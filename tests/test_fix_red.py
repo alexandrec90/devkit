@@ -13,14 +13,17 @@ import fix_cycle
 import fix_red
 
 
-def _regate_world(monkeypatch, code: int, err: str = "") -> list:
+def _regate_world(monkeypatch, code: int, err: str = "", answers: list | None = None) -> list:
+    """`answers`, when given, is `(code, err)` per call in turn; else every call is `code`."""
     asked: list = []
 
     def gh(*args):
         asked.append(args)
-        return subprocess.CompletedProcess(args, code, "", err)
+        answer = answers.pop(0) if answers else (code, err)
+        return subprocess.CompletedProcess(args, answer[0], "", answer[1])
 
     monkeypatch.setattr(fix_red.sweep, "gh_for", lambda _p: gh)
+    monkeypatch.setattr(fix_red.time, "sleep", lambda _s: None)
     monkeypatch.setattr(fix_red.sweep, "git_for", lambda _p: lambda *a: None)
     monkeypatch.setattr(fix_red.tb, "detect_default_branch", lambda _git, fallback="main": "master")
     return asked
@@ -41,6 +44,56 @@ def test_a_regate_gh_refuses_is_said_with_its_last_line(monkeypatch, tmp_path):
     assert not ok and line.endswith("HTTP 422: Workflow does not have 'workflow_dispatch'")
     _regate_world(monkeypatch, 1)
     assert fix_red.regate(tmp_path) == (False, "master -- FAILED to re-run the gate: ?")
+
+
+_GATEWAY = "HTTP 504: We couldn't respond to your request in time. Sorry about that. (https://api.github.com/x)"
+
+
+def test_a_regate_github_times_out_on_is_retried(monkeypatch, tmp_path):
+    """bc1ec6d1: one `HTTP 504` from the dispatch API was filed as a harness defect, and a
+    fixer sent at devkit for a GitHub hiccup the next attempt would have cleared."""
+    asked = _regate_world(monkeypatch, 0, answers=[(1, _GATEWAY), (0, "")])
+    ok, line = fix_red.regate(tmp_path)
+    assert ok and line == "master -- no verdict at the tip; gate re-run"
+    assert len(asked) == 2
+
+
+def test_a_regate_github_keeps_failing_on_is_deferred_not_filed(monkeypatch, tmp_path):
+    """Still a server error after every retry: the next pass re-runs it, since the tip is
+    still unread, so the line carries no `FAILED` for `fix-pass.py` to file."""
+    slept: list = []
+    asked = _regate_world(monkeypatch, 1, _GATEWAY)
+    monkeypatch.setattr(fix_red.time, "sleep", slept.append)
+    ok, line = fix_red.regate(tmp_path)
+    assert not ok and "FAILED" not in line
+    assert line.startswith("master -- gate re-run deferred: GitHub answered HTTP 504")
+    assert len(asked) == len(fix_red.REGATE_RETRY_SECONDS) + 1
+    assert slept == list(fix_red.REGATE_RETRY_SECONDS)
+
+
+def test_a_refusal_is_not_retried(monkeypatch, tmp_path):
+    asked = _regate_world(monkeypatch, 1, "HTTP 422: Workflow does not have 'workflow_dispatch'")
+    ok, line = fix_red.regate(tmp_path)
+    assert not ok and "FAILED" in line
+    assert len(asked) == 1
+
+
+@pytest.mark.parametrize(
+    ("said", "transient"),
+    [
+        (_GATEWAY, True),
+        ("HTTP 502: Bad Gateway", True),
+        ("HTTP 503: No server is currently available", True),
+        ('Post "https://api.github.com/x": net/http: TLS handshake timeout', True),
+        ("error connecting to api.github.com", True),
+        ("HTTP 422: Workflow does not have 'workflow_dispatch'", False),
+        ("HTTP 404: Not Found", False),
+        ("HTTP 5000 widgets", False),
+        ("", False),
+    ],
+)
+def test_transient_names_only_a_server_or_network_failure(said, transient):
+    assert fix_red.transient(said) is transient
 
 
 def test_regate_unread_re_runs_each_and_reports_only_the_dispatched(monkeypatch, tmp_path):
