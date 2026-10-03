@@ -412,6 +412,10 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
         # 0929-6 ran mypy on its scripts only, "the linter" being unnamed, and #467 went
         # red on the test file it added: a second fixer for one annotation.
         assert "python scripts/lint-all.py over every file you changed, the tests" in text
+        # 2026-10-02: sports_betting's fixer handed --paths only its `*.py` files, and
+        # dotenv-linter's finding in the `.env.example` it had staged went red in CI: a
+        # second fixer for one pair of quotes. --changed leaves nothing to choose.
+        assert "python scripts/lint-all.py --changed" in text and "*.py" not in text
         # A resolver took main's wording in a rule, ran the two ratchets it was named,
         # and left #398 13 tokens over the hot-tier ceiling: a third session to fix it.
         assert "python scripts/hot-budget.py" in text

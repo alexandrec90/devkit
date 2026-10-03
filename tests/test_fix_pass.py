@@ -1191,6 +1191,32 @@ def test_a_carried_intent_is_recorded_under_the_branch_it_went_out_on(monkeypatc
     ]
 
 
+def test_a_refused_intent_is_recorded_by_the_line_that_says_why(monkeypatch, tmp_path):
+    """2026-10-02: the record kept the output's tail -- "refused: mment If a secret has
+    already been committed, visit https://help.github.com/..." -- and the line naming the
+    failed hook, further up, never reached it."""
+    one = ship_intent.Intent("sports_betting", tmp_path, "agent/i", "S", "B")
+    output = (
+        "Detect secrets...........................Failed\n- hook id: detect-secrets\n"
+        + "boilerplate a reader needs nothing from\n" * 20
+        + "If a secret has already been committed, visit https://help.github.com/x\n"
+    )
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [one])
+    monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
+    monkeypatch.setattr(fix_pass, "provision_for_ship", lambda tree: "")
+
+    def refuse(*_a):
+        ship_intent.write_state(tmp_path, {"stage": "refused", "step": "fixers", "output": output})
+        return ship_intent.Outcome(one, ship_intent.REFUSED, f"fixers: {output.strip()[-400:]}")
+
+    monkeypatch.setattr(fix_pass.ship_intent, "ship_one", refuse)
+    [line], [failure], _ = fix_pass.ship_intents(tmp_path, ["sports_betting"], fix_cycle.DISPATCH)
+    assert line == (
+        "sports_betting agent/i -- refused: fixers: Detect secrets...........................Failed"
+    )
+    assert failure.tree == str(tmp_path)
+
+
 def test_ship_intents_in_plan_mode_only_says_what_it_would_do(monkeypatch, tmp_path):
     one = ship_intent.Intent("carameli", tmp_path, "agent/i", "S", "B")
     monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [one])

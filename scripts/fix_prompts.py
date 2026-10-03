@@ -37,7 +37,9 @@ from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_sta
 FINISH = (
     "When it is done, run the targeted tests with this tree's own .venv interpreter, the "
     "linter -- python scripts/lint-all.py over every file you changed, the tests "
-    "included (--paths <files> where it takes one) -- and the ratchets the gate "
+    "included: python scripts/lint-all.py --changed, which takes the whole working-tree "
+    "diff, so no file type is left out; --paths with every changed file only where it "
+    "has no --changed -- and the ratchets the gate "
     "runs -- python scripts/hooks/structure_check.py, python scripts/hooks/untested_symbols.py "
     "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
     "-- in every tree you changed. python scripts/run-tests.py with no arguments picks the "

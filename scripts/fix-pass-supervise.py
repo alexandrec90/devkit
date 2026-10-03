@@ -272,14 +272,15 @@ def dispatched_since(
 
 
 def settle(
-    trees: list[fix_reports.Tree],
+    find: Callable[[], list[fix_reports.Tree]],
     until: _dt.datetime,
     clock: Callable[[], _dt.datetime],
     sleep: Callable[[float], None] = time.sleep,
     out: Path | None = None,
     busy: Callable[[], frozenset[str]] = frozenset,
 ) -> list[Session]:
-    """Wait until no tree's session is still working, or `until`; what each ended as.
+    """Wait until no tree `find` names has a session still working, or `until`; what
+    each ended as.
 
     Only `WORKING` holds the wait: a session this cannot see (`""`, a Codex tab) would
     otherwise hold every iteration for the whole `SETTLE`. Each session's transcript is
@@ -289,8 +290,15 @@ def settle(
     `busy` (`bg_sessions.working` in a real run) holds a tree whose session left its
     intent and kept going: one sweep worked 70 calls past it, and the transcript audited
     was the half rendered at the intent.
+
+    `find` is read on every poll, and what it names joins the wait: the scheduled pass
+    fires every half hour whatever runs here, and on 2026-10-02 it sent a fixer at
+    sports_betting #53 two minutes into an iteration's wait -- listed once, as the pass
+    returned, the trees here never held it, and no iteration audited it.
     """
+    trees: list[fix_reports.Tree] = []
     while True:
+        trees = _joined(trees, find())
         now = clock()
         states = {t.path: fix_reports.session_state(t.path, now) for t in trees}
         live = busy() if trees else frozenset()
@@ -321,6 +329,14 @@ def settle(
             )
         )
     return sessions
+
+
+def _joined(trees: list[fix_reports.Tree], found: list[fix_reports.Tree]) -> list[fix_reports.Tree]:
+    """`trees` with each of `found` added once, by path; a tree stamped again is the
+    newer dispatch, so its stamp replaces the one held."""
+    by_path = {t.path: t for t in trees}
+    by_path.update((t.path, t) for t in found)
+    return list(by_path.values())
 
 
 def live_dirs() -> frozenset[str]:
@@ -365,8 +381,15 @@ def open_kinds(devkit_dir: Path) -> set[tuple[str, str]]:
 
 
 def iterate(
-    workspace: Path, number: int, mode: str, clock: Callable[[], _dt.datetime]
+    workspace: Path,
+    number: int,
+    mode: str,
+    clock: Callable[[], _dt.datetime],
+    since: _dt.datetime | None = None,
 ) -> Iteration:
+    """One pass and the sessions stamped since `since` -- the end of the last
+    iteration's wait, so a session another pass sent between two iterations is in the
+    next one's audit rather than in neither -- or since this pass started."""
     root = workspace.parent
     devkit_dir = root / "devkit"
     before = {i.id for i in triage.open_items(triage.load(devkit_dir))}
@@ -382,9 +405,15 @@ def iterate(
     )
     if mode == "dispatch":
         projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
-        trees = dispatched_since(root, projects, started)
+        frm = since or started
         out = REPO_ROOT / READABLE / f"iteration-{number}"
-        iteration.sessions = settle(trees, started + SETTLE, clock, out=out, busy=live_dirs)
+        iteration.sessions = settle(
+            lambda: dispatched_since(root, projects, frm),
+            started + SETTLE,
+            clock,
+            out=out,
+            busy=live_dirs,
+        )
         iteration.violations += check_sessions(iteration.sessions)
         iteration.violations += check_spend(iteration.sessions)
     return iteration
@@ -436,8 +465,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_REFUSED
     iterations: list[Iteration] = []
+    since: _dt.datetime | None = None
     for number in range(1, args.iterations + 1):
-        iteration = iterate(args.workspace.resolve(), number, args.mode, utc_now)
+        iteration = iterate(args.workspace.resolve(), number, args.mode, utc_now, since)
+        since = utc_now()
         iterations.append(iteration)
         iteration.violations += check_progress(iterations)
         write_report(iterations)

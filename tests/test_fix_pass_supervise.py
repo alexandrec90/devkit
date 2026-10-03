@@ -118,7 +118,7 @@ def test_an_elevated_dispatch_is_refused_before_the_first_iteration(tmp_path, mo
     monkeypatch.setattr(
         supervise,
         "iterate",
-        lambda ws, n, mode, clock: (
+        lambda ws, n, mode, clock, since=None: (
             ran.append(mode) or supervise.Iteration(n, clock().isoformat(), 0, "")
         ),
     )
@@ -220,7 +220,7 @@ def test_settle_waits_for_a_working_session_and_stops_at_its_outcome(tmp_path, m
         future = (now + _dt.timedelta(minutes=1)).timestamp()
         os.utime(tree.path / "logs" / "ship-intent.md", (future, future))
 
-    [session] = supervise.settle([tree], now + _dt.timedelta(hours=1), lambda: now, nap)
+    [session] = supervise.settle(lambda: [tree], now + _dt.timedelta(hours=1), lambda: now, nap)
     assert naps == [1] and session.state == fix_reports.DONE
 
 
@@ -236,7 +236,11 @@ def test_settle_holds_a_session_that_left_its_intent_while_it_is_still_busy(tmp_
     polls = iter([frozenset({str(tree.path).replace("\\", "/").lower()}), frozenset()])
     naps = []
     [session] = supervise.settle(
-        [tree], now + _dt.timedelta(hours=1), lambda: now, naps.append, busy=lambda: next(polls)
+        lambda: [tree],
+        now + _dt.timedelta(hours=1),
+        lambda: now,
+        naps.append,
+        busy=lambda: next(polls),
     )
     assert len(naps) == 1 and session.state == fix_reports.DONE
 
@@ -253,7 +257,7 @@ def test_live_dirs_are_the_busy_sessions_claude_agents_lists(monkeypatch):
 def test_settle_gives_up_at_its_deadline(tmp_path):
     now = _dt.datetime.now(_dt.UTC)
     tree = _tree(tmp_path, now - _dt.timedelta(minutes=5))
-    [session] = supervise.settle([tree], now, lambda: now, lambda _s: None)
+    [session] = supervise.settle(lambda: [tree], now, lambda: now, lambda _s: None)
     assert session.state == fix_reports.WORKING
 
 
@@ -261,6 +265,63 @@ def test_only_this_iterations_dispatches_are_waited_on(tmp_path, monkeypatch):
     old, new = _tree(tmp_path / "o", NOW - _dt.timedelta(hours=3)), _tree(tmp_path / "n", NOW)
     monkeypatch.setattr(supervise.fix_reports, "read_trees", lambda root, projects: [old, new])
     assert supervise.dispatched_since(tmp_path, [], NOW - _dt.timedelta(minutes=1)) == [new]
+
+
+def test_a_session_another_pass_sends_during_the_wait_is_waited_on_and_audited(tmp_path):
+    """2026-10-02: the scheduled pass sent a fixer at sports_betting #53 two minutes into
+    iteration 2's wait; the trees were listed once, as the pass returned, so no iteration
+    audited it."""
+    now = _dt.datetime.now(_dt.UTC)
+    ours = _tree(tmp_path / "a", now - _dt.timedelta(minutes=5))
+    theirs = _tree(tmp_path / "b", now - _dt.timedelta(minutes=1))
+
+    def finish(tree):
+        intent = tree.path / "logs" / "ship-intent.md"
+        intent.write_text("S\n", encoding="utf-8")
+        future = (now + _dt.timedelta(minutes=1)).timestamp()
+        os.utime(intent, (future, future))
+
+    # Ours is working at the first poll; the other pass's tree is stamped by the second.
+    polls = iter([[ours], [ours, theirs], [ours, theirs]])
+    naps = []
+
+    def nap(_seconds):
+        naps.append(1)
+        finish(ours)
+        if len(naps) == 2:
+            finish(theirs)
+
+    sessions = supervise.settle(lambda: next(polls), now + _dt.timedelta(hours=1), lambda: now, nap)
+    assert sorted(s.tree for s in sessions) == sorted([str(ours.path), str(theirs.path)])
+    assert len(naps) == 2, "the other pass's working session held the wait"
+    assert {s.state for s in sessions} == {fix_reports.DONE}
+
+
+def test_a_tree_stamped_again_is_held_once_at_its_newer_dispatch(tmp_path):
+    first = _tree(tmp_path, NOW - _dt.timedelta(hours=1))
+    again = _tree(tmp_path, NOW)
+    assert supervise._joined([first], [again]) == [again]
+
+
+def test_each_iteration_audits_what_was_stamped_since_the_last_one_ended(tmp_path, monkeypatch):
+    """A session sent between two iterations -- after one's wait, before the next pass --
+    belongs to the next iteration's audit, not to neither."""
+    workspace = _workspace(tmp_path)
+    monkeypatch.setattr(supervise, "RECORD", tmp_path / "fix-pass.log")
+    monkeypatch.setattr(supervise, "run_pass", lambda ws, mode: (0, ""))
+    asked = []
+
+    def since(root, projects, when):
+        asked.append(when)
+        return []
+
+    monkeypatch.setattr(supervise, "dispatched_since", since)
+    ended = NOW - _dt.timedelta(minutes=20)
+    supervise.iterate(workspace, 2, "dispatch", lambda: NOW, ended)
+    assert asked and set(asked) == {ended}
+    asked.clear()
+    supervise.iterate(workspace, 1, "dispatch", lambda: NOW)
+    assert set(asked) == {NOW}
 
 
 # --- across iterations, and the report ------------------------------------------------------
@@ -341,8 +402,8 @@ def test_main_runs_each_iteration_and_exits_on_whether_any_broke_the_contract(
     workspace = _workspace(tmp_path)
     runs = []
 
-    def fake_iterate(ws, number, mode, clock):
-        runs.append((number, mode))
+    def fake_iterate(ws, number, mode, clock, since=None):
+        runs.append((number, mode, since is None))
         return supervise.Iteration(
             number, clock().isoformat(), 0, "", violations=["x"] if number == 2 else []
         )
@@ -351,7 +412,8 @@ def test_main_runs_each_iteration_and_exits_on_whether_any_broke_the_contract(
     monkeypatch.setattr(supervise, "REPO_ROOT", tmp_path)
     argv = ["--iterations", "2", "--min-gap", "0", "--workspace", str(workspace)]
     assert supervise.main(argv) == supervise.EXIT_VIOLATED
-    assert runs == [(1, "dispatch"), (2, "dispatch")]
+    # The second iteration is handed when the first ended; the first, nothing.
+    assert runs == [(1, "dispatch", True), (2, "dispatch", False)]
     assert (
         supervise.main(
             [*argv[:1], "1", "--min-gap", "0", "--mode", "plan", "--workspace", str(workspace)]
@@ -381,7 +443,9 @@ def test_a_session_this_cannot_see_does_not_hold_the_wait(tmp_path):
     fix_reports.stamp(path, "k", "n", NOW, agent="codex")
     tree = fix_reports.Tree("carameli", path, "agent/x", fix_reports.read_stamp(path), ())
     naps = []
-    [session] = supervise.settle([tree], NOW + _dt.timedelta(hours=1), lambda: NOW, naps.append)
+    [session] = supervise.settle(
+        lambda: [tree], NOW + _dt.timedelta(hours=1), lambda: NOW, naps.append
+    )
     assert naps == [] and session.state == "unknown" and session.readable == ""
 
 
@@ -392,7 +456,9 @@ def test_a_settled_sessions_transcript_is_rendered_for_the_audit(tmp_path, monke
     monkeypatch.setattr(
         supervise.fix_reports, "session_state", lambda p, now: (fix_reports.DONE, str(transcript))
     )
-    [session] = supervise.settle([tree], NOW, lambda: NOW, lambda _s: None, out=tmp_path / "out")
+    [session] = supervise.settle(
+        lambda: [tree], NOW, lambda: NOW, lambda _s: None, out=tmp_path / "out"
+    )
     assert Path(session.readable).read_text(encoding="utf-8") == "L1 USER: go\n"
 
 
@@ -431,7 +497,7 @@ def test_the_brake_stops_the_run_past_its_token_total(tmp_path, monkeypatch):
     workspace = _workspace(tmp_path)
     runs = []
 
-    def costly(ws, number, mode, clock):
+    def costly(ws, number, mode, clock, since=None):
         runs.append(number)
         session = supervise.Session("devkit", "C:/t", "n", fix_reports.DONE, tokens=600)
         return supervise.Iteration(number, clock().isoformat(), 0, "", sessions=[session])
