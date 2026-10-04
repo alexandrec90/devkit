@@ -446,6 +446,59 @@ def path_sources(here: Path) -> list[str]:
     return found
 
 
+WORKFLOWS = Path(".github") / "workflows"
+# A step's start: a sequence item. Every key of one checkout step is read between two.
+STEP_START = re.compile(r"^\s*-\s", re.M)
+# `actions/checkout`'s two inputs that name another repo and where it stands.
+CHECKOUT_KEY = re.compile(r"^\s*(repository|ref)\s*:\s*(.*?)\s*(?:\s#.*)?$")
+
+
+def pinned_ref(here: Path, name: str) -> str:
+    """The ref this tree's own CI checks out its sibling repo `name` at; "" if none pins it.
+
+    b0b2f7d7: ibkr_trader's PR gate pins data-lake to the commit its `uv.lock` was
+    resolved against (its c221765), and the sibling was cut at data-lake's `origin/HEAD`
+    -- so a session's tests imported a module main had retired and the gate's pin still
+    had, and its `uv sync` relocked a `uv.lock` it never meant to touch. The gate is the
+    authority a session is held to, so its pin is the ref; `pr-gate*` is read first, as
+    a nightly may check the same repo out at its default branch on purpose. Matched by
+    the repository's last segment, the name the path source climbs to. A ref that is a
+    workflow expression is no pin.
+    """
+    try:
+        files = sorted(
+            (here / WORKFLOWS).glob("*.y*ml"),
+            key=lambda path: (not path.name.startswith("pr-gate"), path.name),
+        )
+    except OSError:
+        return ""
+    for workflow in files:
+        try:
+            text = workflow.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for step in STEP_START.split(text):
+            keys: dict[str, str] = {}
+            for line in step.splitlines():
+                found = CHECKOUT_KEY.match(line)
+                if found:
+                    keys.setdefault(found.group(1), found.group(2).strip("'\""))
+            repo = keys.get("repository", "").rstrip("/").rsplit("/", 1)[-1]
+            ref = keys.get("ref", "")
+            if repo.lower() == name.lower() and ref and "${{" not in ref:
+                return ref
+    return ""
+
+
+def resolve_pin(source: Path, pin: str, env: Mapping[str, str]) -> str:
+    """`pin` as `source` can check it out: a branch by its remote-tracking ref, which the
+    fetch just moved, ahead of a local branch of that name; "" when `source` has neither."""
+    for ref in (f"origin/{pin}", pin):
+        if _git(source, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", env=env):
+            return ref
+    return ""
+
+
 def link_path_sources(
     here: Path,
     checkout: Path,
@@ -454,7 +507,8 @@ def link_path_sources(
 ) -> list[str]:
     """Cut each missing sibling as a detached worktree of the repo the checkout sees there.
 
-    At that repo's `origin/HEAD`, never at its checkout's working state: ibkr's CLAUDE.md
+    At the ref the tree's own CI pins that repo to (`pinned_ref`), else at its
+    `origin/HEAD`; never at its checkout's working state: ibkr's CLAUDE.md
     records that building against the static data-lake checkout re-resolves `uv.lock`
     and smuggles its specifier bumps into whatever branch is open. One tree serves every
     worktree of the tier, since they all resolve the same `..`; a task that edits the
@@ -474,7 +528,13 @@ def link_path_sources(
             continue
         # The remote-tracking ref is only as new as the sibling checkout's last fetch.
         _git(source, "fetch", "--quiet", "origin", env=env, timeout=60)
-        ref = _git(source, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", env=env) or "HEAD"
+        pin = pinned_ref(here, source.name)
+        ref = resolve_pin(source, pin, env) if pin else ""
+        if pin and not ref:
+            lines.append(f"devkit: CI pins {source.name} to {pin}, which {source} lacks")
+        ref = ref or (
+            _git(source, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", env=env) or "HEAD"
+        )
         if target.exists():
             lines.append(advance_sibling(target, source, ref, env))
             continue
