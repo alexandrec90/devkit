@@ -5254,6 +5254,46 @@ def test_a_failed_image_removal_is_reported_but_is_not_fatal(monkeypatch):
     assert "image is in use" in message
 
 
+def test_an_image_the_box_never_built_is_already_removed(monkeypatch):
+    """The 2026-10-04 reconcile failure: carameli's `db-backup` is a built service with a
+    box-scoped tag, but a box that never started it never built it, so `docker image rm`
+    removed the app image, said `No such image` for the other, and exited 1 -- failing
+    every reap of such a box over an image that was exactly as gone as it should be."""
+    missing = "Error response from daemon: No such image: carameli-db-backup-c--x:latest"
+    monkeypatch.setattr(
+        worktree.subprocess,
+        "run",
+        lambda *a, **k: _completed(1, stdout="Untagged: carameli-app-c--x:latest", stderr=missing),
+    )
+    ok, message = worktree.remove_images(("carameli-app-c--x", "carameli-db-backup-c--x"))
+    assert ok
+    assert "No such image" not in message
+    assert "carameli-db-backup-c--x" in message
+
+
+def test_a_real_image_error_still_fails_beside_an_already_missing_one(monkeypatch):
+    """Only `No such image` is the goal state. Anything else beside it -- an image still
+    in use -- is a leak the reap must report, and the report names that error alone."""
+    stderr = (
+        "Error response from daemon: No such image: carameli-db-backup-c--x:latest\n"
+        "Error response from daemon: conflict: unable to remove repository reference "
+        '"carameli-app-c--x" - container 1a2b is using its referenced image'
+    )
+    monkeypatch.setattr(worktree.subprocess, "run", lambda *a, **k: _completed(1, stderr=stderr))
+    ok, message = worktree.remove_images(("carameli-app-c--x", "carameli-db-backup-c--x"))
+    assert not ok
+    assert "is using its referenced image" in message
+    assert "No such image" not in message
+
+
+def test_a_silent_image_removal_failure_is_not_read_as_success(monkeypatch):
+    """Filtering out `No such image` leaves nothing for an exit 1 that printed nothing,
+    and an empty error list must not pass for "every error was a missing image"."""
+    monkeypatch.setattr(worktree.subprocess, "run", lambda *a, **k: _completed(1))
+    ok, _ = worktree.remove_images(("carameli-app-c--x",))
+    assert not ok
+
+
 def test_a_missing_docker_leaves_the_images_rather_than_raising(monkeypatch):
     """`reap` runs when the daemon is down -- that is the case `compose_down` already
     tolerates, and an unhandled `FileNotFoundError` here would abort the reap after the
