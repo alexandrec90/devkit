@@ -2677,9 +2677,11 @@
 		// exits and, once a day, updates the Claude CLI in the gap between stopping them
 		// and starting them again -- see README, "Remote Control servers".
 		//
-		// The three on hold above are deliberately absent: `rc_config.selected` refuses
-		// them anyway, since a paused project is one nothing should be in flight for and
-		// a phone-reachable server is an invitation to start something.
+		// Every registered project is listed. One on hold above is refused by
+		// `rc_config.selected` anyway, since a paused project is one nothing should be in
+		// flight for and a phone-reachable server is an invitation to start something --
+		// so putting a project on hold is enough to take it off the phone. A name with no
+		// checkout on this machine is reported and skipped, not served.
 		//
 		// `bypassPermissions` because a phone has no way to escalate: a session spawned
 		// from the mobile app opens in `auto` and the UI offers no switch, so a standing
@@ -2696,7 +2698,15 @@
 		// the same time. Use `worktree.py new` for those; this is fine for everything
 		// else. Gitignored in each repo so the checkout does not read as dirty.
 		"devkit.remoteControl": {
-			"projects": ["devkit", "carameli", "roguelike"],
+			"projects": [
+				"devkit",
+				"carameli",
+				"roguelike",
+				"ibkr_trader",
+				"data-lake",
+				"sports_betting",
+				"social-scraper"
+			],
 			"spawn": "worktree",
 			"permissionMode": "bypassPermissions"
 		},
