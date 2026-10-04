@@ -29,6 +29,13 @@ import sweep
 # names, or an object carrying the same list under `projects` plus the knobs below.
 RC_SETTING = "devkit.remoteControl"
 
+# Spelled in place of the list: every checkout in the workspace file that is not on hold,
+# read afresh on every fire. A list is a second copy of the `folders` registry, so a
+# project plugged in later got no server until someone remembered to add it here too.
+# Read off the file the job is handed -- the live one is `machine_view`, so it is the
+# projects checked out on *this* machine, never one registered only on another PC.
+ALL_PROJECTS = "all"
+
 # `same-dir` is `remote-control`'s own default and is kept as this job's default
 # deliberately -- but it is a default, not a prohibition, and `"spawn": "worktree"` is a
 # reasonable thing for a machine to ask for: a phone has no VS Code tasks, so spawning
@@ -155,6 +162,11 @@ def parse_config(text: str) -> Config:
         "devkit.remoteControl": ["devkit", "carameli"]
         "devkit.remoteControl": {"projects": ["devkit"], "idleMinutes": 30}
 
+    Either list may be `ALL_PROJECTS` instead, which expands to the workspace's folders
+    minus those on hold. On hold is subtracted *here* rather than left to `selected`:
+    there it is a refusal reported on every fire, which is right for a name someone
+    wrote down and noise for one nobody did.
+
     Malformed input yields an empty `Config`, matching `sweep.parse_workspace` and
     `sweep.on_hold`: this job's failure mode for a broken workspace file is to serve
     nothing, which is visible in the artifact, rather than to crash a scheduled task
@@ -170,12 +182,15 @@ def parse_config(text: str) -> Config:
     if not isinstance(settings, dict):
         return Config()
     raw = settings.get(RC_SETTING)
-    if isinstance(raw, list):
+    if isinstance(raw, list) or raw == ALL_PROJECTS:
         raw = {"projects": raw}
     if not isinstance(raw, dict):
         return Config()
 
     names = raw.get("projects")
+    if names == ALL_PROJECTS:
+        held = sweep.on_hold(text)
+        names = [name for name in sweep.parse_workspace(text) if name not in held]
     projects = (
         tuple(name for name in names if isinstance(name, str) and name)
         if isinstance(names, list)

@@ -73,6 +73,51 @@ def test_a_setting_that_is_neither_list_nor_object_is_ignored():
     assert rc_config.parse_config(workspace_text("devkit")) == rc_config.Config()
 
 
+def held_text(setting: object, folders: tuple[str, ...], held: list[str]) -> str:
+    payload = json.loads(workspace_text(setting, folders))
+    payload["settings"]["devkit.onHold"] = held
+    return json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [rc_config.ALL_PROJECTS, {"projects": rc_config.ALL_PROJECTS, "spawn": "worktree"}],
+    ids=["bare", "object"],
+)
+def test_all_serves_every_folder_in_the_workspace(setting):
+    """A list is a second copy of the registry, and a project plugged in after it was
+    written got no server. `all` reads the folders on every fire instead."""
+    text = workspace_text(setting, ("devkit", "carameli", "freshly-plugged"))
+    assert rc_config.parse_config(text).projects == ("devkit", "carameli", "freshly-plugged")
+
+
+def test_all_keeps_the_object_form_s_knobs():
+    text = workspace_text({"projects": rc_config.ALL_PROJECTS, "spawn": "worktree"})
+    assert rc_config.parse_config(text).spawn == "worktree"
+
+
+def test_all_leaves_out_a_project_on_hold_without_reporting_it():
+    """Subtracted in the parse, so `selected` has no refusal to report on every fire for
+    a name nobody wrote down."""
+    text = held_text(rc_config.ALL_PROJECTS, ("devkit", "carameli"), ["carameli"])
+    config = rc_config.parse_config(text)
+    assert config.projects == ("devkit",)
+    assert rc_config.selected(config, ["devkit", "carameli"], frozenset({"carameli"})) == (
+        ["devkit"],
+        [],
+    )
+
+
+def test_all_in_a_workspace_with_no_folders_serves_nothing():
+    assert rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS, ())).projects == ()
+
+
+def test_an_explicit_list_still_names_a_held_project_so_it_is_refused_out_loud():
+    """The list form is unchanged: a name someone typed is reported when refused."""
+    text = held_text(["devkit", "carameli"], ("devkit", "carameli"), ["carameli"])
+    assert rc_config.parse_config(text).projects == ("devkit", "carameli")
+
+
 def test_non_string_project_names_are_dropped_not_stringified():
     assert rc_config.parse_config(
         workspace_text({"projects": ["devkit", 7, None, ""]})
