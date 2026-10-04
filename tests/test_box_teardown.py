@@ -261,7 +261,10 @@ def _linked_from_a_cache(tmp_path: Path, monkeypatch) -> tuple[Path, Path, Path]
     real_unlink = os.unlink
 
     def mapped_elsewhere(path, *args, **kwargs):
-        if box_dir.name in str(path) and str(path).endswith("arrow.dll"):
+        # POSIX `rmtree` unlinks a bare name under a `dir_fd`, which no other unlink here
+        # passes, so that spelling is the box's link too; the retry and the trash go by path.
+        in_box = kwargs.get("dir_fd") is not None or box_dir.name in str(path)
+        if in_box and str(path).endswith("arrow.dll"):
             raise PermissionError(13, "Access is denied")
         return real_unlink(path, *args, **kwargs)
 
