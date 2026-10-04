@@ -50,6 +50,10 @@ DEVKIT_PREFIX = "devkit-"
 # Machine-local by construction: `logs/` is ignored in every devkit checkout.
 ASSIGNMENT = Path("logs/collectors.machine.json")
 
+# Minutes a started or redeployed container goes unjudged (`Collector.settle`). An hour
+# covers ibkr_trader's half-hourly `reddit` and hourly `sentiment` with a pass to spare.
+DEFAULT_SETTLE = 60
+
 
 @dataclass(frozen=True)
 class Collector:
@@ -67,6 +71,11 @@ class Collector:
       social-scraper drives the host's Chrome. `needs` are compose services started
       before each fire. The command's exit code is the verdict, so 0 has to cover "ran
       and deliberately did nothing".
+
+    `settle` is how many minutes after this job starts or redeploys a container its
+    `health` is not run (`collectors.settling`): until each job inside has fired on the
+    new code, the verdict is the old code's. Set it to the longest interval of a job
+    whose failure would otherwise outlive the fix that cured it.
     """
 
     project: str
@@ -75,6 +84,7 @@ class Collector:
     command: tuple[str, ...] = ()
     minutes: int = 0
     needs: tuple[str, ...] = ()
+    settle: int = DEFAULT_SETTLE
 
     @property
     def scheduled(self) -> bool:
@@ -137,7 +147,11 @@ def _entry(project: str, raw: object) -> tuple[Collector | None, str]:
     health = raw.get("health", [])
     if not isinstance(health, list) or not all(isinstance(part, str) and part for part in health):
         return None, f"{project}: `health` must be a list of strings (argv, not a shell line)"
-    return Collector(project, service, tuple(health)), ""
+    settle = raw.get("settle", DEFAULT_SETTLE)
+    # `bool` is an `int`, as for `minutes`.
+    if isinstance(settle, bool) or not isinstance(settle, int) or settle < 0:
+        return None, f"{project}: `settle` must be a whole number of minutes, 0 or more"
+    return Collector(project, service, tuple(health), settle=settle), ""
 
 
 def parse_setting(text: str) -> tuple[list[Collector], list[str]]:

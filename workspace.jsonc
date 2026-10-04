@@ -2705,7 +2705,8 @@
 		// until `collectors.py run-here` on that machine, which is recorded in devkit's
 		// ignored `logs/` and so never follows the workspace to a second PC.
 		// A `service` is a compose service kept up; `health` runs inside the container and
-		// its exit code is the project's own verdict on whether ingestion is pulling data.
+		// its exit code is the project's own verdict on whether ingestion is pulling data,
+		// not asked for `settle` minutes (default 60) after a start or redeploy.
 		// A `command` is argv run from the project's checkout every `minutes`, by a
 		// Scheduled Task named after the collector (never `devkit-`: it is not devkit's
 		// job), after starting the compose services it `needs`. Its exit code is the verdict.

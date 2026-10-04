@@ -69,9 +69,10 @@ ARTIFACT = Path("logs/collectors.log")
 # taken from so a verdict about a container since replaced is not reported against it.
 # `code_at` is the newest the code in that container can be (`code_at`), which
 # `fix_loop.collector_findings` weighs against the fix of the group a verdict would
-# reopen; `held` says why a container behind its checkout was not redeployed.
+# reopen; `held` says why a container behind its checkout was not redeployed;
+# `started_at` is when this job last started or redeployed it (`settling`).
 HEALTH = Path("logs/collectors.health.json")
-CODE_AT, HELD = "code_at", "held"
+CODE_AT, HELD, STARTED_AT = "code_at", "held", "started_at"
 
 # Every spawn here is reachable from a scheduled task under `pythonw.exe`; see
 # `tests/test_scheduled_jobs.py`. Zero off Windows, where the flag does not exist.
@@ -368,8 +369,10 @@ def keep_running(
 ) -> dict | None:
     """Start the collector if it is down, redeploy it if it is behind its checkout.
     Returns a health record, or None when there is nothing to record this pass. `last`
-    is the project's previous record."""
+    is the project's previous record. A container this job started or redeployed is not
+    judged until it has settled (`settling`)."""
     name, service = target.collector.project, target.collector.service
+    clock = _clock()
     if not (target.checkout / ".git").exists():
         report.fail(f"{name}: no checkout at {target.checkout} -- nothing to start")
         return None
@@ -380,19 +383,47 @@ def keep_running(
             report.fail(f"{name}: could not start `{service}` -- {first_line(out) or 'no output'}")
             report.lines.extend(f"    {line}" for line in out.splitlines()[-20:])
             return None
-        # No health check on the pass that started it: every job in it has yet to run,
-        # and a verdict of "never ran" about a container seconds old is noise.
+        # No health check until it has settled: every job in it has yet to run, and a
+        # verdict about a container seconds old is noise (`settling`).
         report.say(f"{name}: started `{service}`")
-        return None
+        return {STARTED_AT: clock}
     report.say(f"{name}: `{service}` up ({box.status})")
-    code = redeploy(target, box, docker, git or Git(), report, last or {})
+    last = last or {}
+    code = redeploy(target, box, docker, git or Git(), report, last)
     if code.pop("deployed", False):
         # As on a start: the container is seconds old and its verdict would be noise. The
-        # record holds no `ok`, so the tray shows the row green until the next pass.
-        return code
+        # record holds no `ok`, so the tray shows the row green until it has settled.
+        return {**code, STARTED_AT: clock}
     if not target.collector.health:
         return code or None
+    started = last.get(STARTED_AT)
+    if isinstance(started, (int, float)) and settling(started, clock, target.collector.settle):
+        report.say(
+            f"{name}: health check deferred -- `{service}` was (re)started "
+            f"{int((clock - started) // 60)} min ago, inside its {target.collector.settle}-minute "
+            "settle"
+        )
+        return {**code, STARTED_AT: started}
     return {**check_health(target, box, docker, report), **code}
+
+
+def _clock() -> float:
+    """Now, as a POSIX time: what `STARTED_AT` records and `settling` measures from."""
+    return _dt.datetime.now().timestamp()
+
+
+def settling(started: float, clock: float, settle: int) -> bool:
+    """Whether a container this job started or redeployed at `started` is still too new
+    for its health verdict to be about the code it runs.
+
+    A project's scheduler persists each job's outcome across a restart, and an interval
+    job first fires one interval after it. So for that long the verdict is the *old*
+    code's: ibkr_trader's `reddit` read 45 failures from before #79 for the half hour
+    after the redeploy that carried #79, and only resolutions that happened to post-date
+    #79's merge kept the fix pass from refiling the group (221f3b05) as "did not hold".
+    A `started` in the future is a clock that moved, not a container still settling.
+    """
+    return 0 <= clock - started < settle * 60
 
 
 def keep_stopped(
