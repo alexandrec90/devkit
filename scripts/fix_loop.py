@@ -85,6 +85,9 @@ class Closed:
     """What reading back found that the rest of the pass needs."""
 
     lines: list[str] = field(default_factory=list)  # for the record, `blocked` rows
+    # What `fix_verify` and the rechecks decided on the ledger: `verified` rows, never
+    # `blocked` ones -- a retirement read as a stuck session in a record read for those.
+    verified: list[str] = field(default_factory=list)
     # A devkit session still working the harness, by tree: a second one is held, since
     # two sessions at one backlog was a waste the ledger alone could not see.
     harness_busy: str = ""
@@ -120,8 +123,8 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
     journal.add(*journal.step("jobs", job_findings, ctx, default=[]))
     journal.add(*journal.step("collectors", collector_findings, ctx, default=[]))
     if ctx.writes:
-        closed.lines += journal.step("verify", _verify, ctx, default=[])
-        closed.lines += journal.step("recheck", _recheck, ctx, default=[])
+        closed.verified += journal.step("verify", _verify, ctx, default=[])
+        closed.verified += journal.step("recheck", _recheck, ctx, default=[])
         runner = ship_intent.run_quiet
         closed.stopped = journal.step(
             "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]

@@ -564,6 +564,27 @@ def test_the_record_names_the_regated_branches_and_the_blocked_reports():
     assert lines[3] == "blocked  carameli agent/x -- needs a database the runner lacks"
 
 
+def test_the_record_says_what_the_ledger_verdicts_were_apart_from_the_blocked():
+    """2026-10-03: a row `fix_verify` retired read "blocked  retired [a8b29f18] ...", the
+    label for a session that could not do its work, in a record read for exactly that."""
+    account = fix_cycle.Account(
+        fix_cycle.DISPATCH,
+        fix_cycle.harness_state({}, True, []),
+        blocked=("carameli agent/x -- needs a database",),
+        verified=("retired [a8b29f18] -- filed while the fix was in flight",),
+    )
+    lines = fix_cycle.render(account).splitlines()
+    assert "blocked  carameli agent/x -- needs a database" in lines
+    assert "verified retired [a8b29f18] -- filed while the fix was in flight" in lines
+    assert not any(line.startswith("blocked  retired") for line in lines)
+
+
+def test_labelled_pads_every_label_to_one_column():
+    assert fix_cycle.labelled("sent", ["a", "b"]) == ["sent     a", "sent     b"]
+    assert fix_cycle.labelled("verified", ["x"]) == ["verified x"]
+    assert fix_cycle.labelled("filed", []) == []
+
+
 def test_when_planning_raises_only_the_backlog_goes_to_the_devkit_session():
     """The crash is on that backlog by then, so the devkit session is what fixes the plan."""
     backlog = failure(kind=fix_plan.LEDGER, project="devkit", number=0, head="", signature=("x",))

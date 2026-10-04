@@ -392,6 +392,8 @@ class Account:
     backlog: int = 0
     # Finished fixers' idle processes the pass stopped (`bg_sessions.py`).
     stopped: tuple[str, ...] = ()
+    # What the pass decided on the ledger itself: retired, reopened, settled, pending.
+    verified: tuple[str, ...] = ()
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -402,8 +404,7 @@ def render(account: Account) -> str:
     """The pass's own record, written whether or not it sent anything."""
     harness = account.harness
     lines = [f"fix-pass: mode={account.mode}"]
-    lines += [f"shipped  {line}" for line in account.shipped]
-    lines += [f"regate   {line}" for line in account.regated]
+    lines += labelled("shipped", account.shipped) + labelled("regate", account.regated)
     lines.append(
         "harness  clean" if harness.clean else "harness  RED -- " + "; ".join(harness.reasons)
     )
@@ -412,18 +413,26 @@ def render(account: Account) -> str:
             f"adopting {', '.join(harness.adopting)} -- the newest release; "
             "each one's other PRs wait for its adoption"
         )
-    lines += [f"blocked  {line}" for line in account.blocked]
+    lines += labelled("blocked", account.blocked) + labelled("verified", account.verified)
     lines += [f"{d.action:8} {_names(d)} -- {d.note}" for d in account.go]
-    lines += [f"held     {_names(d)} -- {why}" for d, why in account.held]
-    lines += [f"capped   {_names(d)} -- {why}" for d, why in account.capped]
-    lines += [f"skip     {_names(d)} -- {d.note}" for d in account.skipped]
-    lines += [f"sent     {line}" for line in account.sent]
-    lines += [f"merged   {line}" for line in account.merged]
-    lines += [f"filed    {line}" for line in account.filed]
-    lines += [f"stopped  {line}" for line in account.stopped]
+    lines += labelled("held", [f"{_names(d)} -- {why}" for d, why in account.held])
+    lines += labelled("capped", [f"{_names(d)} -- {why}" for d, why in account.capped])
+    lines += labelled("skip", [f"{_names(d)} -- {d.note}" for d in account.skipped])
+    for label, rows in (
+        ("sent", account.sent),
+        ("merged", account.merged),
+        ("filed", account.filed),
+        ("stopped", account.stopped),
+    ):
+        lines += labelled(label, rows)
     lines.append(f"ledger   {account.backlog} open on the harness-defect ledger")
-    lines += [f"release  {account.release}"] if account.release else []
+    lines += labelled("release", [account.release] if account.release else [])
     return "\n".join(lines)
+
+
+def labelled(label: str, rows: Iterable[str]) -> list[str]:
+    """Each row under its record label, the labels padded to one column."""
+    return [f"{label:8} {row}" for row in rows]
 
 
 def history_line(account: Account, now: _dt.datetime) -> str:

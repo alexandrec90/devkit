@@ -107,13 +107,16 @@ def regate_unread(root: Path, unread: list[str], mode: str) -> tuple[list[str], 
 
     An unreadable devkit main holds every project fixer, and nothing else ever makes it
     readable. A checkout re-run here is `RUNNING` for this pass, as after any merge.
-    Outside `dispatch` mode it only says what it would do.
+    Outside `dispatch` mode it only says what it would do, and counts the checkout as
+    re-run all the same: a rehearsal is read for what dispatch would hold, and it held
+    every project fixer behind an unreadable devkit main that dispatch re-gates first.
     """
     lines: list[str] = []
     rerun: set[str] = set()
     for name in unread:
         if mode != fix_cycle.DISPATCH:
             lines.append(f"{name} -- would re-run the gate: no verdict at the tip")
+            rerun.add(name)
             continue
         ok, line = regate(root / name)
         lines.append(f"{name} {line}")
