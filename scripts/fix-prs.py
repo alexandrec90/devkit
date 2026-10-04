@@ -299,7 +299,8 @@ def dispatch_fresh(
     key: str = "",
     problem: str = "",
 ) -> int:
-    """A nightly, or a vendored failure shared across consumers: a fresh branch."""
+    """A nightly, a red default branch, what Dependabot cannot do, or a vendored failure
+    shared across consumers: a fresh branch."""
     first = decision.failures[0]
     upstream = decision.action == fix_plan.UPSTREAM
     project = DEVKIT if upstream else first.project
@@ -321,12 +322,17 @@ def dispatch_fresh(
         fix_reports.stamp(tree, key, decision.note, problem=problem, agent=launch.agent)
         # A tree the pass cut is fixer work from the start: its PR merges itself.
         (tree / fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+        if not upstream and first.kind == fix_plan.NIGHTLY and first.number:
+            # The tracker issue the prompt names, in this same repo: the PR closes it.
+            fix_reports.note_on_stamp(tree, fix_reports.CLOSES, str(first.number))
     print(f"  worktree {tree} on {branch}")
     if upstream:
         failures = fix_prompts.with_trees(decision.failures, root, sweep.git_for)
         prompt, title = fix_prompts.upstream_prompt(failures, branch), f"devkit {branch}"
     elif first.kind == fix_plan.BRANCH:
         prompt, title = fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
+    elif first.kind == fix_plan.DEPENDABOT:
+        prompt, title = fix_prompts.dependabot_prompt(first, branch), f"{project} dependabot"
     else:
         prompt, title = fix_prompts.nightly_prompt(first, branch), f"{project} {first.workflow}"
     return open_session(launch, tree, branch, tab_safe(prompt), title, runner)

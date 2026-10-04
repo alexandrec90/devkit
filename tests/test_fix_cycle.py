@@ -180,6 +180,19 @@ def test_no_evidence_is_unknown_and_a_conflict_alone_is_unknown():
     assert fix_cycle.classify(failure(signature=(fix_plan.CONFLICT,)), set()) == fix_cycle.UNKNOWN
 
 
+def test_what_dependabot_cannot_do_is_the_projects_even_when_two_share_it():
+    """Two consumers of data-lake both say `"data-lake" is unfetchable`: a shared
+    signature, which would fold into the devkit session -- which can bump neither lock."""
+    unfetchable = (f"{fix_plan.UNFETCHABLE_ENTRY}data-lake",)
+    red = [
+        failure(kind=fix_plan.DEPENDABOT, project=p, number=0, signature=unfetchable)
+        for p in ("ibkr_trader", "sports_betting")
+    ]
+    shared = fix_cycle.shared_signatures(red)
+    assert unfetchable in shared
+    assert {fix_cycle.classify(f, shared) for f in red} == {fix_cycle.PROJECT}
+
+
 def test_classify_all_is_keyed_like_the_ledger():
     red = [failure(number=1), failure(project="a", number=2, signature=VENDORED)]
     classes = fix_cycle.classify_all(red)

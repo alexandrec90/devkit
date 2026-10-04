@@ -116,6 +116,22 @@ def note_on_stamp(tree: Path, field: str, value: str) -> None:
         (tree / STAMP_FILE).write_text(text, encoding="utf-8")
 
 
+# The stamp field naming the issue a dispatch was sent at, in the tree's own repository:
+# the tracker issue of a scheduled workflow. Written by `fix-prs.dispatch_fresh`, read by
+# `closing_line` when the tree's PR opens.
+CLOSES = "closes"
+
+
+def closing_line(tree: Path) -> str:
+    """`Closes #N` for the issue this tree's dispatch named, or "".
+
+    Only what the pass itself sent the session at: an issue a fixer merely mentions is
+    not one its PR solves, and GitHub closes whatever a closing keyword names on merge.
+    """
+    number = str(read_stamp(tree).get(CLOSES, "")).strip()
+    return f"Closes #{number}" if number.isdigit() else ""
+
+
 def inherit_origin(tree: Path, home: Path | None = None) -> bool:
     """Copy `home`'s `ORIGIN_FILE` -- by default this script's own checkout, a fixer's
     tree when a fix-pass session runs its copy -- into `tree`; whether it had one.

@@ -117,6 +117,27 @@ def test_the_ledger_records_and_answers_the_second_click(tmp_path):
     assert ledger[fix_ledger.decision_key(decision)]["what"] == "1 check failing"
 
 
+def test_a_sourced_entry_keeps_every_send_and_a_day_counts_them_all(tmp_path):
+    """`when` is only the newest send: a key re-sent after `RESEND_AFTER` is two sends in
+    one day, and a daily cap that read `when` would count it once."""
+    path = tmp_path / "dispatch.json"
+    for hours in (30, 7, 1):
+        stamp = NOW - _dt.timedelta(hours=hours)
+        fix_ledger.record(path, "dependabot:a:0:?:d:dispatch", "n", stamp, source="dependabot")
+    fix_ledger.record(path, "pr:b:1:s:d:dispatch", "n", NOW)
+    ledger = fix_ledger.read_ledger(path)
+    entry = ledger["dependabot:a:0:?:d:dispatch"]
+    assert entry["sent"] == 3 and entry["source"] == "dependabot" and len(entry["at"]) == 3
+    assert "source" not in ledger["pr:b:1:s:d:dispatch"], "an unsourced entry is as before"
+    day_ago = NOW - _dt.timedelta(hours=24)
+    assert fix_ledger.sent_since(ledger, "dependabot", day_ago) == 2
+    assert fix_ledger.sent_since(ledger, "other", day_ago) == 0
+    for _ in range(fix_ledger.AT_KEEP + 2):
+        fix_ledger.record(path, "dependabot:a:0:?:d:dispatch", "n", NOW, source="dependabot")
+    kept = fix_ledger.read_ledger(path)["dependabot:a:0:?:d:dispatch"]["at"]
+    assert len(kept) == fix_ledger.AT_KEEP
+
+
 def test_a_corrupt_ledger_is_empty_rather_than_a_traceback(tmp_path):
     path = tmp_path / "dispatch.json"
     path.write_text("{not json", encoding="utf-8")

@@ -332,6 +332,25 @@ def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
     )
 
 
+def test_dependabots_red_is_named_described_and_told_from_any_other_pr():
+    found = failure(
+        kind=fix_plan.DEPENDABOT,
+        number=0,
+        title="Dependabot in carameli: 1 update job(s) failing",
+        signature=("run sqlalchemy: dependency_file_content_not_changed",),
+    )
+    assert fix_plan.name_of(found) == "dependabot"
+    assert fix_plan.describe(found) == (
+        "Dependabot in carameli: 1 update job(s) failing: "
+        "run sqlalchemy: dependency_file_content_not_changed"
+    )
+    assert fix_plan.is_dependabot(found)
+    assert fix_plan.is_dependabot(failure(head="dependabot/uv/urllib3-2.8.0"))
+    assert not fix_plan.is_dependabot(failure(head="agent/dependabot-config"))
+    [placed] = fix_plan.plan([found], "", ())
+    assert placed.action == fix_plan.DISPATCH, "a fresh branch off its base, like a nightly"
+
+
 def test_the_release_test_is_the_one_the_pipeline_expects_red():
     """One spelling, in two files: the pipeline judges a release PR by it, and the plan
     reads a red default branch by it."""

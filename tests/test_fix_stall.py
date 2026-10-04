@@ -50,6 +50,8 @@ def test_what_another_part_of_the_loop_already_tracks_is_not_filed_twice():
         "a #1": "escalated: the devkit session has it on the harness ledger",
         "b #2": "backing off: retried at max effort after 2026-09-27 12:00",
         "c #3": "held until the devkit session in C:/t finishes",
+        # A full Dependabot cap frees itself; filed, it would send the devkit session it saves.
+        "d dependabot": f"{fix_stall.fix_budget.DAILY_CAPPED}: 2 of 2 sessions sent in the last 24h",
     }
     assert fix_stall.stalled([line(72, tracked), line(0, tracked)], NOW) == []
 

@@ -23,7 +23,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
-from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, PR, Failure, describe, name_of
+from fix_plan import (
+    ALERT_ENTRY,
+    COMMIT,
+    CONFLICT,
+    DEPENDABOT_EVIDENCE,
+    EVIDENCE_DIR,
+    LEDGER,
+    PR,
+    UNFETCHABLE_ENTRY,
+    Failure,
+    describe,
+    name_of,
+)
 from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
 from harness_triage import ARTIFACT as _TRIAGE_ARTIFACT
 from junit_report import READABLE
@@ -362,6 +374,53 @@ def branch_prompt(failure: Failure, branch: str) -> str:
         f"This worktree is on the fresh branch {branch} off origin/{failure.base}, "
         "so the failure reproduces here. Fix it; every PR against this base is red until "
         f"the fix lands. {FINISH}"
+    )
+
+
+def _unfetchable_note(names: list[str]) -> str:
+    """Why Dependabot cannot do it here, and the only two fixes, when a path dependency
+    is what stops it. No quotes or backticks: the prompt crosses a `wt` command line."""
+    if not names:
+        return ""
+    which = ", ".join(names)
+    return (
+        f" Every Dependabot job here dies on the path dependency {which}: its runner "
+        "clones only this repository, so a [tool.uv.sources] path to a sibling checkout "
+        "is never there, and re-running or retrying Dependabot changes nothing -- do "
+        "neither. The fix is one of two: bump the packages by hand in this repository, "
+        f"or give {which} a source Dependabot can fetch, a git URL or a published package. "
+        "Take the first unless the second fits how this project builds, and say which in "
+        "the intent. A relock resolves against the sibling as it is on disk, so if this "
+        "repository's CI checks the sibling out at a pinned ref (the evidence names it), "
+        "move that ref to the sibling commit you locked against in the same change."
+    )
+
+
+def dependabot_prompt(failure: Failure, branch: str) -> str:
+    """What Dependabot cannot do for a project: alerts no PR answers, update jobs failing.
+
+    The prompt is about the outcome, not the bot: every package named reaches its patched
+    version in this repository's lock, whoever does the bump.
+    """
+    sig = failure.signature
+    bumps = [e.removeprefix(ALERT_ENTRY) for e in sig if e.startswith(ALERT_ENTRY)]
+    runs = [e for e in sig if not e.startswith((ALERT_ENTRY, UNFETCHABLE_ENTRY))]
+    unfetchable = [
+        e.removeprefix(UNFETCHABLE_ENTRY) for e in sig if e.startswith(UNFETCHABLE_ENTRY)
+    ]
+    wanted = (
+        f" Bump each of these to at least the version named: {'; '.join(bumps)}." if bumps else ""
+    )
+    failing = f" Update jobs also fail on: {'; '.join(runs)}." if runs else ""
+    return _framed(
+        f"{failure.title} ({failure.url}).{wanted}{failing} Every alert, with its advisory, "
+        f"and every failing job with its error, is in {EVIDENCE_DIR}/{DEPENDABOT_EVIDENCE} "
+        f"in this worktree -- read it first.{_unfetchable_note(unfetchable)} This worktree is "
+        f"on the fresh branch {branch} off origin/{failure.base}. Bump only what is named, "
+        "in the lock (uv lock --upgrade-package NAME, or the project's own equivalent), "
+        "then run the tests that touch those packages. Name every package you bumped in "
+        "the intent's subject or body: the pass reads an alert as answered by any open PR "
+        f"that names its package, and sends again at one that none does. {FINISH}"
     )
 
 

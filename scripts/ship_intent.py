@@ -650,6 +650,20 @@ def _push(intent: Intent, runner: Runner, when: str) -> Outcome | None:
     return Outcome(intent, FAILED, f"push: {detail}")
 
 
+def pr_body(intent: Intent) -> str:
+    """The intent's body, closing the issue the tree's dispatch was sent at, when one was.
+
+    A nightly's fixer was told "the issue closes itself when the workflow next passes",
+    and it does -- unless the workflow never runs green on the base again (renamed,
+    disabled, superseded), and then the issue stood open over a merged fix.
+    """
+    body = intent.body or intent.subject
+    closes = fix_reports.closing_line(intent.tree)
+    if not closes or closes in body:
+        return body
+    return f"{body}\n\n{closes}"
+
+
 def ship_one(
     intent: Intent,
     python: str,
@@ -683,7 +697,7 @@ def ship_one(
         gh_for(tree),
         sweep.Plan(
             pr_title=intent.subject,
-            pr_body=intent.body or intent.subject,
+            pr_body=pr_body(intent),
             pr_head=intent.branch,
             pr_base=base,
             pr_labels=labels_for(tree),

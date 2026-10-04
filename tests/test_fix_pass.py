@@ -167,7 +167,31 @@ def world(tmp_path, monkeypatch):
         "installers": [],
         "installers_code": 0,
         "devkit_fixes": [],
+        "dependabot": [],
+        "dependabot_notes": [],
+        "drift": [],
+        "issues": [],
+        "upkeep": [],
     }
+    # GitHub's Dependabot, the checkouts' default branches and their tracker issues are
+    # the machine's own: each step is a table entry, and what it was asked is recorded.
+    monkeypatch.setattr(
+        fix_pass.fix_dependabot,
+        "collect",
+        lambda ws, projects, now: (list(table["dependabot"]), list(table["dependabot_notes"])),
+    )
+    monkeypatch.setattr(
+        fix_pass.fix_drift,
+        "tend",
+        lambda ws, projects, mode: table["upkeep"].append(("drift", mode)) or list(table["drift"]),
+    )
+    monkeypatch.setattr(
+        fix_pass.fix_issues,
+        "sweep_green",
+        lambda ws, projects, mode: (
+            table["upkeep"].append(("issues", mode)) or list(table["issues"])
+        ),
+    )
     # The machine's real scheduler is never touched: `maintain` re-registers tasks.
     monkeypatch.setattr(
         fix_pass.installers,
@@ -346,6 +370,61 @@ def test_a_dispatching_pass_brings_every_installer_current_and_a_plan_does_not(w
     assert world["installers"] == []
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
     assert world["installers"] == [["maintain", "--workspace", str(world["workspace"])]]
+
+
+def dependabot_failure(project: str = "carameli") -> fix_plan.Failure:
+    return failure(
+        kind=fix_plan.DEPENDABOT,
+        project=project,
+        number=0,
+        head="",
+        sha="",
+        title=f"Dependabot in {project}: 1 package(s) with alerts no PR answers",
+        signature=(f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0",),
+    )
+
+
+def test_what_dependabot_cannot_do_is_sent_recorded_under_its_source_and_capped(world):
+    """ibkr_trader's Dependabot failed 11 of 15 runs and nothing read it. Now it is a
+    failure like any other -- and a new kind of dispatch, so it has a daily cap."""
+    world["dependabot"] = [dependabot_failure("carameli"), dependabot_failure("devkit")]
+    world["dependabot_notes"] = ["data-lake -- Dependabot Updates fails only because ..."]
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
+    assert len(world["dispatched"]) == 2
+    path = fix_pass.worktree.boxes_root(world["workspace"].parent) / fix_ledger.LEDGER_NAME
+    ledger = fix_ledger.read_ledger(path)
+    assert {entry["source"] for entry in ledger.values()} == {fix_plan.DEPENDABOT}
+    text = artifact(world)
+    assert "dependabot data-lake -- Dependabot Updates fails only because" in text
+    world["dependabot"] = [dependabot_failure("sports_betting")]
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW)
+    assert len(world["dispatched"]) == 2, "the third of the day waits"
+    assert "dependabot daily cap: 2 of 2" in artifact(world)
+
+
+def test_upkeep_runs_in_every_mode_and_lands_on_the_record(world):
+    world["drift"] = [
+        "ibkr_trader main -- uv.lock is origin/main's already; main's uv.lock restored"
+    ]
+    world["issues"] = ["carameli #12 (Nightly) -- would close: green on origin/main at the tip"]
+    assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
+    assert world["upkeep"] == [("drift", fix_cycle.PLAN), ("issues", fix_cycle.PLAN)]
+    text = artifact(world)
+    assert "drift    ibkr_trader main -- uv.lock is origin/main's already" in text
+    assert "issue    carameli #12 (Nightly) -- would close" in text
+
+
+def test_an_upkeep_line_that_failed_is_filed_against_its_checkout(world, tmp_path):
+    world["drift"] = ["ibkr_trader main -- uv.lock relocked: FAILED to cut agent/auto/relock-x"]
+    world["issues"] = ["carameli #12 (Nightly) -- FAILED to close: HTTP 403"]
+    journal = fix_pass.Journal(tmp_path)
+    ctx = fix_pass.context(world["workspace"], fix_cycle.DISPATCH, NOW)
+    drift, issues = fix_pass.tend(world["workspace"], ctx, journal)
+    assert (drift, issues) == (world["drift"], world["issues"])
+    assert [(f.kind, f.project) for f in journal.findings] == [
+        ("drift-failed", "ibkr_trader"),
+        ("issue-close-failed", "carameli"),
+    ]
 
 
 def test_a_failed_installer_is_filed_for_the_devkit_session(world, monkeypatch, tmp_path):

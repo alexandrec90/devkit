@@ -334,6 +334,25 @@ def test_the_spawn_is_window_less_and_captured_with_the_streams_merged(monkeypat
     assert kwargs["stderr"] == subprocess.STDOUT and kwargs["stdin"] == subprocess.DEVNULL
 
 
+def test_a_collector_runs_uv_frozen_so_it_never_rewrites_the_checkouts_lock(monkeypatch, tmp_path):
+    """The command runs in the static checkout, where a bare `uv run` relocks against a
+    moved sibling and leaves `uv.lock` uncommitted on the default branch -- ibkr_trader's
+    `main` from 2026-10-03 on."""
+    assert tasks.command_env({"PATH": "p", "UV_FROZEN": "0"}) == {"PATH": "p", "UV_FROZEN": "1"}
+    FakePopen.hang = False
+    monkeypatch.setattr(tasks.subprocess, "Popen", FakePopen)
+    tasks.spawn(["uv", "run", "x"], tmp_path, 10)
+    assert FakePopen.instances[-1].kwargs["env"]["UV_FROZEN"] == "1"
+    ran: list = []
+    monkeypatch.setattr(
+        tasks.subprocess,
+        "run",
+        lambda argv, **kw: ran.append(kw) or subprocess.CompletedProcess(argv, 0),
+    )
+    assert tasks.stream(["uv", "run", "x"], tmp_path) == 0
+    assert ran[0]["env"]["UV_FROZEN"] == "1"
+
+
 def test_a_timeout_ends_the_whole_tree_and_keeps_what_was_said(monkeypatch, tmp_path):
     """`uv`'s grandchild is the Chrome holding the profile lock; killing `uv` alone
     leaves it, and every later fire fails on the lock."""
