@@ -65,7 +65,8 @@ what the hook runs and CI does not, are both held to a written reason by
   gate where no `$DEVKIT_DIR` exists — `sync_devkit.codex_hooks_stale` is that check.
   Regenerating on `--pull` is not enough alone: a project only pulls when asked to.
   The `.agents/skills/` mirror is the same shape: `--pull` re-mirrors it
-  (`remirror_codex_skills`), and the vendored `test_sync_codex_context.py` is its check.
+  (`remirror_codex_skills`), so does `ship.py --fix` before every commit the pass makes
+  (`mirror_codex_skills`), and the vendored `test_sync_codex_context.py` is its check.
 
 ## `templates/` is content, not source
 
