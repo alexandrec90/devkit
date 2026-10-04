@@ -108,5 +108,7 @@ def test_regate_unread_outside_dispatch_only_says_what_it_would_do(monkeypatch, 
     monkeypatch.setattr(fix_red, "regate", lambda _d: pytest.fail("plan re-gated"))
     lines, rerun = fix_red.regate_unread(tmp_path, ["devkit"], fix_cycle.PLAN)
     assert lines == ["devkit -- would re-run the gate: no verdict at the tip"]
-    assert rerun == set()
+    # Counted as re-run all the same: a rehearsal that held every project fixer behind
+    # "devkit's gate could not be read" showed holds the dispatch pass never makes.
+    assert rerun == {"devkit"}
     assert fix_red.regate_unread(tmp_path, [], fix_cycle.DISPATCH) == ([], set())

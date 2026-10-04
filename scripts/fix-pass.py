@@ -358,7 +358,7 @@ def run(
     # Filed before the backlog is read, and the backlog read on its own: whatever broke
     # above -- the collect step included -- reaches the devkit session this same pass.
     filed = fix_loop.record(ctx, journal)
-    closed.lines += step("pending", fix_loop.recheck_open, ctx, default=[])
+    closed.verified += step("pending", fix_loop.recheck_open, ctx, default=[])
     backlog = step("backlog", fix_red.backlog_failure, workspace, closed.in_flight, default=None)
     failures += [backlog] if backlog else []
     newest = step("newest-release", gate_evidence.newest_release, devkit_dir, default="")
@@ -398,6 +398,7 @@ def run(
         tuple(filed),
         fix_loop.backlog(ctx),
         tuple(closed.stopped),
+        tuple(closed.verified),
     )
     publish(account, now)
     return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)

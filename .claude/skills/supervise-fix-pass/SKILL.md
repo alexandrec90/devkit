@@ -55,6 +55,11 @@ Start it in the background and wait for its completion notice -- expect hours, s
 each iteration waits for its sessions. **Do not poll it, tail it or sleep on it**: each
 check you make while it runs is a turn spent on a verdict the report gives in one read.
 
+Claude Code stops an idle session's background command when the machine runs low on
+memory, and says so in the completion notice. The report is written after every
+iteration, so audit what finished; do not restart the run unasked -- memory is still
+short -- and say in the reply which iteration it stopped in.
+
 It runs from this worktree, so your fixes are live on the next iteration -- and the
 sessions it sends cut their branches from `main`, which has none of them yet. Until this
 branch merges, expect them to report that `main`'s tools disagree with the evidence the

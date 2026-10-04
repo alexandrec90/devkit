@@ -504,7 +504,9 @@ def test_verify_reopens_what_did_not_land(ctx, monkeypatch):
     outcome = fix_loop.fix_verify.Outcome(reopen=[(ref, "closed unmerged")])
     monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: outcome)
     closed, _ = close(ctx)
-    assert closed.lines == [f"reopened [{ref}] -- closed unmerged"]
+    assert closed.verified == [f"reopened [{ref}] -- closed unmerged"]
+    # Not a `blocked` row: the record read a verdict on the ledger as a stuck session.
+    assert closed.lines == []
     assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [ref]
 
 
@@ -519,7 +521,7 @@ def test_verify_retires_what_was_filed_while_the_merged_fix_waited(ctx, monkeypa
     outcome = fix_loop.fix_verify.Outcome(covered=[(ref, "filed while #434 waited", "u/434")])
     monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: outcome)
     closed, _ = close(ctx)
-    assert f"retired [{ref}] -- filed while #434 waited" in closed.lines
+    assert f"retired [{ref}] -- filed while #434 waited" in closed.verified
     assert triage.open_items(triage.load(ctx.devkit_dir)) == []
     [resolution] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
     assert resolution.fields["pr"] == "u/434"
@@ -538,7 +540,7 @@ def test_verify_names_the_merged_pr_that_held_a_fix_its_branch_never_landed(ctx,
     outcome = fix_loop.fix_verify.Outcome(found=[(was, fix)])
     monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: outcome)
     closed, _ = close(ctx)
-    assert f"settled [{ref}] on u/440 -- agent/x-3 never landed it" in closed.lines
+    assert f"settled [{ref}] on u/440 -- agent/x-3 never landed it" in closed.verified
     [resolution] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
     assert resolution.fields["pr"] == "u/440"
     assert resolution.fields["note"].startswith("split by cause -- merged as u/440")
@@ -555,7 +557,7 @@ def test_a_friction_row_todays_detectors_would_not_file_is_retired(ctx, monkeypa
     ref = triage.item_id(row)
     monkeypatch.setattr(fix_loop.session_friction, "outdated", lambda items: [(ref, "gone")])
     closed, _ = close(ctx)
-    assert f"retired [{ref}] -- gone" in closed.lines
+    assert f"retired [{ref}] -- gone" in closed.verified
     assert triage.open_items(triage.load(ctx.devkit_dir)) == []
 
 
