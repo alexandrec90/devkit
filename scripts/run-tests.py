@@ -14,7 +14,8 @@ into every consuming project and must stay separately runnable there.
 **The default is the tests named by what changed**, not the suite: every file
 changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`
 (and, for anything under `templates/`, to `GENERATED_TREE_TESTS` too; a `.tmpl` also
-to the tests that spell its name), plus `CONTRACT_TESTS`, which read every module and
+to the tests that spell its name; a script the test contract's `COVERED_BY` lists, to
+the module it names), plus `CONTRACT_TESTS`, which read every module and
 so are named by none of them.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
@@ -28,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import subprocess
 import sys
@@ -48,6 +50,13 @@ TEST_DIRS = ("tests", "scripts/hooks/tests")
 # without that reading, a change to `ruff.toml.tmpl` or `pr-gate.yml.tmpl` named no test
 # but the generated-tree checks.
 TEMPLATE_SUFFIX = ".tmpl"
+
+# Where a script tested by a module of another name says which: the test contract's
+# `COVERED_BY`, script name -> (test module, reason), which that contract holds to a
+# module that exists and names the script. Read off the source, never imported, so the
+# runner needs no test tree on its path. Without it a change to `scripts/fix_send.py`
+# named no test and ran only the contract tests (8e2abca7).
+COVERED_BY_SOURCE = "tests/test_test_contract.py"
 
 # The checks over a generated project as a whole -- format-clean, for one -- which every
 # change under `templates/` names in addition to its own tests.
@@ -215,20 +224,50 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
     `tests/test_fix_pass.py`), when that file exists; a `.py.tmpl` names that and
     `test_<stem>_template.py`, and anything under `templates/` names
     `GENERATED_TREE_TESTS`. A `.tmpl` also names every test
-    whose source spells its file name, since that is how a test reads one. Everything
+    whose source spells its file name, since that is how a test reads one, and a script
+    in `COVERED_BY_SOURCE`'s `COVERED_BY` names the module it gives. Everything
     else -- a document, a workflow, a module with no test of its own -- is reported so
     the caller can see what the run did not cover.
     """
+    covered = covered_by(root)
     tests: list[str] = []
     unnamed: list[str] = []
     for path in paths:
         posix = path.replace("\\", "/")
-        found = [name for name in _named_tests(posix) if (root / name).is_file()]
+        named = [*_named_tests(posix), covered.get(posix.rsplit("/", 1)[-1], "")]
+        found = [name for name in dict.fromkeys(named) if name and (root / name).is_file()]
         found += [name for name in _reading_tests(posix, root) if name not in found]
         tests.extend(name for name in found if name not in tests)
         if not found:
             unnamed.append(posix)
     return tests, unnamed
+
+
+def covered_by(root: Path = REPO_ROOT) -> dict[str, str]:
+    """Script file name -> the test module `COVERED_BY_SOURCE` says covers it.
+
+    Empty where the file, the `COVERED_BY` assignment or a literal value is missing: a
+    project without the contract has nothing to add, and a runner must still run.
+    """
+    try:
+        tree = ast.parse((root / COVERED_BY_SOURCE).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    for node in tree.body:
+        targets: list[ast.expr]
+        if isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        else:
+            continue
+        if value is None or not any(getattr(t, "id", "") == "COVERED_BY" for t in targets):
+            continue
+        try:
+            return {str(name): str(entry[0]) for name, entry in ast.literal_eval(value).items()}
+        except (ValueError, TypeError, AttributeError, IndexError, KeyError):
+            return {}
+    return {}
 
 
 def _named_tests(posix: str) -> list[str]:

@@ -409,6 +409,61 @@ def test_a_template_names_its_stems_test_and_every_test_that_reads_it(tmp_path):
     )
 
 
+def test_a_script_covered_by_another_module_names_it(tmp_path):
+    """8e2abca7: `scripts/fix_send.py` is tested in `tests/test_fix_pass.py`, and a change
+    to it alone named no test and ran only the contract tests."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_fix_pass.py").write_text("", encoding="utf-8")
+    (tests / "test_precommit_hooks.py").write_text("", encoding="utf-8")
+    (tmp_path / run_tests.COVERED_BY_SOURCE).write_text(
+        "COVERED_BY: dict[str, tuple[str, str]] = {\n"
+        '    "fix_send.py": ("tests/test_fix_pass.py", "split out of " "fix-pass.py"),\n'
+        '    "check_stdlib_only.py": ("tests/test_precommit_hooks.py", "siblings"),\n'
+        '    "gone.py": ("tests/test_gone.py", "a module that does not exist"),\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    paths = [
+        "scripts/fix_send.py",
+        "scripts/fix-pass.py",
+        "scripts/precommit/check_stdlib_only.py",
+        "scripts/gone.py",
+    ]
+    assert run_tests.tests_for(paths, tmp_path) == (
+        ["tests/test_fix_pass.py", "tests/test_precommit_hooks.py"],
+        ["scripts/gone.py"],
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        None,
+        "COVERED_BY = {",
+        "OTHER = {'x.py': ('tests/test_y.py', 'r')}",
+        "COVERED_BY = dict(x=1)",
+        "COVERED_BY = ['x.py']",
+        "COVERED_BY = {'x.py': ()}",
+    ],
+)
+def test_covered_by_is_empty_where_the_contract_cannot_say(tmp_path, source):
+    """A project without the contract, or with one this cannot read, still runs."""
+    (tmp_path / "tests").mkdir()
+    if source is not None:
+        (tmp_path / run_tests.COVERED_BY_SOURCE).write_text(source, encoding="utf-8")
+    assert run_tests.covered_by(tmp_path) == {}
+
+
+def test_every_covered_by_entry_in_devkit_names_its_module():
+    """The live contract, read as the runner reads it: each script it excuses from a
+    `test_<stem>.py` is mapped to the module that covers it."""
+    covered = run_tests.covered_by(REPO_ROOT)
+    assert covered["fix_send.py"] == "tests/test_fix_pass.py"
+    assert run_tests.tests_for(["scripts/fix_send.py"], REPO_ROOT)[0] == ["tests/test_fix_pass.py"]
+    assert all((REPO_ROOT / module).is_file() for module in covered.values())
+
+
 def test_a_template_of_a_test_is_not_run_as_one(tmp_path):
     """`templates/core/tests/test_smoke.py.tmpl` renders into a test; unrendered it is
     not one, and naming it would hand pytest a file it cannot collect."""
