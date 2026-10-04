@@ -117,6 +117,30 @@ def test_an_intent_whose_fixer_waits_on_a_background_task_is_held(monkeypatch, t
     assert lines[0] == "devkit agent/w -- held: its session is still working in the tree"
 
 
+def test_an_intent_a_live_session_has_edited_past_is_held(monkeypatch, tmp_path):
+    """e89a0224: roguelike #81's tree was committed under a devkit fixer's message with
+    the files the person's interactive session there had just begun."""
+    trees = [ship_intent.Intent("roguelike", tmp_path / "shared", "worktree-b", "S", "B")]
+    trees.append(ship_intent.Intent("devkit", tmp_path / "own", "agent/o", "S", "B"))
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: trees)
+    late = {str(tmp_path / "shared"): "src/puddle.ts"}
+    monkeypatch.setattr(
+        fix_pass.fix_loop, "outran_intent", lambda tree, now: late.get(str(tree), "")
+    )
+    shipped = []
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda i, p, b: shipped.append(i.branch) or ship_intent.Outcome(i, "shipped", "u"),
+    )
+    lines, _, _ = fix_pass.ship_intents(tmp_path, ["roguelike", "devkit"], fix_cycle.DISPATCH)
+    assert shipped == ["agent/o"]
+    assert lines[0] == (
+        "roguelike worktree-b -- held: src/puddle.ts changed after the intent was written, "
+        "and a session is still at work in the tree"
+    )
+
+
 def failure(**fields) -> fix_plan.Failure:
     base: dict[str, Any] = {
         "kind": fix_plan.PR,

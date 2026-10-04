@@ -1031,3 +1031,81 @@ def test_still_working_is_a_busy_listing_or_a_background_task_still_out(monkeypa
     assert fix_loop.still_working(busy, tmp_path / "listed", NOW)
     assert fix_loop.still_working(frozenset(), tmp_path / "waiting", NOW)
     assert not fix_loop.still_working(busy, tmp_path / "idle", NOW)
+
+
+def _intent_tree(tmp_path, monkeypatch, *, live=True, intent_at=1000.0):
+    """A tree with an intent written at `intent_at`, two changed files, and a session
+    `live` in it or not; the fake `git status` lists both files and a deletion."""
+    root = tmp_path / "tree"
+    (root / "logs").mkdir(parents=True)
+    intent = root / "logs" / "ship-intent.md"
+    intent.write_text("Re-mirror the skill\n\nBody.\n", encoding="utf-8")
+    os.utime(intent, (intent_at, intent_at))
+    for name, when in (("mirror.md", 900.0), ("puddle.ts", 1100.0)):
+        (root / name).write_text("x", encoding="utf-8")
+        os.utime(root / name, (when, when))
+    monkeypatch.setattr(
+        fix_reports, "active_transcript", lambda tree, now: root / "t.jsonl" if live else None
+    )
+    porcelain = " M mirror.md\n?? puddle.ts\n D gone.ts\n"
+    calls = []
+
+    def runner(argv, cwd=None):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=porcelain, stderr="")
+
+    return root, runner, calls
+
+
+def test_an_intent_a_live_session_has_edited_past_is_outrun(tmp_path, monkeypatch):
+    """e89a0224: a devkit fixer's intent in roguelike #81's tree was shipped at 16:00
+    with the half-written files the person's session there had begun at 15:56."""
+    root, runner, calls = _intent_tree(tmp_path, monkeypatch)
+    assert fix_loop.outran_intent(root, NOW, runner) == "puddle.ts"
+    assert "--untracked-files=all" in calls[0], "a new directory is listed file by file"
+
+
+def test_an_intent_is_not_outrun_once_the_session_is_quiet(tmp_path, monkeypatch):
+    root, runner, calls = _intent_tree(tmp_path, monkeypatch, live=False)
+    assert fix_loop.outran_intent(root, NOW, runner) == ""
+    assert calls == [], "no git call for a tree nobody is in"
+
+
+def test_an_intent_written_after_every_edit_is_not_outrun(tmp_path, monkeypatch):
+    """The ordinary ship: the intent is the session's last write, live or not."""
+    root, runner, _ = _intent_tree(tmp_path, monkeypatch, intent_at=1200.0)
+    assert fix_loop.outran_intent(root, NOW, runner) == ""
+
+
+def test_an_intent_the_pass_already_tried_is_not_outrun(tmp_path, monkeypatch):
+    """A refused ship's own fixers rewrote files after the intent was written."""
+    root, runner, _ = _intent_tree(tmp_path, monkeypatch)
+    words = fix_loop.ship_intent.parse_intent("Re-mirror the skill\n\nBody.\n")
+    digest = fix_loop.ship_intent.Intent("", root, "", *words).digest
+    fix_loop.ship_intent.write_state(root, {"stage": "refused", "intent": digest})
+    assert fix_loop.outran_intent(root, NOW, runner) == ""
+    fix_loop.ship_intent.write_state(root, {"stage": "shipped", "intent": "an-older-one"})
+    assert fix_loop.outran_intent(root, NOW, runner) == "puddle.ts"
+
+
+def test_why_held_names_a_busy_session_before_an_outrun_intent(tmp_path, monkeypatch):
+    busy = frozenset({str(tmp_path / "listed").replace("\\", "/").lower()})
+    monkeypatch.setattr(fix_reports, "awaiting_task", lambda tree, now: False)
+    monkeypatch.setattr(fix_loop, "outran_intent", lambda tree, now: "src/puddle.ts")
+    assert fix_loop.why_held(busy, tmp_path / "listed", NOW) == (
+        "its session is still working in the tree"
+    )
+    assert fix_loop.why_held(frozenset(), tmp_path / "other", NOW).startswith("src/puddle.ts ")
+    monkeypatch.setattr(fix_loop, "outran_intent", lambda tree, now: "")
+    assert fix_loop.why_held(frozenset(), tmp_path / "other", NOW) == ""
+
+
+def test_outran_intent_says_nothing_without_an_intent_or_a_readable_tree(tmp_path, monkeypatch):
+    root, runner, _ = _intent_tree(tmp_path, monkeypatch)
+
+    def failing(argv, cwd=None):
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr="not a repo")
+
+    assert fix_loop.outran_intent(root, NOW, failing) == ""
+    (root / "logs" / "ship-intent.md").unlink()
+    assert fix_loop.outran_intent(root, NOW, runner) == ""
