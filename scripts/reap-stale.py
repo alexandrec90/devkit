@@ -74,6 +74,16 @@ SETTING = "devkit.reapStale"
 # that resumes every session, this one gates a stop that does not.
 DEFAULT_SESSION_IDLE_MINUTES = 120
 
+# Each way a pass fails, as a marker its line carries and the kind `cause_line` names it
+# by; `session_trees` owns the kinds of its own removals. First marker wins per line.
+NO_TABLE = "the process table could not be read"
+STOP_REFUSED = "could not stop"
+FAILURE_KINDS = {
+    NO_TABLE: NO_TABLE,
+    f"-- {STOP_REFUSED}:": "a process tree could not be stopped",
+    **session_trees.FAILURE_KINDS,
+}
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -259,7 +269,7 @@ def act(
             continue
         error = stop(finding.row.pid)
         if error:
-            report.fail(f"{finding.label}: {finding.reason} -- could not stop: {error}")
+            report.fail(f"{finding.label}: {finding.reason} -- {STOP_REFUSED}: {error}")
             continue
         stopped += 1
         report.say(f"{finding.label}: {finding.reason} -- reaped")
@@ -291,9 +301,31 @@ def describe(findings: Sequence[Finding], report: Pass) -> None:
 # --- the artifact ------------------------------------------------------------------
 
 
+def cause_line(lines: Sequence[str], failures: int) -> str:
+    """A failed pass's last line: `error: ` and each kind of failure its `lines` name,
+    once each, in `FAILURE_KINDS` order. `""` for a pass that did not fail.
+
+    `log-wrap.py` files a scheduled job's `cause=` from an `error:` line, and from the
+    last line printed when there is none. Here that was a failure naming its tree and
+    the file the filesystem refused, and the fold keeps a basename: one reap defect on
+    two trees, `arrow.dll` and `_greenlet.pyd`, filed two ledger groups and sent a fixer
+    at a defect whose fix was in review (9d0f1476). The kinds name neither, and the
+    artifact above them keeps both.
+    """
+    if not failures:
+        return ""
+    found = {
+        next((kind for marker, kind in FAILURE_KINDS.items() if marker in line), "")
+        for line in lines
+    }
+    kinds = [kind for kind in dict.fromkeys(FAILURE_KINDS.values()) if kind in found]
+    return "error: " + ("; ".join(kinds) or "reap-stale failed")
+
+
 def render(lines: Sequence[str], failures: int, when: _dt.datetime, mode: str) -> str:
     head = f"# reap-stale {when.isoformat(timespec='seconds')} [{mode}] -- {failures} failure(s)"
-    return "\n".join([head, *lines, ""])
+    cause = cause_line(lines, failures)
+    return "\n".join([head, *lines, *([cause] if cause else []), ""])
 
 
 def write_artifact(text: str, root: Path = REPO_ROOT) -> None:
@@ -369,7 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     table = reap_machine.process_table()
     if table is None:
-        report.fail("the process table could not be read -- nothing assessed")
+        report.fail(f"{NO_TABLE} -- nothing assessed")
         return finish(2)
 
     plan = build_plan(table, Path(workspace) if workspace else None, root, report)

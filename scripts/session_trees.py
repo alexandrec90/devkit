@@ -95,6 +95,20 @@ ENGINE_DOWN = (
     "the next pass with the engine up reaps it, stack and all"
 )
 
+# Each way a removal here fails: a marker its artifact line carries, and the kind
+# `reap-stale.cause_line` files it under on the ledger. The line names the tree and the
+# file the filesystem refused; the kind names neither, so one defect is one ledger group
+# whichever tree it hit (9d0f1476). A line's first marker decides it, so the fallback's
+# failure is listed before the bare git refusal it also contains.
+HUSK_REFUSED = "could not remove its husk"
+REAP_REFUSED = "could not reap"
+FAILURE_KINDS = {
+    HUSK_REFUSED: "a session tree's husk could not be removed",
+    f"{REAP_REFUSED}: compose down": "a merged session tree's stack would not come down",
+    "and finishing it failed": "a merged session tree could not be removed after git refused it",
+    f"{REAP_REFUSED}: git worktree remove": "git refused to remove a merged session tree",
+}
+
 
 @dataclass(frozen=True)
 class Tree:
@@ -328,7 +342,7 @@ def sweep_husks(
             say(f"{label}: {why}")
         elif error:
             failures += 1
-            say(f"{label}: could not remove its husk: {error}")
+            say(f"{label}: {HUSK_REFUSED}: {error}")
         else:
             say(f"{label}: a husk a removal left behind -- removed")
     return failures
@@ -409,7 +423,7 @@ def reap_outcome(path: Path, error: str) -> tuple[str, bool]:
     why = admin_only(path)
     if why:
         return why, False
-    return f"could not reap: {error}", True
+    return f"{REAP_REFUSED}: {error}", True
 
 
 def sweep_workspace(workspace: Path, apply: bool, say: Callable[[str], None]) -> int:
