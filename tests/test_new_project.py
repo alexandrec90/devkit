@@ -911,6 +911,95 @@ def test_generated_lint_runner_fails_a_changed_run_when_git_refuses_the_tree(tmp
     assert "# git\n" in artifact and "dubious ownership" in artifact
 
 
+def _frontend_project(tmp_path: Path, typecheck: str, node_modules: bool = True):
+    """A generated project whose `.devkit.toml` turns the frontend tier on at its root,
+    as roguelike's does, with `typecheck` as the Python the "npm" stand-in runs."""
+    import importlib.util
+
+    root = generate(tmp_path, {})
+    (root / "logs").mkdir(exist_ok=True)
+    (root / "src").mkdir()
+    (root / "src" / "a.ts").write_text("export const a = 1;\n", encoding="utf-8")
+    if node_modules:
+        (root / "node_modules").mkdir()
+    manifest = root / ".devkit.toml"
+    off = "[frontend]\nenabled = false\n"
+    text = manifest.read_text(encoding="utf-8")
+    assert off in text, "the generated manifest no longer turns the tier off this way"
+    tier = '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\n'
+    tier += f"typecheck_cmd = {json.dumps(['-c', typecheck])}\n"
+    manifest.write_text(text.replace(off, tier), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(
+        "frontend_lint_all", root / "scripts" / "lint-all.py"
+    )
+    assert spec is not None and spec.loader is not None
+    generated = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generated)
+    return root, generated
+
+
+def test_generated_lint_runner_typechecks_a_typescript_only_change(tmp_path, monkeypatch):
+    """2ed077d6: in roguelike, a TypeScript-only `--changed` printed "no changed files
+    this run lints; nothing to do", so the fixer's lint step checked nothing. With the
+    `[frontend]` tier on, a `.ts` change runs the tier's typecheck and its finding fails
+    the run and lands in the artifact."""
+    root, generated = _frontend_project(
+        tmp_path, "print('src/a.ts: error TS2322'); raise SystemExit(2)"
+    )
+    monkeypatch.setattr(generated.shutil, "which", lambda name: sys.executable)
+
+    assert generated.main(["--paths", "src/a.ts"]) == 1
+    artifact = (root / "logs" / "lint-errors.log").read_text(encoding="utf-8")
+    assert "# typecheck\n" in artifact and "error TS2322" in artifact
+
+
+def test_generated_lint_runner_skips_a_typecheck_with_no_node_modules(
+    tmp_path, monkeypatch, capsys
+):
+    """An unprovisioned frontend is a missing tool: a note, never an artifact finding."""
+    root, generated = _frontend_project(tmp_path, "raise SystemExit(2)", node_modules=False)
+    monkeypatch.setattr(generated.shutil, "which", lambda name: sys.executable)
+
+    assert generated.main(["--paths", "src/a.ts"]) == 0
+    assert "no node_modules" in capsys.readouterr().out
+    assert (root / "logs" / "lint-errors.log").read_text(encoding="utf-8") == ""
+
+
+def test_generated_lint_runner_names_the_files_it_has_no_linter_for(tmp_path, capsys):
+    """ "nothing to do" alone reads the same as a diff the run never saw; naming the
+    files is what lets an agent tell the two apart without spending a turn."""
+    root, generated = _frontend_project(tmp_path, "raise SystemExit(2)")
+    (root / "notes.md").write_text("x\n", encoding="utf-8")
+
+    assert generated.main(["--paths", "notes.md"]) == 0
+    out = capsys.readouterr().out
+    assert "notes.md" in out and "nothing to do" in out
+
+
+def test_generated_frontend_targets_follow_the_tiers_directory():
+    """Script and config files under `[frontend] dir`, and nothing with the tier off."""
+    import importlib.machinery
+    import importlib.util
+    from types import SimpleNamespace
+
+    source = str(TEMPLATES / "core" / "scripts" / "lint-all.py.tmpl")
+    loader = importlib.machinery.SourceFileLoader("targets_lint_all", source)
+    spec = importlib.util.spec_from_loader("targets_lint_all", loader)
+    template = importlib.util.module_from_spec(spec)
+    loader.exec_module(template)
+    paths = ["src/a.ts", "frontend/b.tsx", "frontend/package.json", "README.md", "x.py"]
+
+    assert template.frontend_targets(paths, None) == []
+    at_root = SimpleNamespace(dir=".")
+    assert template.frontend_targets(paths, at_root) == [
+        "src/a.ts",
+        "frontend/b.tsx",
+        "frontend/package.json",
+    ]
+    nested = SimpleNamespace(dir="frontend/")
+    assert template.frontend_targets(paths, nested) == ["frontend/b.tsx", "frontend/package.json"]
+
+
 def test_generated_lint_runner_covers_the_env_file_and_pre_commit_covers_the_workflows(
     tmp_path,
 ):
