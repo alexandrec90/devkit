@@ -130,6 +130,25 @@ def test_a_resolution_retires_exactly_the_item_it_names():
     assert [i.detail for i in triage.open_items(items)] == ["two"]
 
 
+def test_target_reads_the_project_and_the_pr_a_resolution_names():
+    assert triage.target("#402") == ("devkit", "402")
+    assert triage.target("https://github.com/o/carameli/pull/12.") == ("carameli", "12")
+    assert triage.target("agent/fix-x-0919") == ("", "agent/fix-x-0919")
+    assert triage.target("-") == ("", "")
+
+
+def test_recent_returns_a_resolution_for_each_fix_still_to_verify():
+    """Only a standing resolution naming a PR, from inside the window, is one to check."""
+    named = _line("triage-resolved", ref="aaaabbbb", pr="agent/fix-x-0919", note="one")
+    unnamed = _line("triage-resolved", ref="ccccdddd", pr="-", note="two")
+    items = triage.read_items("\n".join([named, unnamed]))
+    now = datetime.fromisoformat(STAMP) + timedelta(hours=1)
+    made = triage.resolved_at(items[0])
+    expected = triage.Resolution("aaaabbbb", made, "agent/fix-x-0919", "one")
+    assert triage.recent(items, now) == [expected]
+    assert triage.recent(items, now + timedelta(days=365)) == []
+
+
 def test_resolved_refs_names_every_ref_and_ignores_the_refless():
     items = triage.read_items(
         "\n".join(

@@ -1663,6 +1663,27 @@ def test_a_pr_only_plan_is_still_applied():
     assert result.ok and result.pr_url
 
 
+def test_the_report_is_a_row_per_checkout_then_the_plans_then_the_shared_remotes():
+    url = "https://github.com/o/proj"
+    ready = sweep.Result(
+        on_feature(dirty=2, remote_url=url), sweep.READY, "2 uncommitted", ["commit"]
+    )
+    clean = sweep.Result(on_default(name="proj-b", remote_url=url), sweep.CLEAN, "clean")
+    lines = sweep.render([ready, clean]).splitlines()
+    assert lines[0].split() == ["PROJECT", "BRANCH", "DIRTY", "vs", "BASE", "VERDICT"]
+    assert lines[2].split() == ["proj", "claude/thing-0727", "2", "-0/+1", sweep.READY]
+    assert lines[3].split() == ["proj-b", "main", "0", "-0/+0", sweep.CLEAN]
+    assert "1 checkout(s) need action:" in lines
+    assert "    1. commit" in lines
+    assert lines[-1] == f"  proj, proj-b -> {url}"
+
+
+def test_a_report_with_nothing_to_do_says_so():
+    text = sweep.render([sweep.Result(State(name="p", is_git=False), sweep.SKIPPED, "n/a")])
+    assert text.splitlines()[2].split() == ["p", "n/a", "-", "-", sweep.SKIPPED]
+    assert text.endswith("Nothing stranded -- every checkout is clean.")
+
+
 def test_the_ship_dry_run_shows_the_pr_it_would_open():
     result = sweep.Result(on_feature(dirty=3), sweep.READY, "3 uncommitted", [])
     dry = sweep.render_plans("ship", [(result, SHIP_PLAN)], applied=False)
