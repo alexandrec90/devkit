@@ -638,6 +638,87 @@ def test_a_sibling_tree_already_there_is_moved_to_the_ref_it_was_cut_at(tmp_path
     assert _git(target, "rev-parse", "HEAD").stdout.strip() == new
 
 
+PR_GATE = """\
+jobs:
+  test:
+    steps:
+      - name: Checkout ibkr_trader
+        uses: actions/checkout@v7
+        with:
+          path: ibkr_trader
+      - name: Checkout data-lake
+        uses: actions/checkout@v7
+        with:
+          repository: alexandrec90/data-lake
+          ref: {ref}  # the commit uv.lock was resolved against
+          path: data-lake
+"""
+
+
+def _pin(tree: Path, ref: str, name: str = "pr-gate.yml", text: str = PR_GATE) -> None:
+    workflows = tree / ".github" / "workflows"
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / name).write_text(text.replace("{ref}", ref), encoding="utf-8")
+
+
+def test_the_pin_is_the_ref_the_trees_own_gate_checks_the_sibling_out_at(tmp_path):
+    sha = "4305" * 10  # a full commit sha's shape, without the entropy detect-secrets flags
+    assert wt_env.pinned_ref(tmp_path, "data-lake") == "", "no workflows: no pin"
+    _pin(tmp_path, f'"{sha}"')
+    assert wt_env.pinned_ref(tmp_path, "data-lake") == sha, "quotes and a comment are not the ref"
+    assert wt_env.pinned_ref(tmp_path, "Data-Lake") == sha
+    assert wt_env.pinned_ref(tmp_path, "other") == "", "another repo's step is not its pin"
+    # The PR gate outranks a nightly that tracks the default branch on purpose.
+    _pin(tmp_path, "main", name="nightly.yml")
+    assert wt_env.pinned_ref(tmp_path, "data-lake") == sha
+    # A step with no `ref:`, or an expression, pins nothing.
+    _pin(tmp_path, "${{ inputs.ref }}")
+    assert wt_env.pinned_ref(tmp_path, "data-lake") == "main", "the nightly's, now the only one"
+    unpinned = PR_GATE.replace(
+        "          ref: {ref}  # the commit uv.lock was resolved against\n", ""
+    )
+    _pin(tmp_path, "x", text=unpinned)
+    (tmp_path / ".github" / "workflows" / "nightly.yml").unlink()
+    assert wt_env.pinned_ref(tmp_path, "data-lake") == ""
+
+
+def test_a_sibling_is_cut_and_moved_at_the_ref_the_trees_gate_pins(tmp_path):
+    """b0b2f7d7: ibkr_trader's gate pins data-lake to a commit and the sibling was cut at
+    data-lake's main, which had retired a module the pin still had -- the session's tests
+    failed on an import CI never saw, and `uv sync` relocked ibkr's `uv.lock`."""
+    lake, checkout, tree = _with_sibling_source(tmp_path)
+    pinned = _git(lake, "rev-parse", "HEAD").stdout.strip()
+    _advance_lake(lake)
+    _pin(tree, pinned)
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == pinned, line
+    # A shared sibling that was cut at main is moved back to the pin, and then left there.
+    _git(target, "checkout", "-q", "--detach", "main")
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == pinned, line
+    assert wt_env.link_path_sources(tree, checkout, runner=_hookless) == []
+
+
+def test_a_pin_the_sibling_repo_lacks_is_named_and_the_default_branch_used(tmp_path):
+    lake, checkout, tree = _with_sibling_source(tmp_path)
+    _pin(tree, "f" * 40)
+    lines = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert any(f"pins data-lake to {'f' * 40}" in line for line in lines), lines
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    head = _git(lake, "rev-parse", "HEAD").stdout.strip()
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == head
+
+
+def test_a_branch_pin_resolves_to_its_remote_tracking_ref_first(tmp_path):
+    lake = _repo(tmp_path / "lake", compose=False)
+    env = wt_env.git_env(os.environ)
+    assert wt_env.resolve_pin(lake, "main", env) == "main", "no remote: the local branch"
+    _git(lake, "update-ref", "refs/remotes/origin/main", "HEAD")
+    assert wt_env.resolve_pin(lake, "main", env) == "origin/main"
+    assert wt_env.resolve_pin(lake, "no-such-ref", env) == ""
+
+
 def test_a_sibling_tree_holding_work_is_never_moved(tmp_path):
     lake, checkout, tree, target = _cut_sibling(tmp_path)
     old = _git(target, "rev-parse", "HEAD").stdout.strip()
