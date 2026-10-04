@@ -11,9 +11,11 @@ Tested through the pass in `tests/test_fix_pass.py`.
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import sys
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -316,13 +318,43 @@ def _send_one(
         return f"would {would.get(decision.action, f'send ({decision.action})')}", EXIT_OK
     how = agent_models.Launch(launch.agent, launch.model, effort) if effort else launch
     problem = fix_ledger.problem_key(decision)
-    if dispatch(decision, ctx.root, how, problem) != EXIT_OK:
+    code, said = _saying(dispatch, decision, ctx.root, how, problem)
+    if code != EXIT_OK:
         first = decision.failures[0]
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
-        fix_findings.file(
-            journal, f"{decision.action}-failed", first.project, f"{names}: {decision.note[:160]}"
-        )
+        detail, kind = f"{names}: {decision.note[:160]}", f"{decision.action}-failed"
+        # Why it failed is only ever printed, and a scheduled pass's streams go nowhere:
+        # the finding for #538 named no step until its push was reproduced by hand.
+        where = ""
+        if journal is not None and said.strip():
+            where = fix_findings.evidence_file(f"{detail}\n\n{said}", journal.devkit_dir, kind)
+        fix_findings.file(journal, kind, first.project, detail, evidence=where)
         return f"FAILED to {decision.action}", EXIT_FAILED
     key = fix_ledger.decision_key(decision)
     fix_ledger.record(ctx.ledger_path, key, decision.note, ctx.now, problem=problem)
     return decision.action + (f" at effort {effort}" if effort else ""), EXIT_OK
+
+
+class _Tee(io.TextIOBase):
+    """A stream that keeps what is written to it and passes it on, when there is an on."""
+
+    def __init__(self, on, kept: io.StringIO) -> None:
+        self.on, self.kept = on, kept
+
+    def write(self, text: str) -> int:
+        self.kept.write(text)
+        if self.on is not None:  # None under `pythonw.exe`, which the scheduled pass is
+            self.on.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        if self.on is not None:
+            self.on.flush()
+
+
+def _saying(fn, *args) -> tuple[int, str]:
+    """`(fn(*args), what it printed to either stream)`; the printing still happens."""
+    kept = io.StringIO()
+    with redirect_stdout(_Tee(sys.stdout, kept)), redirect_stderr(_Tee(sys.stderr, kept)):
+        code = fn(*args)
+    return code, kept.getvalue()
