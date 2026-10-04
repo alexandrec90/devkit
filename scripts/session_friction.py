@@ -94,6 +94,21 @@ IMPORT_STATEMENT = re.compile(
     r"\s*(?:import\s+(?P<names>[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*)"
     r"|from\s+(?P<source>[\w.]+)\s+import\s+[\w.*, ()]+)\s*$"
 )
+# A shell naming the command it could not find. The class is filed under that name, so a
+# missing tool groups as itself: the snippet from the match on dropped it, and one
+# session's empty PATH was four groups of "command not found" plus whatever followed.
+# Not zsh's `zsh: command not found: uv`, which names the shell first and the tool after.
+SHELL_MISSING = re.compile(r"(?:^|: )([\w.+-]+): command not found(?!:)", re.M)
+# What the Bash tool's own shell carries: Git Bash's `/usr/bin`, and the git it ships
+# with. One of these missing is that shell started without its PATH -- Claude Code's
+# shell, which nothing in devkit sets (no settings `env` names PATH) -- not a toolchain
+# the harness owes. The one session it hit ran in a minute when every sibling session,
+# started from the same terminals, had a working Bash (8bdaf003).
+SHELL_OWN = frozenset(
+    {"ls", "cat", "head", "tail", "wc", "grep", "sed", "awk", "find", "sort", "uniq"}
+    | {"cut", "tr", "tee", "xargs", "env", "mkdir", "rm", "cp", "mv", "dirname"}
+    | {"basename", "touch", "date", "which", "git"}
+)
 WAIT_TOOLS = frozenset({"Monitor"})
 
 # An odd count of any of these before a match on its line means the match is quoted.
@@ -177,7 +192,9 @@ READS_HARNESS_TEXT = re.compile(
 # `.venv` is there, its "No module named pytest" is the session picking the wrong
 # interpreter, not an environment that is missing (devkit's supervisor, 2026-10-01,
 # filed against itself); `judged` drops it, since only the tree can say which it was.
-BARE_INTERPRETER = re.compile(r"(?:^|[;&|]\s*)(?:python3?|py)(?:\.exe)?\s+-m\s", re.M)
+# `-c` too: a social-scraper session read parquet with the machine's `python -c` while its
+# tree's `.venv` held the pyarrow the tree imports (9b16713a).
+BARE_INTERPRETER = re.compile(r"(?:^|[;&|]\s*)(?:python3?|py)(?:\.exe)?\s+-[mc]\s", re.M)
 # A command whose output is read for an environment failure even when it exited 0.
 SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pytest|git)\b", re.M)
 # A quoted argument, whose `|`, `;` and newlines separate no statements: the `\|pytest` of
@@ -490,8 +507,21 @@ def _result_class(text: str, command: str = "") -> tuple[str, str]:
                 or _answers_probe(text, found.start(), probed)
             ):
                 continue
+            missing = _missing_command(text, found)
+            if missing in SHELL_OWN:
+                continue
+            if missing:
+                return cls, f"{missing}: command not found"
             return cls, normalize(text[found.start() : found.start() + SNIPPET])
     return "", ""
+
+
+def _missing_command(text: str, found: re.Match[str]) -> str:
+    """The command a shell's "command not found" at `found` names, or "" for none."""
+    if found.group().lower() != "command not found":
+        return ""
+    named = SHELL_MISSING.search(text[text.rfind("\n", 0, found.start()) + 1 : found.end() + 1])
+    return named.group(1) if named else ""
 
 
 def probed_modules(command: str) -> frozenset[str]:

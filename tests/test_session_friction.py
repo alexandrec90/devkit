@@ -63,6 +63,60 @@ def test_claude_codes_isolation_guard_is_not_filed_on_devkits_ledger():
         assert classes([call("git -C .. status", "1"), result(refusal, "1")]) == []
 
 
+def test_the_bash_tools_own_shell_missing_its_coreutils_is_not_filed():
+    """8bdaf003, c4642d3f, e35c772a: one social-scraper session's Bash started with no
+    PATH -- `ls`, `cat`, `git`, `head`, `wc` all missing, the exact output -- and was filed
+    as four environment groups. Git Bash ships those itself; nothing in devkit sets the
+    Bash tool's PATH, so no change here could have prevented it."""
+    for command, said in (
+        (
+            "ls; ls logs 2>/dev/null; cat .env.example; git log --oneline | head -30",
+            "Exit code 127\n/usr/bin/bash: line 1: ls: command not found\n"
+            "/usr/bin/bash: line 1: cat: command not found\n"
+            "/usr/bin/bash: line 1: git: command not found\n"
+            "/usr/bin/bash: line 1: head: command not found",
+        ),
+        (
+            "docker ps 2>&1 | head -20",
+            "Exit code 127\n/usr/bin/bash: line 1: head: command not found",
+        ),
+        ("wc -l a.py b.md", "/usr/bin/bash: line 1: wc: command not found"),
+    ):
+        assert classes([call(command, "1"), result(said, "1")]) == [], command
+
+
+def test_a_missing_tool_is_filed_under_its_own_name():
+    """The snippet ran from "command not found" on, so the tool's name -- the one thing a
+    sweep needs -- was cut, and whatever followed made each recurrence its own group."""
+    said = "/usr/bin/bash: line 1: docker: command not found\n/usr/bin/bash: line 2: ls: x"
+    events = [
+        e
+        for n, row in enumerate([call("docker ps", "1"), result(said, "1")], 1)
+        for e in st.claude_events(row, n)
+    ]
+    assert [(cls, what) for cls, what, _ in sf.detect(events)] == [
+        ("environment", "docker: command not found")
+    ]
+    mixed = "bash: head: command not found\nbash: uv: command not found"
+    assert sf._result_class(mixed) == ("environment", "uv: command not found"), "past the shell's"
+    assert sf._result_class("zsh: command not found: uv") == (
+        "environment",
+        "command not found: uv",
+    ), "a shell that names it after keeps it in the snippet"
+
+
+def test_no_settings_devkit_writes_sets_the_shells_path():
+    """`SHELL_OWN` is excused because nothing devkit writes reaches the Bash tool's PATH:
+    once a settings `env` names it, a shell missing its coreutils is devkit's to fix."""
+    for path in (
+        REPO_ROOT / ".claude" / "settings.json",
+        REPO_ROOT / "templates" / "core" / "dot-claude" / "settings.json.tmpl",
+    ):
+        text = path.read_text(encoding="utf-8")
+        assert '"env"' in text, f"{path} still has the block this reads"
+        assert '"PATH"' not in text.upper(), path
+
+
 def test_a_missing_module_is_friction_only_when_the_call_failed():
     """A file that quotes an error is not one: most of the first harvest's noise."""
     assert classes(
@@ -359,6 +413,19 @@ def test_the_rules_every_session_reads_answer_the_two_frictions_they_file():
     assert "`python -` patch script" in engineering
     scope = " ".join((rules / "session-scope.md").read_text(encoding="utf-8").split())
     assert "run it bare: it builds the `.venv` a `claude --worktree` tree arrives without" in scope
+
+
+def test_the_scope_rule_names_the_whole_run_sessions_type():
+    """98e676fc then 2bf712f8, each retired as the session's habit: a social-scraper
+    session ran `python -m pytest tests` over a few hundred tests after a refactor, under
+    a rule that said only "the whole test suite". The rule names the spelling now, and
+    the detector still reads it as whole, so the two cannot drift apart."""
+    rules = Path(__file__).resolve().parents[1] / ".claude" / "rules"
+    scope = " ".join((rules / "session-scope.md").read_text(encoding="utf-8").split())
+    assert "run the whole test suite — `pytest tests`, or any run naming no test file" in scope
+    ran = ".venv\\Scripts\\python.exe -m pytest tests -q -x -p no:cacheprovider 2>&1"
+    assert sf.whole_runs(ran) == ["tests"]
+    assert sf.whole_runs(ran.replace("tests", "", 1)) == [""], "naming no test file at all"
 
 
 def test_a_file_written_through_a_shell_heredoc_is_friction():
@@ -984,6 +1051,29 @@ def test_the_machines_python_in_a_tree_with_its_own_venv_is_no_missing_environme
     venv_events = [e for n, row in enumerate(venv_ran, 1) for e in st.claude_events(row, n)]
     assert [row[0] for row in sf.judged(venv_events, str(tree), tmp_path)] == ["environment"], (
         "the tree's own interpreter missing pytest is the environment"
+    )
+
+
+def test_the_machines_python_c_in_a_tree_with_its_own_venv_is_no_missing_environment(tmp_path):
+    """9b16713a, the exact call: a social-scraper session read parquet with the machine's
+    `python -c` while its tree's `.venv` held the pyarrow the tree imports."""
+    ran = (
+        'cd /c/Users/alexa/vs-code && grep -n "ARCHIVE_S3_PREFIX" sports_betting/.env.example; '
+        'cd data-lake/data/archive && python -c "\nimport pyarrow.dataset as ds\n'
+        "for d in ['sports_odds']:\n    t=ds.dataset(d,format='parquet').to_table()\n\""
+    )
+    said = "Exit code 1\nModuleNotFoundError: No module named 'pyarrow'"
+    rows = [call(ran, "1"), result(said, "1")]
+    events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+    tree = _git_tree(tmp_path / "social-scraper", {"archive.py": "import pyarrow as pa\n"})
+    assert [row[0] for row in sf.judged(events, str(tree), tmp_path)] == ["environment"]
+    (tree / ".venv" / "Scripts").mkdir(parents=True)
+    (tree / ".venv" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+    assert sf.judged(events, str(tree), tmp_path) == []
+    own = [call('.venv/Scripts/python.exe -c "import json; x()"', "2"), result(said, "2")]
+    own_events = [e for n, row in enumerate(own, 1) for e in st.claude_events(row, n)]
+    assert [row[0] for row in sf.judged(own_events, str(tree), tmp_path)] == ["environment"], (
+        "the tree's own interpreter missing it is the environment"
     )
 
 
