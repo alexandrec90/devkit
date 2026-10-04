@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import subprocess
 import time
 
 import pytest
@@ -23,6 +24,7 @@ rc_config = load_script("scripts/rc_config.py")
 rc_machine = load_script("scripts/rc_machine.py")
 reap_machine = load_script("scripts/reap_machine.py")
 reap = load_script("scripts/reap-stale.py")
+wrap = load_script("scripts/log-wrap.py")
 
 P = reap_machine.Process
 CLAUDE = r'"C:\bin\claude.EXE"'
@@ -283,8 +285,94 @@ def test_the_plan_looks_a_row_up_by_pid(tmp_path, store):
 
 
 def test_render_leads_with_the_stamp_the_mode_and_the_failure_count():
-    text = reap.render(["a", "b"], 1, WHEN, "maintain")
-    assert text == "# reap-stale 2026-09-07T15:40:00 [maintain] -- 1 failure(s)\na\nb\n"
+    text = reap.render(["a", "b"], 0, WHEN, "maintain")
+    assert text == "# reap-stale 2026-09-07T15:40:00 [maintain] -- 0 failure(s)\na\nb\n"
+    failed = reap.render(["a", "b"], 1, WHEN, "maintain")
+    assert failed.splitlines()[:3] == [
+        "# reap-stale 2026-09-07T15:40:00 [maintain] -- 1 failure(s)",
+        "a",
+        "b",
+    ]
+    assert failed.splitlines()[3] == reap.cause_line(["a", "b"], 1)
+
+
+# --- the cause the ledger files -------------------------------------------------------
+
+# The two Reap Stale failures of 2026-10-03 (9d0f1476): one defect -- a uv-hardlinked
+# image mapped through another link -- on two trees, each refusing a different file.
+HUSK_LINES = (
+    r"session tree data-lake:social-scraper-connector-1003: could not remove its husk: "
+    r"\\?\C:\ws\data-lake\.claude\worktrees\social-scraper-connector-1003\.venv\Lib"
+    r"\site-packages\pyarrow\arrow.dll: Access is denied",
+    r"session tree social-scraper:x-timeline-op-1003: could not remove its husk: "
+    r"\\?\C:\ws\social-scraper\.claude\worktrees\x-timeline-op-1003\.venv\Lib"
+    r"\site-packages\greenlet\_greenlet.cp312-win_amd64.pyd: Access is denied",
+)
+HUSK_KIND = "a session tree's husk could not be removed"
+
+
+def test_one_defect_on_two_trees_is_one_cause_on_the_ledger():
+    """9d0f1476: `log-wrap` read the cause off the pass's last line, which named the tree
+    and the refused file. Its fold keeps a basename, so `arrow.dll` and `_greenlet.pyd`
+    filed two groups, and the fix pass sent a fixer to re-verify a defect whose fix was
+    already in review."""
+    causes = {
+        wrap.failure_cause(reap.render(["stopped 0 process tree(s)", line], 1, WHEN, "maintain"))
+        for line in HUSK_LINES
+    }
+    assert causes == {f"error: {HUSK_KIND}"}
+
+
+def test_the_cause_names_each_kind_once_in_a_fixed_order():
+    stop = "session cse_X (pid 2, carameli): idle 600 min -- could not stop: access denied"
+    lines = [HUSK_LINES[1], stop, HUSK_LINES[0], "stopped 0 process tree(s)"]
+    assert reap.cause_line(lines, 3) == f"error: a process tree could not be stopped; {HUSK_KIND}"
+    assert reap.cause_line(list(reversed(lines)), 3) == reap.cause_line(lines, 3)
+    assert reap.cause_line(lines, 0) == ""
+    assert reap.cause_line(["something nobody named"], 1) == "error: reap-stale failed"
+
+
+def test_each_way_a_session_tree_fails_files_its_own_kind(tmp_path, monkeypatch):
+    """Driven through `session_trees` itself, so a reworded line cannot leave its kind
+    behind: an unclassified failure would read `reap-stale failed` and merge with all."""
+    st = reap.session_trees
+    monkeypatch.setattr(st, "admin_only", lambda path: "")
+    checkout = tmp_path / "carameli"
+
+    def tree(name, stack=False):
+        path = checkout / ".claude" / "worktrees" / name
+        path.mkdir(parents=True)
+        if stack:
+            (path / ".env").write_text(f"COMPOSE_PROJECT_NAME={name}\n", "utf-8")
+        return st.Tree(path, f"agent/{name}", "abc", False)
+
+    def run(argv):
+        if argv[0] == "docker":
+            return subprocess.CompletedProcess(argv, 1, "", "volume is in use")
+        if "remove" in argv:
+            return subprocess.CompletedProcess(argv, 255, "", "fatal: Invalid argument")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    refused = lambda path: ("denied", [])
+    gone = st.Tree(checkout / "gone", "agent/gone", "abc", False)
+    reaps = {
+        "a merged session tree's stack would not come down": st.reap(
+            tree("stacked", stack=True), checkout, run
+        ),
+        "a merged session tree could not be removed after git refused it": st.reap(
+            tree("husked"), checkout, run, remove=refused
+        ),
+        "git refused to remove a merged session tree": st.reap(gone, checkout, run),
+    }
+    for kind, error in reaps.items():
+        line, failed = st.reap_outcome(gone.path, error)
+        assert (
+            failed and reap.cause_line([f"session tree carameli:x: {line}"], 1) == f"error: {kind}"
+        )
+
+    said: list[str] = []
+    st.sweep_husks(checkout, [], True, said.append, lambda path: 10**9, refused)
+    assert said and reap.cause_line(said, len(said)) == f"error: {HUSK_KIND}"
 
 
 def test_the_artifact_lands_under_logs_in_the_named_root(tmp_path):

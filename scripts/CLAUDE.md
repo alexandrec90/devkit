@@ -223,5 +223,7 @@ turn green -- a step that raised, a fixer that died or gave up, transcript frict
 stale wait -- is a `fix-pass-finding` or `session-friction` there, and nothing it does
 ends at a person. Two consequences for a change here: a finding is filed only when no
 open one shares its signature, so the detail must be stable across recurrences (lead with
-the kind, keep shas and counts out); and a resolution is held to its `pr=`
+the kind, keep shas and counts out). A scheduled job's `cause=` is held to the same: `log-wrap.py` reads it
+from the job's `error:` line, else its last, so a job whose failures name a tree or a file
+ends a failed run on an `error:` line naming only the kind (`reap-stale.cause_line`); and a resolution is held to its `pr=`
 (`fix_verify.py` reopens what never merged), so "resolved" means landed.
