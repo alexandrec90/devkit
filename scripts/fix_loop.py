@@ -306,6 +306,51 @@ def still_working(busy: frozenset[str], tree: Path, now: _dt.datetime) -> bool:
     return bg_sessions.busy_in(busy, tree) or fix_reports.awaiting_task(tree, now)
 
 
+def why_held(busy: frozenset[str], tree: Path, now: _dt.datetime) -> str:
+    """Why the pass must not ship `tree`'s intent yet, or "": `still_working`, then
+    `outran_intent`."""
+    if still_working(busy, tree, now):
+        return "its session is still working in the tree"
+    if late := outran_intent(tree, now):
+        return f"{late} changed after the intent was written, and a session is still at work in the tree"
+    return ""
+
+
+def outran_intent(tree: Path, now: _dt.datetime, runner=ship_intent.run_quiet) -> str:
+    """A changed path in `tree` written after its untried intent, while a session is
+    still live there; else "".
+
+    The commit takes the whole tree, so an intent describes the tree as it was when
+    written. A devkit fixer left one in roguelike #81's tree at 15:37; the person's
+    interactive session there began its next task at 15:56, and the pass committed its
+    half-written files under the fixer's message at 16:00 (e89a0224). `still_working`
+    sees only a background session, and an interactive one is busy by definition.
+    Once the session goes quiet the tree ships whole, as before. An intent the pass has
+    already tried is left alone: its own fixers rewrote files after it.
+    """
+    intent = tree / ship_intent.INTENT_FILE
+    try:
+        written = intent.stat().st_mtime
+        words = ship_intent.parse_intent(intent.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return ""
+    tried = ship_intent.read_state(tree).get("intent")
+    if tried == ship_intent.Intent("", tree, "", *words).digest:
+        return ""
+    if fix_reports.active_transcript(tree, now) is None:
+        return ""
+    status = runner(["git", "status", "--porcelain", "--untracked-files=all"], cwd=tree)
+    if status.returncode != 0:
+        return ""
+    for path in ship_intent.ship.changed_paths(status.stdout or ""):
+        try:
+            if (tree / path).stat().st_mtime > written:
+                return path
+        except OSError:
+            continue
+    return ""
+
+
 # A scheduled job's own failure, read off the scheduler. Every job but the resident tray
 # now runs under `log-wrap.py --always`, which files each failed run itself, so what is
 # left here is what only the scheduler can say -- disabled, stale, never ran -- plus a
