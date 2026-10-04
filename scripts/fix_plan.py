@@ -140,6 +140,9 @@ class Failure:
     signature: tuple[str, ...] = ()
     evidence: str = ""  # the directory the run's artifacts were downloaded to
     behind: bool = False  # PR only: its head lacks the base's tip, so its gate is stale
+    # PR only: GitHub calls it conflicting and git merges it with the base cleanly, so it
+    # is updated by a merge the pass pushes, not by a resolver or `gh pr update-branch`.
+    merges_clean: bool = False
     # PR only: the runs behind its failing checks, off the rollup, for when the gate
     # workflow's own run list has nothing at this sha -- a required check from another
     # workflow, a consumer whose gate is named differently.
@@ -394,7 +397,12 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     if CONFLICT in failure.signature and not against_red:
         return Decision(RESOLVE, describe(failure), (failure,))
     if failure.behind and CONFLICT not in failure.signature:
-        return Decision(UPDATE, f"{describe(failure)}; behind origin/{failure.base}", (failure,))
+        why = (
+            f"GitHub says conflicting, git merges it with origin/{failure.base} cleanly"
+            if failure.merges_clean
+            else f"behind origin/{failure.base}"
+        )
+        return Decision(UPDATE, f"{describe(failure)}; {why}", (failure,))
     if against_red:
         return Decision(HOLD, held_note(failure), (failure,))
     if failure.kind == NIGHTLY and failure.tip_running:

@@ -320,6 +320,24 @@ def test_a_pr_behind_its_base_is_updated_not_fixed_unless_it_conflicts():
     assert fix_ledger.render(decisions, {}).splitlines()[0].startswith("update   carameli #1")
 
 
+def test_a_conflict_only_github_reports_is_an_update_that_says_so():
+    """#538: GitHub said `CONFLICTING`, git merged it with origin/main cleanly, and the
+    resolver sent at it had nothing to do but record the merge parent."""
+    phantom = failure(
+        number=538,
+        head="agent/fix-x",
+        reason="merge conflict",
+        signature=(),
+        behind=True,
+        merges_clean=True,
+    )
+    decisions = fix_plan.plan([phantom], "v0-11-23", PREFIXES)
+    assert actions(decisions) == [(fix_plan.UPDATE, ["carameli#538"])]
+    assert decisions[0].note.endswith(
+        "GitHub says conflicting, git merges it with origin/main cleanly"
+    )
+
+
 def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
     assert fix_plan.name_of(failure()) == "#412"
     assert fix_plan.name_of(failure(kind=fix_plan.NIGHTLY, number=7)) == "#7"

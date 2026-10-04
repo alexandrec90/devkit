@@ -843,7 +843,9 @@ def test_an_intent_already_shipped_with_a_clean_tree_is_not_shipped_twice(tmp_pa
     )
     again = Runner(porcelain="")
     assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SKIPPED
-    assert again.verbs() == ["git status", "git rev-parse"], "HEAD is still the shipped sha"
+    assert again.verbs() == ["git status", "git rev-parse", "git rev-parse"], (
+        "no merge in progress, and HEAD is still the shipped sha"
+    )
 
 
 def test_an_intent_left_over_from_a_ship_is_set_aside_and_said_once(tmp_path, monkeypatch):
@@ -871,7 +873,55 @@ def test_a_rewritten_intent_on_a_clean_shipped_tree_is_nothing_to_ship(tmp_path,
     two = intent(tmp_path, body="Rewritten.")
     run = Runner(porcelain="")
     assert ship_intent.ship_one(two, "py", "main", run, gh_ok, NOW).stage == ship_intent.SKIPPED
-    assert run.verbs() == ["git status", "git rev-parse"]
+    assert run.verbs() == ["git status", "git rev-parse", "git rev-parse"]
+
+
+class Merging(Runner):
+    """A `Runner` whose tree is mid-merge: `--git-path MERGE_HEAD` names a file that exists."""
+
+    def __init__(self, merge_head: Path, **kwargs):
+        super().__init__(**kwargs)
+        self.merge_head = merge_head
+
+    def __call__(self, argv, cwd, env=None):
+        if argv[:4] == ["git", "rev-parse", "--git-path", "MERGE_HEAD"]:
+            self.calls.append(([str(a) for a in argv], Path(cwd), env))
+            return subprocess.CompletedProcess(argv, 0, f"{self.merge_head}\n", "")
+        return super().__call__(argv, cwd, env)
+
+
+def test_a_merge_that_changes_no_file_is_committed_not_read_as_shipped(tmp_path, monkeypatch):
+    """#538: its resolver merged origin/main in, the merge changed no file (main's side was
+    already in through a criss-cross), and the pass read the clean tree at the shipped sha
+    as "already shipped" -- the merge parent that would have cleared GitHub's conflict
+    was set aside with the intent."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    shipped = {"stage": ship_intent.SHIPPED, "intent": one.digest, "sha": "abc123"}
+    ship_intent.write_state(one.tree, shipped)
+    merge_head = tmp_path / "MERGE_HEAD"
+    merge_head.write_text("78f8e03\n", encoding="utf-8")
+    assert not ship_intent.is_spent(one, Merging(merge_head, porcelain=""))
+    run = Merging(merge_head, porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    verbs = run.verbs()
+    assert "git commit" in verbs and verbs.index("git commit") < verbs.index("git push")
+    merge_head.unlink()
+    assert ship_intent.is_spent(one, Merging(merge_head, porcelain=""))
+
+
+def test_merging_is_whether_merge_head_exists_and_unknown_is_no(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    assert not ship_intent.merging(repo, ship_intent.run_quiet)
+    (repo / ".git" / "MERGE_HEAD").write_text("abc\n", encoding="utf-8")
+    assert ship_intent.merging(repo, ship_intent.run_quiet)
+
+    def refused(argv, cwd, env=None):
+        return subprocess.CompletedProcess(argv, 128, "", "fatal: not a git repository")
+
+    assert not ship_intent.merging(tmp_path, refused)
 
 
 def test_a_clean_tree_whose_last_ship_failed_still_pushes(tmp_path, monkeypatch):
@@ -992,8 +1042,9 @@ def test_a_clean_tree_with_nothing_committed_opens_no_pr_and_sets_the_intent_asi
     run = Runner({"git rev-list": (0, "0\n", "")}, porcelain="")
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.EMPTY and plans == []
-    assert run.verbs() == ["git status", "git rev-list"]
-    assert run.calls[1][0] == ["git", "rev-list", "--count", "origin/main..HEAD"]
+    assert run.verbs() == ["git status", "git rev-parse", "git rev-list"]
+    assert run.calls[1][0] == ["git", "rev-parse", "--git-path", "MERGE_HEAD"], "no merge"
+    assert run.calls[2][0] == ["git", "rev-list", "--count", "origin/main..HEAD"]
     assert not (one.tree / ship_intent.INTENT_FILE).exists()
     assert (one.tree / ship_intent.SHIPPED_FILE).is_file(), "the session's outcome, kept"
     state = ship_intent.read_state(one.tree)

@@ -819,6 +819,30 @@ def test_reading_a_pr_marks_it_behind_unless_it_conflicts(monkeypatch, tmp_path)
     assert conflicted.behind is False and fix_plan.CONFLICT in conflicted.signature
 
 
+def test_a_conflict_git_merges_cleanly_is_read_as_behind_not_conflicted(monkeypatch, tmp_path):
+    """#538: GitHub said `CONFLICTING` while `git merge-tree` merged it with origin/main
+    cleanly, and a resolver was sent only to record the merge parent."""
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({}))
+    monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: None)
+    monkeypatch.setattr(ev, "is_behind", lambda git, base, sha: False)
+    monkeypatch.setattr(ev, "clean_merge", lambda git, base, sha: "tree1")
+    said = pr(mergeable="CONFLICTING", statusCheckRollup=[])
+    phantom = ev.read_pr(tmp_path, ev.pr_failure("carameli", said), tmp_path / "ev")
+    assert (phantom.behind, phantom.merges_clean) == (True, True)
+    assert fix_plan.CONFLICT not in phantom.signature
+    monkeypatch.setattr(ev, "clean_merge", lambda git, base, sha: "")
+    real = ev.read_pr(tmp_path, ev.pr_failure("carameli", said), tmp_path / "ev")
+    assert (real.behind, real.merges_clean, real.signature) == (False, False, (fix_plan.CONFLICT,))
+
+
+def test_a_pr_github_calls_mergeable_is_never_merged_locally(monkeypatch, tmp_path):
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({}))
+    monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: None)
+    monkeypatch.setattr(ev, "clean_merge", lambda *a: pytest.fail("only a conflict is checked"))
+    plain = ev.read_pr(tmp_path, ev.pr_failure("carameli", pr()), tmp_path / "ev")
+    assert plain.merges_clean is False
+
+
 def test_every_checkout_on_disk_has_its_default_branch_read(monkeypatch, tmp_path):
     workspace = tmp_path / "alex.code-workspace"
     (tmp_path / "devkit").mkdir()

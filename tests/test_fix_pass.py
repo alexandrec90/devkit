@@ -717,6 +717,44 @@ def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
     )
 
 
+def test_a_conflict_only_github_reports_is_merged_and_pushed_without_gh(monkeypatch, tmp_path):
+    """#538: GitHub said `CONFLICTING` and would refuse `update-branch` on that verdict,
+    while git merged it cleanly; the pass pushes git's merge as a fast-forward."""
+    calls = []
+
+    def git(*args):
+        calls.append(args)
+        out = {"merge-tree": "tree9\n", "commit-tree": "merge9\n"}.get(args[0], "tip1\n")
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "git_for", lambda _p: git)
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "gh_for", lambda _p: pytest.fail("no gh"))
+    phantom = failure(number=538, head="agent/x", sha="ccf68d7", behind=True, merges_clean=True)
+    assert fix_pass.fix_send.update_branch(phantom, tmp_path) == fix_pass.EXIT_OK
+    base = "refs/remotes/origin/main"
+    assert ("merge-tree", "--write-tree", base, "ccf68d7") in calls
+    made = next(c for c in calls if c[0] == "commit-tree")
+    assert made[:6] == ("commit-tree", "tree9", "-p", "ccf68d7", "-p", base)
+    assert calls[-1] == ("push", "--quiet", "origin", "merge9:refs/heads/agent/x")
+
+
+def test_a_clean_merge_that_cannot_be_pushed_or_made_is_a_failed_update(monkeypatch, tmp_path):
+    """A head pushed to meanwhile refuses the fast-forward, and the base moving into a
+    real conflict leaves no tree; either is an update that did not happen."""
+    phantom = failure(number=538, head="agent/x", sha="ccf68d7", behind=True, merges_clean=True)
+
+    def git_failing(step):
+        def git(*args):
+            out = {"merge-tree": "tree9\n", "commit-tree": "merge9\n"}.get(args[0], "tip1\n")
+            return subprocess.CompletedProcess(args, 1 if args[0] == step else 0, out, "rejected")
+
+        return git
+
+    for step in ("merge-tree", "commit-tree", "push"):
+        monkeypatch.setattr(fix_pass.fix_send.sweep, "git_for", lambda _p, s=step: git_failing(s))
+        assert fix_pass.fix_send.push_clean_merge(phantom, tmp_path) == fix_pass.EXIT_FAILED, step
+
+
 def test_an_update_that_fails_because_the_pr_just_closed_is_not_a_failure(monkeypatch, tmp_path):
     """The pass filed "update-failed #390" 27 seconds after #390 closed, and a sweep spent
     2 calls finding that out. A failed update re-reads the PR before anything is filed."""

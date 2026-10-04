@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
+import branch_facts
 import fix_budget
 import fix_findings
 import fix_ledger
@@ -114,8 +115,12 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
 
     No session and no worktree. A PR that comes back green is done; one still red at
     the new sha is a new ledger key and gets its session next pass; one GitHub cannot
-    update (a conflict) reads `CONFLICTING` next pass and goes to the resolver.
+    update (a conflict) reads `CONFLICTING` next pass and goes to the resolver. One that
+    only GitHub calls conflicting (`merges_clean`) is merged here instead: GitHub would
+    refuse to update it on that same verdict.
     """
+    if failure.merges_clean:
+        return push_clean_merge(failure, root)
     gh = sweep.gh_for(root / failure.project)
     done = gh("pr", "update-branch", str(failure.number))
     if done.returncode != 0 and (state := _state(gh, failure.number)) not in ("", "OPEN"):
@@ -130,6 +135,35 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
         )
         return EXIT_FAILED
     print(f"  {failure.project} #{failure.number}: branch updated; the gate re-runs")
+    return EXIT_OK
+
+
+def push_clean_merge(failure: fix_plan.Failure, root: Path) -> int:
+    """Merge `origin/<base>` into the PR's head in the checkout's object store and push the
+    merge commit to the head branch: what a resolver sent at #538 did by hand.
+
+    No worktree: `merge-tree` writes the tree and `commit-tree` the commit, both against
+    the refs `gate_evidence` judged clean. The push is a fast-forward of the head sha the
+    pass read, so a head pushed to meanwhile is refused rather than overwritten.
+    """
+    git = sweep.git_for(root / failure.project)
+    where = f"  {failure.project} #{failure.number}"
+    tree = branch_facts.clean_merge(git, failure.base, failure.sha)
+    if not tree:
+        print(f"{where}: no longer merges cleanly with origin/{failure.base}")
+        return EXIT_FAILED
+    message = f"Merge origin/{failure.base} into {failure.head}"
+    base = f"refs/remotes/origin/{failure.base}"
+    made = git("commit-tree", tree, "-p", failure.sha, "-p", base, "-m", message)
+    commit = (made.stdout or "").strip() if made.returncode == 0 else ""
+    pushed = (
+        git("push", "--quiet", "origin", f"{commit}:refs/heads/{failure.head}") if commit else made
+    )
+    if not commit or pushed.returncode != 0:
+        why = (pushed.stderr or pushed.stdout or "").strip().splitlines()
+        print(f"{where}: pushing the merge failed: {why[-1] if why else '?'}")
+        return EXIT_FAILED
+    print(f"{where}: GitHub said conflicting; pushed git's clean merge, the gate re-runs")
     return EXIT_OK
 
 
