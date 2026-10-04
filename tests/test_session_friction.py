@@ -577,6 +577,56 @@ def test_a_heredoc_dumped_back_byte_for_byte_is_a_probe_not_a_write():
     assert sf.damageable_heredoc(ccde706b.rsplit("\n", 1)[0] + "\nodd -c x")
 
 
+def test_a_scratch_heredoc_printed_back_with_cat_is_a_probe_not_a_write():
+    """fbeea67b: the fixer that found `"\\\\"` survives the Bash tool mapped which spellings
+    collapse by writing them to its job's `tmp/` and reading them back with `cat`, not
+    `od`, and the pass filed its own probe as the write it measured."""
+    fbeea67b = (
+        "cat > \"$CLAUDE_JOB_DIR/tmp/p6.txt\" <<'EOF'\n"
+        '1 a\\\\b\n2 "\\\\"\n3 \'\\\\\'\n4 \\\\"\n5 "a\\\\b"\n6 x\\\\\n7 \\\\n\n8 "\\\\n"\n'
+        "9 (\\\\)\n10 \\\\ b\nEOF\n"
+        'cat "$CLAUDE_JOB_DIR/tmp/p6.txt"'
+    )
+    assert classes([call(fbeea67b, "0")]) == []
+    assert classes([call(fbeea67b.rsplit("\n", 1)[0], "0")]) == ["heredoc-write"]
+    body = "<<'EOF'\na\\\\b\nEOF\n"
+    for probe in (
+        f'cd "$CLAUDE_JOB_DIR/tmp" && cat > hd.txt {body}cat hd.txt',
+        "cat <<'EOF' > /tmp/p.txt\na\\\\b\nEOF\nhead -3 /tmp/p.txt",
+        f"tee -a $TMP/p.txt {body}Get-Content $TMP/p.txt 2>&1",
+    ):
+        assert sf.printed_back(probe), probe
+        assert not sf.damageable_heredoc(probe), probe
+    # A file in the tree, a scratch file the command goes on to run or copy, and a
+    # program that writes its own file are each still a write the work depends on.
+    for write in (
+        f"cat > scripts/x.py {body}cat scripts/x.py",
+        f'cat > "$CLAUDE_JOB_DIR/tmp/x.py" {body}cat "$CLAUDE_JOB_DIR/tmp/x.py"; '
+        'python "$CLAUDE_JOB_DIR/tmp/x.py"',
+        f"cat > /tmp/x.py {body}cat /tmp/x.py > scripts/x.py",
+        f"python - {body}cat /tmp/x.txt",
+    ):
+        assert not sf.printed_back(write), write
+        assert sf.damageable_heredoc(write), write
+
+
+def test_heredoc_target_names_the_file_a_heredoc_statement_writes():
+    heredoc = sf.WRITTEN_HEREDOC
+    assert sf.heredoc_target(f'cat > "$T/tmp/a b.txt" {heredoc}') == "$T/tmp/a b.txt"
+    assert sf.heredoc_target(f"cat >> logs/a.txt {heredoc}") == "logs/a.txt"
+    assert sf.heredoc_target(f"cat {heredoc} > logs/a.txt") == "logs/a.txt"
+    assert sf.heredoc_target(f"tee -a 'logs/a.txt' {heredoc}") == "logs/a.txt"
+    assert sf.heredoc_target(f"tee {heredoc}") == ""
+    assert sf.heredoc_target(f"python - {heredoc}") == ""
+
+
+def test_only_prints_is_a_printer_with_no_output_redirect():
+    for printing in ("cat a.txt", "od -c a.txt", "head -3 a.txt 2>&1", "tail a 2>/dev/null"):
+        assert sf.only_prints(printing), printing
+    for using in ("cat a.txt > b.txt", "cat a >> b", "python a.py", "cp a b", ""):
+        assert not sf.only_prints(using), using
+
+
 def test_a_heredoc_with_only_single_backslashes_is_not_friction():
     """46a1578d recurred on a `cat >` whose body's only backslashes were the `\\n` in
     f-strings. The Bash tool collapses a doubled backslash and nothing else: written

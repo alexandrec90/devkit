@@ -188,6 +188,22 @@ SCRATCH_DIR = re.compile(
     r"(?:^|[\\/])(?:tmp\w*|temp)(?:[\\/]|$)|\$(?:env:)?\{?(?:TMP|TEMP|TMPDIR)\b", re.I
 )
 GIT_C = re.compile(r"\bgit\s(?:[^\n]*?\s)?-C\s+(\S+)")
+# A heredoc and the rest of its `<<TAG` line, which can name the file it writes
+# (`cat <<EOF > a.txt`); `printed_back` drops the body.
+HEREDOC_SPAN = re.compile(
+    r"<<-?\s*(['\"]?)(?P<tag>\w+)\1(?P<rest>[^\n]*)\n[\s\S]*?(?:^[ \t]*(?P=tag)[ \t]*$|\Z)",
+    re.M,
+)
+WRITTEN_HEREDOC = "<<HEREDOC"
+REDIRECT_TARGET = re.compile(r">>?\s*(\"[^\"]*\"|'[^']*'|\S+)")
+# An output redirect, not a descriptor merge like `2>&1` or a `2>/dev/null`.
+WRITES_OUTPUT = re.compile(r"(?<![\d&])>")
+# Commands that print a file and do nothing else with it.
+PRINTERS = frozenset(
+    {"cat", "type", "head", "tail", "more", "less", "Get-Content", "gc"}
+    | {"od", "xxd", "hexdump", "Format-Hex"}
+)
+STATEMENTS = re.compile(r"&&?|\|\|?|[;\n]")
 
 # A command reading back text the harness wrote, which quotes the very patterns above:
 # the triage log, the ledger, a transcript, a friction file. Its output is never friction.
@@ -446,12 +462,56 @@ def damageable_heredoc(command: str) -> bool:
     write through the tool on 2026-09-26 confirmed byte for byte; on 2026-10-04 a second
     one showed a run ending at a `"` is left as written too (`COLLAPSED_RUN`).
 
-    Not when the same command dumps the bytes back: that is the probe that confirmed it."""
-    if BYTE_DUMP.search(command):
+    Not when the same command dumps the bytes back, or prints back the scratch file it
+    wrote: that is the probe that confirmed it (`printed_back`)."""
+    if BYTE_DUMP.search(command) or printed_back(command):
         return False
     return any(
         COLLAPSED_RUN.search(found.group("body")) for found in HEREDOC_BODY.finditer(command)
     )
+
+
+def heredoc_target(statement: str) -> str:
+    """The file a heredoc statement writes -- `cat > T`, `cat <<TAG > T`, `tee [-a] T` --
+    or `""` for none, like a `python -` program."""
+    words = [word.strip("'\"") for word in statement.split()]
+    found = REDIRECT_TARGET.search(statement)
+    if words[0] == "cat" and found:
+        return found[1].strip("'\"")
+    if words[0] == "tee":
+        named = [word for word in words[1:] if not word.startswith(("-", "<"))]
+        return named[0] if named else ""
+    return ""
+
+
+def printed_back(command: str) -> bool:
+    """Every heredoc in `command` writes a scratch file that the rest of the command only
+    prints. That is a measurement of what the Bash tool delivers, read back with `cat` as
+    readily as with `od` (fbeea67b: the probes that found `"\\\\"` survives were filed as
+    the writes they measured). A file in the tree, or one the command goes on to run, is
+    still a write the work depends on."""
+    text = HEREDOC_SPAN.sub(lambda found: f" {WRITTEN_HEREDOC} {found['rest']}", command)
+    where, written, printed = "", {}, set()
+    for statement in STATEMENTS.split(command_position(text)):
+        words = [word.strip("'\"") for word in statement.split()] or [""]
+        if words[0] in ("cd", "pushd"):
+            where = " ".join(words[1:2])
+            continue
+        if WRITTEN_HEREDOC in words:
+            target = heredoc_target(statement)
+            written[target] = bool(target) and bool(SCRATCH_DIR.search(f"{target} {where}"))
+            continue
+        named = {target for target in written if target and target in statement}
+        if named and not only_prints(statement):
+            return False
+        printed |= named
+    return bool(written) and all(written.values()) and printed == set(written)
+
+
+def only_prints(statement: str) -> bool:
+    """`statement` prints a file to the terminal and does nothing else with it."""
+    words = statement.split()
+    return bool(words) and words[0] in PRINTERS and not WRITES_OUTPUT.search(statement)
 
 
 def scratch_only(command: str) -> bool:
