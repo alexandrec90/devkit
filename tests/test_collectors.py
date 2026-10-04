@@ -176,7 +176,7 @@ def test_run_starts_a_collector_that_is_down_and_skips_its_health_this_pass(tmp_
     collectors.maintain([target(tmp_path)], docker, report, health)
     assert ("up", "ibkr_trader", "app") in docker.calls
     assert not any(call[0] == "health" for call in docker.calls)
-    assert report.failures == 0 and health == {}
+    assert report.failures == 0 and set(health["ibkr_trader"]) == {collectors.STARTED_AT}
 
 
 def test_run_leaves_a_running_collector_alone_and_records_its_health(tmp_path):
@@ -206,10 +206,69 @@ def test_a_collector_older_than_its_merged_checkout_is_redeployed_and_not_judged
     collectors.maintain([target(tmp_path)], docker, report, health, git)
     assert ("deploy", "ibkr_trader", "app") in docker.calls
     assert not any(call[0] == "health" for call in docker.calls), "the container is seconds old"
-    assert health["ibkr_trader"] == {collectors.CODE_AT: 2000.0}
+    assert health["ibkr_trader"][collectors.CODE_AT] == 2000.0
+    assert set(health["ibkr_trader"]) == {collectors.CODE_AT, collectors.STARTED_AT}
     assert report.failures == 0 and any("redeployed `app` onto c8c7b02" in l for l in report.lines)
     containers = [ours(tmp_path, cid="c2")]
     assert collectors.row(target(tmp_path), containers, health)[0] == collectors.OK
+
+
+def at(monkeypatch, when):
+    monkeypatch.setattr(collectors, "_clock", lambda: when)
+
+
+def test_the_clock_is_now():
+    assert abs(collectors._clock() - dt.datetime.now().timestamp()) < 60
+
+
+def test_a_container_this_job_redeployed_is_not_judged_until_it_has_settled(tmp_path, monkeypatch):
+    """221f3b05: the pass after the redeploy that carried ibkr_trader #79 judged
+    `reddit`'s 45 failures from before #79 -- its half-hourly job had yet to fire."""
+    docker = FakeDocker([ours(tmp_path)], health=(1, "unhealthy: reddit"), built=1000.0)
+    health = {"ibkr_trader": {collectors.CODE_AT: 2000.0, collectors.STARTED_AT: 10_000.0}}
+    report = collectors.Report()
+    at(monkeypatch, 10_000.0 + 15 * 60)  # the pass after the redeploy
+    record = collectors.keep_running(
+        target(tmp_path), [ours(tmp_path)], docker, report, health["ibkr_trader"], FakeGit()
+    )
+    assert not any(call[0] == "health" for call in docker.calls)
+    assert record == {collectors.CODE_AT: 2000.0, collectors.STARTED_AT: 10_000.0}
+    assert any("health check deferred" in line and "15 min ago" in line for line in report.lines)
+    assert collectors.row(target(tmp_path), [ours(tmp_path)], {"ibkr_trader": record})[0] == (
+        collectors.OK
+    )
+
+
+def test_a_settled_container_is_judged_and_the_start_is_forgotten(tmp_path, monkeypatch):
+    docker = FakeDocker([ours(tmp_path)], health=(1, "unhealthy: reddit"), built=1000.0)
+    last = {collectors.CODE_AT: 2000.0, collectors.STARTED_AT: 10_000.0}
+    at(monkeypatch, 10_000.0 + config.DEFAULT_SETTLE * 60)
+    record = collectors.keep_running(
+        target(tmp_path), [ours(tmp_path)], docker, collectors.Report(), last, FakeGit()
+    )
+    assert record is not None and record["ok"] is False
+    assert collectors.STARTED_AT not in record
+
+
+def test_a_settle_of_zero_judges_the_pass_after_the_start(tmp_path, monkeypatch):
+    t = collectors.Target(
+        config.Collector("ibkr_trader", "app", ("h",), settle=0), RUN, target(tmp_path).checkout
+    )
+    last = {collectors.CODE_AT: 2000.0, collectors.STARTED_AT: 10_000.0}
+    docker = FakeDocker([ours(tmp_path)], built=1000.0)
+    at(monkeypatch, 10_001.0)
+    record = collectors.keep_running(
+        t, [ours(tmp_path)], docker, collectors.Report(), last, FakeGit()
+    )
+    assert record is not None and record["ok"] is True
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "expected"),
+    [(0, True), (59 * 60, True), (60 * 60, False), (-5, False)],
+)
+def test_settling_is_the_window_after_the_start(elapsed, expected):
+    assert collectors.settling(10_000.0, 10_000.0 + elapsed, 60) is expected
 
 
 def test_a_rebuild_that_changed_nothing_is_not_redeployed_again(tmp_path):
@@ -267,7 +326,8 @@ def test_a_collector_without_a_health_command_still_records_its_code(tmp_path):
     record = collectors.keep_running(
         target(tmp_path, health=()), [ours(tmp_path)], docker, collectors.Report(), {}, FakeGit()
     )
-    assert record == {collectors.CODE_AT: 2000.0}, "or the next pass rebuilds it again"
+    assert record is not None
+    assert record[collectors.CODE_AT] == 2000.0, "or the next pass rebuilds it again"
 
 
 @pytest.mark.parametrize(

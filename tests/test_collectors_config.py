@@ -37,6 +37,14 @@ def test_a_declared_collector_is_read_with_its_health_command():
 def test_health_is_optional():
     found, _ = config.parse_setting(workspace({config.SETTING: {"p": {"service": "s"}}}))
     assert found == [config.Collector("p", "s", ())]
+    assert found[0].settle == config.DEFAULT_SETTLE
+
+
+@pytest.mark.parametrize("settle", [0, 180])
+def test_a_container_collector_may_set_its_settle(settle):
+    text = workspace({config.SETTING: {"p": {"service": "s", "settle": settle}}})
+    found, notes = config.parse_setting(text)
+    assert found == [config.Collector("p", "s", (), settle=settle)] and notes == []
 
 
 def test_no_setting_declares_nothing_and_says_nothing():
@@ -51,6 +59,9 @@ def test_no_setting_declares_nothing_and_says_nothing():
         ({"service": ""}, "no `service`"),
         ({"service": "app", "health": "ibkr-trader health"}, "list of strings"),
         ({"service": "app", "health": ["ok", 3]}, "list of strings"),
+        ({"service": "app", "settle": -1}, "0 or more"),
+        ({"service": "app", "settle": "60"}, "0 or more"),
+        ({"service": "app", "settle": True}, "0 or more"),
         ({"command": [], "minutes": 30}, "non-empty list"),
         ({"command": "uv run x", "minutes": 30}, "non-empty list"),
         ({"command": ["uv"]}, "positive whole number"),

@@ -1000,7 +1000,9 @@ stopped collector with `docker compose up -d <service>`, stops one on a `stop-he
 with `docker stop`, and redeploys (`up -d --build`) a running one whose code is older than
 its checkout's HEAD -- only when that HEAD is on origin's default branch and no tracked file
 is edited, so a timer deploys merged code and nothing else; otherwise `logs/collectors.log`
-says why it held. A scheduled collector's task is registered on a `run-here` machine, and
+says why it held. A container it started or redeployed is not health-checked for its
+`settle` minutes (default 60, settable per collector beside `health`): until every job
+inside has fired on the new code, the verdict is still the old code's. A scheduled collector's task is registered on a `run-here` machine, and
 removed on a `stop-here` or `release`. The tray gets a `collector: <name>` row per
 assigned collector. A container shows its live state on every poll, plus the last health
 verdict, shown amber rather than red because it is the project's verdict, not a failure
