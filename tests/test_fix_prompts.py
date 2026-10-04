@@ -191,6 +191,46 @@ def test_the_nightly_prompt_names_the_red_runs_commit_beside_the_tip_it_was_cut_
     assert "which is not the tip" not in at_tip and "at b31b60cbbbbb" in at_tip
 
 
+def _dependabot(*signature: str) -> fix_plan.Failure:
+    return failure(
+        kind=fix_plan.DEPENDABOT,
+        number=0,
+        title="Dependabot in ibkr_trader: 1 package(s) with alerts no PR answers",
+        url="https://run/9",
+        signature=signature,
+    )
+
+
+def test_the_dependabot_prompt_names_each_bump_and_where_the_evidence_is():
+    alert = f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0"
+    text = fix_prompts.dependabot_prompt(
+        _dependabot(alert, "run sqlalchemy: dependency_file_content_not_changed"), "agent/fix-d"
+    )
+    assert text.startswith(fix_prompts.ROLE)
+    assert "Bump each of these to at least the version named: urllib3 >= 2.8.0." in text
+    assert "Update jobs also fail on: run sqlalchemy" in text
+    assert f"{fix_plan.EVIDENCE_DIR}/{fix_plan.DEPENDABOT_EVIDENCE}" in text
+    assert "Name every package you bumped" in text, "how the pass knows an alert is answered"
+    assert "path dependency" not in text, "nothing to say about a sibling there is not"
+    assert not set("`") & set(text)
+
+
+def test_an_unfetchable_sibling_is_said_with_the_only_two_fixes_and_never_a_retry():
+    """ibkr_trader: every Dependabot job died on `"data-lake" at /pyproject.toml`."""
+    text = fix_prompts.dependabot_prompt(
+        _dependabot(
+            f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0", f"{fix_plan.UNFETCHABLE_ENTRY}data-lake"
+        ),
+        "agent/fix-d",
+    )
+    assert "dies on the path dependency data-lake" in text
+    assert "re-running or retrying Dependabot changes nothing -- do neither" in text
+    assert "bump the packages by hand in this repository" in text
+    assert "give data-lake a source Dependabot can fetch" in text
+    assert "move that ref to the sibling commit you locked against" in text
+    assert "Update jobs also fail" not in text, "the sibling is said once, as the cause"
+
+
 def test_a_conflicted_pr_gets_the_resolver_prompt_which_names_no_failure():
     """The gate cannot have run, and a resolver told "also fix the tests" fixes the
     wrong thing; whatever the gate says after the push is the next pass's business."""

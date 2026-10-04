@@ -34,7 +34,7 @@ import junit_report
 import sweep
 import task_branch as tb
 from _loader import load_by_path
-from branch_facts import branch_tip, is_behind, is_tagged
+from branch_facts import branch_tip, clean_merge, is_behind, is_tagged
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -346,10 +346,18 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     behind the failing checks. Three of nine ledger entries once read "no artifact and
     no failed step named" because the failing check belonged to another workflow, and
     each got a session sent blind at a run the rollup had the id of.
+
+    A conflict GitHub reports and git does not is no conflict: the PR is behind, and the
+    pass pushes the merge itself (`merges_clean`), so no resolver goes. Checked only when
+    GitHub says conflicting, against the same `origin/<base>` `is_behind` reads.
     """
     gh = sweep.gh_for(project_dir)
-    conflicted = fix_plan.CONFLICT in failure.reason
-    behind = not conflicted and is_behind(sweep.git_for(project_dir), failure.base, failure.sha)
+    git = sweep.git_for(project_dir)
+    said = fix_plan.CONFLICT in failure.reason
+    clean = said and bool(clean_merge(git, failure.base, failure.sha))
+    conflicted = said and not clean
+    behind = clean or (not conflicted and is_behind(git, failure.base, failure.sha))
+    failure = replace(failure, merges_clean=clean)
     run = gate_run(gh, failure.head, failure.sha)
     gate_id = str(run.get("databaseId", "") or "")
     run_ids = [gate_id] if gate_id else list(failure.check_runs)
@@ -453,6 +461,24 @@ def run_head(gh: Gh, run_id: str) -> str:
     return str(viewed.get("headSha", "") or "") if isinstance(viewed, dict) else ""
 
 
+def scheduled_at_tip(project_dir: Path, workflow: str) -> tuple[str, str, list[dict], str]:
+    """`(base, file, runs, tip)` for the scheduled workflow titled `workflow`: the default
+    branch, the workflow's file when it takes `workflow_dispatch`, its newest runs there,
+    and the branch's tip ("" when there are no runs to judge it by)."""
+    git = sweep.git_for(project_dir)
+    base = tb.detect_default_branch(git, fallback="main")
+    file = dispatchable_file(project_dir, workflow)
+    runs = default_branch_runs(sweep.gh_for(project_dir), base, file or workflow)
+    return base, file, runs, branch_tip(git, base) if runs else ""
+
+
+def green_at_tip(runs: list[dict], tip: str) -> dict:
+    """The run that judged `tip` green, or {} when nothing did: `_tip_verdict`'s True."""
+    if not tip or _tip_verdict(runs, tip)[0] is not True:
+        return {}
+    return next((r for r in runs if str(r.get("status", "")) == "completed"), {})
+
+
 def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_plan.Failure | None:
     """One tracker issue, read at its base's tip; None when the workflow is green there.
 
@@ -466,20 +492,17 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
     prompt names: a fixer could not tell the log was older than its tree (41924a97).
     """
     gh = sweep.gh_for(project_dir)
-    git = sweep.git_for(project_dir)
     title = str(issue.get("title", ""))
+    base, file, runs, tip = scheduled_at_tip(project_dir, workflow_from_title(title))
     failure = fix_plan.Failure(
         kind=fix_plan.NIGHTLY,
         project=project,
         number=int(issue.get("number", 0) or 0),
         title=title,
         url=str(issue.get("url", "")),
-        base=tb.detect_default_branch(git, fallback="main"),
+        base=base,
         workflow=workflow_from_title(title),
     )
-    file = dispatchable_file(project_dir, failure.workflow)
-    runs = default_branch_runs(gh, failure.base, file or failure.workflow)
-    tip = branch_tip(git, failure.base) if runs else ""
     verdict, red = _tip_verdict(runs, tip) if tip else (None, {})
     if verdict is True:
         return None

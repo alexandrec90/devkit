@@ -320,6 +320,24 @@ def test_a_pr_behind_its_base_is_updated_not_fixed_unless_it_conflicts():
     assert fix_ledger.render(decisions, {}).splitlines()[0].startswith("update   carameli #1")
 
 
+def test_a_conflict_only_github_reports_is_an_update_that_says_so():
+    """#538: GitHub said `CONFLICTING`, git merged it with origin/main cleanly, and the
+    resolver sent at it had nothing to do but record the merge parent."""
+    phantom = failure(
+        number=538,
+        head="agent/fix-x",
+        reason="merge conflict",
+        signature=(),
+        behind=True,
+        merges_clean=True,
+    )
+    decisions = fix_plan.plan([phantom], "v0-11-23", PREFIXES)
+    assert actions(decisions) == [(fix_plan.UPDATE, ["carameli#538"])]
+    assert decisions[0].note.endswith(
+        "GitHub says conflicting, git merges it with origin/main cleanly"
+    )
+
+
 def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
     assert fix_plan.name_of(failure()) == "#412"
     assert fix_plan.name_of(failure(kind=fix_plan.NIGHTLY, number=7)) == "#7"
@@ -330,6 +348,25 @@ def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
     assert fix_plan.describe(backlog) == (
         "2 open group(s) on the harness-defect ledger: agent-report devkit [a] x2, b"
     )
+
+
+def test_dependabots_red_is_named_described_and_told_from_any_other_pr():
+    found = failure(
+        kind=fix_plan.DEPENDABOT,
+        number=0,
+        title="Dependabot in carameli: 1 update job(s) failing",
+        signature=("run sqlalchemy: dependency_file_content_not_changed",),
+    )
+    assert fix_plan.name_of(found) == "dependabot"
+    assert fix_plan.describe(found) == (
+        "Dependabot in carameli: 1 update job(s) failing: "
+        "run sqlalchemy: dependency_file_content_not_changed"
+    )
+    assert fix_plan.is_dependabot(found)
+    assert fix_plan.is_dependabot(failure(head="dependabot/uv/urllib3-2.8.0"))
+    assert not fix_plan.is_dependabot(failure(head="agent/dependabot-config"))
+    [placed] = fix_plan.plan([found], "", ())
+    assert placed.action == fix_plan.DISPATCH, "a fresh branch off its base, like a nightly"
 
 
 def test_the_release_test_is_the_one_the_pipeline_expects_red():

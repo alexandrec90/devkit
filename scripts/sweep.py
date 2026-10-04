@@ -63,7 +63,7 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -1222,15 +1222,17 @@ def exit_code(results: list[Result]) -> int:
 
 
 def git_for(path: Path) -> Git:
-    """A `git(*args)` callable bound to one checkout."""
+    """A `git(*args)` callable bound to one checkout; `env=` replaces the environment, as
+    a push that skips the pre-push gate needs (`release.push_env`)."""
 
-    def git(*args: str) -> subprocess.CompletedProcess[str]:
+    def git(*args: str, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", "-C", str(path), *args],
             capture_output=True,
             text=True,
             check=False,
             creationflags=NO_WINDOW,
+            env=None if env is None else dict(env),
         )
 
     return git

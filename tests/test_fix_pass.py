@@ -191,7 +191,31 @@ def world(tmp_path, monkeypatch):
         "installers": [],
         "installers_code": 0,
         "devkit_fixes": [],
+        "dependabot": [],
+        "dependabot_notes": [],
+        "drift": [],
+        "issues": [],
+        "upkeep": [],
     }
+    # GitHub's Dependabot, the checkouts' default branches and their tracker issues are
+    # the machine's own: each step is a table entry, and what it was asked is recorded.
+    monkeypatch.setattr(
+        fix_pass.fix_dependabot,
+        "collect",
+        lambda ws, projects, now: (list(table["dependabot"]), list(table["dependabot_notes"])),
+    )
+    monkeypatch.setattr(
+        fix_pass.fix_drift,
+        "tend",
+        lambda ws, projects, mode: table["upkeep"].append(("drift", mode)) or list(table["drift"]),
+    )
+    monkeypatch.setattr(
+        fix_pass.fix_issues,
+        "sweep_green",
+        lambda ws, projects, mode: (
+            table["upkeep"].append(("issues", mode)) or list(table["issues"])
+        ),
+    )
     # The machine's real scheduler is never touched: `maintain` re-registers tasks.
     monkeypatch.setattr(
         fix_pass.installers,
@@ -370,6 +394,61 @@ def test_a_dispatching_pass_brings_every_installer_current_and_a_plan_does_not(w
     assert world["installers"] == []
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
     assert world["installers"] == [["maintain", "--workspace", str(world["workspace"])]]
+
+
+def dependabot_failure(project: str = "carameli") -> fix_plan.Failure:
+    return failure(
+        kind=fix_plan.DEPENDABOT,
+        project=project,
+        number=0,
+        head="",
+        sha="",
+        title=f"Dependabot in {project}: 1 package(s) with alerts no PR answers",
+        signature=(f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0",),
+    )
+
+
+def test_what_dependabot_cannot_do_is_sent_recorded_under_its_source_and_capped(world):
+    """ibkr_trader's Dependabot failed 11 of 15 runs and nothing read it. Now it is a
+    failure like any other -- and a new kind of dispatch, so it has a daily cap."""
+    world["dependabot"] = [dependabot_failure("carameli"), dependabot_failure("devkit")]
+    world["dependabot_notes"] = ["data-lake -- Dependabot Updates fails only because ..."]
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
+    assert len(world["dispatched"]) == 2
+    path = fix_pass.worktree.boxes_root(world["workspace"].parent) / fix_ledger.LEDGER_NAME
+    ledger = fix_ledger.read_ledger(path)
+    assert {entry["source"] for entry in ledger.values()} == {fix_plan.DEPENDABOT}
+    text = artifact(world)
+    assert "dependabot data-lake -- Dependabot Updates fails only because" in text
+    world["dependabot"] = [dependabot_failure("sports_betting")]
+    fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW)
+    assert len(world["dispatched"]) == 2, "the third of the day waits"
+    assert "dependabot daily cap: 2 of 2" in artifact(world)
+
+
+def test_upkeep_runs_in_every_mode_and_lands_on_the_record(world):
+    world["drift"] = [
+        "ibkr_trader main -- uv.lock is origin/main's already; main's uv.lock restored"
+    ]
+    world["issues"] = ["carameli #12 (Nightly) -- would close: green on origin/main at the tip"]
+    assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
+    assert world["upkeep"] == [("drift", fix_cycle.PLAN), ("issues", fix_cycle.PLAN)]
+    text = artifact(world)
+    assert "drift    ibkr_trader main -- uv.lock is origin/main's already" in text
+    assert "issue    carameli #12 (Nightly) -- would close" in text
+
+
+def test_an_upkeep_line_that_failed_is_filed_against_its_checkout(world, tmp_path):
+    world["drift"] = ["ibkr_trader main -- uv.lock relocked: FAILED to cut agent/auto/relock-x"]
+    world["issues"] = ["carameli #12 (Nightly) -- FAILED to close: HTTP 403"]
+    journal = fix_pass.Journal(tmp_path)
+    ctx = fix_pass.context(world["workspace"], fix_cycle.DISPATCH, NOW)
+    drift, issues = fix_pass.tend(world["workspace"], ctx, journal)
+    assert (drift, issues) == (world["drift"], world["issues"])
+    assert [(f.kind, f.project) for f in journal.findings] == [
+        ("drift-failed", "ibkr_trader"),
+        ("issue-close-failed", "carameli"),
+    ]
 
 
 def test_a_failed_installer_is_filed_for_the_devkit_session(world, monkeypatch, tmp_path):
@@ -715,6 +794,48 @@ def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
     assert fix_pass.fix_send.update_branch(stuck, tmp_path) == fix_pass.EXIT_FAILED, (
         "GitHub refuses to update a conflicted branch; the next pass reads it as a conflict"
     )
+
+
+def test_a_conflict_only_github_reports_is_merged_and_pushed_without_gh(monkeypatch, tmp_path):
+    """#538: GitHub said `CONFLICTING` and would refuse `update-branch` on that verdict,
+    while git merged it cleanly; the pass pushes git's merge as a fast-forward."""
+    calls, envs = [], {}
+
+    def git(*args, env=None):
+        calls.append(args)
+        envs[args[0]] = env
+        out = {"merge-tree": "tree9\n", "commit-tree": "merge9\n"}.get(args[0], "tip1\n")
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "git_for", lambda _p: git)
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "gh_for", lambda _p: pytest.fail("no gh"))
+    phantom = failure(number=538, head="agent/x", sha="ccf68d7", behind=True, merges_clean=True)
+    assert fix_pass.fix_send.update_branch(phantom, tmp_path) == fix_pass.EXIT_OK
+    base = "refs/remotes/origin/main"
+    assert ("merge-tree", "--write-tree", base, "ccf68d7") in calls
+    made = next(c for c in calls if c[0] == "commit-tree")
+    assert made[:6] == ("commit-tree", "tree9", "-p", "ccf68d7", "-p", base)
+    assert calls[-1] == ("push", "--quiet", "origin", "merge9:refs/heads/agent/x")
+    # The push gate ran the whole suite over the checkout's working copy, not the merge,
+    # and #538's push came back failed after six minutes in it.
+    assert "devkit-push-gate" in envs["push"]["SKIP"].split(",")
+
+
+def test_a_clean_merge_that_cannot_be_pushed_or_made_is_a_failed_update(monkeypatch, tmp_path):
+    """A head pushed to meanwhile refuses the fast-forward, and the base moving into a
+    real conflict leaves no tree; either is an update that did not happen."""
+    phantom = failure(number=538, head="agent/x", sha="ccf68d7", behind=True, merges_clean=True)
+
+    def git_failing(step):
+        def git(*args, env=None):
+            out = {"merge-tree": "tree9\n", "commit-tree": "merge9\n"}.get(args[0], "tip1\n")
+            return subprocess.CompletedProcess(args, 1 if args[0] == step else 0, out, "rejected")
+
+        return git
+
+    for step in ("merge-tree", "commit-tree", "push"):
+        monkeypatch.setattr(fix_pass.fix_send.sweep, "git_for", lambda _p, s=step: git_failing(s))
+        assert fix_pass.fix_send.push_clean_merge(phantom, tmp_path) == fix_pass.EXIT_FAILED, step
 
 
 def test_an_update_that_fails_because_the_pr_just_closed_is_not_a_failure(monkeypatch, tmp_path):

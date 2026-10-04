@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import task_branch as tb
 from _loader import load_by_path
 
-# The four sources of red this plans for. A `COMMIT` is a session's intent the fix pass
+# The sources of red this plans for. A `COMMIT` is a session's intent the fix pass
 # could not commit: the commit stage refused it, and the branch is the worktree it sits in.
 # A `BRANCH` is a default branch whose own gate is red: a push landed red, so nothing
 # rebased onto it can be green and every PR against it inherits the failure.
@@ -69,6 +69,19 @@ BRANCH = "branch"
 # The harness-defect ledger's open backlog (`harness_triage.py`), as one failure for the
 # devkit session: every entry on it is a devkit defect, whichever project filed it.
 LEDGER = "ledger"
+# What Dependabot cannot do for a project (`fix_dependabot.py`): its update runs failing,
+# and security alerts no PR answers. One per project, keyed by what it names rather than
+# by a commit, so a merge to the base is not a reason to send again.
+DEPENDABOT = "dependabot"
+# The head every Dependabot PR is opened from: a red one is an ordinary PR to fix, but
+# it counts against the same daily cap (`fix_budget.DEPENDABOT_DAILY`).
+DEPENDABOT_BRANCH = "dependabot/"
+# How `fix_dependabot` spells the two kinds of entry in a DEPENDABOT signature: an alert
+# no PR answers, and a run that failed because a path dependency cannot be fetched.
+ALERT_ENTRY = "alert "
+UNFETCHABLE_ENTRY = "unfetchable path dependency "
+# The file under `EVIDENCE_DIR` a DEPENDABOT fixer reads first: every alert and job, in full.
+DEPENDABOT_EVIDENCE = "dependabot.md"
 
 # The one test a release commit fails by construction, and the reason a red default
 # branch is not always red: `release-pipeline.py` bumps `FALLBACK_DEVKIT_REF` to a tag
@@ -126,7 +139,7 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 class Failure:
     """One red thing, with everything the plan and the prompt need to know about it."""
 
-    kind: str  # PR, NIGHTLY, COMMIT or BRANCH
+    kind: str  # PR, NIGHTLY, COMMIT, BRANCH, LEDGER or DEPENDABOT
     project: str  # the checkout name in the workspace registry
     number: int  # PR number, or the tracker issue's number for a nightly; 0 otherwise
     title: str
@@ -140,6 +153,9 @@ class Failure:
     signature: tuple[str, ...] = ()
     evidence: str = ""  # the directory the run's artifacts were downloaded to
     behind: bool = False  # PR only: its head lacks the base's tip, so its gate is stale
+    # PR only: GitHub calls it conflicting and git merges it with the base cleanly, so it
+    # is updated by a merge the pass pushes, not by a resolver or `gh pr update-branch`.
+    merges_clean: bool = False
     # PR only: the runs behind its failing checks, off the rollup, for when the gate
     # workflow's own run list has nothing at this sha -- a required check from another
     # workflow, a consumer whose gate is named differently.
@@ -270,9 +286,16 @@ def name_of(failure: Failure) -> str:
         return f"origin/{failure.base}"
     if failure.kind == COMMIT:
         return failure.head
-    if failure.kind == LEDGER:
-        return LEDGER
+    if failure.kind in (LEDGER, DEPENDABOT):
+        return failure.kind
     return f"#{failure.number}"
+
+
+def is_dependabot(failure: Failure) -> bool:
+    """Dependabot's own red: its runs and alerts, or a PR it opened."""
+    return failure.kind == DEPENDABOT or (
+        failure.kind == PR and failure.head.startswith(DEPENDABOT_BRANCH)
+    )
 
 
 # --- the two shapes that never get an agent -------------------------------------------
@@ -394,7 +417,12 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     if CONFLICT in failure.signature and not against_red:
         return Decision(RESOLVE, describe(failure), (failure,))
     if failure.behind and CONFLICT not in failure.signature:
-        return Decision(UPDATE, f"{describe(failure)}; behind origin/{failure.base}", (failure,))
+        why = (
+            f"GitHub says conflicting, git merges it with origin/{failure.base} cleanly"
+            if failure.merges_clean
+            else f"behind origin/{failure.base}"
+        )
+        return Decision(UPDATE, f"{describe(failure)}; {why}", (failure,))
     if against_red:
         return Decision(HOLD, held_note(failure), (failure,))
     if failure.kind == NIGHTLY and failure.tip_running:
@@ -424,6 +452,8 @@ def describe(failure: Failure) -> str:
     """The one-line reason a row is red, for the report and the prompt."""
     if failure.kind == LEDGER:
         head = f"{len(failure.signature)} open group(s) on the harness-defect ledger"
+    elif failure.kind == DEPENDABOT:
+        head = failure.title
     elif failure.kind in (NIGHTLY, BRANCH):
         head = f"{failure.workflow} workflow failing on origin/{failure.base}"
     else:

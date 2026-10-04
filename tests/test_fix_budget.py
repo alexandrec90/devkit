@@ -225,3 +225,44 @@ def test_a_conflict_back_at_a_new_head_gets_its_resolver_again_however_often():
     for sha in shas[1:]:
         assert go(fix_budget.budget(_conflict(sha), ledger, NOW))
         ledger.update(ledger_after(_conflict(sha)))
+
+
+def _dependabot(project: str = "ibkr_trader", alert: str = "urllib3") -> fix_plan.Decision:
+    found = failure(
+        kind=fix_plan.DEPENDABOT,
+        project=project,
+        number=0,
+        head="",
+        sha="",
+        signature=(f"{fix_plan.ALERT_ENTRY}{alert} >= 1.0",),
+    )
+    return decision(fix_plan.DISPATCH, found)
+
+
+def test_dependabot_sessions_stop_at_the_daily_cap_and_nothing_else_does(tmp_path):
+    """Added as an input while the ledger session already went out a dozen times a day:
+    an alert backlog can always find one more session to spend, so it has a fuse."""
+    path = tmp_path / "dispatch.json"
+    sent = [_dependabot("ibkr_trader"), _dependabot("data-lake")]
+    for n, one in enumerate(sent):
+        assert go(fix_budget.budget(one, fix_ledger.read_ledger(path), NOW))
+        when = NOW - _dt.timedelta(hours=n)
+        key = fix_ledger.decision_key(one)
+        fix_ledger.record(path, key, "n", when, source=fix_budget.source(one))
+    ledger = fix_ledger.read_ledger(path)
+    red_pr = decision(fix_plan.DISPATCH, failure(head="dependabot/uv/urllib3-2.8.0"))
+    for third in (_dependabot("social-scraper"), red_pr):
+        capped = fix_budget.budget(third, ledger, NOW)
+        assert not capped.go and capped.finding is None
+        assert capped.why == f"{fix_budget.DAILY_CAPPED}: 2 of 2 sessions sent in the last 24h"
+    assert go(fix_budget.budget(decision(fix_plan.DISPATCH, failure()), ledger, NOW))
+    folded = decision(fix_plan.UPSTREAM, failure(head="dependabot/uv/x"), failure(project="devkit"))
+    assert fix_budget.over_daily_cap(folded, ledger, NOW) == "", "the harness is never held by it"
+    tomorrow = NOW + fix_budget.DAY
+    assert go(fix_budget.budget(_dependabot("social-scraper"), ledger, tomorrow))
+
+
+def test_only_a_dependabot_session_is_recorded_under_its_source():
+    assert fix_budget.source(_dependabot()) == fix_plan.DEPENDABOT
+    assert fix_budget.source(decision(fix_plan.DISPATCH, failure())) == ""
+    assert fix_budget.source(decision(fix_plan.UPSTREAM, failure(head="dependabot/x"))) == ""

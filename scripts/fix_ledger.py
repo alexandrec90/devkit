@@ -156,15 +156,52 @@ def _write(path: Path, ledger: dict[str, dict]) -> None:
 
 
 def record(
-    path: Path, key: str, note: str, now: _dt.datetime | None = None, problem: str = ""
+    path: Path,
+    key: str,
+    note: str,
+    now: _dt.datetime | None = None,
+    problem: str = "",
+    source: str = "",
 ) -> None:
     """One more session sent under `key`: the newest time, how many so far, and the
-    `problem_key` it counts against when the caller knows it."""
+    `problem_key` it counts against when the caller knows it.
+
+    A `source` (`fix_plan.DEPENDABOT`) is a family of sends with a daily cap: its entries
+    keep every send's time (`AT_KEEP` of them), because `when` is only the newest and a
+    key re-sent after `RESEND_AFTER` is two sends in one day.
+    """
     ledger = read_ledger(path)
+    old = ledger.get(key)
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
-    entry = {"when": when, "what": note, "sent": sends(ledger.get(key)) + 1}
-    ledger[key] = {**entry, "problem": problem} if problem else entry
+    entry: dict = {"when": when, "what": note, "sent": sends(old) + 1}
+    if problem:
+        entry["problem"] = problem
+    if source:
+        earlier = old.get("at", []) if isinstance(old, dict) else []
+        entry["source"] = source
+        entry["at"] = [*(earlier if isinstance(earlier, list) else []), when][-AT_KEEP:]
+    ledger[key] = entry
     _write(path, ledger)
+
+
+# How many send times a sourced entry keeps: more than one key can be sent in any day.
+AT_KEEP = 8
+
+
+def sent_since(ledger: dict[str, dict], source: str, since: _dt.datetime) -> int:
+    """How many sessions of `source` the ledger records at or after `since`."""
+    count = 0
+    for entry in ledger.values():
+        if not isinstance(entry, dict) or entry.get("source") != source:
+            continue
+        stamps = entry.get("at")
+        for stamp in stamps if isinstance(stamps, list) else []:
+            try:
+                at = _dt.datetime.fromisoformat(str(stamp))
+            except ValueError:
+                continue
+            count += (at if at.tzinfo else at.replace(tzinfo=_dt.UTC)) >= since
+    return count
 
 
 def sends(entry: object) -> int:
