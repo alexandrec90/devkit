@@ -26,6 +26,7 @@ import fix_ledger
 import fix_loop
 import fix_plan
 import host_memory
+import release
 import ship_intent
 import sweep
 from _loader import load_by_path
@@ -145,6 +146,11 @@ def push_clean_merge(failure: fix_plan.Failure, root: Path) -> int:
     No worktree: `merge-tree` writes the tree and `commit-tree` the commit, both against
     the refs `gate_evidence` judged clean. The push is a fast-forward of the head sha the
     pass read, so a head pushed to meanwhile is refused rather than overwritten.
+
+    The push skips the pre-push gate, as every other push the pass makes does
+    (`release.push_env`). Pushed from the project's own checkout, that gate ran the whole
+    suite over whatever that working copy held, not over the merge: #538's push spent six
+    minutes in it and came back an `update-failed` naming no cause. CI gates the merge.
     """
     git = sweep.git_for(root / failure.project)
     where = f"  {failure.project} #{failure.number}"
@@ -157,7 +163,15 @@ def push_clean_merge(failure: fix_plan.Failure, root: Path) -> int:
     made = git("commit-tree", tree, "-p", failure.sha, "-p", base, "-m", message)
     commit = (made.stdout or "").strip() if made.returncode == 0 else ""
     pushed = (
-        git("push", "--quiet", "origin", f"{commit}:refs/heads/{failure.head}") if commit else made
+        git(
+            "push",
+            "--quiet",
+            "origin",
+            f"{commit}:refs/heads/{failure.head}",
+            env=release.push_env(),
+        )
+        if commit
+        else made
     )
     if not commit or pushed.returncode != 0:
         why = (pushed.stderr or pushed.stdout or "").strip().splitlines()
