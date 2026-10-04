@@ -854,6 +854,48 @@ def test_an_update_that_fails_because_the_pr_just_closed_is_not_a_failure(monkey
     assert fix_pass.fix_send.update_branch(failure(number=390, behind=True), tmp_path) == 0
 
 
+def test_a_failed_send_files_what_its_dispatcher_said_as_the_evidence(
+    monkeypatch, tmp_path, capsys
+):
+    """f6a5aa87: the finding for #538 named no failing step, because the update path only
+    printed why and a scheduled pass's stdout goes nowhere. Both streams still print, and
+    the finding cites a file holding them."""
+
+    def gh_for(_project_dir):
+        def gh(*args):
+            print("gh asked", file=sys.stderr)
+            return subprocess.CompletedProcess(args, 1, "", "GraphQL: merge conflict")
+
+        return gh
+
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "gh_for", gh_for)
+    ctx = fix_pass.fix_loop.Context(
+        tmp_path, ["carameli"], tmp_path, tmp_path / "l.json", tmp_path / "h", "dispatch", NOW
+    )
+    journal = fix_pass.Journal(tmp_path)
+    decision = fix_plan.Decision(fix_plan.UPDATE, "behind", (failure(number=538, behind=True),))
+    line, code = fix_pass.fix_send._send_one(decision, ctx, "claude", "", journal)
+    assert (line, code) == ("FAILED to update", fix_pass.EXIT_FAILED)
+    (found,) = journal.findings
+    assert found.kind == "update-failed" and found.detail == "carameli #538: behind"
+    said = Path(found.evidence).read_text(encoding="utf-8")
+    assert "update-branch failed: GraphQL: merge conflict" in said and "gh asked" in said
+    streams = capsys.readouterr()
+    assert "update-branch failed" in streams.out and "gh asked" in streams.err
+
+
+def test_a_failed_send_that_said_nothing_cites_no_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(fix_pass.fix_send, "dispatch", lambda *a: fix_pass.EXIT_FAILED)
+    ctx = fix_pass.fix_loop.Context(
+        tmp_path, ["carameli"], tmp_path, tmp_path / "l.json", tmp_path / "h", "dispatch", NOW
+    )
+    journal = fix_pass.Journal(tmp_path)
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "red", (failure(),))
+    fix_pass.fix_send._send_one(decision, ctx, "claude", "", journal)
+    (found,) = journal.findings
+    assert found.evidence == "" and not (tmp_path / "logs").exists()
+
+
 def test_a_rerun_is_one_workflow_run_on_the_tip_and_no_session(monkeypatch, tmp_path, capsys):
     """85219e18: a nightly red before main's tip is run again there, and whatever that
     run says is the next pass's to read -- no fixer is spent finding the fix merged."""
