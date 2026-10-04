@@ -444,6 +444,28 @@ def test_a_heredoc_with_only_single_backslashes_is_not_friction():
         assert sf.damageable_heredoc(f"cat > a.py <<'EOF'\n{doubled}\nEOF"), doubled
 
 
+def test_a_doubled_backslash_before_a_double_quote_is_not_friction():
+    """70e4798c: a roguelike session wrote `replaceAll("\\\\", "/")` through a heredoc,
+    and the file on disk held both backslashes. Written through the tool on 2026-10-04, a
+    run of backslashes that ends at a `"` came out byte for byte -- `"\\\\"`, `\\\\"`,
+    `\\\\\\\\"`, `\\\\\\"` -- while `\\\\'`, `'\\\\'`, `\\\\$` and `\\\\` before anything else
+    still came out halved."""
+    a70e4798c = (
+        "cat > logs/deps.mjs <<'EOF'\n"
+        "for (const m of src.matchAll(/(?:import|export)\\s[^'\"]*?from\\s+[\"']([^\"']+)[\"']/g)) {\n"
+        'const rel = (s) => [...s].map((f) => relative(root, f).replaceAll("\\\\", "/"));\n'
+        'console.log("\\nSHARED:\\n" + shared.join("\\n"));\n'
+        "EOF\n"
+        "node logs/deps.mjs > logs/deps.txt; head -3 logs/deps.txt"
+    )
+    assert classes([call(a70e4798c, "1")]) == []
+    assert not sf.damageable_heredoc(a70e4798c)
+    for kept in ('"\\\\"', '\\\\"', '\\\\\\\\"', '\\\\\\"', 'a\\\\"b'):
+        assert not sf.damageable_heredoc(f"cat > a.py <<'EOF'\n{kept}\nEOF"), kept
+    for halved in ("\\\\'", "'\\\\'", "\\\\$", "x\\\\", 'a\\\\"b\\\\c', '"a\\\\b"'):
+        assert sf.damageable_heredoc(f"cat > a.py <<'EOF'\n{halved}\nEOF"), halved
+
+
 def test_the_full_suite_is_friction_and_a_targeted_run_is_not():
     assert classes([call(".venv/Scripts/python.exe -m pytest -q", "1")]) == ["full-suite"]
     assert classes([call("python scripts/run-tests.py", "1")]) == ["full-suite"]

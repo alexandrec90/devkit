@@ -136,8 +136,8 @@ COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # *can* be damaged is, noticed or not: `damageable_heredoc` holds it to a body with a
     # doubled backslash, the one spelling the tool collapses. One without is delivered
     # intact -- no backslash at all (b935e421) or only single ones, like the `\n` in an
-    # f-string (46a1578d) -- and filing it left a sweep nothing to retire it with but
-    # "no defect".
+    # f-string (46a1578d), or a doubled one before a `"` (70e4798c) -- and filing it left a
+    # sweep nothing to retire it with but "no defect".
     (
         "heredoc-write",
         re.compile(
@@ -157,6 +157,9 @@ HEREDOC_BODY = re.compile(
 # measurement of what the Bash tool does to one, not a file the work depends on
 # (ccde706b, the probe that established the doubled-backslash rule above).
 BYTE_DUMP = re.compile(r"(?:^|[;&|]\s*)(?:od|xxd|hexdump|Format-Hex)\b", re.M)
+# A run of two or more backslashes the Bash tool halves: one that does not end at a `"`.
+# A run that does -- `"\\"`, `\\"`, `\\\"` -- is delivered as written (70e4798c).
+COLLAPSED_RUN = re.compile(r"\\{2,}(?![\\\"])")
 # A directory that is a scratch repository: a `tmp*` or `temp` segment, or the shell's
 # temp variable. A `--no-verify` there commits a fixture that nothing gates (7ce3ea59, a
 # release repro under the job's `tmp/`); `templates/` is not one.
@@ -407,14 +410,17 @@ COMMAND_DETAIL = {
 
 
 def damageable_heredoc(command: str) -> bool:
-    """A heredoc body in `command` carries a doubled backslash: the one thing the Bash
-    tool alters. It collapses each `\\\\` to `\\` and leaves a lone `\\n`, `\\t` or `\\s` as
-    written, which a write through the tool on 2026-09-26 confirmed byte for byte.
+    """A heredoc body in `command` carries a doubled backslash the Bash tool alters. It
+    collapses each `\\\\` to `\\` and leaves a lone `\\n`, `\\t` or `\\s` as written, which a
+    write through the tool on 2026-09-26 confirmed byte for byte; on 2026-10-04 a second
+    one showed a run ending at a `"` is left as written too (`COLLAPSED_RUN`).
 
     Not when the same command dumps the bytes back: that is the probe that confirmed it."""
     if BYTE_DUMP.search(command):
         return False
-    return any("\\\\" in found.group("body") for found in HEREDOC_BODY.finditer(command))
+    return any(
+        COLLAPSED_RUN.search(found.group("body")) for found in HEREDOC_BODY.finditer(command)
+    )
 
 
 def scratch_only(command: str) -> bool:
