@@ -24,12 +24,21 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fix_budget
 import fix_findings
 
 STALL_AFTER = _dt.timedelta(hours=24)
 FIELDS = ("waiting", "skipped")
-# Waits some other part of the loop already owns, by how the reason starts.
-TRACKED = ("escalated", "backing off", "already dispatched", "held until the devkit session")
+# Waits some other part of the loop already owns, by how the reason starts. A full
+# Dependabot cap frees itself within the day, and filing it as a stall would send the
+# devkit session the cap exists to save.
+TRACKED = (
+    "escalated",
+    "backing off",
+    "already dispatched",
+    "held until the devkit session",
+    fix_budget.DAILY_CAPPED,
+)
 
 
 def read_history(path: Path) -> list[dict]:

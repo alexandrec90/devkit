@@ -37,7 +37,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PureWindowsPath
 from typing import Protocol
 
@@ -59,6 +59,22 @@ SCHTASKS_TIMEOUT = 60
 
 # Lines of the command's output the log keeps: the tail, where the error is.
 LOG_LINES = 300
+
+# What every collector command runs with on top of this process's environment. The
+# command runs in the project's *static* checkout, and a bare `uv run` relocks whenever
+# the lock disagrees with what it resolves -- a sibling path dependency that moved is
+# enough -- which writes `uv.lock` on the default branch. That is how ibkr_trader's `main`
+# held an uncommitted lock from 2026-10-03 on (an interactive `uv run`, not this job, but
+# this job runs `uv run` in a checkout every half hour). Frozen, uv installs from the
+# lock as committed and never rewrites it.
+COMMAND_ENV = {"UV_FROZEN": "1"}
+
+
+def command_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment a collector's command runs in: `base` (this process's) plus
+    `COMMAND_ENV`, so nothing it runs rewrites the checkout's tracked files."""
+    return {**(os.environ if base is None else base), **COMMAND_ENV}
+
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
 
@@ -233,6 +249,7 @@ def spawn(argv: Sequence[str], cwd: Path, timeout: int) -> tuple[int, str]:
             encoding="utf-8",
             errors="replace",
             creationflags=NO_WINDOW,
+            env=command_env(),
         )
     except FileNotFoundError:
         return 127, f"{argv[0]} is not on PATH"
@@ -320,7 +337,12 @@ def stream(argv: Sequence[str], cwd: Path) -> int:
     """Run `argv` with its output going straight to this terminal; its exit code."""
     try:
         return subprocess.run(
-            list(argv), cwd=cwd, check=False, creationflags=NO_WINDOW, **inherited_streams()
+            list(argv),
+            cwd=cwd,
+            check=False,
+            creationflags=NO_WINDOW,
+            env=command_env(),
+            **inherited_streams(),
         ).returncode
     except FileNotFoundError:
         print(f"{argv[0]} is not on PATH", flush=True)

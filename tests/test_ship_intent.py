@@ -340,6 +340,20 @@ def shipped_labels(tmp_path, monkeypatch, marked: bool, stamps: int) -> tuple[st
     return plans[0].pr_labels
 
 
+def test_a_pr_from_a_tree_sent_at_an_issue_closes_that_issue_and_no_other(tmp_path, monkeypatch):
+    """A nightly's fixer: the issue it was sent at closes when its fix merges, even if the
+    workflow is renamed before it runs green again. A tree not sent at one closes none."""
+    one = intent(tmp_path)
+    ship_intent.fix_reports.stamp(one.tree, "nightly:carameli:9:t:d:dispatch", "n", NOW)
+    ship_intent.fix_reports.note_on_stamp(one.tree, ship_intent.fix_reports.CLOSES, "9")
+    plans = capture_plans(monkeypatch)
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
+    assert plans[0].pr_body == "Because.\n\nCloses #9"
+    assert ship_intent.pr_body(replace(one, body="Fixed it. Closes #9")) == "Fixed it. Closes #9"
+    ship_intent.fix_reports.stamp(one.tree, "pr:carameli:412:abc:d:dispatch", "n", NOW)
+    assert ship_intent.pr_body(one) == "Because."
+
+
 def test_a_pr_from_a_branch_the_pass_cut_for_a_fixer_is_labelled_automerge(tmp_path, monkeypatch):
     """The pass decided on that work itself, so its green gate is the whole review."""
     assert shipped_labels(tmp_path, monkeypatch, True, 1) == (ship_intent.sweep.AUTOMERGE_LABEL,)

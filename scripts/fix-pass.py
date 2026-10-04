@@ -17,14 +17,19 @@ which survives this file crashing). Two rules hold it together:
 3. **Read back** (`fix_loop.py`): blocked reports, friction files, dead sessions,
    transcripts, resolutions that did not hold, waits that have gone stale -- filed now,
    so the backlog read next already carries them.
-4. **Collect everything red** (`fix_red.py`), the harness-defect backlog included,
-   plan it (`fix_plan.py`) and classify it (`fix_cycle.py`).
+4. **Collect everything red** (`fix_red.py`), the harness-defect backlog included, and
+   what Dependabot cannot do (`fix_dependabot.py`: failing update jobs, alerts no PR
+   answers -- under its own daily cap), plan it (`fix_plan.py`) and classify it
+   (`fix_cycle.py`).
 5. **Harness first**: while anything harness-shaped is red, one devkit session gets
    all of it and project fixers are held, out loud. Only one at a time.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
    escalation ladder.
 7. **Installers current** (`installers.py maintain`), on a dispatching pass, so a
    merged change to what a job registers is live within a pass, not a day.
+8. **Upkeep** (`tend`): a default branch's uncommitted lockfile carried or restored
+   (`fix_drift.py`), any other drift reported and left; tracker issues whose workflow is
+   green at the tip closed (`fix_issues.py`).
 
 Every pass appends a line to `logs/fix-pass.history.jsonl`, which `fix_stall` reads.
 `"devkit.fixPass"` in the workspace file is `off` (the default), `plan` (write it all,
@@ -49,6 +54,9 @@ import agent_tabs
 import broken_pr_menu as menu
 import devkit_project
 import fix_cycle
+import fix_dependabot
+import fix_drift
+import fix_issues
 import fix_ledger
 import fix_loop
 import fix_plan
@@ -283,11 +291,46 @@ def _ship_and_merge(
     return shipped, refused, failed, merged
 
 
+def _collect(
+    workspace: Path,
+    projects: list[str],
+    refused: list[fix_plan.Failure],
+    now: _dt.datetime,
+    journal: Journal,
+) -> tuple[list[fix_plan.Failure], bool | str | None, list[str], list[str]]:
+    """Step 4's reading, each source isolated: `(failures, devkit's default-branch
+    verdict, the default branches with none, what Dependabot fails on that no session
+    can change)`. A Dependabot read that raised costs its own failures, not the gate's."""
+    failures, green, unread = journal.step(
+        "collect", fix_red.collect_red, workspace, projects, refused, default=([], None, [])
+    )
+    found, notes = journal.step(
+        "dependabot", fix_dependabot.collect, workspace, projects, now, default=([], [])
+    )
+    return failures + found, green, unread, notes
+
+
 def _file_failures(lines: list[str], kind: str, journal: Journal) -> None:
     """A failed regate or merge in the record is a finding against that checkout."""
     for line in lines:
         if "FAILED" in line:
             fix_loop.fix_findings.file(journal, kind, line.split(" ", 1)[0], line)
+
+
+def tend(workspace: Path, ctx: fix_loop.Context, journal: Journal) -> tuple[list[str], list[str]]:
+    """The checkouts' own upkeep, after the send: `(drift lines, issue lines)`.
+
+    Uncommitted drift on a default branch (`fix_drift.tend`) and the tracker issues a
+    green tip has answered (`fix_issues.sweep_green`). Each step isolated, and a line
+    either says `FAILED` on is filed against its checkout, as a failed merge is.
+    """
+    drift = journal.step("drift", fix_drift.tend, workspace, ctx.projects, ctx.mode, default=[])
+    issues = journal.step(
+        "issues", fix_issues.sweep_green, workspace, ctx.projects, ctx.mode, default=[]
+    )
+    _file_failures(drift, "drift-failed", journal)
+    _file_failures(issues, "issue-close-failed", journal)
+    return drift, issues
 
 
 def decide(
@@ -349,9 +392,7 @@ def run(
 
     shipped, refused, ship_failed, merged = _ship_and_merge(root, projects, mode, journal)
     closed = step("read-back", fix_loop.close, ctx, journal, default=fix_loop.Closed())
-    failures, green, unread = step(
-        "collect", fix_red.collect_red, workspace, projects, refused, default=([], None, [])
-    )
+    failures, green, unread, unsent = _collect(workspace, projects, refused, now, journal)
     regated, rerun = step("regate", fix_red.regate_unread, root, unread, mode, default=([], set()))
     _file_failures(regated, "regate-failed", journal)
     _file_failures(merged, "merge-failed", journal)
@@ -381,6 +422,7 @@ def run(
     )
     if dispatching:
         step("installers", refresh_installers, workspace, journal, default=2)
+    drift, issues = tend(workspace, ctx, journal)
     filed += fix_loop.record(ctx, journal)
     failed_steps = ship_failed or bool(journal.crashed)
     account = fix_cycle.Account(
@@ -400,6 +442,7 @@ def run(
         fix_loop.backlog(ctx),
         tuple(closed.stopped),
         tuple(closed.verified),
+        *(tuple(rows) for rows in (unsent, drift, issues)),
     )
     publish(account, now)
     return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)

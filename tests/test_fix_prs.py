@@ -1555,6 +1555,50 @@ def test_a_tree_the_pass_cuts_is_marked_fixer_work_and_a_persons_tree_is_not(mon
     assert not (persons / fix_prs.fix_reports.ORIGIN_FILE).exists()
 
 
+def test_a_nightly_fixers_tree_names_its_issue_for_the_pr_to_close(monkeypatch, root):
+    """The tracker issue the prompt sends the fixer at is the one its PR closes; an
+    upstream session, whose fix lands in devkit and not in that repo, closes nothing."""
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    capture_sessions(monkeypatch)
+    claude = agent_models.Launch("claude")
+    fresh = root / "carameli" / ".claude" / "worktrees" / "n"
+    fresh.mkdir(parents=True)
+    monkeypatch.setattr(fix_prs, "cut_fresh_tree", lambda *a: (fresh, "agent/fix-nightly"))
+    nightly = failure(kind=fix_plan.NIGHTLY, head="", workflow="Nightly", number=9)
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (nightly,))
+    assert fix_prs.dispatch_fresh(decision, root, claude, None, "nightly:carameli:9:k", "p") == 0
+    assert fix_prs.fix_reports.closing_line(fresh) == "Closes #9"
+    monkeypatch.setattr(fix_prs.tb, "detect_default_branch", lambda _git: "main")
+    upstream = fix_plan.Decision(fix_plan.UPSTREAM, "n", (nightly,))
+    assert fix_prs.dispatch_fresh(upstream, root, claude, None, "upstream:1:k", "p") == 0
+    assert fix_prs.fix_reports.closing_line(fresh) == ""
+
+
+def test_what_dependabot_cannot_do_opens_its_own_prompt_off_the_default_branch(monkeypatch, root):
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    opened = capture_sessions(monkeypatch)
+    fresh = root / "carameli" / ".claude" / "worktrees" / "d"
+    fresh.mkdir(parents=True)
+    cut = []
+    monkeypatch.setattr(
+        fix_prs,
+        "cut_fresh_tree",
+        lambda d, branch, base, runner: cut.append(branch) or (fresh, branch),
+    )
+    found = failure(
+        kind=fix_plan.DEPENDABOT,
+        head="",
+        number=0,
+        workflow="Dependabot Updates",
+        title="Dependabot in carameli: 1 package(s) with alerts no PR answers",
+        signature=(f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0",),
+    )
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "d", (found,))
+    assert fix_prs.dispatch_fresh(decision, root, agent_models.Launch("claude")) == 0
+    assert cut[0].startswith("agent/fix-dependabot-updates-")
+    assert "urllib3 >= 2.8.0" in opened[0]["prompt"] and opened[0]["title"] == "carameli dependabot"
+
+
 def test_a_folded_prs_head_is_named_with_the_tree_holding_it(root):
     """753e8b25: the upstream prompt named carameli #395 by URL only, and the devkit
     session searched carameli's worktrees for the tree holding its head."""

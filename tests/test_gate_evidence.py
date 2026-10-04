@@ -592,6 +592,18 @@ def test_a_nightly_green_at_the_tip_is_nothing_to_fix(monkeypatch, tmp_path):
     assert ev.read_issue("ibkr_trader", tmp_path, ISSUE_69, tmp_path / "ev") is None
 
 
+def test_the_scheduled_workflow_is_read_at_the_tip_and_its_green_run_named(monkeypatch, tmp_path):
+    """What `fix_issues` closes on: the run that judged the tip green, and nothing else."""
+    green = {**run_at("new", 72, conclusion="success"), "url": "https://run/72"}
+    nightly_world(monkeypatch, tmp_path, [green, run_at("old")])
+    base, file, runs, tip = ev.scheduled_at_tip(tmp_path, "Nightly")
+    assert (base, file, tip) == ("main", "nightly.yml", "new")
+    assert ev.green_at_tip(runs, tip) == green
+    assert ev.green_at_tip([run_at("new", 71)], "new") == {}, "red at the tip"
+    assert ev.green_at_tip([run_at("old", 70, conclusion="success")], "new") == {}, "not the tip"
+    assert ev.green_at_tip(runs, "") == {}
+
+
 def test_a_nightly_with_a_run_going_at_the_tip_downloads_nothing(monkeypatch, tmp_path):
     calls = nightly_world(
         monkeypatch, tmp_path, [run_at("new", 73, "in_progress", ""), run_at("old")]

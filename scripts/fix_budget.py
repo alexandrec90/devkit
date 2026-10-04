@@ -7,11 +7,15 @@ could not move is escalated -- a finding on the harness-defect ledger, which the
 session takes over -- and gets fresh fixers once that finding is resolved. The devkit
 session has nothing above it, so its own exhaustion backs off instead of stopping.
 
-There are no daily fuses. They were a cap on sessions per day, set for a pass nobody was
-watching; the first supervised run showed what one costs -- two dead launches spent the
-devkit target's four and held a 21-item backlog for the rest of the day. What stops a
-pass that reads wrong now is the supervisor's spend watch (`fix-pass-supervise.py`)
-and a person reading it, not a count that also stops a pass that reads right.
+There is one daily fuse, and it is on a source rather than on the pass. A cap on all
+sessions per day, set for a pass nobody was watching, was removed: the first supervised
+run showed what one costs -- two dead launches spent the devkit target's four and held a
+21-item backlog for the rest of the day. What stops a pass that reads wrong is the
+supervisor's spend watch (`fix-pass-supervise.py`) and a person reading it. Dependabot
+is the exception (`DEPENDABOT_DAILY`): it was added as an input on 2026-10-04 while the
+devkit ledger session was already going out a dozen times a day, and an alert backlog
+is the kind of red that can always find one more session to spend. Its cap holds only
+its own sessions -- updates are free, and the devkit session is never held by it.
 
 Tested in `tests/test_fix_budget.py`.
 """
@@ -103,7 +107,40 @@ def budget(
         if decision.action == fix_plan.UPSTREAM:
             return _back_off(decision, ledger, now, made - limit)
         return _exhausted(decision, made)
+    if over := over_daily_cap(decision, ledger, now):
+        return Budget(False, over)
     return Budget(True)
+
+
+# Dependabot sessions per rolling day, machine-wide: its runs, its unanswered alerts and
+# its red PRs together. Two covers one project's alert backlog and its retry.
+DEPENDABOT_DAILY = 2
+DAY = _dt.timedelta(hours=24)
+# How a capped decision's reason starts; `fix_stall.TRACKED` names it.
+DAILY_CAPPED = "dependabot daily cap"
+
+
+def over_daily_cap(decision: fix_plan.Decision, ledger: dict[str, dict], now: _dt.datetime) -> str:
+    """Why a Dependabot session waits for tomorrow, or "" when it may go.
+
+    Only a session of its own: a folded devkit session that carries a Dependabot PR among
+    the harness failures is the harness's, and is never held by this.
+    """
+    if decision.action == fix_plan.UPSTREAM or not any(
+        fix_plan.is_dependabot(f) for f in decision.failures
+    ):
+        return ""
+    sent = fix_ledger.sent_since(ledger, fix_plan.DEPENDABOT, now - DAY)
+    if sent < DEPENDABOT_DAILY:
+        return ""
+    return f"{DAILY_CAPPED}: {sent} of {DEPENDABOT_DAILY} sessions sent in the last 24h"
+
+
+def source(decision: fix_plan.Decision) -> str:
+    """The ledger source a dispatch is recorded under: what `over_daily_cap` counts."""
+    if decision.action == fix_plan.UPSTREAM:
+        return ""
+    return fix_plan.DEPENDABOT if any(fix_plan.is_dependabot(f) for f in decision.failures) else ""
 
 
 def _exhausted(decision: fix_plan.Decision, made: int) -> Budget:

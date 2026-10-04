@@ -37,6 +37,21 @@ def test_the_stamp_round_trips_and_a_missing_or_corrupt_one_reads_as_empty(tmp_p
     assert fix_reports.read_stamp(tmp_path) == {}
 
 
+def test_the_issue_a_dispatch_was_sent_at_is_what_its_pr_closes_and_a_restamp_forgets_it(
+    tmp_path,
+):
+    assert fix_reports.closing_line(tmp_path) == "", "no stamp, nothing to close"
+    fix_reports.stamp(tmp_path, "nightly:carameli:9:t:d:dispatch", "n", NOW)
+    assert fix_reports.closing_line(tmp_path) == ""
+    fix_reports.note_on_stamp(tmp_path, fix_reports.CLOSES, "9")
+    assert fix_reports.closing_line(tmp_path) == "Closes #9"
+    fix_reports.note_on_stamp(tmp_path, fix_reports.CLOSES, "#9; rm -rf")
+    assert fix_reports.closing_line(tmp_path) == "", "only a number is ever written out"
+    fix_reports.note_on_stamp(tmp_path, fix_reports.CLOSES, "9")
+    fix_reports.stamp(tmp_path, "pr:carameli:412:abc:d:dispatch", "n", NOW)
+    assert fix_reports.closing_line(tmp_path) == "", "the next dispatch in the tree is not for it"
+
+
 def test_a_restamp_keeps_the_mark_of_a_tree_the_pass_cut(tmp_path):
     """A fixer sent back at a fixer's branch is still on the pass's branch; one sent at a
     person's never gains the mark. Only the dispatch that cut the tree writes it."""

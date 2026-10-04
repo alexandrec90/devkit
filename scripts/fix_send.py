@@ -338,5 +338,12 @@ def _send_one(
         )
         return f"FAILED to {decision.action}", EXIT_FAILED
     key = fix_ledger.decision_key(decision)
-    fix_ledger.record(ctx.ledger_path, key, decision.note, ctx.now, problem=problem)
+    fix_ledger.record(
+        ctx.ledger_path,
+        key,
+        decision.note,
+        ctx.now,
+        problem=problem,
+        source=fix_budget.source(decision),
+    )
     return decision.action + (f" at effort {effort}" if effort else ""), EXIT_OK

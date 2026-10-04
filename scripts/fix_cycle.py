@@ -23,7 +23,8 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   dispatch at the same commit. A failure `fix_ledger.ATTEMPTS` fixers left unchanged
   is filed on the harness-defect ledger (`fix_budget.py`), where the devkit session takes it
   over, and gets fresh fixers once that is resolved. The devkit session, with nothing
-  above it, backs off instead. No daily fuse caps any of it: the supervisor's spend
+  above it, backs off instead. One daily fuse caps one source -- Dependabot's own
+  sessions (`fix_budget.DEPENDABOT_DAILY`) -- and nothing else: the supervisor's spend
   watch does that job, with a person reading it.
 
 The switch is the workspace file: `"devkit.fixPass"` under `settings`, `off` (the
@@ -155,9 +156,12 @@ def _harness_shaped(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> 
     of the two it is decides where the fixer goes -- the one devkit session, or the
     adoption branch itself.
 
-    A devkit PR is not the harness by any of these: see `classify`.
+    A devkit PR is not the harness by any of these: see `classify`. Nor is what
+    Dependabot cannot do: two consumers of one sibling share the signature `"data-lake"
+    is unfetchable`, and as a shared signature it would fold into the devkit session,
+    which can bump neither lock. Its entries name no harness path, so it is the project's.
     """
-    return (
+    return failure.kind != fix_plan.DEPENDABOT and (
         failure.project == DEVKIT
         or bool(failure.signature and failure.signature in shared)
         or fix_plan.is_vendored(failure.signature)
@@ -394,6 +398,12 @@ class Account:
     stopped: tuple[str, ...] = ()
     # What the pass decided on the ledger itself: retired, reopened, settled, pending.
     verified: tuple[str, ...] = ()
+    # What Dependabot is failing on that the pass sends no one at (`fix_dependabot`),
+    # uncommitted drift on a default branch carried or left (`fix_drift`), and the
+    # scheduled-failure issues closed once their workflow went green (`fix_issues`).
+    dependabot: tuple[str, ...] = ()
+    drift: tuple[str, ...] = ()
+    issues: tuple[str, ...] = ()
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -423,6 +433,9 @@ def render(account: Account) -> str:
         ("merged", account.merged),
         ("filed", account.filed),
         ("stopped", account.stopped),
+        ("dependabot", account.dependabot),
+        ("drift", account.drift),
+        ("issue", account.issues),
     ):
         lines += labelled(label, rows)
     lines.append(f"ledger   {account.backlog} open on the harness-defect ledger")

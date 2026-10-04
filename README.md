@@ -585,8 +585,10 @@ each, run here.
 2. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
    Before the red is read, so a release whose adoptions just went green stops holding
    the projects on this pass.
-3. **Collect everything red** — refused commits, red PRs, open scheduled-failure issues,
-   and every default branch whose own gate is red — with what each gate actually said
+3. **Collect everything red** — refused commits, red PRs (Dependabot's included), open
+   scheduled-failure issues, every default branch whose own gate is red, and what
+   Dependabot cannot do: update jobs failing, alerts no open PR answers after a day
+   (`scripts/fix_dependabot.py`) — with what each gate actually said
    (`scripts/gate_evidence.py`), and classify each as harness, project or unknown
    (`scripts/fix_cycle.py`). Every registered checkout is read, `devkit.onHold` included:
    a PR that exists is work in flight. A default branch with no verdict at its tip gets
@@ -609,7 +611,14 @@ each, run here.
    exception: an update is a GitHub call and a resolver needs the PR's own head branch,
    so each goes as itself, ahead of the devkit session, rather than into a fresh branch
    that could never land on it.
-6. **Then projects**, conflicts first, each under the dispatch ledger and a daily cap.
+6. **Then projects**, conflicts first, each under the dispatch ledger.
+7. **Upkeep.** A default branch whose only uncommitted change is `uv.lock` is put
+   right (`scripts/fix_drift.py`): already origin's byte for byte, it is restored so the
+   checkout can fast-forward; relocked against a newer sibling path dependency, it is
+   carried to its own branch, CI pin moved with it, for the next pass to ship. Any other
+   drift on a default branch is reported in the record and never touched. A
+   scheduled-failure issue whose workflow is green at the tip is closed as completed
+   (`scripts/fix_issues.py`) when the reporter's own close did not happen.
 
 `--mode plan` writes the whole plan to `logs/fix-pass.log` and does nothing, which is
 what the scheduled job does while the switch says `plan`. What each dispatch looks like
@@ -631,8 +640,15 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
   the affected PRs named. This is the shape a devkit release fans out into, and the one
   the old per-PR dropdown cost eight sessions on.
 - **A failing scheduled workflow** gets a fresh branch off the default branch in that
-  project, the run's logs, and a prompt that ends with the ship skill; the issue closes
-  itself when the workflow next passes.
+  project, the run's logs, and a prompt that ends with the ship skill; its PR carries
+  `Closes #N` for the issue it was sent at, and the issue also closes itself when the
+  workflow next passes.
+- **What Dependabot cannot do** gets one fresh branch per project, with every alert and
+  failing job in the tree's gate evidence (`fix_plan.DEPENDABOT_EVIDENCE`), and a prompt to bump each named package to
+  its patched version. When the cause is a sibling path dependency the Dependabot runner
+  cannot fetch, the prompt says so: the fix is a hand bump or a fetchable source, never
+  a Dependabot retry. A project whose only red is that unfetchable sibling, with every
+  alert answered, is a `dependabot` line in the record and no session.
 - **A red PR that is behind its base** is updated, not fixed: `gh pr update-branch`,
   no session, and the pass reads the new run next time. Its red may already be fixed
   on the base, and a session sent at it can only merge the base in. A PR the update
@@ -658,8 +674,9 @@ effort. A problem with no evidence gets one session
 — except a conflict whose head has moved since every earlier resolver was sent
 (`fix_ledger.moved_on`): a resolver pushes only a merge that resolved, so a new conflict
 at a new commit is the base moving again, not a fix that did not take.
-There is no daily cap on sessions; `/supervise-fix-pass`'s spend watch is what catches a
-pass spending on something that is not moving. A dispatched session found dead frees its entry at once; an
+The one daily cap is on Dependabot's own sessions (`fix_budget.DEPENDABOT_DAILY` per
+rolling day, its runs, alerts and red PRs together); otherwise `/supervise-fix-pass`'s
+spend watch is what catches a pass spending on something that is not moving. A dispatched session found dead frees its entry at once; an
 entry older than `fix_ledger.RESEND_AFTER` frees it regardless. An open adoption holds
 only its own project's other PRs. Every pass appends a line to
 `logs/fix-pass.history.jsonl`. A scheduled pass always uses `claude-bg`.

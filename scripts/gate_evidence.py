@@ -461,6 +461,24 @@ def run_head(gh: Gh, run_id: str) -> str:
     return str(viewed.get("headSha", "") or "") if isinstance(viewed, dict) else ""
 
 
+def scheduled_at_tip(project_dir: Path, workflow: str) -> tuple[str, str, list[dict], str]:
+    """`(base, file, runs, tip)` for the scheduled workflow titled `workflow`: the default
+    branch, the workflow's file when it takes `workflow_dispatch`, its newest runs there,
+    and the branch's tip ("" when there are no runs to judge it by)."""
+    git = sweep.git_for(project_dir)
+    base = tb.detect_default_branch(git, fallback="main")
+    file = dispatchable_file(project_dir, workflow)
+    runs = default_branch_runs(sweep.gh_for(project_dir), base, file or workflow)
+    return base, file, runs, branch_tip(git, base) if runs else ""
+
+
+def green_at_tip(runs: list[dict], tip: str) -> dict:
+    """The run that judged `tip` green, or {} when nothing did: `_tip_verdict`'s True."""
+    if not tip or _tip_verdict(runs, tip)[0] is not True:
+        return {}
+    return next((r for r in runs if str(r.get("status", "")) == "completed"), {})
+
+
 def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_plan.Failure | None:
     """One tracker issue, read at its base's tip; None when the workflow is green there.
 
@@ -474,20 +492,17 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
     prompt names: a fixer could not tell the log was older than its tree (41924a97).
     """
     gh = sweep.gh_for(project_dir)
-    git = sweep.git_for(project_dir)
     title = str(issue.get("title", ""))
+    base, file, runs, tip = scheduled_at_tip(project_dir, workflow_from_title(title))
     failure = fix_plan.Failure(
         kind=fix_plan.NIGHTLY,
         project=project,
         number=int(issue.get("number", 0) or 0),
         title=title,
         url=str(issue.get("url", "")),
-        base=tb.detect_default_branch(git, fallback="main"),
+        base=base,
         workflow=workflow_from_title(title),
     )
-    file = dispatchable_file(project_dir, failure.workflow)
-    runs = default_branch_runs(gh, failure.base, file or failure.workflow)
-    tip = branch_tip(git, failure.base) if runs else ""
     verdict, red = _tip_verdict(runs, tip) if tip else (None, {})
     if verdict is True:
         return None
