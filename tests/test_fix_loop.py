@@ -854,6 +854,29 @@ def test_a_collector_the_tray_shows_failing_is_filed_against_its_project(ctx):
     assert found.evidence == str(ctx.devkit_dir / "logs" / "collectors.log")
 
 
+def test_each_unhealthy_job_a_collector_names_is_its_own_group(ctx):
+    """6b140f4e: `social` failing on a missing boto3 shared one group with `reddit`'s
+    fixed failure, so the triage log called a new cause "RECURRED ... that fix did not
+    hold". The jobs the project names ride in the detail; the particulars still do not."""
+    social = "health check failing: social -- exit 1: health artifact (written 2026-10-04)"
+    [found] = fix_loop.collector_findings(
+        ctx, [("collector: ibkr_trader", fix_loop.collectors.WARN, social)]
+    )
+    assert found.detail == "ibkr_trader: health check failing: social"
+    _row, made = _resolved_collector(ctx)
+    old = {"ibkr_trader": {"ok": False, fix_loop.collectors.CODE_AT: made - 86400}}
+    named = ("collector: ibkr_trader", fix_loop.collectors.WARN, social)
+    assert len(fix_loop.collector_findings(ctx, [named], old)) == 1, "a job no fix covered"
+    fix_findings.record_all([found], [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "the image installs the archive extra", root=ctx.devkit_dir)
+    [*_, made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    old[found.project][fix_loop.collectors.CODE_AT] = (
+        _dt.datetime.fromisoformat(made.stamp).timestamp() - 86400
+    )
+    assert fix_loop.collector_findings(ctx, [named], old) == [], "weighed against its own fix"
+
+
 @pytest.mark.parametrize(
     ("detail", "state"),
     [

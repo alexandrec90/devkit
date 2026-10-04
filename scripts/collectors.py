@@ -98,6 +98,11 @@ OK, WARN, FAIL = "ok", "warn", "fail"
 ROW_PREFIX = "collector: "
 # A row's state when the project's own verdict is the failing part.
 HEALTH_FAILING = "health check failing"
+# The line a health command may print naming its failing jobs, as ibkr_trader's does:
+# `unhealthy: social, reddit`. The row carries them into the state, so each job's failure
+# is its own group: without them, `social` missing boto3 read as `reddit`'s fixed failure
+# recurring (6b140f4e). A command that prints none is one group per project, as before.
+UNHEALTHY_LINE = re.compile(r"^\s*unhealthy:\s*(?P<jobs>.+?)\s*$", re.M | re.I)
 
 
 @dataclass(frozen=True)
@@ -318,7 +323,19 @@ def check_health(target: Target, box: Container, docker: Docker, report: Report)
     summary = f"exit {code}: {first_line(out)}"
     report.say(f"{name}: {HEALTH_FAILING} ({summary})")
     report.lines.extend(f"    {line}" for line in out.splitlines()[:40])
-    return {"ok": False, "summary": summary, "container": box.id}
+    verdict = {"ok": False, "summary": summary, "container": box.id}
+    if jobs := unhealthy_jobs(out):
+        verdict["unhealthy"] = jobs
+    return verdict
+
+
+def unhealthy_jobs(out: str) -> list[str]:
+    """The jobs a health command's `UNHEALTHY_LINE` names, sorted so the order the project
+    printed them in makes no new group; [] when it prints none."""
+    return sorted(
+        {job.strip() for found in UNHEALTHY_LINE.finditer(out) for job in found["jobs"].split(",")}
+        - {""}
+    )
 
 
 def code_at(box: Container, docker: Docker, last: dict) -> float | None:
@@ -547,7 +564,9 @@ def row(target: Target, containers: Sequence[Container] | None, health: dict) ->
         return FAIL, f"not running ({box.status})"
     verdict = health.get(target.collector.project, {})
     if verdict.get("container") == box.id and verdict.get("ok") is False:
-        return WARN, f"{HEALTH_FAILING} -- {verdict.get('summary', '')}"
+        jobs = verdict.get("unhealthy")
+        named = f": {', '.join(map(str, jobs))}" if isinstance(jobs, list) and jobs else ""
+        return WARN, f"{HEALTH_FAILING}{named} -- {verdict.get('summary', '')}"
     return OK, f"running ({box.status})"
 
 

@@ -78,8 +78,9 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # Claude Code's own refusal of a foreground `sleep`, which names the right wait in the
 # same message. Absent from `blocked-call` for the isolation guard's reason, and it
 # retracts its call's `poll` too: a refused sleep waited for nothing, so the one refusal
-# was filed as two groups neither of which devkit could fix (9854b541, 363d8be7).
-SLEEP_GUARD = re.compile(r"<tool_use_error>Blocked: sleep \d+ followed by")
+# was filed as two groups neither of which devkit could fix (9854b541, 363d8be7). It
+# refuses PowerShell's `Start-Sleep 40; Get-Content` in the same words (228353d8).
+SLEEP_GUARD = re.compile(r"<tool_use_error>Blocked: (?:sleep|Start-Sleep) \d+ followed by")
 # The rewrite a call that sets Git Bash's own conversion switches was measuring, beside the
 # setting that stops it: the probe that put `MSYS2_ARG_CONV_EXCL` in the agent env was
 # filed as the defect it measured (d71a2caf), as `BYTE_DUMP` is for a heredoc's probe.
@@ -118,6 +119,11 @@ QUOTE_MARKS = ("'", '"', "`")
 ESCAPED = re.compile(r"\\.")
 # So is a match a failed assertion reports: pytest echoing a test's expected text.
 ASSERTION = re.compile(r"\bassert\b|AssertionError")
+# And one right after an escaped newline: a traceback serialized into a record -- a JSON
+# health file's `last_traceback` -- whose opening quote a terminal wrapped onto an earlier
+# line (4ae355df). A traceback printed ends its lines in real newlines. The exception's
+# name may sit between, and nothing else: a `\nifty-lark\` in a Windows path is no escape.
+ESCAPED_NEWLINE = re.compile(r"\\n[ \t]*(?:[\w.]+(?:Error|Exception): [^\\\n]*)?$")
 
 # Commands that are friction whatever they return.
 NO_VERIFY = re.compile(r"\bgit\b[^\n]*--no-verify")
@@ -294,6 +300,14 @@ GIT_CHANGED_PATH = re.compile(
 )
 # A file a Codex `apply_patch` names, whose patch rides in the command.
 PATCHED_FILE = re.compile(r"^\*\*\* (?:Update|Add) File: (.+)$", re.M)
+# Where a Python project declares what it installs, and the commands that declare it. A
+# module a run lacked that the session declares after it was the project's undeclared
+# dependency -- the defect it was fixing -- not a tree the harness left unprovisioned
+# (8d969865: a regression test failing on duckdb's undeclared `pytz`, then pytz added).
+DEPENDENCY_FILE = re.compile(
+    r"(?:^|[\\/])(?:pyproject\.toml|setup\.(?:cfg|py)|requirements[\w.-]*\.txt)$"
+)
+DEPENDENCY_COMMAND = re.compile(r"(?:^|&&?|\|\|?|;)\s*(?:uv|poetry)\s+add\b[^\n;&|]*", re.M)
 
 # The user telling a session it went wrong -- the most expensive friction there is, and
 # the one no tool result carries. Skipped on a session's opening message, which is the
@@ -464,6 +478,26 @@ def changes_the_suite(event: Event) -> bool:
     )
 
 
+def declared_text(event: Event) -> str:
+    """What `event` adds to its project's dependency set: what an edit writes into a
+    `DEPENDENCY_FILE` (a Codex patch rides in its command), and any `uv add`; "" for none."""
+    edited = event.path if event.tool in EDIT_TOOLS else ""
+    paths = [edited, *(found.strip() for found in PATCHED_FILE.findall(event.command))]
+    parts = (
+        [event.text or event.command] if any(DEPENDENCY_FILE.search(p) for p in paths if p) else []
+    )
+    parts += [
+        found.group() for found in DEPENDENCY_COMMAND.finditer(command_position(event.command))
+    ]
+    return "\n".join(parts)
+
+
+def declares(module: str, text: str) -> bool:
+    """`text` names `module`'s top-level package, `-` and `_` alike, as a whole word."""
+    name = "[-_]".join(re.escape(part) for part in module.split(".")[0].split("_"))
+    return bool(re.search(rf"(?<![\w.-]){name}(?![\w-])", text, re.I))
+
+
 def _command_classes(
     command: str, checked: frozenset[str] | None = None, targeted_runner: bool = False
 ) -> Iterator[tuple[str, str]]:
@@ -490,8 +524,13 @@ def _quoted(text: str, at: int) -> bool:
     """The match at `at` sits inside a string its line opened: a regex's source, a diff
     of the rule's prose, pytest echoing an assertion's operands. That quotes an error
     rather than having one -- seven groups in the first supervised rehearsal."""
-    line = ESCAPED.sub("", text[text.rfind("\n", 0, at) + 1 : at])
-    return any(line.count(mark) % 2 for mark in QUOTE_MARKS) or bool(ASSERTION.search(line))
+    raw = text[text.rfind("\n", 0, at) + 1 : at]
+    line = ESCAPED.sub("", raw)
+    return (
+        any(line.count(mark) % 2 for mark in QUOTE_MARKS)
+        or bool(ASSERTION.search(line))
+        or bool(ESCAPED_NEWLINE.search(raw))
+    )
 
 
 def _result_class(text: str, command: str = "") -> tuple[str, str]:
@@ -593,6 +632,8 @@ class _Session:
     checked: set[str] | None = None
     suite_asked: bool = False  # it invoked a `WHOLE_SUITE_SKILLS` skill
     targeted_runner: bool = False  # its `RUNNER` runs the tests for what changed, bare
+    # (line, `declared_text`) of each call that declared dependencies.
+    declared: list[tuple[int, str]] = field(default_factory=list)
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -621,6 +662,8 @@ class _Session:
             self.last_said = None  # it went on working: that text was not how it ended
         if changes_the_suite(event):
             self.checked = set()
+        if said := declared_text(event):
+            self.declared.append((event.line, said))
         self._note_command(event)
         if self.checked is not None:
             # The next whole run is the habit.
@@ -649,6 +692,15 @@ class _Session:
 
     def say(self, event: Event) -> None:
         self.last_said = event
+
+    def settle(self) -> None:
+        """Retract each `environment` row whose missing module a later call declared."""
+        for (cls, what), event in list(self.found.items()):
+            named = MISSING_MODULE.search(what) if cls == "environment" else None
+            if named and any(
+                line > event.line and declares(named.group(1), text) for line, text in self.declared
+            ):
+                self.retract(cls, what, event.call_id)
 
     def ending(self) -> None:
         """Judge the last thing the agent said, once the session's events are read."""
@@ -704,6 +756,7 @@ def _read(events: Iterable[Event], targeted_runner: bool = False) -> _Session:
             (session.failed if event.error else session.succeeded)(event)
         elif event.kind in handlers:
             handlers[event.kind](event)
+    session.settle()
     return session
 
 
@@ -730,14 +783,25 @@ DEFAULT_BRANCHES = frozenset({"main", "master"})
 # targeted run, so a whole one there is no friction: 0a4b17f3 was a data-lake session
 # whose CLAUDE.md names `run-tests.py` as "the suite", filed as if it had been told not to.
 SCOPE_RULE = ".claude/rules/session-scope.md"
+# The spelling sessions type, as the rule has named it since 6134af6. A copy without it said
+# only "the whole test suite", which is what retired this class twice, so a tree on such a
+# copy was never told and the fix is the pull it owes: 8d219c5f read RECURRED off a
+# social-scraper tree on v0.11.46, which predates the spelling. Held to devkit's own rule
+# by `tests/test_session_friction.py`, whitespace aside, as `FILE_WRITES_BAN` is.
+WHOLE_RUN_NAMED = "`pytest tests`, or any run naming no test file"
 
 
 def asks_for_targeted_runs(cwd: str, workspace_root: Path, project: str) -> bool:
-    """The session's tree carries `SCOPE_RULE`; its project's checkout decides once the
-    tree is gone. Neither there to read: it may well have, so the finding stands."""
+    """The session's tree carries `SCOPE_RULE` naming `WHOLE_RUN_NAMED`; its project's
+    checkout decides once the tree is gone. Neither there to read: it may well have, so
+    the finding stands."""
     for root in (Path(cwd), workspace_root / project):
         if root.is_dir():
-            return (root / SCOPE_RULE).is_file()
+            try:
+                rule = (root / SCOPE_RULE).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return False
+            return WHOLE_RUN_NAMED in " ".join(rule.split())
     return True
 
 
