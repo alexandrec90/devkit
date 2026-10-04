@@ -3332,6 +3332,11 @@ def remove_images(tags: Sequence[str]) -> tuple[bool, str]:
     already gone or the daemon went away mid-teardown -- the box is destroyed either
     way, and the caller's exit code is about the *stack*, per `apply_reap`. So the
     message says what happened and the boolean only gates the wording.
+
+    **`No such image` is success**, because the image being gone is the goal. A built
+    service the box never started was never built -- carameli's `db-backup` in a box
+    that ran only `app` -- and docker removes the tags it has, then exits 1 over the
+    rest. Counted as a failure, that failed every reconcile that reaped such a box.
     """
     if not tags:
         return True, ""
@@ -3348,10 +3353,13 @@ def remove_images(tags: Sequence[str]) -> tuple[bool, str]:
         return False, "docker is not on PATH — the box's images were left behind"
     except subprocess.TimeoutExpired:
         return False, "docker image rm timed out after 120s — images may survive"
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        return False, f"could not remove {len(tags)} box image(s): {detail}"
-    return True, f"removed {len(tags)} image(s) built by the box: {', '.join(tags)}"
+    if completed.returncode == 0:
+        return True, f"removed {len(tags)} image(s) built by the box: {', '.join(tags)}"
+    lines = (completed.stderr or completed.stdout or "").strip().splitlines()
+    errors = [line for line in lines if "No such image" not in line]
+    if errors or not lines:
+        return False, f"could not remove {len(tags)} box image(s): {chr(10).join(errors)}"
+    return True, f"removed the image(s) built by the box, some never built: {', '.join(tags)}"
 
 
 def compose_config(
