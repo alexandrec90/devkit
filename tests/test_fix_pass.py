@@ -720,10 +720,11 @@ def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
 def test_a_conflict_only_github_reports_is_merged_and_pushed_without_gh(monkeypatch, tmp_path):
     """#538: GitHub said `CONFLICTING` and would refuse `update-branch` on that verdict,
     while git merged it cleanly; the pass pushes git's merge as a fast-forward."""
-    calls = []
+    calls, envs = [], {}
 
-    def git(*args):
+    def git(*args, env=None):
         calls.append(args)
+        envs[args[0]] = env
         out = {"merge-tree": "tree9\n", "commit-tree": "merge9\n"}.get(args[0], "tip1\n")
         return subprocess.CompletedProcess(args, 0, out, "")
 
@@ -736,6 +737,9 @@ def test_a_conflict_only_github_reports_is_merged_and_pushed_without_gh(monkeypa
     made = next(c for c in calls if c[0] == "commit-tree")
     assert made[:6] == ("commit-tree", "tree9", "-p", "ccf68d7", "-p", base)
     assert calls[-1] == ("push", "--quiet", "origin", "merge9:refs/heads/agent/x")
+    # The push gate ran the whole suite over the checkout's working copy, not the merge,
+    # and #538's push came back failed after six minutes in it.
+    assert "devkit-push-gate" in envs["push"]["SKIP"].split(",")
 
 
 def test_a_clean_merge_that_cannot_be_pushed_or_made_is_a_failed_update(monkeypatch, tmp_path):
@@ -744,7 +748,7 @@ def test_a_clean_merge_that_cannot_be_pushed_or_made_is_a_failed_update(monkeypa
     phantom = failure(number=538, head="agent/x", sha="ccf68d7", behind=True, merges_clean=True)
 
     def git_failing(step):
-        def git(*args):
+        def git(*args, env=None):
             out = {"merge-tree": "tree9\n", "commit-tree": "merge9\n"}.get(args[0], "tip1\n")
             return subprocess.CompletedProcess(args, 1 if args[0] == step else 0, out, "rejected")
 

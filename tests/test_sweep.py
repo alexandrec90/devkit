@@ -8,6 +8,7 @@ them pins the individual decisions.
 
 import datetime as dt
 import json
+import os
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -2118,3 +2119,19 @@ def test_gh_for_runs_gh_in_the_checkout_without_raising_or_a_window(monkeypatch,
     assert argv == ["gh", "pr", "list"]
     assert kwargs["cwd"] == str(tmp_path) and kwargs["check"] is False
     assert kwargs["creationflags"] == sweep.NO_WINDOW
+
+
+def test_git_for_inherits_the_environment_unless_a_push_hands_it_one(tmp_path):
+    """`env=` is how the fix pass's clean-merge push skips the pre-push gate; without it
+    git runs in the process's own environment, as every other caller expects."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    git = sweep.git_for(tmp_path)
+    plain = git("config", "--get", "devkit.probe")
+    assert plain.returncode == 1, "nothing set: the process environment carries no config"
+    probe = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "devkit.probe",
+        "GIT_CONFIG_VALUE_0": "yes",
+    }
+    handed = git("config", "--get", "devkit.probe", env={**os.environ, **probe})
+    assert (handed.returncode, handed.stdout.strip()) == (0, "yes")
