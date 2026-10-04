@@ -269,19 +269,37 @@ def spent(intent: Intent, state: dict) -> bool:
     return state.get("stage") == SHIPPED and state.get("intent") == intent.digest
 
 
+def merging(tree: Path, runner: Runner) -> bool:
+    """Whether the tree is in the middle of a merge: `MERGE_HEAD` exists.
+
+    Its commit is work even over a clean `git status`. A merge that changes no file --
+    origin's side already in through a criss-cross, or a resolution that kept ours
+    everywhere -- has nothing to stage, and was read as nothing to ship: #538's resolver
+    set up exactly that merge, and the pass set its intent aside as "already shipped",
+    leaving the PR as conflicted as before. The file is looked for rather than the ref
+    verified, so git failing to answer reads as no merge, as everywhere else here.
+    """
+    where = runner(["git", "rev-parse", "--git-path", "MERGE_HEAD"], cwd=tree)
+    named = (where.stdout or "").strip() if where.returncode == 0 else ""
+    if not named:
+        return False
+    path = Path(named)
+    return (path if path.is_absolute() else tree / path).is_file()
+
+
 def _settled(
-    intent: Intent, porcelain: str, base: str, runner: Runner, when: str
+    intent: Intent, porcelain: str, base: str, runner: Runner, when: str, mid_merge: bool = False
 ) -> Outcome | None:
     """This pass's answer when nothing needs doing: shipped already, nothing to ship,
-    or refused again."""
+    or refused again. A merge in progress (`merging`) is never the first two."""
     state = read_state(intent.tree)
     head = _shipped_head(intent.tree, state, porcelain, runner)
-    if already_shipped(intent, state, porcelain, head):
+    if not mid_merge and already_shipped(intent, state, porcelain, head):
         # Consumed, as a fresh ship's intent is: left in place it was re-read and
         # re-reported by every pass -- ten from before the pass set intents aside.
         set_aside(intent.tree, SHIPPED_FILE)
         return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
-    if not porcelain.strip() and commits_ahead(intent.tree, base, runner) == 0:
+    if not porcelain.strip() and not mid_merge and commits_ahead(intent.tree, base, runner) == 0:
         return _empty(intent, when, "nothing changed or committed: no PR to open; set aside")
     if lands_nothing(intent.tree, base, runner):
         why = f"every change in the tree is already on origin/{base}: no PR to open; set aside"
@@ -339,7 +357,9 @@ def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
         return False  # unreadable is not clean: say it would ship, as a dispatch tries to
     porcelain, state = status.stdout or "", read_state(intent.tree)
     head = _shipped_head(intent.tree, state, porcelain, runner)
-    return already_shipped(intent, state, porcelain, head)
+    if not already_shipped(intent, state, porcelain, head):
+        return False
+    return not merging(intent.tree, runner)
 
 
 def _shipped_head(tree: Path, state: dict, porcelain: str, runner: Runner) -> str:
@@ -666,9 +686,11 @@ def ship_one(
         # An unreadable tree is not a clean one: read as clean, a supervisor's second
         # intent over 19 modified files was set aside as already shipped.
         return Outcome(intent, FAILED, f"status: git could not read the tree: {_first(status)}")
-    if settled := _settled(intent, status.stdout or "", base, runner, when):
+    porcelain = status.stdout or ""
+    mid_merge = not porcelain.strip() and merging(tree, runner)
+    if settled := _settled(intent, porcelain, base, runner, when, mid_merge):
         return settled
-    if (status.stdout or "").strip():
+    if porcelain.strip() or mid_merge:
         intent, step, output = _commit_carrying(intent, python, runner)
         if step:
             after = runner(["git", "status", "--porcelain"], cwd=tree).stdout or ""

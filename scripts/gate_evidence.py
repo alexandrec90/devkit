@@ -34,7 +34,7 @@ import junit_report
 import sweep
 import task_branch as tb
 from _loader import load_by_path
-from branch_facts import branch_tip, is_behind, is_tagged
+from branch_facts import branch_tip, clean_merge, is_behind, is_tagged
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -346,10 +346,18 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     behind the failing checks. Three of nine ledger entries once read "no artifact and
     no failed step named" because the failing check belonged to another workflow, and
     each got a session sent blind at a run the rollup had the id of.
+
+    A conflict GitHub reports and git does not is no conflict: the PR is behind, and the
+    pass pushes the merge itself (`merges_clean`), so no resolver goes. Checked only when
+    GitHub says conflicting, against the same `origin/<base>` `is_behind` reads.
     """
     gh = sweep.gh_for(project_dir)
-    conflicted = fix_plan.CONFLICT in failure.reason
-    behind = not conflicted and is_behind(sweep.git_for(project_dir), failure.base, failure.sha)
+    git = sweep.git_for(project_dir)
+    said = fix_plan.CONFLICT in failure.reason
+    clean = said and bool(clean_merge(git, failure.base, failure.sha))
+    conflicted = said and not clean
+    behind = clean or (not conflicted and is_behind(git, failure.base, failure.sha))
+    failure = replace(failure, merges_clean=clean)
     run = gate_run(gh, failure.head, failure.sha)
     gate_id = str(run.get("databaseId", "") or "")
     run_ids = [gate_id] if gate_id else list(failure.check_runs)
