@@ -570,6 +570,112 @@ def test_the_tray_shows_one_row_per_assigned_collector(tmp_path, monkeypatch):
     ]
 
 
+def test_a_container_a_pass_is_starting_is_green_and_red_once_the_pass_is_over(
+    tmp_path, monkeypatch
+):
+    """3cc7de43: the fix pass read ibkr_trader's row seven seconds into a redeploy's start,
+    compose's new container still `Created`, and filed "not running (Created)" against a
+    collector that was up by the time the finding landed."""
+    root = devkit_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    created = box(workdir=str(tmp_path / "ibkr_trader"), state="created", status="Created")
+    docker = FakeDocker([created])
+    at(monkeypatch, 10_000.0)
+    collectors.write_file(
+        root / collectors.IN_PASS,
+        json.dumps({collectors.STARTED_AT: 9_900.0, collectors.UNTIL: 12_000.0}),
+    )
+    assert collectors.tray_rows(docker=docker) == [
+        ("collector: ibkr_trader", collectors.OK, f"{collectors.STARTING} (Created)")
+    ]
+    (root / collectors.IN_PASS).unlink()
+    assert collectors.tray_rows(docker=docker) == [
+        ("collector: ibkr_trader", collectors.FAIL, "not running (Created)")
+    ]
+
+
+def test_a_first_start_still_building_has_no_container_yet_and_is_green_meanwhile(tmp_path):
+    assert collectors.row(target(tmp_path), [], {}, busy=True) == (
+        collectors.OK,
+        f"{collectors.STARTING} (no container yet)",
+    )
+
+
+@pytest.mark.parametrize(
+    ("container", "busy", "expected"),
+    [
+        (None, False, (collectors.FAIL, "no container -- see logs/collectors.log")),
+        ("exited", False, (collectors.FAIL, "not running (Exited (1))")),
+        ("exited", True, (collectors.OK, f"{collectors.STARTING} (Exited (1))")),
+        (None, True, (collectors.OK, f"{collectors.STARTING} (no container yet)")),
+    ],
+)
+def test_down_row_is_red_unless_a_pass_is_starting_it(container, busy, expected):
+    down = box(state=container, status="Exited (1)") if container else None
+    assert collectors.down_row(down, busy) == expected
+
+
+def test_a_pass_says_nothing_of_a_running_collectors_health_or_a_silent_engine(tmp_path):
+    """The marker covers a container being started, never a verdict on one that is up."""
+    health = {"ibkr_trader": {"ok": False, "summary": "exit 1", "container": "c1"}}
+    level, _detail = collectors.row(target(tmp_path), [ours(tmp_path)], health, busy=True)
+    assert level == collectors.WARN
+    assert collectors.row(target(tmp_path), None, {}, busy=True)[0] == collectors.FAIL
+
+
+@pytest.mark.parametrize(
+    ("text", "clock", "expected"),
+    [
+        ('{"started_at": 100, "until": 200}', 150, True),
+        ('{"started_at": 100, "until": 200}', 100, True),
+        ('{"started_at": 100, "until": 200}', 200, False),  # a killed pass's marker
+        ('{"started_at": 100, "until": 200}', 50, False),  # a clock that moved
+        ('{"started_at": "x", "until": 200}', 150, False),
+        ("[1, 2]", 150, False),
+        ("not json", 150, False),
+        (None, 150, False),
+    ],
+)
+def test_in_pass_reads_only_a_live_marker(tmp_path, text, clock, expected):
+    path = tmp_path / "pass.json"
+    if text is not None:
+        path.write_text(text, encoding="utf-8")
+    assert collectors.in_pass(path, clock) is expected
+
+
+def test_the_marker_is_up_while_the_pass_starts_containers_and_gone_after(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {"ibkr_trader": RUN, "sports_betting": RUN})
+    seen = []
+
+    class Watching(FakeDocker):
+        def up(self, checkout, service):
+            seen.append(json.loads((root / collectors.IN_PASS).read_text(encoding="utf-8")))
+            return super().up(checkout, service)
+
+    at(monkeypatch, 10_000.0)
+    assert collectors.main(["maintain"], docker=Watching([])) == 0
+    assert len(seen) == 2 and seen[0][collectors.STARTED_AT] == 10_000.0
+    assert seen[0][collectors.UNTIL] == 10_000.0 + 2 * collectors.TARGET_BOUND + (
+        collectors.PS_TIMEOUT
+    ), "each run target gets its whole bound"
+    assert not (root / collectors.IN_PASS).exists()
+
+
+def test_the_marker_goes_even_when_the_pass_raises(tmp_path):
+    path = tmp_path / "logs" / "pass.json"
+    with pytest.raises(RuntimeError), collectors.acting(path, [target(tmp_path)]):
+        assert path.is_file()
+        raise RuntimeError("boom")
+    assert not path.exists()
+
+
+def test_a_pass_that_only_stops_containers_writes_no_marker(tmp_path):
+    path = tmp_path / "pass.json"
+    with collectors.acting(path, [target(tmp_path, mode=STOP)]):
+        assert not path.exists()
+    with collectors.acting(path, []):
+        assert not path.exists()
+
+
 def test_an_assignment_the_workspace_no_longer_declares_is_amber(tmp_path, monkeypatch):
     devkit_home(tmp_path, monkeypatch, {"retired": RUN})
     rows = collectors.tray_rows(docker=FakeDocker([]))
