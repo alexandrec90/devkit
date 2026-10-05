@@ -302,6 +302,7 @@ installs no package of its own, as devkit does (see `tests/test_self_hosting.py`
 generated project's trees cannot -- an editable install points the checkout's venv at the
 checkout's `src/`, so a borrowed one tests the wrong code -- so its template
 `run-tests.py` and `lint-all.py` build the tree its own `.venv` on their first run,
+and re-sync it on any run after its lock has moved on (a merge that added a package),
 through `rerun_in_venv` in the vendored `scripts/hooks/toolchain.py`. The hook itself
 does two things a linked worktree otherwise
 lacks, each only when its conditions hold:
