@@ -54,6 +54,20 @@ def test_what_another_part_of_the_loop_already_tracks_is_not_filed_twice():
         "d dependabot": f"{fix_stall.fix_budget.DAILY_CAPPED}: 2 of 2 sessions sent in the last 24h",
     }
     assert fix_stall.stalled([line(72, tracked), line(0, tracked)], NOW) == []
+    assert all(fix_stall.tracked(why) for why in tracked.values())
+    assert not fix_stall.tracked(HELD["carameli #8"]) and not fix_stall.tracked(None)
+
+
+def test_a_tracked_wait_breaks_the_run_an_untracked_one_is_dated_from():
+    # data-lake dependabot, 2026-10-05: a session sent, then a day under the Dependabot
+    # cap, then half an hour behind a red harness -- filed as a day-long harness hold.
+    sent = {"carameli #8": "already dispatched at 2026-09-25T06:00:05+00:00"}
+    capped = {"carameli #8": f"{fix_stall.fix_budget.DAILY_CAPPED}: 2 of 2 sessions sent"}
+    history = [line(30, HELD), line(26, sent), line(20, capped), line(0.5, HELD), line(0, HELD)]
+    assert fix_stall.streaks(history, "waiting") == {
+        "carameli #8": (history[3]["when"], HELD["carameli #8"])
+    }
+    assert fix_stall.stalled(history, NOW) == []
 
 
 def test_history_reads_skip_junk_and_a_missing_file_is_empty(tmp_path):
