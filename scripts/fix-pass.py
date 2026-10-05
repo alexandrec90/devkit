@@ -221,8 +221,12 @@ def ship_intents(
         if outcome.intent.branch != intent.branch:
             # Carried off a retired name: the record names what went out, or it reads as
             # a merged branch shipping again. The session's resolutions named the retired
-            # name too, whose PR predates them, so they follow the fix to its new one.
-            since = ship_intent.retired_at(intent.tree, intent.branch)
+            # name too, whose PR predates them, so they follow the fix to its new one. A
+            # hand-named branch never headed a PR, so every resolution naming it does.
+            if intent.adopt:
+                since = ship_intent.EVER
+            else:
+                since = ship_intent.retired_at(intent.tree, intent.branch)
             moved = fix_loop.triage.repoint(
                 intent.branch, outcome.intent.branch, since, root / fix_cycle.DEVKIT
             )

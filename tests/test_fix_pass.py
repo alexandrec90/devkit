@@ -1441,6 +1441,35 @@ def test_a_carried_intent_is_recorded_under_the_branch_it_went_out_on(monkeypatc
     ]
 
 
+def test_an_adopted_branch_re_points_every_resolution_naming_it(monkeypatch, tmp_path):
+    """A hand-named branch (32f97dae) never headed a PR, so no merge time bounds which of
+    the resolutions naming it are this tree's: all of them are, and `fix_verify` would
+    reopen each when `reddit-import-memory-cap` never became a PR."""
+    found = ship_intent.Intent("ss", tmp_path, "memory-cap", "S", "B", adopt=True)
+    moved = ship_intent.Intent("ss", tmp_path, "agent/memory-cap", "S", "B")
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: [found])
+    monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda *a: ship_intent.Outcome(moved, ship_intent.SHIPPED, "u/pull/9", "u/pull/9"),
+    )
+
+    def never(*_a):
+        raise AssertionError("a hand-named branch has no merged PR to ask gh about")
+
+    monkeypatch.setattr(fix_pass.ship_intent, "retired_at", never)
+    pointed = []
+    monkeypatch.setattr(
+        fix_pass.fix_loop.triage,
+        "repoint",
+        lambda old, new, since, root: pointed.append((old, new, since)) or ["r1"],
+    )
+    [line], _, _ = fix_pass.ship_intents(tmp_path, ["ss"], fix_cycle.DISPATCH)
+    assert line.startswith("ss agent/memory-cap (carried off memory-cap; 1 resolution(s)")
+    assert pointed == [("memory-cap", "agent/memory-cap", ship_intent.EVER)]
+
+
 def test_a_refused_intent_is_recorded_by_the_line_that_says_why(monkeypatch, tmp_path):
     """2026-10-02: the record kept the output's tail -- "refused: mment If a secret has
     already been committed, visit https://help.github.com/..." -- and the line naming the
