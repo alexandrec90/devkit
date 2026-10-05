@@ -45,12 +45,13 @@ process inside the container and the tray polls every two minutes.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -74,6 +75,18 @@ ARTIFACT = Path("logs/collectors.log")
 HEALTH = Path("logs/collectors.health.json")
 CODE_AT, HELD, STARTED_AT = "code_at", "held", "started_at"
 
+# Present while a `maintain` pass is acting on containers, `{started_at, until}`, and
+# removed when it ends. A start or redeploy builds for minutes and then leaves the
+# container `Created` -- or the one it replaces `Exited` -- for the seconds before compose
+# starts it, so a row read then is a pass at work, not a collector down. 3cc7de43: the fix
+# pass read ibkr_trader's row seven seconds into a redeploy's start and filed "not running
+# (Created)" against a container that was up when the finding landed. `until` bounds a
+# marker a killed pass left behind (`TARGET_BOUND`).
+IN_PASS = Path("logs/collectors.pass.json")
+UNTIL = "until"
+# A row's state while that pass is at it.
+STARTING = "being started by the collectors pass"
+
 # Every spawn here is reachable from a scheduled task under `pythonw.exe`; see
 # `tests/test_scheduled_jobs.py`. Zero off Windows, where the flag does not exist.
 NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -91,6 +104,9 @@ STOP_TIMEOUT = 120
 HEALTH_TIMEOUT = 120
 INSPECT_TIMEOUT = 30
 GIT_TIMEOUT = 30
+# The longest one container target can hold a pass: every spawn `keep_running` makes, at
+# its timeout -- two image inspects, three git calls, the build and the health check.
+TARGET_BOUND = 2 * INSPECT_TIMEOUT + 3 * GIT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
 
 # The tray's three levels, spelled as `tray_state` spells them. Not imported from there:
 # `tray_state` imports this module, and `test_collectors.py` pins the two to each other.
@@ -500,6 +516,40 @@ def maintain(
             keep_stopped(target, containers, docker, report)
 
 
+@contextlib.contextmanager
+def acting(path: Path, chosen: Sequence[Target]) -> Iterator[None]:
+    """`IN_PASS` written for as long as the block runs, when any of `chosen` is a `run`
+    target -- a pass that only stops containers starts none -- and removed however it
+    ends. `until` allows each such target its whole `TARGET_BOUND`."""
+    started = [t for t in chosen if t.mode == config.RUN]
+    if not started:
+        yield
+        return
+    clock = _clock()
+    until = clock + len(started) * TARGET_BOUND + PS_TIMEOUT
+    write_file(path, json.dumps({STARTED_AT: clock, UNTIL: until}) + "\n")
+    try:
+        yield
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def in_pass(path: Path, clock: float) -> bool:
+    """Whether `acting`'s marker at `path` says a pass is at work at `clock`. A marker
+    past its `until` is one a killed pass left; one starting after `clock` is a clock
+    that moved. Either, or one unreadable, is no pass."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    started, until = raw.get(STARTED_AT), raw.get(UNTIL)
+    if not (isinstance(started, (int, float)) and isinstance(until, (int, float))):
+        return False
+    return started <= clock < until
+
+
 def status(
     collectors: Sequence[config.Collector],
     chosen: Sequence[Target],
@@ -548,8 +598,12 @@ def write_file(path: Path, text: str) -> None:
 # --- the tray's half --------------------------------------------------------------
 
 
-def row(target: Target, containers: Sequence[Container] | None, health: dict) -> tuple[str, str]:
-    """`(level, detail)` for one assigned collector."""
+def row(
+    target: Target, containers: Sequence[Container] | None, health: dict, busy: bool = False
+) -> tuple[str, str]:
+    """`(level, detail)` for one assigned collector. `busy` is a `maintain` pass at work
+    (`in_pass`), which is starting whatever it finds down: green until it is done, and a
+    start that fails fails that pass."""
     if target.mode == config.STOP:
         box = find(containers or [], target.checkout, target.collector.service)
         if box is not None and box.running:
@@ -558,16 +612,24 @@ def row(target: Target, containers: Sequence[Container] | None, health: dict) ->
     if containers is None:
         return FAIL, "docker is not answering"
     box = find(containers, target.checkout, target.collector.service)
-    if box is None:
-        return FAIL, "no container -- see logs/collectors.log"
-    if not box.running:
-        return FAIL, f"not running ({box.status})"
+    if box is None or not box.running:
+        return down_row(box, busy)
     verdict = health.get(target.collector.project, {})
     if verdict.get("container") == box.id and verdict.get("ok") is False:
         jobs = verdict.get("unhealthy")
         named = f": {', '.join(map(str, jobs))}" if isinstance(jobs, list) and jobs else ""
         return WARN, f"{HEALTH_FAILING}{named} -- {verdict.get('summary', '')}"
     return OK, f"running ({box.status})"
+
+
+def down_row(box: Container | None, busy: bool) -> tuple[str, str]:
+    """`row`'s answer for a `run` collector with no running container: red, unless a
+    pass is at work (`busy`), which is starting it."""
+    if busy:
+        return OK, f"{STARTING} ({box.status if box else 'no container yet'})"
+    if box is None:
+        return FAIL, "no container -- see logs/collectors.log"
+    return FAIL, f"not running ({box.status})"
 
 
 def assigned(root: Path = REPO_ROOT) -> tuple[list[config.Collector], list[Target]]:
@@ -623,7 +685,10 @@ def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tupl
     if chosen:
         containers = (docker or Docker(TRAY_PS_TIMEOUT)).ps()
         health = load_health(base / HEALTH)
-        rows += [(ROW_PREFIX + t.collector.project, *row(t, containers, health)) for t in chosen]
+        busy = in_pass(base / IN_PASS, _clock())
+        rows += [
+            (ROW_PREFIX + t.collector.project, *row(t, containers, health, busy)) for t in chosen
+        ]
     rows += [
         (ROW_PREFIX + t.collector.project, OK, "off on this machine (by choice)")
         for t in scheduled
@@ -835,7 +900,9 @@ def main(
         report.say("no collector is assigned to this machine -- nothing to do")
     maintain_scheduled([t for t in chosen if t.collector.scheduled], base, report, run)
     health = load_health(base / HEALTH)
-    maintain([t for t in chosen if not t.collector.scheduled], engine, report, health)
+    in_containers = [t for t in chosen if not t.collector.scheduled]
+    with acting(base / IN_PASS, in_containers):
+        maintain(in_containers, engine, report, health)
     write_file(base / HEALTH, json.dumps(health, indent=2, sort_keys=True) + "\n")
     return finish()
 

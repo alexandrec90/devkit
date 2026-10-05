@@ -456,6 +456,12 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
         # dotenv-linter's finding in the `.env.example` it had staged went red in CI: a
         # second fixer for one pair of quotes. --changed leaves nothing to choose.
         assert "python scripts/lint-all.py --changed" in text and "*.py" not in text
+        # afd00d21: "so no file type is left out" read as every type being linted, and a
+        # fixer found its CLAUDE.md and workflow edits skipped. The scope is whole; the
+        # linters are not, and the prompt says which half it promises.
+        assert "no file type is left out" not in text
+        assert "no changed file is left out of its scope" in text
+        assert "names the changed files it has none for" in text
         # A resolver took main's wording in a rule, ran the two ratchets it was named,
         # and left #398 13 tokens over the hot-tier ceiling: a third session to fix it.
         assert "python scripts/hot-budget.py" in text
