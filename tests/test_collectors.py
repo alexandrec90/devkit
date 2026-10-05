@@ -662,6 +662,25 @@ def test_check_health_keeps_the_projects_words_in_the_log(tmp_path):
     assert "    a" in report.lines and "    b" in report.lines
 
 
+def test_a_failing_verdict_names_the_jobs_the_project_says_are_unhealthy(tmp_path):
+    """6b140f4e: every failing ibkr_trader job was one row, "health check failing", so its
+    `social` job missing boto3 read as the fixed `reddit` failure recurring. The project's
+    own `unhealthy:` line names which, and the row carries it into the group's key."""
+    out = (
+        "health artifact: logs/scheduler-health.json (written 2026-10-04T22:16:52+00:00)\n"
+        "job     status   last success\nsocial  failing  never\n\nunhealthy: social, reddit\n"
+    )
+    record = collectors.check_health(
+        target(tmp_path), ours(tmp_path), FakeDocker(health=(1, out)), collectors.Report()
+    )
+    assert record["unhealthy"] == ["reddit", "social"]
+    level, detail = collectors.row(target(tmp_path), [ours(tmp_path)], {"ibkr_trader": record})
+    assert level == collectors.WARN
+    assert detail.startswith("health check failing: reddit, social -- exit 1: health artifact")
+    assert collectors.unhealthy_jobs("  Unhealthy:  prices \n") == ["prices"]
+    assert collectors.unhealthy_jobs("api-sports  idle  runs 7 fail 1\n") == []
+
+
 def test_keep_running_records_nothing_for_a_collector_without_a_health_command(tmp_path):
     no_health = target(tmp_path, health=())
     docker = FakeDocker()

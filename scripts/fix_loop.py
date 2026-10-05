@@ -494,7 +494,7 @@ def collector_findings(
         )
         verdict = (health or {}).get(project, {})
         stale = _verdict_predates_fix(finding, items, verdict, ctx.now)
-        if not (state == collectors.HEALTH_FAILING and stale):
+        if not (state.startswith(collectors.HEALTH_FAILING) and stale):
             found.append(finding)
     return found
 

@@ -183,7 +183,9 @@ def test_a_session_is_judged_as_the_pass_files_it(tmp_path):
     (tree / "scripts" / "run-tests.py").write_text(
         'parser.add_argument("--all", action="store_true")\n', encoding="utf-8"
     )
-    (tree / ".claude" / "rules" / "session-scope.md").write_text("# scope\n", encoding="utf-8")
+    (tree / ".claude" / "rules" / "session-scope.md").write_text(
+        f"# scope\n{supervise.session_friction.WHOLE_RUN_NAMED}\n", encoding="utf-8"
+    )
     command = ".venv/Scripts/python.exe scripts/run-tests.py > out.txt 2>&1"
     rows = [
         {

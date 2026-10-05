@@ -126,6 +126,81 @@ def test_a_missing_module_is_friction_only_when_the_call_failed():
     assert classes([call("cat notes.md", "2"), quoted]) == []
 
 
+def test_an_error_serialized_into_a_record_quotes_it():
+    """4ae355df: a fixer read a container's health JSON, whose `last_traceback` holds a
+    traceback as one escaped string, and PowerShell wrapped it so the string's opening
+    quote sat a line above the error. The `\\n` before it is the escape a real traceback
+    never prints: the error is a record's text, the very failure the fixer was sent at."""
+    command = (
+        "docker exec ibkr_trader-app-1 cat /app/logs/scheduler-health.json; "
+        "git log --oneline -6 origin/HEAD"
+    )
+    record = (
+        '        "last_traceback": "Traceback (most recent call last):\\n  File '
+        '\\"/data-lake/src/data_lake/archive/store.py\\", \r\n'
+        "line 102, in from_settings\\n    import boto3\\nModuleNotFoundError: No module named "
+        "'boto3'\\n\\nThe above exception was \r\nthe direct cause\n4ffdf9d Merge pull request"
+    )
+    assert classes([call(command, "1"), result(record, "1", error=False)]) == []
+    printed = (
+        "  File store.py, line 102\n    import boto3\nModuleNotFoundError: No module named 'boto3'"
+    )
+    assert classes([call("git status; pytest tests/x.py", "2"), result(printed, "2")]) == [
+        "environment"
+    ], "the same error printed is still the environment"
+    in_a_tree = "C:\\ws\\x\\.claude\\worktrees\\nifty-lark\\.venv\\Scripts\\python.exe: No module named pytest"
+    assert classes([call("python -m pytest tests/x.py", "3"), result(in_a_tree, "3")]) == [
+        "environment"
+    ], "a `\\n` opening a path segment is no escaped newline"
+
+
+def test_a_module_the_session_then_declares_was_the_projects_missing_dependency():
+    """8d969865: a fixer wrote its regression test first and watched it fail on duckdb's
+    undeclared `pytz`, then declared it in `pyproject.toml`. The run lacked what the
+    project never asked for -- the defect it was fixing -- not a tree left unprovisioned."""
+    run = ".venv/Scripts/python.exe -m pytest tests/test_lens.py -q 2>&1 | tail -8"
+    failed = result(
+        "E   _duckdb.InvalidInputException: Required module 'pytz' failed to import\r\n"
+        "E   ModuleNotFoundError: No module named 'pytz'\r\n\r\n"
+        "FAILED tests/test_lens.py::test_a_timestamp_column",
+        "1",
+        error=False,
+    )
+    ran = [call(run, "1"), failed]
+    declare = _tool(
+        "Edit",
+        "2",
+        file_path="C:\\ws\\social-scraper\\pyproject.toml",
+        old_string='  "duckdb>=1.1",\n',
+        new_string='  "duckdb>=1.1",\n  "pytz>=2024.1",\n',
+    )
+    assert classes([*ran, declare]) == []
+    assert classes([*ran, call("uv add pytz && uv lock", "3")]) == []
+    assert classes(ran) == ["environment"], "nothing declared: it stands"
+    other = _tool("Edit", "2", file_path="pyproject.toml", old_string="a", new_string='"rich"')
+    assert classes([*ran, other]) == ["environment"], "a different package declared"
+    source = _tool("Edit", "2", file_path="lens.py", old_string="a", new_string="import pytz")
+    assert classes([*ran, source]) == ["environment"], "not a dependency manifest"
+    assert classes([declare, *ran]) == ["environment"], "declared before: the tree was not synced"
+
+
+def test_declared_text_reads_manifests_and_adds_and_declares_matches_whole_names():
+    edit = st.Event("call", 1, '"pytz>=2024.1",', tool="Edit", path="a/pyproject.toml")
+    assert sf.declared_text(edit) == '"pytz>=2024.1",'
+    patch = "*** Begin Patch\n*** Update File: requirements-dev.txt\n+typing_extensions\n"
+    assert "typing_extensions" in sf.declared_text(
+        st.Event("call", 1, command=patch, tool="apply_patch")
+    )
+    added = st.Event("call", 1, command="cd x && uv add pyyaml && pytest t.py", tool="Bash")
+    assert "uv add pyyaml" in sf.declared_text(added)
+    assert "pytest" not in sf.declared_text(added), "only the add"
+    assert sf.declared_text(st.Event("call", 1, "import pytz", tool="Edit", path="lens.py")) == ""
+    assert sf.declares("typing_extensions.x", "typing-extensions>=4")
+    assert sf.declares("pytz", '"PyTZ>=2024.1"'), "case aside"
+    assert not sf.declares("tz", '"pytz>=2024.1"'), "a whole name only"
+    assert not sf.declares("pytz", '"pytz-deprecation-shim"')
+
+
 def test_a_failing_test_is_the_work_and_not_friction():
     """Red, edit, red, edit: each failure followed a change, so none was a wasted retry."""
     rows = []
@@ -172,6 +247,18 @@ def test_claude_codes_sleep_guard_refusal_is_neither_a_block_nor_a_poll():
     # Any other refusal is still a blocked call.
     other = "<tool_use_error>Blocked: rm -rf / is not allowed</tool_use_error>"
     assert classes([call("rm -rf /", "1"), result(other, "1")]) == ["blocked-call"]
+
+
+def test_the_sleep_guards_powershell_refusal_is_not_a_blocked_call():
+    """228353d8: the same guard refusing a PowerShell `Start-Sleep 40; Get-Content` was
+    filed as a blocked call, since only the Bash spelling was known as the guard's."""
+    command = 'Start-Sleep 40; Get-Content "$env:TEMP\\claude\\x\\scratchpad\\cli.log" -Tail 8'
+    refusal = (
+        '<tool_use_error>Blocked: Start-Sleep 40 followed by: Get-Content "$env:TEMP\\claude'
+        '\\x\\scratchpad\\cli.log" -Tail 8. To wait for a condition, use Monitor with an '
+        "until-loop (e.g. `until <check>; do sleep 2; done` — Monitor runs bash).</tool_use_error>"
+    )
+    assert classes([_tool("PowerShell", "1", command=command), result(refusal, "1")]) == []
 
 
 def test_no_verify_in_a_scratch_repository_is_a_fixture_not_a_bypass():
@@ -983,7 +1070,7 @@ def test_a_whole_suite_is_friction_only_where_the_scope_rule_asked_for_less(tmp_
     held, adopted = tmp_path / "data-lake", tmp_path / "ibkr_trader"
     for checkout in (held, adopted):
         (checkout / ".claude" / "rules").mkdir(parents=True)
-    (adopted / sf.SCOPE_RULE).write_text("# Rule: Stop at the change\n", encoding="utf-8")
+    (adopted / sf.SCOPE_RULE).write_text(SCOPE_RULE_TEXT, encoding="utf-8")
     assert kinds(held) == []
     assert kinds(adopted) == ["full-suite"]
     gone = ".claude/worktrees/nifty-coalescing-lark"
@@ -994,6 +1081,42 @@ def test_a_whole_suite_is_friction_only_where_the_scope_rule_asked_for_less(tmp_
     assert not sf.asks_for_targeted_runs(str(held), tmp_path, "ibkr_trader")
     assert sf.asks_for_targeted_runs(str(tmp_path / "gone"), tmp_path, "ibkr_trader")
     assert not sf.asks_for_targeted_runs(str(tmp_path / "gone"), tmp_path, "data-lake")
+
+
+# A scope rule as the vendored one reads since it named the spelling sessions type.
+SCOPE_RULE_TEXT = (
+    "# Rule: Stop at the change\n\n- run the whole test suite — `pytest tests`, or any run\n"
+    "  naming no test file, however few tests it holds — or wait on a CI gate.\n"
+)
+
+
+def test_a_whole_suite_under_a_scope_rule_older_than_its_spelling_is_the_pull_owed(tmp_path):
+    """8d219c5f, marked RECURRED: a social-scraper session ran `pytest tests` on
+    v0.11.46, whose rule still said only "run the whole test suite" -- the spelling that
+    retired the group last time landed four hours later and was in no release yet. That
+    tree was never told, so the fix is the pull it owes, as for a heredoc ban."""
+    run = ".venv\\Scripts\\python.exe -m pytest tests -q -p no:cacheprovider 2>&1"
+    chunk = st.Chunk(((1, user("expand the scraper")), (2, call(run, "1"))), 0)
+    stale, current = tmp_path / "social-scraper", tmp_path / "carameli"
+    for checkout in (stale, current):
+        (checkout / ".claude" / "rules").mkdir(parents=True)
+    (stale / sf.SCOPE_RULE).write_text(
+        "# Rule: Stop at the change\n\n- run the whole test suite, or wait on a CI gate.\n",
+        encoding="utf-8",
+    )
+    (current / sf.SCOPE_RULE).write_text(SCOPE_RULE_TEXT, encoding="utf-8")
+
+    def kinds(cwd: Path) -> list[str]:
+        return [
+            f.kind for f in sf.session_findings(tmp_path / "s.jsonl", chunk, str(cwd), tmp_path)
+        ]
+
+    assert kinds(stale) == []
+    assert kinds(stale / ".claude/worktrees/federated-skipping-bee") == []
+    assert kinds(current) == ["full-suite"]
+    assert sf.asks_for_targeted_runs(str(REPO_ROOT), tmp_path, "devkit"), (
+        "devkit's own rule carries the spelling the detector reads"
+    )
 
 
 def test_a_heredoc_write_is_friction_only_where_the_rule_bans_it(tmp_path):
@@ -1054,7 +1177,7 @@ def test_a_bare_run_tests_is_whole_only_where_the_runner_defaults_to_the_suite(t
     targeted, whole = tmp_path / "devkit", tmp_path / "social-scraper"
     for checkout in (targeted, whole):
         (checkout / ".claude" / "rules").mkdir(parents=True)
-        (checkout / sf.SCOPE_RULE).write_text("# Rule: Stop at the change\n", encoding="utf-8")
+        (checkout / sf.SCOPE_RULE).write_text(SCOPE_RULE_TEXT, encoding="utf-8")
         (checkout / "scripts").mkdir()
     (targeted / sf.RUNNER).write_text(
         'parser.add_argument("--all", action="store_true")\n', encoding="utf-8"

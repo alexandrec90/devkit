@@ -39,7 +39,7 @@ class Event:
 
     kind: str  # "user", "say" (the agent's own text), "call" or "result"
     line: int
-    text: str = ""
+    text: str = ""  # for an edit call, what it writes
     command: str = ""
     error: bool = False
     call_id: str = ""
@@ -97,6 +97,7 @@ def _claude_block(block: dict, speaker: str, line: int) -> Event | None:
         return Event(
             "call",
             line,
+            _written(given),
             command=command,
             call_id=call_id,
             tool=tool,
@@ -108,6 +109,18 @@ def _claude_block(block: dict, speaker: str, line: int) -> Event | None:
         call_id = str(block.get("tool_use_id", ""))
         return Event("result", line, _text(block.get("content")), error=error, call_id=call_id)
     return None
+
+
+def _written(given: dict) -> str:
+    """The text an edit call puts in its file: `Edit`'s new string, `Write`'s content,
+    each of a `MultiEdit`'s; "" for any other call."""
+    listed = given.get("edits")
+    edits = listed if isinstance(listed, list) else [given]
+    return "\n".join(
+        str(edit.get("new_string") or edit.get("content") or "")
+        for edit in edits
+        if isinstance(edit, dict)
+    ).strip()
 
 
 def codex_events(row: dict, line: int) -> Iterator[Event]:

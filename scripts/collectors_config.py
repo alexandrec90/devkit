@@ -64,7 +64,9 @@ class Collector:
     - **a container** (`service`): a compose service keeping its own clock inside, which
       this job keeps up. `health` is a command run *inside* it, whose exit code is the
       project's own verdict on whether ingestion is actually pulling data. Empty means the
-      project offers none, and only "is the container up" is reported.
+      project offers none, and only "is the container up" is reported. A failing one may
+      print `unhealthy: <job>, <job>` (`collectors.UNHEALTHY_LINE`), which makes each
+      job's failure its own group on the ledger rather than one per project.
     - **a scheduled command** (`command`): argv run on the host from the project's
       checkout every `minutes`, by a Windows Scheduled Task of its own named after the
       collector (`collector_tasks`). For work that cannot live in a container --
