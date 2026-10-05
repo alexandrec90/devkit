@@ -34,6 +34,7 @@ from fix_plan import (
     UNFETCHABLE_ENTRY,
     Failure,
     describe,
+    is_unstarted,
     name_of,
 )
 from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
@@ -150,6 +151,8 @@ def _logs(failure: Failure) -> str:
 
     Two sessions were told the logs were under `logs/gate/` and spent turns finding the
     directory absent: the run had aged out, or uploaded nothing. Saying so is cheaper.
+    A run whose jobs never started a step has no log to read at all, and "no artifact
+    came down" gave its fixer no hint of that (carameli PR Gate run 37363944090).
     """
     if failure.evidence:
         return (
@@ -157,6 +160,13 @@ def _logs(failure: Failure) -> str:
             f"{_first_read(Path(failure.evidence))} there first. {LINUX}"
         )
     where = failure.url or "the run"
+    if is_unstarted(failure.signature):
+        return (
+            "No job that failed ever started a step, so there is no log: a runner was "
+            "never acquired, or the job's `runs-on` or `if:` never let it start. The pass "
+            f"re-runs such a run once before sending anyone; read the run's annotations at "
+            f"{where} first, and fix the workflow if they name it. {LINUX}"
+        )
     return f"No artifact came down from the run; read it at {where} first. {LINUX}"
 
 

@@ -305,7 +305,7 @@ def test_a_job_log_that_names_nothing_hands_back_the_jobs_already_read(tmp_path)
 
 
 def test_a_log_that_names_nothing_still_falls_back_to_the_jobs(tmp_path):
-    jobs = [{"name": "Frontend", "conclusion": "failure", "steps": []}]
+    jobs = [{"name": "Frontend", "conclusion": "failure", "steps": [{"name": "s"}]}]
     gh = table(
         {("run", "view", "7"): {"jobs": jobs}, ("run", "view", "7", "--log-failed"): "x\ty\tz\n"}
     )
@@ -487,7 +487,7 @@ def test_without_an_artifact_the_steps_are_asked_for(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
     failure = ev.read_pr(tmp_path, ev.pr_failure("carameli", pr()), tmp_path / "ev")
-    assert failure.signature == ("Drift",)
+    assert failure.signature == ("Drift (never started a step)",)
     assert failure.evidence == ""
 
 
@@ -568,6 +568,39 @@ def test_a_default_branch_whose_red_jobs_never_got_a_runner_is_marked_too(monkey
     assert failure.signature == (f"Lint / {fix_plan.NO_RUNNER}", f"Tests / {fix_plan.NO_RUNNER}")
 
 
+def test_a_run_whose_jobs_never_started_is_read_with_its_attempt(monkeypatch, tmp_path):
+    """carameli PR Gate run 37363944090: one job cancelled with zero steps. The plan
+    re-runs a first attempt like that instead of sending a session, so its attempt is
+    read -- and only then, one call, never for a run with a failure to name."""
+    jobs = [{"name": "Backend unit + integration", "conclusion": "cancelled", "steps": []}]
+    gh = table(
+        {
+            ("run", "list"): [{"databaseId": 7, "headSha": "sha1"}],
+            ("run", "view", "7", "--json", "jobs,conclusion,headSha,url"): {"jobs": jobs},
+            ("run", "view", "7", "--json", "attempt"): {"attempt": 1},
+            ("run", "view", "7", "--log-failed"): "",
+        }
+    )
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    failure = ev.read_pr(tmp_path, ev.pr_failure("carameli", pr()), tmp_path / "ev")
+    assert failure.signature == ("Backend unit + integration (never started a step)",)
+    assert failure.attempt == 1
+    [decision] = fix_plan.plan([failure], "", ())
+    assert decision.action == fix_plan.RERUN
+
+
+def test_the_attempt_is_asked_for_only_of_an_unstarted_signature():
+    gh = table({("run", "view", "7", "--json", "attempt"): {"attempt": 2}})
+    assert ev.run_attempt(gh, "7", ("Drift (never started a step)",)) == 2
+    assert ev.run_attempt(gh, "7", ("Tests / Suite",)) == 0
+    assert ev.run_attempt(gh, "", ("Drift (never started a step)",)) == 0
+    assert len(gh.calls) == 1
+    for said in ({"attempt": "x"}, [], "not json"):
+        assert (
+            ev.run_attempt(table({("run", "view"): said}), "7", ("J (never started a step)",)) == 0
+        )
+
+
 def test_a_conflict_with_no_run_is_still_signed(monkeypatch, tmp_path):
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({}))
     conflicted = pr(mergeable="CONFLICTING", statusCheckRollup=[])
@@ -592,7 +625,8 @@ def test_an_issue_becomes_a_nightly_failure_on_the_default_branch(monkeypatch, t
     monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "master")
     failure = ev.read_issue("carameli", tmp_path, issue, tmp_path / "ev")
     assert (failure.kind, failure.number, failure.workflow) == (fix_plan.NIGHTLY, 9, "Nightly")
-    assert (failure.base, failure.run_id, failure.signature) == ("master", "55", ("Suite",))
+    unstarted = ("Suite (never started a step)",)
+    assert (failure.base, failure.run_id, failure.signature) == ("master", "55", unstarted)
 
 
 NIGHTLY_YML = """\

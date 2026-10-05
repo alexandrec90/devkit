@@ -344,6 +344,18 @@ def test_a_prompt_says_when_no_artifact_came_down_instead_of_naming_an_empty_dir
     assert "read the run at its URL" in fix_prompts.upstream_prompt((none,), "agent/fix")
 
 
+def test_a_prompt_says_when_the_failed_job_never_started_a_step():
+    """carameli PR Gate run 37363944090: "Failing: see the run" and "no artifact came
+    down" gave its fixer no hint that the one red job had never been given a runner."""
+    sig = ("Backend unit + integration (never started a step)",)
+    text = fix_prompts.pr_prompt(failure(evidence="", url="u/412", signature=sig))
+    assert "Backend unit + integration (never started a step)" in text
+    assert "No job that failed ever started a step, so there is no log" in text
+    assert "a runner was never acquired" in text
+    assert "annotations at u/412" in text
+    assert "No artifact came down" not in text
+
+
 def test_the_resolver_leaves_the_merge_for_the_pass_to_commit():
     """The first resolver the pass sent used --no-verify on its merge commit and flagged
     it itself. Now it commits nothing: the pass concludes the merge with the hooks

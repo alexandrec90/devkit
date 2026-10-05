@@ -344,18 +344,30 @@ def rerun_workflow(failure: fix_plan.Failure, root: Path) -> int:
     That run decides next pass: green, and the reporter closes the tracker issue; red,
     and it is a failure at the tip with its fixer. The plan makes this only for a
     workflow that takes `workflow_dispatch`, so a refusal here is worth reporting.
-    A gate whose red jobs never got a runner (`lost_runs`) has its failed jobs re-run.
+
+    A run whose jobs never started a step is re-run in place instead
+    (`fix_plan.reruns_in_place`): its failed and cancelled jobs, on the same commit,
+    which is what the PR's checks or the branch's verdict read next pass. So is a gate
+    whose red jobs GitHub said it never gave a runner (`lost_runs`), every run of it.
     """
     gh = sweep.gh_for(root / failure.project)
     if failure.lost_runs:
         return rerun_lost_jobs(gh, failure)
-    done = gh("workflow", "run", failure.rerun_file, "--ref", failure.base)
-    name = f"{failure.project} #{failure.number}"
+    in_place = fix_plan.reruns_in_place(failure)
+    if in_place:
+        done = gh("run", "rerun", failure.run_id, "--failed")
+    else:
+        done = gh("workflow", "run", failure.rerun_file, "--ref", failure.base)
+    name = f"{failure.project} {fix_plan.name_of(failure)}"
     if done.returncode != 0:
         why = (done.stderr or done.stdout or "").strip().splitlines()
-        print(f"  {name}: workflow run failed: {why[-1] if why else '?'}", file=sys.stderr)
+        what = "run rerun" if in_place else "workflow run"
+        print(f"  {name}: {what} failed: {why[-1] if why else '?'}", file=sys.stderr)
         return EXIT_FAILED
-    print(f"  {name}: {failure.workflow} re-run on origin/{failure.base} at {failure.tip[:9]}")
+    if in_place:
+        print(f"  {name}: run {failure.run_id}'s jobs never started a step; re-ran them")
+    else:
+        print(f"  {name}: {failure.workflow} re-run on origin/{failure.base} at {failure.tip[:9]}")
     return EXIT_OK
 
 
