@@ -120,6 +120,19 @@ def run_jobs(gh: Gh, run_id: str) -> list[dict]:
     return [job for job in jobs if isinstance(job, dict)] if isinstance(jobs, list) else []
 
 
+def run_attempt(gh: Gh, run_id: str, sig: tuple[str, ...]) -> int:
+    """The run's attempt when `sig` is jobs that never started a step, which is when the
+    plan re-runs it once (`fix_plan.reruns_in_place`); 0 otherwise, or when `gh` cannot say.
+    """
+    if not run_id or not fix_plan.is_unstarted(sig):
+        return 0
+    viewed = gh_json(gh("run", "view", str(run_id), "--json", "attempt"))
+    try:
+        return int(viewed.get("attempt", 0) or 0) if isinstance(viewed, dict) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]]:
     """`(artifact texts, jobs)`: the run's artifacts downloaded under `dest` and read by
     `junit_report`, and its jobs whenever those texts name nothing.
@@ -378,6 +391,7 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
         run_id=run_ids[0],
         evidence=str(where) if texts else "",
         behind=behind,
+        attempt=run_attempt(gh, run_ids[0], sig),
     )
 
 
@@ -425,7 +439,12 @@ def read_default_branch(
     sig = fix_plan.signature(False, texts, jobs)
     if fix_plan.is_release_red(sig) and is_tagged(git, failure.sha):
         return True, None
-    return False, replace(failure, signature=sig, evidence=str(where) if texts else "")
+    return False, replace(
+        failure,
+        signature=sig,
+        evidence=str(where) if texts else "",
+        attempt=run_attempt(gh, run_id, sig),
+    )
 
 
 def collect_default_branches(
@@ -514,11 +533,13 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
         return failure  # held until the run at the tip is done, so nothing to download
     where = root / evidence_slot(failure)
     texts, jobs = run_evidence(gh, run_id, where)
+    sig = fix_plan.signature(False, texts, jobs)
     return replace(
         failure,
-        signature=fix_plan.signature(False, texts, jobs),
+        signature=sig,
         sha=str(red.get("headSha", "") or "") or run_head(gh, run_id),
         evidence=str(where) if texts else "",
+        attempt=run_attempt(gh, run_id, sig),
     )
 
 

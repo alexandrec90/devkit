@@ -95,13 +95,69 @@ def test_without_an_artifact_the_failed_steps_are_the_signature():
             ],
         },
         {"name": "Lint", "conclusion": "success", "steps": []},
-        {"name": "Drift", "conclusion": "failure", "steps": []},
+        {"name": "Drift", "conclusion": "failure", "steps": [SET_UP]},
     ]
     assert fix_plan.signature_from_jobs(jobs) == ("Drift", "Tests / Application suite")
 
 
+SET_UP = {"name": "Set up job", "conclusion": "success"}
+# carameli PR Gate run 37363944090, as `gh run view --json jobs` gave it: the run failed,
+# and its only non-green job was one no hosted runner ever picked up.
+UNACQUIRED = [
+    {"name": "Backend unit + integration", "conclusion": "cancelled", "steps": []},
+    {"name": "Lint", "conclusion": "success", "steps": [SET_UP]},
+]
+UNACQUIRED_SIG = ("Backend unit + integration (never started a step)",)
+
+
+def test_a_job_that_never_started_a_step_is_named_as_one():
+    """The run's signature was empty -- a cancelled job was not a failure -- so its fixer
+    was told "see the run" and that no artifact came down, with no hint the job never ran."""
+    assert fix_plan.signature_from_jobs(UNACQUIRED) == UNACQUIRED_SIG
+    assert fix_plan.is_unstarted(UNACQUIRED_SIG)
+    failed = [{"name": "Drift", "conclusion": "failure", "steps": []}]
+    assert fix_plan.signature_from_jobs(failed) == ("Drift (never started a step)",)
+
+
+def test_a_cancelled_job_beside_a_real_failure_is_its_collateral():
+    """A matrix's fail-fast cancels the queued siblings; naming them would make the
+    signature of one failure depend on how far the others got."""
+    jobs = [
+        {
+            "name": "Tests",
+            "conclusion": "failure",
+            "steps": [{"name": "Suite", "conclusion": "failure"}],
+        },
+        *UNACQUIRED,
+    ]
+    assert fix_plan.signature_from_jobs(jobs) == ("Tests / Suite",)
+    assert not fix_plan.is_unstarted(("Tests / Suite", *UNACQUIRED_SIG))
+    assert not fix_plan.is_unstarted(())
+
+
+def test_a_first_attempt_no_runner_started_is_re_run_in_place_not_fixed():
+    unstarted = failure(signature=UNACQUIRED_SIG, run_id="37363944090", attempt=1)
+    [decision] = fix_plan.plan([unstarted], "v0-11-21", PREFIXES)
+    assert decision.action == fix_plan.RERUN
+    assert "run 37363944090's failed jobs are re-run once" in decision.note
+    assert fix_plan.reruns_in_place(unstarted)
+
+
+def test_a_second_attempt_no_runner_started_gets_its_fixer():
+    """Once is luck; the same twice is a workflow whose job cannot start, and that is
+    code. An unread attempt (0) or no run to re-run is not re-run either."""
+    for unstarted in (
+        failure(signature=UNACQUIRED_SIG, run_id="7", attempt=2),
+        failure(signature=UNACQUIRED_SIG, run_id="7", attempt=0),
+        failure(signature=UNACQUIRED_SIG, run_id="", attempt=1),
+    ):
+        [decision] = fix_plan.plan([unstarted], "v0-11-21", PREFIXES)
+        assert decision.action == fix_plan.DISPATCH, unstarted
+    assert not fix_plan.reruns_in_place(failure(signature=UNACQUIRED_SIG, run_id=""))
+
+
 def test_the_artifact_wins_over_the_steps_and_a_conflict_comes_first():
-    jobs = [{"name": "Tests", "conclusion": "failure", "steps": []}]
+    jobs = [{"name": "Tests", "conclusion": "failure", "steps": [SET_UP]}]
     assert fix_plan.signature(True, [SUMMARY], jobs) == (
         fix_plan.CONFLICT,
         "scripts/hooks/tests/test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
@@ -473,6 +529,19 @@ def test_a_nightly_red_at_the_tip_or_unreadable_or_not_dispatchable_gets_its_fix
     ):
         [decision] = fix_plan.plan([nightly], "v0-11-23", PREFIXES)
         assert decision.action == fix_plan.DISPATCH, nightly
+
+
+def test_a_nightly_whose_jobs_never_started_is_re_run_at_the_tip_when_it_predates_it():
+    """Running the workflow at the tip answers both questions at once; re-running the
+    old run in place would only say whether a runner turns up for an old commit."""
+    stale = _nightly(signature=UNACQUIRED_SIG, run_id="55", attempt=1)
+    assert fix_plan.reruns_at_tip(stale) and not fix_plan.reruns_in_place(stale)
+    [decision] = fix_plan.plan([stale], "v0-11-23", PREFIXES)
+    assert decision.note.endswith("re-running it there")
+    at_tip = _nightly(signature=UNACQUIRED_SIG, run_id="55", attempt=1, sha="b31b60cbbbbb")
+    assert fix_plan.reruns_in_place(at_tip)
+    [decision] = fix_plan.plan([at_tip], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.RERUN and "re-run once" in decision.note
 
 
 def test_the_tip_note_names_both_commits_and_what_the_pass_does():

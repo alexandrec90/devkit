@@ -94,7 +94,9 @@ DISPATCH = "dispatch"  # one agent, in a worktree on the failure's own branch
 RESOLVE = "resolve"  # the same worktree, a conflict-only prompt, and nothing about the gate
 UPSTREAM = "upstream"  # one agent in devkit, for a signature shared across consumers
 UPDATE = "update"  # no agent: the PR is behind its base, so update it and let the gate re-run
-RERUN = "rerun"  # no agent: a nightly's red run predates the tip, so run it there first
+# no agent: a nightly's red run predates the tip, so run it there first; or no job of a
+# run's first attempt started a step, so re-run its failed jobs (`reruns_in_place`)
+RERUN = "rerun"
 SKIP = "skip"  # nothing, and the note says why
 HOLD = "hold"  # nothing this pass: its base is red, and the base's fixer goes first
 # The actions that are one GitHub call and no session: free, so never rationed.
@@ -133,6 +135,8 @@ JS_FAIL_LINE = re.compile(r"^\s*FAIL\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?(?: > .+
 # since every one of them is anchored at the line's start.
 LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# What a job with no steps at all carries after its name in a signature.
+UNSTARTED = "(never started a step)"
 
 
 @dataclass(frozen=True)
@@ -168,6 +172,8 @@ class Failure:
     tip: str = ""
     tip_running: bool = False
     rerun_file: str = ""
+    # The run's attempt, read only when its signature `is_unstarted`; 0 when not read.
+    attempt: int = 0
 
 
 @dataclass(frozen=True)
@@ -201,26 +207,34 @@ def _entry(raw: str) -> str:
 def signature_from_jobs(jobs: Iterable[dict]) -> tuple[str, ...]:
     """`job / step` for every failed step, when no artifact says anything finer.
 
-    A job that failed with no failed step named -- a cancelled one, a runner that
-    never started -- contributes its own name, so a run that failed outside any step
-    still has a signature rather than an empty one that would match every other
-    artifact-less failure.
+    A failed job with no failed step named contributes its own name, so a run that
+    failed outside any step still has a signature rather than an empty one that would
+    match every other artifact-less failure. A job with no steps at all never started
+    one, and says so (`UNSTARTED`): failed, or cancelled while nothing else failed --
+    carameli's PR Gate run 37363944090 failed on one job no hosted runner ever picked up,
+    `cancelled` with zero steps, and its fixer was sent out with "see the run". A
+    cancelled job beside a real failure is that failure's collateral, and left out.
     """
     found: set[str] = set()
+    unstarted: set[str] = set()
     for job in jobs:
-        if not isinstance(job, dict) or str(job.get("conclusion", "")).lower() != "failure":
+        if not isinstance(job, dict):
             continue
+        conclusion = str(job.get("conclusion", "")).lower()
         name = str(job.get("name", "?"))
-        steps = [
-            s
-            for s in job.get("steps", []) or []
-            if isinstance(s, dict) and str(s.get("conclusion", "")).lower() == "failure"
-        ]
-        if steps:
-            found.update(f"{name} / {s.get('name', '?')}" for s in steps)
-        else:
-            found.add(name)
-    return tuple(sorted(found))
+        steps = [s for s in job.get("steps", []) or [] if isinstance(s, dict)]
+        if not steps and conclusion in ("failure", "cancelled"):
+            (found if conclusion == "failure" else unstarted).add(f"{name} {UNSTARTED}")
+        elif conclusion == "failure":
+            failed = [s for s in steps if str(s.get("conclusion", "")).lower() == "failure"]
+            found.update([f"{name} / {s.get('name', '?')}" for s in failed] or [name])
+    return tuple(sorted(found or unstarted))
+
+
+def is_unstarted(sig: tuple[str, ...]) -> bool:
+    """Every entry is a job that never started a step: a runner never acquired, or a
+    `runs-on`/`if:` that never let it start -- nothing a session can read code for."""
+    return bool(sig) and all(entry.endswith(UNSTARTED) for entry in sig)
 
 
 def signature(conflicted: bool, texts: Iterable[str], jobs: Iterable[dict]) -> tuple[str, ...]:
@@ -412,6 +426,10 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     there that is still going decides, and a red run from before the tip is re-run on it
     before any session goes. ibkr_trader's Nightly was fixed on main an hour after its
     run went red, and the fixer sent at that run spent its session finding out (85219e18).
+
+    A run whose first attempt failed only on jobs that never started a step is re-run
+    in place, once: that is a runner GitHub never handed out, not code. A second attempt
+    the same way is no longer luck, and its fixer goes, told the job never started.
     """
     against_red = failure.kind in (PR, NIGHTLY) and (failure.project, failure.base) in red_bases
     if CONFLICT in failure.signature and not against_red:
@@ -427,9 +445,27 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
         return Decision(HOLD, held_note(failure), (failure,))
     if failure.kind == NIGHTLY and failure.tip_running:
         return Decision(HOLD, tip_note(failure, "a run at the tip is in progress"), (failure,))
-    if failure.kind == NIGHTLY and failure.rerun_file and failure.tip not in ("", failure.sha):
+    if reruns_at_tip(failure):
         return Decision(RERUN, tip_note(failure, "re-running it there"), (failure,))
+    if reruns_in_place(failure) and failure.attempt == 1:
+        why = f"no runner started it, so run {failure.run_id}'s failed jobs are re-run once"
+        return Decision(RERUN, f"{describe(failure)}; {why}", (failure,))
     return None
+
+
+def reruns_at_tip(failure: Failure) -> bool:
+    """A nightly's red run predates its base's tip, and its workflow can be run there."""
+    return (
+        failure.kind == NIGHTLY
+        and bool(failure.rerun_file)
+        and failure.tip not in ("", failure.sha)
+    )
+
+
+def reruns_in_place(failure: Failure) -> bool:
+    """A `RERUN` of this failure re-runs its own run's failed jobs (`gh run rerun
+    --failed`) rather than dispatching its workflow at the tip."""
+    return bool(failure.run_id) and is_unstarted(failure.signature) and not reruns_at_tip(failure)
 
 
 def tip_note(failure: Failure, what: str) -> str:
