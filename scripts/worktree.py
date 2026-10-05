@@ -41,7 +41,9 @@ Modes:
                   borrows the rest of the stack from the static checkout — the
                   cheap preview for a frontend change.
   provision <box> install the toolchain into a box that was cut without one (the
-                  guard hook cuts those — see `apply_new`).
+                  guard hook cuts those — see `apply_new`). In a linked worktree it
+                  first moves each path-source sibling to the ref CI pins now
+                  (`link_siblings`), so a bumped pin is followed.
   reap <box>      tear the stack down, remove the worktree, delete the branch,
                   release the lease. **Refuses while the box still holds work.**
   reap --all      the same pass over every live box, stepping over the ones still
@@ -5923,14 +5925,30 @@ def provision_target(root: Path, name: str) -> tuple[str, Path]:
     raise WorktreeError(f"no live box or checkout called {name!r}; live boxes: {known}")
 
 
+def link_siblings(path: Path) -> list[str]:
+    """Cut or move a linked worktree's path-source siblings to the ref its CI pins now.
+
+    916daf9b: the `post-checkout` hook aims the shared `../data-lake` at ibkr's PR-gate
+    pin when a tree is cut, and nothing re-aimed it after a session moved that pin -- so
+    the relock the pin's own comment prescribes ran against the old data-lake. Re-running
+    provisioning is the one command a session is told to reach for, so it re-reads the
+    pin. Nothing for a static checkout: its `..` is the sibling's own checkout.
+    """
+    checkout = worktree_env.checkout_of(path)
+    return [] if checkout is None else worktree_env.link_path_sources(path, checkout)
+
+
 def _run_provision(args: argparse.Namespace) -> int:
     root = args.workspace.parent
     name, path = provision_target(root, args.box)
     steps = plan_provision(path)
+    # Before the sync, which resolves the path source against wherever the sibling sits.
+    linked = [] if args.dry_run else link_siblings(path)
     ok, notes = run_provision(path, steps) if steps and not args.dry_run else (True, [])
     if args.json:
         payload = {
             "box": name,
+            "siblings": linked,
             "steps": [asdict(step) for step in steps],
             "applied": not args.dry_run,
             "ok": ok,
@@ -5938,6 +5956,8 @@ def _run_provision(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2))
     else:
+        for line in linked:
+            print(line)
         print(render_provision(name, steps, applied=not args.dry_run, notes=notes, ok=ok))
     return 0 if ok else 1
 
