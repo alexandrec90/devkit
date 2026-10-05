@@ -58,6 +58,7 @@ import fix_plan
 import fix_reports
 import sweep
 import task_branch as tb
+import worktree_tiers
 from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -108,6 +109,9 @@ class Intent:
     # The checkout's default branch: what the PR opens against, and what decided
     # `blocked`. Read once per checkout by `find_intents`.
     base: str = ""
+    # A hand-named branch in an agent's worktree (`hand_named`), which `ship_one` renames
+    # into the `agent/` namespace before it commits.
+    adopt: bool = False
 
     @property
     def digest(self) -> str:
@@ -187,6 +191,28 @@ def has_open_pr(gh, branch: str) -> bool:
     return isinstance(rows, list) and bool(rows)
 
 
+# The namespace a hand-named branch is renamed into (`hand_named`).
+ADOPTED_NAMESPACE = "agent/"
+# A `since` before every resolution, for re-pointing off a name that never headed a PR.
+EVER = "1970-01-01T00:00:00+00:00"
+
+
+def hand_named(tree: Path, branch: str, base: str) -> bool:
+    """Whether `branch` is a name a session gave its task branch by hand, in a tree that
+    is disposable by where it sits.
+
+    The namespace rule (`ship.is_shippable`) keeps a PR from opening off a long-lived home
+    branch. An agent CLI's worktree or a box is never one, whatever its branch is called:
+    a session in social-scraper's spent fixer tree cut `reddit-import-memory-cap` and
+    wrote its intent, and every pass refused it (32f97dae). The ship skill never names
+    the rule, so the session had no way to know. The default branch and the static
+    checkout stay blocked.
+    """
+    if not branch or branch == base or "/" in branch:
+        return False
+    return worktree_tiers.is_worktree(tree) or worktree_tiers.is_box(tree)
+
+
 def find_intents(
     root: Path, projects: list[str], git_for=sweep.git_for, gh_for=sweep.gh_for
 ) -> list[Intent]:
@@ -219,7 +245,9 @@ def find_intents(
         shippable, why = ship.is_shippable(branch, base)
         if not shippable and branch != base and has_open_pr(gh_for(root / project), branch):
             shippable, why = True, ""
-        found.append(Intent(project, tree, branch, subject, body, "" if shippable else why, base))
+        adopt = not shippable and hand_named(tree, branch, base)
+        blocked = "" if shippable or adopt else why
+        found.append(Intent(project, tree, branch, subject, body, blocked, base, adopt))
     return found
 
 
@@ -520,6 +548,21 @@ def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Inten
     return intent, step, output
 
 
+def adopt_name(intent: Intent, runner: Runner) -> Intent | str:
+    """The intent with its hand-named branch renamed to `agent/<name>` -- or to the next
+    free `-<n>` after it when that is taken locally or on origin -- or git's complaint.
+
+    `git branch -m` renames the ref and repoints HEAD without touching the index or the
+    tree, so a merge in progress survives it, and no unnamespaced ref is left behind."""
+    stem = f"{ADOPTED_NAMESPACE}{intent.branch}"
+    taken = _taken_names(stem, runner, intent.tree)
+    name = stem if stem not in taken else next_free_name(stem, taken)
+    done = runner(["git", "branch", "-m", name], cwd=intent.tree)
+    if done.returncode != 0:
+        return f"`git branch -m {name}`: {_first(done)}"
+    return replace(intent, branch=name, adopt=False)
+
+
 def retired_at(tree: Path, branch: str, gh_for=sweep.gh_for) -> str:
     """When `branch`'s newest merged PR merged, as `gh` prints it; "" when unknown.
 
@@ -704,6 +747,12 @@ def ship_one(
     mid_merge = not porcelain.strip() and merging(tree, runner)
     if settled := _settled(intent, porcelain, base, runner, when, mid_merge):
         return settled
+    if intent.adopt:
+        adopted = adopt_name(intent, runner)
+        if isinstance(adopted, str):
+            _record_failure(intent, "rename", adopted, when)
+            return Outcome(intent, FAILED, f"rename: {adopted}")
+        intent = adopted
     if porcelain.strip() or mid_merge:
         intent, step, output = _commit_carrying(intent, python, runner)
         if step:

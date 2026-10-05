@@ -154,7 +154,7 @@ def test_an_edited_or_unshipped_intent_is_still_found(tmp_path):
         ship_intent.write_state(one.tree, state)
         found = ship_intent.find_intents(tmp_path, ["carameli"], git_for)
         assert [i.subject for i in found] == [one.subject]
-        assert "not a namespaced task branch" in found[0].blocked
+        assert found[0].adopt and not found[0].blocked, "an agent tree's hand name is adopted"
 
 
 def test_spent_needs_a_shipped_stage_and_the_same_words(tmp_path):
@@ -225,12 +225,44 @@ def test_a_hand_named_branch_that_heads_an_open_pr_is_shippable(tmp_path):
 @pytest.mark.parametrize(
     ("code", "out"), [(0, "[]"), (1, ""), (0, "not json")], ids=["no-pr", "gh-failed", "garbage"]
 )
-def test_a_hand_named_branch_with_no_open_pr_stays_blocked(tmp_path, code, out):
+def test_a_hand_named_branch_with_no_open_pr_in_an_agent_tree_is_adopted(tmp_path, code, out):
+    """32f97dae: a session in social-scraper's spent fixer tree cut
+    `reddit-import-memory-cap`, and every pass refused its intent. The tree is disposable
+    by where it sits, so the pass renames the branch rather than stranding the work."""
     git_for = _one_tree_on(tmp_path, "flag-wired-agent-hooks")
     found = ship_intent.find_intents(tmp_path, ["carameli"], git_for, _gh_listing(code, out, []))
-    assert [i.blocked for i in found] == [
-        ship_intent.ship.is_shippable("flag-wired-agent-hooks", "main")[1]
+    assert [(i.blocked, i.adopt) for i in found] == [("", True)]
+
+
+def test_a_hand_named_branch_in_the_static_checkout_stays_blocked(tmp_path):
+    """The checkout itself may sit on a long-lived home branch, which is what the
+    namespace rule is there to keep a PR off."""
+    checkout = tmp_path / "carameli"
+    (checkout / "logs").mkdir(parents=True)
+    (checkout / ship_intent.INTENT_FILE).write_text("Resolve it\n", encoding="utf-8")
+    git_for = listing_git(checkout, "develop")
+    found = ship_intent.find_intents(tmp_path, ["carameli"], git_for, _gh_listing(0, "[]", []))
+    assert [(i.blocked, i.adopt) for i in found] == [
+        (ship_intent.ship.is_shippable("develop", "main")[1], False)
     ]
+
+
+@pytest.mark.parametrize(
+    ("where", "branch", "adopted"),
+    [
+        (Path("p/.claude/worktrees/t"), "memory-cap", True),
+        (Path(".worktrees/p--t"), "memory-cap", True),
+        (Path("p"), "memory-cap", False),
+        (Path("p/.claude/worktrees/t"), "main", False),
+        (Path("p/.claude/worktrees/t"), "", False),
+        (Path("p/.claude/worktrees/t"), "feature/x", False),
+    ],
+    ids=["claude-tree", "box", "static", "default", "detached", "namespaced"],
+)
+def test_hand_named_is_an_unnamespaced_task_branch_in_a_disposable_tree(
+    tmp_path, where, branch, adopted
+):
+    assert ship_intent.hand_named(tmp_path / where, branch, "main") is adopted
 
 
 @pytest.mark.parametrize(
@@ -650,6 +682,57 @@ def test_a_failed_carry_is_written_into_the_recorded_refusal(tmp_path):
     output = ship_intent.read_state(one.tree)["output"]
     assert "the carry to a fresh name failed: `git branch agent/labels-0919-2`" in output
     assert ship_intent.RETIRED_MARK in ship_intent.refusal_line(output), "same signature"
+
+
+@pytest.mark.parametrize(
+    ("taken", "name"),
+    [
+        (set(), "agent/memory-cap"),
+        ({"agent/memory-cap", "agent/memory-cap-x"}, "agent/memory-cap-2"),
+    ],
+    ids=["free", "taken"],
+)
+def test_an_adopted_intent_is_renamed_into_the_namespace_before_it_commits(tmp_path, taken, name):
+    """32f97dae: the intent went out on no pass. Renamed, it commits, pushes and opens
+    its PR under the namespaced name, and a name already used counts on from it."""
+    one = replace(intent(tmp_path), branch="memory-cap", adopt=True)
+    run = _RetiredBranch(retired=set(), taken=taken, branch="memory-cap")
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.SHIPPED
+    assert (out.intent.branch, out.intent.adopt) == (name, False)
+    argv = [argv for argv, _c, _e in run.calls]
+    rename = argv.index(["git", "branch", "-m", name])
+    assert rename < argv.index(next(a for a in argv if a[:2] == ["git", "commit"]))
+    assert ["git", "push", "-u", "origin", name] in argv
+
+
+def test_a_rename_git_refuses_is_a_failure_to_retry(tmp_path):
+    one = replace(intent(tmp_path), branch="memory-cap", adopt=True)
+    run = Runner({"git branch": (128, "", "fatal: cannot rename\n")})
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED
+    assert out.detail == "rename: `git branch -m agent/memory-cap`: fatal: cannot rename"
+    assert "git commit" not in run.verbs() and "git push" not in run.verbs()
+    assert ship_intent.read_state(one.tree)["stage"] == ship_intent.FAILED
+
+
+def test_the_rename_keeps_a_merge_in_progress(tmp_path):
+    """A real repository, because the property is git's: a tree mid-merge keeps its
+    `MERGE_HEAD` and its index through `git branch -m`."""
+    repo, git = _resolving(tmp_path, "c")
+    one = ship_intent.Intent("r", repo, "feat", "S", "", adopt=True)
+    moved = ship_intent.adopt_name(one, ship_intent.run_quiet)
+    assert isinstance(moved, ship_intent.Intent) and moved.branch == "agent/feat"
+    assert git("branch", "--show-current").stdout.strip() == "agent/feat"
+    assert git("rev-parse", "-q", "--verify", "refs/heads/feat").returncode != 0, "no stray ref"
+    assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0, "still merging"
+    assert git("diff", "--cached", "--name-only").stdout.split() == ["f"], "index untouched"
+
+
+def test_ever_precedes_every_resolution_stamp():
+    """`harness_triage.carried` compares it with aware stamps, so it must be aware too."""
+    ever = _dt.datetime.fromisoformat(ship_intent.EVER)
+    assert ever.tzinfo is not None and ever < NOW
 
 
 def test_a_tree_whose_every_change_already_landed_is_nothing_to_ship(tmp_path, monkeypatch):

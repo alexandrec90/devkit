@@ -11,7 +11,8 @@ Dependabot runner clones one repository. Nobody noticed for days.
 Three of Dependabot's outputs are read here, per project:
 
 - **its update runs**: the newest run of each update job (`uv in /. for urllib3`), and the
-  error its failed log names (`run_errors`);
+  error its failed log names (`run_errors`), less a package's error that a PR merged
+  since the run has answered (`answered_since`);
 - **its open alerts that no open PR answers**, once Dependabot has had `ALERT_GRACE` to
   open one -- matched by the package's name in a PR's title, branch or body, so a
   fixer's hand bump answers it as well as Dependabot's own PR would;
@@ -48,7 +49,7 @@ import worktree_env
 
 # The dynamic workflow GitHub runs every Dependabot job under; `gh run list` takes the name.
 WORKFLOW = "Dependabot Updates"
-RUN_FIELDS = "databaseId,conclusion,status,url,displayTitle,createdAt"
+RUN_FIELDS = "databaseId,conclusion,status,url,displayTitle,createdAt,headSha"
 RUN_LIMIT = 15
 FAILED = frozenset({"failure", "timed_out", "startup_failure"})
 # Failed jobs whose log is read per project per pass: one per update job is plenty, and
@@ -58,12 +59,17 @@ LOGS_READ = 3
 ALERT_GRACE = _dt.timedelta(hours=24)
 ALERTS = "repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100"
 PR_FIELDS = "number,title,headRefName,body"
+# Merged PRs read for a bump that answered a failed run after it ran (`answered_since`).
+MERGED_FIELDS = f"{PR_FIELDS},mergedAt"
+MERGED_LIMIT = 30
 EVIDENCE_FILE = fix_plan.DEPENDABOT_EVIDENCE
 
 # `uv in /. for urllib3 - Update #1607644272`: the job is everything before the counter.
 _UPDATE_SUFFIX = re.compile(r"\s+-\s+Update\s+#\d+\s*$")
 _ERROR = re.compile(r"\bERROR <job_\d+> (.+?)\s*$")
 _HANDLED = re.compile(r"Handled error whilst updating ([^:]+): (\w+)")
+# The signature entry `run_errors` makes of a handled error: `run sqlalchemy: <kind>`.
+_HANDLED_ENTRY = re.compile(r"run ([^\s:]+): (\w+)")
 _UNFETCHABLE = re.compile(r"path based dependencies could not be retrieved: (.+?) at \S+")
 _QUOTED = re.compile(r'"([^"]+)"')
 _REASON_LIMIT = 160
@@ -133,12 +139,38 @@ def _names(pr: dict, package: str) -> bool:
     return re.search(whole, text) is not None
 
 
-def _created(alert: dict) -> _dt.datetime | None:
+def _stamp(row: dict, key: str) -> _dt.datetime | None:
     try:
-        when = _dt.datetime.fromisoformat(str(alert.get("created_at", "")).replace("Z", "+00:00"))
+        when = _dt.datetime.fromisoformat(str(row.get(key, "")).replace("Z", "+00:00"))
     except ValueError:
         return None
     return when if when.tzinfo else when.replace(tzinfo=_dt.UTC)
+
+
+def _created(alert: dict) -> _dt.datetime | None:
+    return _stamp(alert, "created_at")
+
+
+def answered_since(entry: str, run: dict, merged: Iterable[dict]) -> str:
+    """`#N` of a merged PR naming the package `entry`'s handled error names, merged after
+    `run` started; "" when there is none, or `entry` names no package.
+
+    Dependabot runs a version-update job on its schedule, a week apart, so its newest
+    run of a job can predate the bump that answered it by days. data-lake's run on
+    135bfa8 said `sqlalchemy: dependency_file_content_not_changed`; #50 bumped sqlalchemy
+    two hours later, and the next pass sent a fixer at the same run anyway (6b4570a4).
+    A run after the merge that says it again is a fresh failure, and is read as one.
+    """
+    handled = _HANDLED_ENTRY.fullmatch(entry)
+    started = _stamp(run, "createdAt")
+    if not handled or started is None:
+        return ""
+    package = _norm(handled.group(1))
+    for pr in merged:
+        at = _stamp(pr, "mergedAt")
+        if at is not None and at > started and _names(pr, package):
+            return f"#{pr.get('number', '')}"
+    return ""
 
 
 def _patched(alert: dict) -> str:
@@ -216,6 +248,12 @@ def open_prs(gh: Gh) -> list[dict]:
     return _listed(gh("pr", "list", "--state", "open", "--limit", "100", "--json", PR_FIELDS))
 
 
+def merged_prs(gh: Gh) -> list[dict]:
+    return _listed(
+        gh("pr", "list", "--state", "merged", "--limit", str(MERGED_LIMIT), "--json", MERGED_FIELDS)
+    )
+
+
 def failed_log(gh: Gh, run: dict) -> str:
     done = gh("run", "view", str(run.get("databaseId", "")), "--log-failed")
     return str(getattr(done, "stdout", "") or "") if getattr(done, "returncode", 1) == 0 else ""
@@ -237,6 +275,38 @@ def _sibling_lines(project_dir: Path, names: list[str]) -> list[str]:
     return lines
 
 
+def ran_on(run: dict) -> str:
+    """`run on 135bfa8 at 2026-10-04T20:22:50Z`: what a fixer holds against the base's
+    log to tell a run that predates a fix from one that outlived it."""
+    sha = str(run.get("headSha", "") or "")[:7] or "an unknown commit"
+    return f"run on {sha} at {run.get('createdAt', '') or 'an unknown time'}"
+
+
+def read_runs(gh: Gh) -> tuple[list[tuple[dict, list[str]]], list[dict], list[str]]:
+    """`(failing jobs read, with what each still says; every failing run still counted;
+    a line per run a later merge answered)`.
+
+    A run's handled errors that a bump merged since answers are dropped
+    (`answered_since`), and a run left saying nothing is not failing at all: it is a
+    line for the record until Dependabot runs the job again.
+    """
+    failing_runs = failing_updates(update_runs(gh))
+    read = [(run, run_errors(failed_log(gh, run))) for run in failing_runs[:LOGS_READ]]
+    handled = any(_HANDLED_ENTRY.fullmatch(e) for _, said in read for e in said)
+    merged = merged_prs(gh) if handled else []
+    failing, stale, notes = [], [], []
+    for run, said in read:
+        answered = {e: answered_since(e, run, merged) for e in said}
+        live = [e for e in said if not answered[e]]
+        if said and not live:
+            stale.append(run)
+            by = ", ".join(sorted(set(answered.values())))
+            notes.append(f"{update_job(run)} failed ({ran_on(run)}), and {by} answered it since")
+            continue
+        failing.append((run, live))
+    return failing, [run for run in failing_runs if run not in stale], notes
+
+
 def evidence_text(
     project: str, failing: list[tuple[dict, list[str]]], alerts: list[dict], wanted: dict[str, str]
 ) -> str:
@@ -245,7 +315,7 @@ def evidence_text(
     if failing:
         lines += ["## Failing update jobs", ""]
         for run, errors in failing:
-            lines.append(f"- {update_job(run)} -- {run.get('url', '')}")
+            lines.append(f"- {update_job(run)} -- {run.get('url', '')} ({ran_on(run)})")
             lines += [f"  - {error}" for error in errors] or ["  - (no error line in the log)"]
         lines.append("")
     if wanted:
@@ -276,17 +346,18 @@ def read_project(
     project: str, project_dir: Path, root: Path, now: _dt.datetime, gh: Gh
 ) -> tuple[fix_plan.Failure | None, str]:
     """`(failure, note)`: a failure when a session has something to do, a line for the
-    record when Dependabot is red on what no session can change, neither when green."""
-    failing_runs = failing_updates(update_runs(gh))
-    failing = [(run, run_errors(failed_log(gh, run))) for run in failing_runs[:LOGS_READ]]
+    record when Dependabot is red on what no session can change or a merge has answered
+    since its run, neither when green."""
+    failing, failing_runs, answered = read_runs(gh)
+    stale = "; ".join(f"{project} -- {WORKFLOW}: {line}" for line in answered)
     errors = [e for _, run_said in failing for e in run_said] or [
-        f"run {update_job(run)}: failed" for run in failing_runs[:LOGS_READ]
+        f"run {update_job(run)}: failed" for run, _ in failing
     ]
     alerts = open_alerts(gh)
     wanted = unanswered(alerts, open_prs(gh), now) if alerts else {}
     sig = signature(errors, wanted)
     if not sig:
-        return None, ""
+        return None, stale
     names = unfetchable(sig)
     if not actionable(sig):
         return None, (
@@ -311,7 +382,7 @@ def read_project(
         text += "\n## Path dependencies Dependabot cannot fetch\n\n"
         text += "\n".join(_sibling_lines(project_dir, names)) + "\n"
     (where / EVIDENCE_FILE).write_text(text, encoding="utf-8")
-    return replace(failure, evidence=str(where)), ""
+    return replace(failure, evidence=str(where)), stale
 
 
 def collect(

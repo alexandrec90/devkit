@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_dependabot as fd
 import fix_plan
@@ -116,8 +118,8 @@ def test_the_signature_puts_the_alerts_first_and_says_whether_a_session_can_act(
     assert fd.actionable(("run sqlalchemy: dependency_file_content_not_changed",))
 
 
-def gh_world(runs=(), alerts=None, prs=(), logs=None):
-    """A fake `gh` answering the four calls `read_project` makes; `alerts=None` is the
+def gh_world(runs=(), alerts=None, prs=(), logs=None, merged=()):
+    """A fake `gh` answering the five calls `read_project` makes; `alerts=None` is the
     403 a repository with alerts switched off answers."""
     asked: list = []
 
@@ -129,6 +131,8 @@ def gh_world(runs=(), alerts=None, prs=(), logs=None):
             if alerts is None:
                 return subprocess.CompletedProcess(args, 1, "", "HTTP 403: alerts are disabled")
             return subprocess.CompletedProcess(args, 0, json.dumps(alerts), "")
+        if args[:4] == ("pr", "list", "--state", "merged"):
+            return subprocess.CompletedProcess(args, 0, json.dumps(list(merged)), "")
         if args[:2] == ("pr", "list"):
             return subprocess.CompletedProcess(args, 0, json.dumps(list(prs)), "")
         if args[:2] == ("run", "view"):
@@ -214,12 +218,94 @@ def test_only_the_newest_failing_jobs_logs_are_read(tmp_path, monkeypatch):
     assert failure is None, "every job died on the sibling, and no alert waits"
 
 
+RAN = "2026-10-04T20:22:50Z"
+PR_50 = {
+    "number": 50,
+    "title": "Bump sqlalchemy 2.0.51 -> 2.1.3 in uv.lock",
+    "headRefName": "agent/fix-dependabot-updates-1004",
+    "body": "",
+    "mergedAt": "2026-10-04T22:18:14Z",
+}
+
+
+def data_lake_run(created: str = RAN) -> dict:
+    """data-lake's run 37231865680, on 135bfa8, before #50 bumped sqlalchemy."""
+    return {**run("uv in /.", "failure", 7), "createdAt": created, "headSha": "135bfa8" + "1" * 33}
+
+
+def test_a_handled_error_a_bump_merged_since_answers_sends_no_fixer(tmp_path, monkeypatch):
+    """6b4570a4: the pass sent a fixer at run 37231865680 a day after #50 had bumped the
+    package it named; the job does not run again until Dependabot's next week."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, asked = gh_world([data_lake_run()], logs={"7": HANDLED_LOG}, merged=[PR_50])
+    failure, note = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, gh)
+    assert failure is None
+    assert note == (
+        "data-lake -- Dependabot Updates: uv in /. failed (run on 135bfa8 at "
+        f"{RAN}), and #50 answered it since"
+    )
+    assert ("pr", "list", "--state", "merged", "--limit", "30", "--json", fd.MERGED_FIELDS) in asked
+
+
+@pytest.mark.parametrize(
+    "merged",
+    [
+        [{**PR_50, "mergedAt": "2026-10-04T19:00:00Z"}],
+        [{**PR_50, "title": "Bump pydantic", "headRefName": "agent/x"}],
+        [],
+    ],
+    ids=["merged-before-the-run", "another-package", "none"],
+)
+def test_a_handled_error_no_later_merge_answers_is_still_a_failure(tmp_path, monkeypatch, merged):
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([data_lake_run()], logs={"7": HANDLED_LOG}, merged=merged)
+    failure, note = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, gh)
+    assert note == ""
+    assert failure is not None
+    assert failure.signature == ("run sqlalchemy: dependency_file_content_not_changed",)
+    text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
+    assert f"(run on 135bfa8 at {RAN})" in text, "the fixer can tell a stale run itself"
+
+
+def test_read_runs_keeps_what_no_merge_answered_and_counts_only_live_runs():
+    """A run's answered error is dropped and its others kept; a run left saying nothing
+    leaves the count, and a run whose log was never read stays in it."""
+    both = HANDLED_LOG + "x ERROR <job_1> Something else broke\n"
+    runs = [data_lake_run(), {**run("pip in /.", "failure", 8), "createdAt": RAN}]
+    runs += [run(f"npm in /{n}", "failure", 10 + n) for n in range(3)]
+    gh, _ = gh_world(runs, logs={"7": both, "8": HANDLED_LOG}, merged=[PR_50])
+    failing, counted, notes = fd.read_runs(gh)
+    assert [(r["databaseId"], said) for r, said in failing] == [
+        (7, ["run Something else broke"]),
+        (10, []),
+    ]
+    assert [r["databaseId"] for r in counted] == [7, 10, 11, 12]
+    assert notes == [
+        f"pip in /. failed (run on an unknown commit at {RAN}), and #50 answered it since"
+    ]
+
+
+def test_only_a_handled_error_asks_for_merged_prs(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    gh, asked = gh_world([data_lake_run()], logs={"7": UNFETCHABLE_LOG}, merged=[PR_50])
+    fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, gh)
+    assert not [a for a in asked if a[:4] == ("pr", "list", "--state", "merged")]
+
+
+def test_answered_since_needs_a_package_entry_and_a_run_time():
+    assert fd.answered_since("run sqlalchemy: x_y", data_lake_run(), [PR_50]) == "#50"
+    assert fd.answered_since("run Error during fetching", data_lake_run(), [PR_50]) == ""
+    assert fd.answered_since("run sqlalchemy: x", data_lake_run(created=""), [PR_50]) == ""
+    assert fd.ran_on({}) == "run on an unknown commit at an unknown time"
+
+
 def test_the_reads_answer_empty_on_a_gh_that_cannot():
     def broken(*args):
         return subprocess.CompletedProcess(args, 1, "", "offline")
 
     assert fd.update_runs(broken) == [] and fd.open_alerts(broken) == []
     assert fd.open_prs(broken) == [] and fd.failed_log(broken, {"databaseId": 1}) == ""
+    assert fd.merged_prs(broken) == []
 
 
 def test_evidence_text_names_every_job_and_alert():
