@@ -24,7 +24,9 @@ shapes `gh` returns, so `tests/test_fix_plan.py` drives every branch without a n
   has moved, so what it says may already be fixed on the base; the pass updates the
   branch and reads the new run next time. No session is spent on it.
 - **A nightly red before its base's tip is re-run, not fixed**, for the same reason:
-  the pass dispatches the workflow on the tip and reads that run next time.
+  the pass dispatches the workflow on the tip and reads that run next time. **A gate
+  whose only red jobs never got a runner is re-run too** (`gh run rerun --failed`):
+  no step ran, so there is nothing for a session to read and nothing in the code to fix.
 - **Three shapes are never dispatched.** A release PR is red by construction
   (`RELEASING.md`: `test_fallback_devkit_ref_tracks_the_newest_tag` fails until the
   tag exists, and `release-pipeline.py` judges exactly that red), so an agent sent at
@@ -95,7 +97,8 @@ RESOLVE = "resolve"  # the same worktree, a conflict-only prompt, and nothing ab
 UPSTREAM = "upstream"  # one agent in devkit, for a signature shared across consumers
 UPDATE = "update"  # no agent: the PR is behind its base, so update it and let the gate re-run
 # no agent: a nightly's red run predates the tip, so run it there first; or no job of a
-# run's first attempt started a step, so re-run its failed jobs (`reruns_in_place`)
+# run's first attempt started a step, or GitHub said no runner took its red jobs
+# (`lost_runs`), so re-run its failed jobs (`reruns_in_place`)
 RERUN = "rerun"
 SKIP = "skip"  # nothing, and the note says why
 HOLD = "hold"  # nothing this pass: its base is red, and the base's fixer goes first
@@ -115,6 +118,9 @@ RELEASE_PREFIX = "release/"
 
 # The signature a conflicted PR carries, beside whatever its gate said.
 CONFLICT = "merge conflict"
+# What a job GitHub never gave a runner is signed with, after its name: it ran no step,
+# so there is no step name, test id or log line to sign it by.
+NO_RUNNER = "no runner acquired"
 
 # Where the evidence lands inside the worktree the agent opens in. Under `logs/`
 # because every project ignores that directory, so nothing here can be committed.
@@ -172,6 +178,10 @@ class Failure:
     tip: str = ""
     tip_running: bool = False
     rerun_file: str = ""
+    # PR or BRANCH: the runs read whose only red jobs GitHub never gave a runner
+    # (`gate_evidence.runner_lost`), set only when that is every run read. Such a run is
+    # re-run (`gh run rerun --failed`), not fixed: nothing in the code made it red.
+    lost_runs: tuple[str, ...] = ()
     # The run's attempt, read only when its signature `is_unstarted`; 0 when not read.
     attempt: int = 0
 
@@ -429,7 +439,10 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
 
     A run whose first attempt failed only on jobs that never started a step is re-run
     in place, once: that is a runner GitHub never handed out, not code. A second attempt
-    the same way is no longer luck, and its fixer goes, told the job never started.
+    the same way is no longer luck, and its fixer goes, told the job never started --
+    unless GitHub's annotations say outright that no runner took them (`lost_runs`),
+    which is re-run at any attempt. Both come after the hold: a re-run under a red base
+    would only come back with the base's red.
     """
     against_red = failure.kind in (PR, NIGHTLY) and (failure.project, failure.base) in red_bases
     if CONFLICT in failure.signature and not against_red:
@@ -447,6 +460,11 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
         return Decision(HOLD, tip_note(failure, "a run at the tip is in progress"), (failure,))
     if reruns_at_tip(failure):
         return Decision(RERUN, tip_note(failure, "re-running it there"), (failure,))
+    if failure.lost_runs and CONFLICT not in failure.signature:
+        # c354f451, 27327483: roguelike's and social-scraper's gates each lost every red
+        # job to "not acquired by Runner", and a fixer was sent at a log that did not exist.
+        why = "GitHub never gave its red jobs a runner: re-running them"
+        return Decision(RERUN, f"{describe(failure)}; {why}", (failure,))
     if reruns_in_place(failure) and failure.attempt == 1:
         why = f"no runner started it, so run {failure.run_id}'s failed jobs are re-run once"
         return Decision(RERUN, f"{describe(failure)}; {why}", (failure,))

@@ -347,9 +347,12 @@ def rerun_workflow(failure: fix_plan.Failure, root: Path) -> int:
 
     A run whose jobs never started a step is re-run in place instead
     (`fix_plan.reruns_in_place`): its failed and cancelled jobs, on the same commit,
-    which is what the PR's checks or the branch's verdict read next pass.
+    which is what the PR's checks or the branch's verdict read next pass. So is a gate
+    whose red jobs GitHub said it never gave a runner (`lost_runs`), every run of it.
     """
     gh = sweep.gh_for(root / failure.project)
+    if failure.lost_runs:
+        return rerun_lost_jobs(gh, failure)
     in_place = fix_plan.reruns_in_place(failure)
     if in_place:
         done = gh("run", "rerun", failure.run_id, "--failed")
@@ -365,6 +368,21 @@ def rerun_workflow(failure: fix_plan.Failure, root: Path) -> int:
         print(f"  {name}: run {failure.run_id}'s jobs never started a step; re-ran them")
     else:
         print(f"  {name}: {failure.workflow} re-run on origin/{failure.base} at {failure.tip[:9]}")
+    return EXIT_OK
+
+
+def rerun_lost_jobs(gh, failure: fix_plan.Failure) -> int:
+    """`gh run rerun --failed` on each of `lost_runs`: the jobs no runner took, again."""
+    name = f"{failure.project} {fix_plan.name_of(failure)}"
+    for run_id in failure.lost_runs:
+        done = gh("run", "rerun", run_id, "--failed")
+        if done.returncode != 0:
+            why = (done.stderr or done.stdout or "").strip().splitlines()
+            print(
+                f"  {name}: run rerun {run_id} failed: {why[-1] if why else '?'}", file=sys.stderr
+            )
+            return EXIT_FAILED
+    print(f"  {name}: no runner took its red jobs; re-ran them in {', '.join(failure.lost_runs)}")
     return EXIT_OK
 
 
