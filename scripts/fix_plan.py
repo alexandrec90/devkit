@@ -24,7 +24,9 @@ shapes `gh` returns, so `tests/test_fix_plan.py` drives every branch without a n
   has moved, so what it says may already be fixed on the base; the pass updates the
   branch and reads the new run next time. No session is spent on it.
 - **A nightly red before its base's tip is re-run, not fixed**, for the same reason:
-  the pass dispatches the workflow on the tip and reads that run next time.
+  the pass dispatches the workflow on the tip and reads that run next time. **A gate
+  whose only red jobs never got a runner is re-run too** (`gh run rerun --failed`):
+  no step ran, so there is nothing for a session to read and nothing in the code to fix.
 - **Three shapes are never dispatched.** A release PR is red by construction
   (`RELEASING.md`: `test_fallback_devkit_ref_tracks_the_newest_tag` fails until the
   tag exists, and `release-pipeline.py` judges exactly that red), so an agent sent at
@@ -94,7 +96,7 @@ DISPATCH = "dispatch"  # one agent, in a worktree on the failure's own branch
 RESOLVE = "resolve"  # the same worktree, a conflict-only prompt, and nothing about the gate
 UPSTREAM = "upstream"  # one agent in devkit, for a signature shared across consumers
 UPDATE = "update"  # no agent: the PR is behind its base, so update it and let the gate re-run
-RERUN = "rerun"  # no agent: a nightly's red run predates the tip, so run it there first
+RERUN = "rerun"  # no agent: a nightly's red run predates the tip, or no runner ran a job
 SKIP = "skip"  # nothing, and the note says why
 HOLD = "hold"  # nothing this pass: its base is red, and the base's fixer goes first
 # The actions that are one GitHub call and no session: free, so never rationed.
@@ -113,6 +115,9 @@ RELEASE_PREFIX = "release/"
 
 # The signature a conflicted PR carries, beside whatever its gate said.
 CONFLICT = "merge conflict"
+# What a job GitHub never gave a runner is signed with, after its name: it ran no step,
+# so there is no step name, test id or log line to sign it by.
+NO_RUNNER = "no runner acquired"
 
 # Where the evidence lands inside the worktree the agent opens in. Under `logs/`
 # because every project ignores that directory, so nothing here can be committed.
@@ -168,6 +173,10 @@ class Failure:
     tip: str = ""
     tip_running: bool = False
     rerun_file: str = ""
+    # PR or BRANCH: the runs read whose only red jobs GitHub never gave a runner
+    # (`gate_evidence.runner_lost`), set only when that is every run read. Such a run is
+    # re-run (`gh run rerun --failed`), not fixed: nothing in the code made it red.
+    lost_runs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -412,6 +421,8 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     there that is still going decides, and a red run from before the tip is re-run on it
     before any session goes. ibkr_trader's Nightly was fixed on main an hour after its
     run went red, and the fixer sent at that run spent its session finding out (85219e18).
+    A PR or a default branch whose red jobs all lost their runner is re-run the same way,
+    after the hold: a re-run under a red base would only come back with the base's red.
     """
     against_red = failure.kind in (PR, NIGHTLY) and (failure.project, failure.base) in red_bases
     if CONFLICT in failure.signature and not against_red:
@@ -429,6 +440,11 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
         return Decision(HOLD, tip_note(failure, "a run at the tip is in progress"), (failure,))
     if failure.kind == NIGHTLY and failure.rerun_file and failure.tip not in ("", failure.sha):
         return Decision(RERUN, tip_note(failure, "re-running it there"), (failure,))
+    if failure.lost_runs and CONFLICT not in failure.signature:
+        # c354f451, 27327483: roguelike's and social-scraper's gates each lost every red
+        # job to "not acquired by Runner", and a fixer was sent at a log that did not exist.
+        why = "GitHub never gave its red jobs a runner: re-running them"
+        return Decision(RERUN, f"{describe(failure)}; {why}", (failure,))
     return None
 
 

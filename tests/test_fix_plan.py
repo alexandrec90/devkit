@@ -483,6 +483,35 @@ def test_the_tip_note_names_both_commits_and_what_the_pass_does():
     assert "at an older commit," in fix_plan.tip_note(_nightly(sha=""), "x")
 
 
+def _lost(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "head": "agent/x",
+        "signature": (f"Tests / {fix_plan.NO_RUNNER}",),
+        "lost_runs": ("37364441127",),
+    }
+    return failure(**(base | fields))
+
+
+def test_a_gate_whose_red_jobs_never_got_a_runner_is_re_run_not_fixed():
+    """c354f451, 27327483: roguelike's and social-scraper's gates lost every red job to
+    "not acquired by Runner", and the pass sent a fixer at each -- at no log at all."""
+    for lost in (_lost(), _lost(kind=fix_plan.BRANCH, number=0, head="")):
+        [decision] = fix_plan.plan([lost], "v0-11-23", PREFIXES)
+        assert decision.action == fix_plan.RERUN, lost.kind
+        assert decision.note.endswith("GitHub never gave its red jobs a runner: re-running them")
+        assert f"Tests / {fix_plan.NO_RUNNER}" in decision.note
+
+
+def test_a_lost_runner_under_a_red_base_or_a_conflict_is_not_re_run():
+    """Under a red base the re-run would only say the base's red, so the hold stands;
+    a conflict has no merge ref to run against, so the resolver still goes."""
+    red_base = failure(kind=fix_plan.BRANCH, number=0, head="", signature=("Tests / Pytest",))
+    decisions = fix_plan.plan([_lost(), red_base], "v0-11-23", PREFIXES)
+    assert {d.failures[0].kind: d.action for d in decisions}[fix_plan.PR] == fix_plan.HOLD
+    conflicted = _lost(signature=(fix_plan.CONFLICT,))
+    assert fix_plan.plan([conflicted], "v0-11-23", PREFIXES)[0].action == fix_plan.RESOLVE
+
+
 def test_a_nightly_with_a_run_going_at_the_tip_waits_for_that_run():
     [decision] = fix_plan.plan([_nightly(tip_running=True)], "v0-11-23", PREFIXES)
     assert decision.action == fix_plan.HOLD

@@ -924,6 +924,39 @@ def test_a_rerun_is_one_workflow_run_on_the_tip_and_no_session(monkeypatch, tmp_
     assert "workflow run failed: HTTP 422: no dispatch trigger" in capsys.readouterr().err
 
 
+def test_a_gate_no_runner_took_has_its_failed_jobs_re_run_and_no_session(
+    monkeypatch, tmp_path, capsys
+):
+    """c354f451, 27327483: a gate whose red jobs GitHub never gave a runner is
+    `gh run rerun --failed`, once per run read, and nothing is sent at it."""
+    calls = []
+
+    def gh_for(project_dir):
+        def gh(*args):
+            calls.append((project_dir.name, args))
+            code = 0 if args[2] != "9" else 1
+            return subprocess.CompletedProcess(args, code, "", "HTTP 403: run is too old")
+
+        return gh
+
+    monkeypatch.setattr(fix_pass.fix_prs.sweep, "gh_for", gh_for)
+    monkeypatch.setattr(fix_pass.fix_prs, "dispatch_fresh", lambda *a: pytest.fail("no session"))
+    lost = failure(project="roguelike", number=52, lost_runs=("7", "8"))
+    decision = fix_plan.Decision(fix_plan.RERUN, "n", (lost,))
+    assert fix_pass.fix_send.dispatch(decision, tmp_path, "claude") == 0
+    assert calls == [
+        ("roguelike", ("run", "rerun", "7", "--failed")),
+        ("roguelike", ("run", "rerun", "8", "--failed")),
+    ]
+    assert "roguelike #52: no runner took its red jobs; re-ran them in 7, 8" in (
+        capsys.readouterr().out
+    )
+    refused = failure(project="roguelike", number=52, lost_runs=("9",))
+    gh = gh_for(tmp_path / "roguelike")
+    assert fix_pass.fix_prs.rerun_lost_jobs(gh, refused) == fix_pass.EXIT_FAILED
+    assert "run rerun 9 failed: HTTP 403: run is too old" in capsys.readouterr().err
+
+
 def test_plan_mode_says_a_rerun_would_be_a_rerun(world, tmp_path):
     nightly = failure(kind=fix_plan.NIGHTLY, number=69, sha="a", tip="b", rerun_file="n.yml")
     go = [fix_plan.Decision(fix_plan.RERUN, "n", (nightly,))]

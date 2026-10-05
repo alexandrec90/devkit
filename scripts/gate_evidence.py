@@ -155,6 +155,40 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
     return texts, run_jobs(gh, run_id) if jobs is None else jobs
 
 
+# What GitHub annotates a job's check run with when no runner ever took the job: the job
+# is `cancelled` with zero steps, no log and no artifact. roguelike's gate run 37364441127
+# and social-scraper's 37364457089 failed on nothing else, and a fixer went at each.
+RUNNER_LOST = re.compile(r"\bwas not acquired by runner\b", re.I)
+# The job conclusions that are not red; anything else -- `cancelled` included -- is.
+JOB_PASSED = frozenset({"success", "skipped", "neutral"})
+
+
+def job_annotations(gh: Gh, job_id: object) -> list[str]:
+    """The messages on a job's check run (a job's id is its check run's); empty when
+    `gh` cannot say."""
+    listed = gh_json(gh("api", f"repos/{{owner}}/{{repo}}/check-runs/{job_id}/annotations"))
+    if not isinstance(listed, list):
+        return []
+    return [str(note.get("message", "")) for note in listed if isinstance(note, dict)]
+
+
+def runner_lost(gh: Gh, jobs: list[dict]) -> tuple[str, ...]:
+    """The red jobs' names when every one of them is a job GitHub never gave a runner:
+    no step ran, and its check run says so. () when any red job ran a step, or says
+    nothing about its runner -- that red is the code's, and a fixer's to read."""
+    red = [job for job in jobs if str(job.get("conclusion", "")).lower() not in JOB_PASSED]
+    for job in red:
+        if job.get("steps") or not job.get("databaseId"):
+            return ()
+        if not any(RUNNER_LOST.search(said) for said in job_annotations(gh, job["databaseId"])):
+            return ()
+    return tuple(sorted({str(job.get("name", "?")) for job in red}))
+
+
+def lost_signature(names: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(f"{name} / {fix_plan.NO_RUNNER}" for name in names)
+
+
 def drop_empty(dest: Path) -> list[str]:
     """Delete every zero-byte file under `dest`, then every directory that leaves empty;
     the deleted files' paths, relative to `dest` and in POSIX form.
@@ -350,6 +384,9 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     A conflict GitHub reports and git does not is no conflict: the PR is behind, and the
     pass pushes the merge itself (`merges_clean`), so no resolver goes. Checked only when
     GitHub says conflicting, against the same `origin/<base>` `is_behind` reads.
+
+    Where every run read lost its red jobs to a runner GitHub never gave them, the
+    failure carries those runs as `lost_runs`, and the plan re-runs them.
     """
     gh = sweep.gh_for(project_dir)
     git = sweep.git_for(project_dir)
@@ -364,21 +401,37 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     if not run_ids:
         return replace(failure, signature=fix_plan.signature(conflicted, [], []), behind=behind)
     where = root / evidence_slot(failure)
+    texts, jobs, lost = read_runs(gh, run_ids, where)
+    lost = () if conflicted else lost
+    return replace(
+        failure,
+        signature=lost_signature(lost) if lost else fix_plan.signature(conflicted, texts, jobs),
+        run_id=run_ids[0],
+        evidence=str(where) if texts else "",
+        behind=behind,
+        lost_runs=tuple(run_ids) if lost else (),
+    )
+
+
+def read_runs(
+    gh: Gh, run_ids: list[str], where: Path
+) -> tuple[list[str], list[dict], tuple[str, ...]]:
+    """`(texts, jobs, lost)` across `run_ids`, each run's evidence downloaded under `where`
+    (in a directory of its own when there are several). `lost` names the red jobs no
+    runner took when that is the whole of every run's red, and is () otherwise."""
     texts: list[str] = []
     jobs: list[dict] = []
+    lost: list[str] = []
+    every_run_lost = True
     for run_id in run_ids:
         dest = where / run_id if len(run_ids) > 1 else where
         found, failed_jobs = run_evidence(gh, run_id, dest)
         texts += found
         jobs += failed_jobs
-    sig = fix_plan.signature(conflicted, texts, jobs)
-    return replace(
-        failure,
-        signature=sig,
-        run_id=run_ids[0],
-        evidence=str(where) if texts else "",
-        behind=behind,
-    )
+        names = () if fix_plan.signature_from_logs(found) else runner_lost(gh, failed_jobs)
+        every_run_lost = every_run_lost and bool(names)
+        lost += names
+    return texts, jobs, tuple(sorted(set(lost))) if every_run_lost else ()
 
 
 def read_default_branch(
@@ -425,6 +478,8 @@ def read_default_branch(
     sig = fix_plan.signature(False, texts, jobs)
     if fix_plan.is_release_red(sig) and is_tagged(git, failure.sha):
         return True, None
+    if lost := runner_lost(gh, jobs):
+        return False, replace(failure, signature=lost_signature(lost), lost_runs=(run_id,))
     return False, replace(failure, signature=sig, evidence=str(where) if texts else "")
 
 

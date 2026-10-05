@@ -491,6 +491,83 @@ def test_without_an_artifact_the_steps_are_asked_for(monkeypatch, tmp_path):
     assert failure.evidence == ""
 
 
+# roguelike's gate run 37364441127 as `gh` gave it: three jobs cancelled with no step
+# run, each annotated by GitHub, beside two that passed.
+NOT_ACQUIRED = "The job was not acquired by Runner of type hosted even after multiple attempts"
+LOST_JOBS = [
+    {"databaseId": 11, "name": "Tests", "conclusion": "cancelled", "steps": []},
+    {"databaseId": 12, "name": "Lint", "conclusion": "cancelled", "steps": []},
+    {"databaseId": 13, "name": "Drift", "conclusion": "success", "steps": [{"name": "s"}]},
+]
+
+
+def lost_gh(jobs: list[dict], said: dict[int, list[str]]) -> Table:
+    """A run that downloads nothing and views `jobs`, whose check runs say `said`."""
+    answers: dict[tuple[str, ...], object] = {
+        ("run", "list"): [{"databaseId": 7, "headSha": "sha1"}],
+        ("run", "view"): {"jobs": jobs},
+        ("run", "view", "7", "--log-failed"): "",
+    }
+    for job_id, messages in said.items():
+        path = f"repos/{{owner}}/{{repo}}/check-runs/{job_id}/annotations"
+        answers[("api", path)] = [{"message": m, "annotation_level": "failure"} for m in messages]
+    return table(answers)
+
+
+def test_red_jobs_no_runner_took_are_named_and_any_other_red_is_not():
+    """c354f451: the only failures were jobs GitHub never gave a runner -- zero steps,
+    nothing logged -- and a fixer was sent at them. Anything less certain is the code's."""
+    said = {11: [NOT_ACQUIRED, "ubuntu-latest will migrate"], 12: [NOT_ACQUIRED]}
+    assert ev.runner_lost(lost_gh(LOST_JOBS, said), LOST_JOBS) == ("Lint", "Tests")
+    assert ev.runner_lost(lost_gh(LOST_JOBS, {11: [NOT_ACQUIRED]}), LOST_JOBS) == (), (
+        "a cancelled job whose check run says nothing about its runner is not one"
+    )
+    ran = [{**LOST_JOBS[0], "steps": [{"name": "Set up job"}]}, LOST_JOBS[1]]
+    assert ev.runner_lost(lost_gh(ran, said), ran) == (), "a job that ran a step had a runner"
+    assert ev.runner_lost(lost_gh(LOST_JOBS, said), LOST_JOBS[2:]) == (), "nothing red"
+    assert ev.job_annotations(table({}), 11) == [], "a gh that cannot say says nothing"
+
+
+def test_a_pr_whose_red_jobs_never_got_a_runner_is_marked_for_a_re_run(monkeypatch, tmp_path):
+    said = {11: [NOT_ACQUIRED], 12: [NOT_ACQUIRED]}
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: lost_gh(LOST_JOBS, said))
+    failure = ev.read_pr(tmp_path, ev.pr_failure("roguelike", pr()), tmp_path / "ev")
+    assert failure.lost_runs == ("7",)
+    assert failure.signature == (f"Lint / {fix_plan.NO_RUNNER}", f"Tests / {fix_plan.NO_RUNNER}")
+    assert fix_plan.plan([failure], "", ())[0].action == fix_plan.RERUN
+    assert failure.signature == ev.lost_signature(("Lint", "Tests"))
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: lost_gh(LOST_JOBS, {11: [NOT_ACQUIRED]}))
+    failure = ev.read_pr(tmp_path, ev.pr_failure("roguelike", pr()), tmp_path / "ev")
+    assert failure.lost_runs == (), "one red job with a cause of its own keeps the fixer"
+
+
+def test_runs_off_the_rollup_are_lost_only_when_every_one_of_them_is(tmp_path):
+    """Two runs behind the failing checks: one that lost its runner and one that failed
+    a step is a failure in the code, and its fixer still goes."""
+    said = {11: [NOT_ACQUIRED], 12: [NOT_ACQUIRED]}
+    gh = lost_gh(LOST_JOBS, said)
+    gh.answers[("run", "view", "8", "--log-failed")] = ""
+    texts, jobs, lost = ev.read_runs(gh, ["7", "8"], tmp_path / "ev")
+    assert (texts, lost) == ([], ("Lint", "Tests")), "one entry per job name, as a signature"
+    assert len(jobs) == 2 * len(LOST_JOBS)
+    failed = [{"databaseId": 21, "name": "Tests", "conclusion": "failure", "steps": [{}]}]
+    gh.answers[("run", "view", "8")] = {"jobs": failed}
+    assert ev.read_runs(gh, ["7", "8"], tmp_path / "ev")[2] == ()
+
+
+def test_a_default_branch_whose_red_jobs_never_got_a_runner_is_marked_too(monkeypatch, tmp_path):
+    branch_world(monkeypatch, "failure", "", "")
+    gh = lost_gh(LOST_JOBS, {11: [NOT_ACQUIRED], 12: [NOT_ACQUIRED]})
+    gh.answers[("run", "list")] = [
+        {"databaseId": 7, "status": "completed", "conclusion": "failure", "headSha": "fb17a310"}
+    ]
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    green, failure = ev.read_default_branch("roguelike", tmp_path, tmp_path / "ev")
+    assert green is False and failure is not None
+    assert failure.lost_runs == ("7",)
+    assert failure.signature == (f"Lint / {fix_plan.NO_RUNNER}", f"Tests / {fix_plan.NO_RUNNER}")
+
+
 def test_a_conflict_with_no_run_is_still_signed(monkeypatch, tmp_path):
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({}))
     conflicted = pr(mergeable="CONFLICTING", statusCheckRollup=[])
