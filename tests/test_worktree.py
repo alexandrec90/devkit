@@ -3130,6 +3130,48 @@ def test_provision_acts_by_default_and_plans_only_on_dry_run(workspace, monkeypa
     assert len(ran) == 2
 
 
+def test_provision_re_aims_path_source_siblings_before_the_sync(workspace, monkeypatch, capsys):
+    """916daf9b: ibkr's shared `../data-lake` stayed at the PR-gate pin the tree was cut
+    at after a session moved that pin, so the prescribed relock read the old data-lake.
+    Re-provisioning re-reads the pin, before the sync that resolves against the sibling."""
+    root = workspace.parent
+    (root / "demo" / ".git").mkdir(parents=True)
+    step = worktree.ProvisionStep(label="uv sync", argv=("uv", "sync"))
+    monkeypatch.setattr(worktree, "plan_provision", lambda path: (step,))
+    order: list[str] = []
+    monkeypatch.setattr(
+        worktree,
+        "link_siblings",
+        lambda path: order.append("link") or ["devkit: data-lake moved from c14c6be"],
+    )
+    monkeypatch.setattr(
+        worktree, "run_provision", lambda path, steps: (order.append("sync"), (True, []))[1]
+    )
+
+    assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 0
+    assert order == ["link", "sync"]
+    assert "data-lake moved from c14c6be" in capsys.readouterr().out
+
+    assert worktree.main(["provision", "demo", "--dry-run", "--workspace", str(workspace)]) == 0
+    assert order == ["link", "sync"]
+
+
+def test_link_siblings_leaves_a_static_checkout_alone(tmp_path, monkeypatch):
+    """A static checkout's `..` is the sibling's own checkout; moving it is never wanted."""
+    calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        worktree.worktree_env,
+        "link_path_sources",
+        lambda here, checkout: calls.append((here, checkout)) or ["cut"],
+    )
+    monkeypatch.setattr(worktree.worktree_env, "checkout_of", lambda path: None)
+    assert worktree.link_siblings(tmp_path) == [] and calls == []
+
+    monkeypatch.setattr(worktree.worktree_env, "checkout_of", lambda path: tmp_path / "main")
+    assert worktree.link_siblings(tmp_path / "tree") == ["cut"]
+    assert calls == [(tmp_path / "tree", tmp_path / "main")]
+
+
 def test_a_failed_provision_does_not_print_provisioned(workspace, monkeypatch, capsys):
     """carameli #395's tree: `npm ci` died with `[WinError 2]`, the command exited 1, and
     the headline still read "Provisioned" -- which is what hid a dead step for weeks."""
