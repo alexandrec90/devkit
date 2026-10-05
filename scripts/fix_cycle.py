@@ -107,7 +107,8 @@ HARNESS_REFUSALS = (
 # was a conflict folded this way, and the session it opened was told to fix the harness
 # "in the vendored file, the test, or the template" on a branch that could never land
 # on the PR. A harness PR in either shape goes as itself, before the folded session.
-# A `RERUN` is a `gh workflow run` call, and goes as itself for the same reason.
+# A `RERUN` is a `gh workflow run` or `gh run rerun` call, and goes as itself for the
+# same reason.
 BRANCH_SHAPED = (fix_plan.UPDATE, fix_plan.RERUN, fix_plan.RESOLVE)
 
 

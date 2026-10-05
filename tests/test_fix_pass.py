@@ -924,6 +924,34 @@ def test_a_rerun_is_one_workflow_run_on_the_tip_and_no_session(monkeypatch, tmp_
     assert "workflow run failed: HTTP 422: no dispatch trigger" in capsys.readouterr().err
 
 
+def test_a_run_whose_jobs_never_started_is_re_run_in_place_and_no_session(
+    monkeypatch, tmp_path, capsys
+):
+    """carameli PR Gate run 37363944090: the one red job never got a runner, and the
+    pass sent a fixer at it. A first attempt like that is re-run on the same commit."""
+    calls = []
+
+    def gh_for(project_dir):
+        def gh(*args):
+            calls.append((project_dir.name, args))
+            code = 0 if args[2] == "37363944090" else 1
+            return subprocess.CompletedProcess(args, code, "", "HTTP 403: run too old")
+
+        return gh
+
+    monkeypatch.setattr(fix_pass.fix_prs.sweep, "gh_for", gh_for)
+    monkeypatch.setattr(fix_pass.fix_prs, "dispatch_pr", lambda *a: pytest.fail("no session"))
+    sig = ("Backend unit + integration (never started a step)",)
+    pr = failure(signature=sig, run_id="37363944090", attempt=1)
+    decision = fix_plan.Decision(fix_plan.RERUN, "n", (pr,))
+    assert fix_pass.fix_send.dispatch(decision, tmp_path, "claude") == 0
+    assert calls == [("carameli", ("run", "rerun", "37363944090", "--failed"))]
+    assert "carameli #412: run 37363944090's jobs never started a step" in capsys.readouterr().out
+    old = failure(signature=sig, run_id="5", attempt=1)
+    assert fix_pass.fix_prs.rerun_workflow(old, tmp_path) == fix_pass.EXIT_FAILED
+    assert "run rerun failed: HTTP 403: run too old" in capsys.readouterr().err
+
+
 def test_plan_mode_says_a_rerun_would_be_a_rerun(world, tmp_path):
     nightly = failure(kind=fix_plan.NIGHTLY, number=69, sha="a", tip="b", rerun_file="n.yml")
     go = [fix_plan.Decision(fix_plan.RERUN, "n", (nightly,))]
