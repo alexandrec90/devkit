@@ -59,7 +59,11 @@ def read_history(path: Path) -> list[dict]:
 
 def streaks(history: list[dict], field: str) -> dict[str, tuple[str, str]]:
     """`name -> (since, latest why)` for every name in the newest pass's `field`, where
-    `since` is the first pass of the unbroken run of passes that carried it."""
+    `since` is the first pass of the unbroken run of passes that carried it.
+
+    A pass that carried it for a `TRACKED` reason breaks the run: the loop owned the
+    wait then, so a day of Dependabot cap ending in half an hour behind a red harness
+    is half an hour of harness hold, not a day of it."""
     if not history:
         return {}
     newest = history[-1].get(field)
@@ -70,7 +74,7 @@ def streaks(history: list[dict], field: str) -> dict[str, tuple[str, str]]:
         since = str(history[-1].get("when", ""))
         for row in reversed(history[:-1]):
             carried = row.get(field)
-            if not isinstance(carried, dict) or name not in carried:
+            if not isinstance(carried, dict) or name not in carried or tracked(carried[name]):
                 break
             since = str(row.get("when", since))
         found[name] = (since, str(why))
@@ -84,12 +88,17 @@ def stalled(
     found = []
     for field in FIELDS:
         for name, (since, why) in sorted(streaks(history, field).items()):
-            if why.lower().startswith(TRACKED) or not _older(since, now, after):
+            if tracked(why) or not _older(since, now, after):
                 continue
             project = name.split(" ", 1)[0]
             detail = f"{field} since {since[:16]}: {name} -- {why}"
             found.append(fix_findings.Finding("stalled", project, detail))
     return found
+
+
+def tracked(why: object) -> bool:
+    """Whether a wait's reason is one some other part of the loop already owns."""
+    return str(why).lower().startswith(TRACKED)
 
 
 def _older(since: str, now: _dt.datetime, after: _dt.timedelta) -> bool:
