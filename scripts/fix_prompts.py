@@ -48,7 +48,9 @@ from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_sta
 # intent (`ship_intent.EMPTY`): a fixer whose nightly was green at the tip left neither
 # file, and the pass filed it as a dead session (79ce2440).
 FINISH = (
-    "When it is done, run the targeted tests with this tree's own .venv interpreter, the "
+    "When it is done, run each of these with this tree's own .venv interpreter, not the "
+    "python on PATH, which can lack ruff and mypy, and a project's older lint runner then "
+    "skips both and still says clean: the targeted tests, the "
     "linter -- python scripts/lint-all.py over every file you changed, the tests "
     "included: python scripts/lint-all.py --changed, which takes the whole working-tree "
     "diff, so no changed file is left out of its scope; --paths with every changed file "

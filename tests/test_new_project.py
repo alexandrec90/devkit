@@ -888,6 +888,33 @@ def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
     assert section.startswith("# mypy\n") and "killed after 2s" in section
 
 
+def test_a_generated_lint_run_that_skipped_a_required_linter_is_not_clean(
+    tmp_path, monkeypatch, capsys
+):
+    """db3e57f7: roguelike's runner, under an interpreter with neither ruff nor mypy,
+    skipped both and printed `lint-all: clean`. A skipped optional tool stays a note."""
+    import types
+
+    root = generate(tmp_path, {})
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    absent = [sys.executable, "-m", "definitely_not_an_installed_linter", "."]
+
+    assert lint_all.run_tool("dotenv-linter", ["definitely-not-a-linter-binary"], "hint") == ""
+    assert lint_all._finish("") == 0
+    assert "lint-all: clean" in capsys.readouterr().out
+
+    assert lint_all.run_tool("mypy", absent, "hint") == ""
+    assert lint_all._finish("") == 1
+    out = capsys.readouterr().out
+    assert "NOT CLEAN" in out and "mypy" in out and ".venv" in out and "clean (" not in out
+
+    # `main` starts each run from an empty list, so one run's skip never fails the next.
+    monkeypatch.setitem(sys.modules, "toolchain", types.SimpleNamespace())
+    monkeypatch.setattr(lint_all, "explicit_paths", lambda paths: [])
+    assert lint_all.main(["--paths", "README.md"]) == 0
+    assert lint_all._SKIPPED == []
+
+
 def test_generated_lint_runner_fails_a_changed_run_when_git_refuses_the_tree(tmp_path, monkeypatch):
     """9feac8aa, in the template: `_git` returned `[]` on any non-zero exit, so a git
     refusal (dubious ownership) read as a clean tree and `--changed` said "nothing to
