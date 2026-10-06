@@ -144,6 +144,18 @@ def test_the_background_pipeline_warning_names_the_masked_task_status():
     assert "background task's completion status" in rule
 
 
+def test_the_escape_warning_spells_an_escape_the_edit_tool_leaves_alone():
+    """98049f79, 17306e55: the Edit tool decoded a backslash-u escape into the literal
+    character and RUF001 failed it, a lint cycle each time. The clause writing this
+    warning was itself decoded the same way on its first draft, so the rule names the
+    `\\N{...}` spelling and carries no escape of the kind it warns about."""
+    rule = (REPO_ROOT / ".claude/rules/engineering.md").read_text(encoding="utf-8")
+    clause = next(line for line in rule.splitlines() if "RUF001" in line)
+    assert "backslash-u escape" in clause
+    assert r"`\N{EN DASH}`" in rule
+    assert clause.isascii(), "the warning was decoded into the character it warns about"
+
+
 def test_manifest_paths_is_empty_when_devkit_manifest_is_missing(tmp_path: Path):
     assert budget.manifest_paths(tmp_path) == frozenset()
 

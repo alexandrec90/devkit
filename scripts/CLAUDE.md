@@ -226,5 +226,7 @@ ends at a person. Two consequences for a change here: a finding is filed only wh
 open one shares its signature, so the detail must be stable across recurrences (lead with
 the kind, keep shas and counts out). A scheduled job's `cause=` is held to the same: `log-wrap.py` reads it
 from the job's `error:` line, else its last, so a job whose failures name a tree or a file
-ends a failed run on an `error:` line naming only the kind (`reap-stale.cause_line`); and a resolution is held to its `pr=`
+ends a failed run on an `error:` line naming only the kind (`reap-stale.cause_line`), and a
+status line that only points at a file (`FAILED -- details in <file>`) is followed into
+that file (`cause_source`); and a resolution is held to its `pr=`
 (`fix_verify.py` reopens what never merged), so "resolved" means landed.
