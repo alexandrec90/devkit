@@ -137,8 +137,17 @@ ERROR_KEYS = re.compile(r"^(?:errors?|failures?|cause|reason|exception)$", re.I)
 # Set on the child only when the caller has not, so `FORCE_COLOR=0` still wins.
 # `PYTHONIOENCODING` matches what `stream` decodes: a Python child writing to a pipe
 # otherwise encodes with the locale's code page, cp1252 on Windows, and dies with
-# `UnicodeEncodeError` on the first character outside it.
-COLOR_ENV = {"FORCE_COLOR": "1", "PY_COLORS": "1", "PYTHONIOENCODING": "utf-8"}
+# `UnicodeEncodeError` on the first character outside it. `PYTHONUNBUFFERED` keeps the
+# merged output in the order the child wrote it: piped, its stdout is block-buffered and
+# flushed at exit while stderr goes out at once, so a stderr warning landed *before* the
+# stdout lines printed ahead of it, and the last line `cause_said` falls back to was a
+# bystander's -- "social-scraper is already on devkit vN.N" for an owed release (583d8e80).
+COLOR_ENV = {
+    "FORCE_COLOR": "1",
+    "PY_COLORS": "1",
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONUNBUFFERED": "1",
+}
 
 # Windows only. This wrapper has two kinds of caller and the flag is for the unattended
 # one: a scheduled task runs it under `pythonw.exe`, which has no console, and Windows
@@ -367,7 +376,8 @@ def write_artifact(root: Path, name: str, body: str, since: float = 0.0) -> Path
 
 
 def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """The child's environment, with colour forced unless the caller decided."""
+    """The child's environment, with colour, UTF-8 and unbuffered output forced unless
+    the caller decided."""
     env = dict(os.environ if base is None else base)
     for key, value in COLOR_ENV.items():
         env.setdefault(key, value)
