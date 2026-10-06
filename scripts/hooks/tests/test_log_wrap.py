@@ -504,6 +504,20 @@ def test_an_unattended_failure_records_its_cause_so_two_causes_are_two_defects(
         # pytest's first failed test, not the count line after it.
         ("FAILED tests/test_a.py::test_b - assert 1\n=== 1 failed, 9 passed in 3.2s ===\n", None),
         ("ok\nerror: pathspec 'x' did not match\n", "error: pathspec 'x' did not match"),
+        # 6ba2230e: a summary pointing at an artifact names no cause, so every failure
+        # of a collector was one group; the logged record that failed is the cause,
+        # read from its level on so the timestamp is not part of it.
+        (
+            "2026-10-05 23:44:23,102 WARNING social_scraper.export: export of posts failed: "
+            "[WinError 32] in use\nwaiting 124 s\nFAILED -- details in logs\\scrape-run.json\n",
+            "WARNING social_scraper.export: export of posts failed: [WinError N] in use",
+        ),
+        (
+            "WARNING a: slow\nERROR:root:db gone\nFAILED -- details in x.json\n",
+            "ERROR:root:db gone",
+        ),
+        # With nothing else said, the pointer is still where to look.
+        ("FAILED -- details in logs/run.json\n", "FAILED -- details in logs/run.json"),
         # Nothing error-shaped: the last line said is the best there is.
         ("step 1\nstep 2\n\n", "step N"),
         ("", ""),
