@@ -1499,6 +1499,17 @@ mechanical checks to the tested `scripts/ship.py` driver. The one other shared s
 judgement call to `logs/overnight.md` so it can be reversed, and finishes through
 `/ship`. Only a user can invoke it; the model never starts one on its own.
 
+`/implement-spec <path>` is the one shared [dynamic
+workflow](https://code.claude.com/docs/en/workflows) (`.claude/workflows/implement-spec.js`,
+Claude Code only). Run from a task worktree, it turns a large requirements document into a
+task graph grouped into milestones, kept in the project's own .spec-run directory, builds one milestone per run
+in waves of parallel agents, and ships it through `/ship` as one PR. Builders work in
+detached checkouts of an unbranched snapshot under `logs/spec-run/trees/` and hand back
+patches, so a wave builds on the one before it and nothing is committed before the fix
+pass commits. The next milestone starts in a fresh worktree once that PR merges; a rerun
+in the same tree resumes from the task graph. Pass `{spec, parallel, maxAttempts,
+auditRounds, allMilestones}` instead of a path to tune it.
+
 Generic audits, compatibility smoke commands, stateful refactor sweeps, and model-to-model
 handoff prompts do not belong in every project. Mechanical constraints such as the
 500-line instruction ceiling and local script reachability are enforced by
