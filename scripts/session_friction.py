@@ -90,7 +90,15 @@ PATH_CONVERSION_PROBE = re.compile(r"\bMSYS2_ARG_CONV_EXCL=|\bMSYS_NO_PATHCONV="
 # they import, so its "No module named 'x'" for a module it imported is the answer, not a
 # turn lost (31af383b, a session reproducing a user's report that the bare system Python
 # lacks the project's packages). `IMPORT_STATEMENT` is one `;`-separated statement of it.
-PYTHON_C = re.compile(r"\S*python\S*\s+-c\s+(?P<q>[\"'])(?P<program>.*?)(?P=q)", re.S)
+# `INTERPRETER_FLAGS` are what may stand between the interpreter and its `-c` or `-m`:
+# `-I -c` got a scratch program past every judgement that knew only `python -c` (3310eb1d).
+INTERPRETER_FLAGS = r"(?:\s+-[WX]\s+\S+|\s+-[\w.]+)*"
+PYTHON_C = re.compile(
+    r"(?:\S*python\S*|(?<![\w.-])(?:\S*[\\/])?py(?:\.exe)?)"
+    + INTERPRETER_FLAGS
+    + r"\s+-[A-Za-z]*c\s+(?P<q>[\"'])(?P<program>.*?)(?P=q)",
+    re.S,
+)
 IMPORT_STATEMENT = re.compile(
     r"\s*(?:import\s+(?P<names>[\w.]+(?:\s+as\s+\w+)?(?:\s*,\s*[\w.]+(?:\s+as\s+\w+)?)*)"
     r"|from\s+(?P<source>[\w.]+)\s+import\s+[\w.*, ()]+)\s*$"
@@ -216,7 +224,9 @@ READS_HARNESS_TEXT = re.compile(
 # filed against itself); `judged` drops it, since only the tree can say which it was.
 # `-c` too: a social-scraper session read parquet with the machine's `python -c` while its
 # tree's `.venv` held the pyarrow the tree imports (9b16713a).
-BARE_INTERPRETER = re.compile(r"(?:^|[;&|]\s*)(?:python3?|py)(?:\.exe)?\s+-[mc]\s", re.M)
+BARE_INTERPRETER = re.compile(
+    r"(?:^|[;&|]\s*)(?:python3?|py)(?:\.exe)?" + INTERPRETER_FLAGS + r"\s+-[A-Za-z]*[mc]\s", re.M
+)
 # A command whose output is read for an environment failure even when it exited 0.
 SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pytest|git)\b", re.M)
 # A quoted argument, whose `|`, `;` and newlines separate no statements: the `\|pytest` of
@@ -914,13 +924,22 @@ def outside_the_tree(found: list, cwd: str) -> list:
 
 # A Python script named in a call: what `ad_hoc_program` asks the location of.
 PYTHON_SCRIPT = re.compile(r"\S*python\S*\s+(?:-\S+\s+)*[\"']?(?P<script>[^\s\"';&|]+\.py)\b")
+# The directory a call changes into, and a path that does not lean on it.
+CD_INTO = re.compile(
+    r"(?:^|[;&|]\s*)(?:cd|pushd|Set-Location)\s+[\"']?(?P<dir>[^\"';&|\n]+)", re.I | re.M
+)
+ABSOLUTE_PATH = re.compile(r"^(?:[A-Za-z]:)?[\\/]|^[~$]")
 
 
 def ad_hoc_program(command: str) -> bool:
-    """`command` runs a program the session wrote for itself: inline (`python -c`), or a
-    script in a scratch directory."""
-    return bool(PYTHON_C.search(command)) or any(
-        SCRATCH_DIR.search(found["script"]) for found in PYTHON_SCRIPT.finditer(command)
+    """`command` runs a program the session wrote for itself: inline (`python -c`, any
+    flags first), or a script in a scratch directory, by its path or beside a `cd` there."""
+    if PYTHON_C.search(command):
+        return True
+    beside = any(SCRATCH_DIR.search(found["dir"]) for found in CD_INTO.finditer(command))
+    return any(
+        SCRATCH_DIR.search(script) or (beside and not ABSOLUTE_PATH.match(script))
+        for script in (found["script"] for found in PYTHON_SCRIPT.finditer(command))
     )
 
 

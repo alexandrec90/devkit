@@ -1243,6 +1243,9 @@ def test_the_machines_python_c_in_a_tree_with_its_own_venv_is_no_missing_environ
     (tree / ".venv" / "Scripts").mkdir(parents=True)
     (tree / ".venv" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
     assert sf.judged(events, str(tree), tmp_path) == []
+    for spelled in ("python -I -c 'x'", "python3 -X utf8 -m pytest", "py -3 -Im pytest"):
+        assert sf.BARE_INTERPRETER.search(spelled), f"3310eb1d: flags first, {spelled}"
+    assert not sf.BARE_INTERPRETER.search("python -I scripts/x.py"), "a script is no -c"
     own = [call('.venv/Scripts/python.exe -c "import json; x()"', "2"), result(said, "2")]
     own_events = [e for n, row in enumerate(own, 1) for e in st.claude_events(row, n)]
     assert [row[0] for row in sf.judged(own_events, str(tree), tmp_path)] == ["environment"], (
@@ -1516,6 +1519,20 @@ def test_a_scratch_program_reaching_for_a_package_its_tree_never_imports_is_not_
     scripted = [call(script, "2"), result(said, "2")]
     script_events = [e for n, row in enumerate(scripted, 1) for e in st.claude_events(row, n)]
     assert sf.judged(script_events, str(roguelike), tmp_path) == [], "a scratch script too"
+    # 3310eb1d, the same session's next call: an isolating `-I` before the `-c` got past
+    # an excuse that knew only `python -c`, and the group came back after its resolution.
+    isolated = (
+        f'cd "{SCRATCH}" && python -I -c " from PIL import Image im = Image.open('
+        "'painted-10.png') im.crop((330, 100, 530, 230)).resize((800, 520), Image.NEAREST)"
+        ".save('crop.png') print('ok') \""
+    )
+    flagged = [call(isolated, "3"), result(said, "3")]
+    flagged_events = [e for n, row in enumerate(flagged, 1) for e in st.claude_events(row, n)]
+    assert sf.judged(flagged_events, str(roguelike), tmp_path) == [], "any flags before -c"
+    relative = f'cd "{SCRATCH}" && python cmp.py main.rgba.json'
+    moved = [call(relative, "4"), result(said, "4")]
+    moved_events = [e for n, row in enumerate(moved, 1) for e in st.claude_events(row, n)]
+    assert sf.judged(moved_events, str(roguelike), tmp_path) == [], "a script cd'd beside"
     [row] = sf.detect(events)
     assert sf.reached_past_the_tree(row, [roguelike])
     assert not sf.reached_past_the_tree(("poll", row[1], row[2]), [roguelike]), "its class only"
@@ -1540,6 +1557,16 @@ def test_a_missing_package_the_tree_imports_or_its_own_program_needs_stays_filed
     assert judged(adhoc, tmp_path / "gone") == ["environment"], "nothing to read"
     assert sf.ad_hoc_program(adhoc) and sf.ad_hoc_program(f"python {SCRATCH}/x.py")
     assert not sf.ad_hoc_program("python scripts/x.py") and not sf.ad_hoc_program("ls")
+    for spelled in (
+        "python -I -c 'x'",
+        "python -X utf8 -c 'x'",
+        "py -3 -B -c 'x'",
+        "python -Ic 'x'",
+    ):
+        assert sf.ad_hoc_program(spelled), spelled
+    assert not sf.ad_hoc_program("python -I scripts/x.py"), "a flag is not a program"
+    assert not sf.ad_hoc_program(f'cd "{SCRATCH}" && python C:/ws/bare/scripts/x.py')
+    assert not sf.ad_hoc_program("cd scripts && python x.py"), "the tree's own directory"
     assert sf.imported_by_tree("PIL", [uses]) and not sf.imported_by_tree("PIL", [bare])
     assert not sf.imported_by_tree("PI", [uses]), "a whole name, not a prefix"
 
