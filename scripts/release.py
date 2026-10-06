@@ -38,7 +38,8 @@ from pathlib import Path
 # `release-pipeline.py`, which targets a devkit path given on its command line rather
 # than this file's `REPO_ROOT`, and whose single spawn site carries the console
 # discipline the console-less nightly job needs. Called with the command alone, except
-# for `prepare`'s push, which also passes `env=` (see `push_env`).
+# for `prepare`'s worktree add and push, which also pass `env=` (`unprovisioned_env`,
+# `push_env`).
 GitRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 # The pre-push hook the release push skips, as `ship_intent.SKIP_PUSH_GATE` does for
@@ -49,6 +50,10 @@ GitRunner = Callable[..., subprocess.CompletedProcess[str]]
 # v0.11.26 and v0.11.31 were each refused by a local red that reproduced on no rerun of
 # the same commit, and the failing test died with the throwaway worktree.
 SKIP_PUSH_GATE = "devkit-push-gate"
+
+# What tells the global `post-checkout` hook to leave a new worktree unprovisioned
+# (`worktree_env.SKIP_PROVISION_VAR`). See `unprovisioned_env`.
+SKIP_PROVISION_VAR = "DEVKIT_SKIP_WORKTREE_PROVISION"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -152,6 +157,43 @@ def branch_for(version: str) -> str:
 # Here rather than in `release-pipeline.py` because that module is already over every
 # structural limit it has, and because what these need -- `branch_for`, `bump_fallback`,
 # `NEW_PROJECT` -- is this module's vocabulary.
+
+
+def unresumable(devkit: Path, version: str, run: GitRunner) -> str:
+    """Why origin's `release/<version>` is not a push `prepare` made; "" when it is one.
+
+    A run that dies between its push and its PR leaves a branch on origin with no PR,
+    and `discard_stale_branch` rightly will not delete pushed work -- so every later run
+    refused with "on origin but has no open PR" until somebody chose by hand. v0.11.50
+    sat like that after the temp-directory cleanup raised on a file a process still
+    held. The branch is resumable exactly when it is what `prepare` would push again:
+    one commit, `Release <version>`, touching only `new-project.py`, whose constant
+    names `version`. Anything else is somebody's work and stays a human's call.
+    """
+    branch = branch_for(version)
+    on_origin = pushed_to_origin(devkit, branch, run)
+    if not on_origin:
+        return "origin could not be asked" if on_origin is None else "not on origin"
+    remote = f"refs/remotes/origin/{branch}"
+    relative = NEW_PROJECT.relative_to(REPO_ROOT).as_posix()
+
+    def read(*args: str) -> str | None:
+        result = run(["git", "-C", str(devkit), *args])
+        return result.stdout if result.returncode == 0 else None
+
+    fetched = read("fetch", "--quiet", "origin", f"+refs/heads/{branch}:{remote}")
+    if fetched is None:
+        return f"{branch} could not be fetched"
+    ahead = (read("rev-list", f"refs/remotes/origin/main..{remote}") or "").split()
+    if len(ahead) != 1:
+        return f"{branch} is {len(ahead)} commit(s) ahead of main, not one bump"
+    if (read("log", "-1", "--format=%s", remote) or "").strip() != f"Release {version}":
+        return f"{branch}'s commit is not `Release {version}`"
+    if (read("diff", "--name-only", f"{remote}~1", remote) or "").split() != [relative]:
+        return f"{branch} changes more than {relative}"
+    if bump_fallback(read("show", f"{remote}:{relative}") or "", "unused")[1] != version:
+        return f"{branch} does not set {FALLBACK_CONST} to {version}"
+    return ""
 
 
 def local_branch_exists(devkit: Path, branch: str, run: GitRunner) -> bool:
@@ -307,6 +349,17 @@ def push_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def unprovisioned_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """`base` (the process environment by default) telling `post-checkout` not to provision.
+
+    The variable is `worktree_env.SKIP_PROVISION_VAR`, spelled here because this module
+    imports nothing of devkit's; a test holds the two spellings together.
+    """
+    env = dict(os.environ if base is None else base)
+    env[SKIP_PROVISION_VAR] = "1"
+    return env
+
+
 def prepare(
     devkit: Path, version: str, run: GitRunner, say: Callable[[str], None]
 ) -> tuple[bool, str]:
@@ -318,10 +371,17 @@ def prepare(
     if note:
         say(note)
     pushed = False
-    with tempfile.TemporaryDirectory(prefix="devkit-release-") as tmp:
+    # A file left in the throwaway tree must not undo a push that already happened: the
+    # 2026-10-06 run pushed release/v0.11.50, then died here on a `.pyd` some process
+    # still held, before its PR -- so the cleanup is best effort, and what it leaves is
+    # %TEMP%'s to reap. The tree is cut unprovisioned for the same reason: the global
+    # `post-checkout` hook would `uv sync` a `.venv` into it, minutes of work and a tree
+    # of DLLs for a one-line bump whose commit hooks borrow the checkout's venv anyway.
+    with tempfile.TemporaryDirectory(prefix="devkit-release-", ignore_cleanup_errors=True) as tmp:
         path = Path(tmp) / branch.replace("/", "-")
         add = run(
-            ["git", "-C", str(devkit), "worktree", "add", "-b", branch, str(path), "origin/main"]
+            ["git", "-C", str(devkit), "worktree", "add", "-b", branch, str(path), "origin/main"],
+            env=unprovisioned_env(),
         )
         if add.returncode != 0:
             return False, (add.stderr or add.stdout).strip()
