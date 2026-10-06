@@ -69,6 +69,7 @@ Pure and stdlib-only; every decision is an importable function tested in
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import re
 import subprocess
@@ -124,6 +125,14 @@ SAID_WIDTH = 300
 ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\s'\"\\/:]+)+[\\/]([^\s'\"\\/:]+)")
 HEX_ID = re.compile(r"\b[0-9a-f]{7,40}\b")
 NUMBER = re.compile(r"\d+(?:\.\d+)?")
+# A status line plus a path -- the failure-artifact rule's own shape, `<tool>: FAILED --
+# details in <file>` -- names where the cause is, not what it is: filed as the cause, every
+# failure of the job was one group (6d11553e). Such a line is followed into the file.
+DEFERS_TO = re.compile(r"\bdetails in\s+(\S+?)\.?$", re.I)
+STATUS_ONLY = re.compile(r"^(?:[\w.-]+:)?\W*(?:FAILED|ERROR)?\W*(?:\(exit \d+\))?\W*$", re.I)
+ARTIFACT_BYTES = 1 << 20
+# Where a JSON artifact keeps what went wrong; the first such string, in document order.
+ERROR_KEYS = re.compile(r"^(?:errors?|failures?|cause|reason|exception)$", re.I)
 
 # Set on the child only when the caller has not, so `FORCE_COLOR=0` still wins.
 # `PYTHONIOENCODING` matches what `stream` decodes: a Python child writing to a pipe
@@ -220,6 +229,46 @@ def cause_said(output: str) -> str:
             found = hits[0] if which == "first" else hits[-1]
             break
     return " ".join(found.split())[:SAID_WIDTH]
+
+
+def _first_error(node: object, under_error_key: bool = False) -> str:
+    """The first string a JSON document keeps under an `ERROR_KEYS` key, else `""`."""
+    if isinstance(node, str):
+        return node if under_error_key else ""
+    if isinstance(node, list):
+        children = [(item, under_error_key) for item in node]
+    elif isinstance(node, dict):
+        children = [(v, under_error_key or bool(ERROR_KEYS.match(str(k)))) for k, v in node.items()]
+    else:
+        return ""
+    for child, flagged in children:
+        found = _first_error(child, flagged)
+        if found.strip():
+            return found
+    return ""
+
+
+def cause_source(output: str, root: Path) -> str:
+    """The text a failure's cause is read from: `output`, unless the line `cause_said`
+    picks only points at a file (`DEFERS_TO`, `STATUS_ONLY`) -- then that file, relative to
+    `root`, read as JSON (`_first_error`) or as text. `output` whenever the file is not
+    there or names nothing, since the status line still beats an empty cause."""
+    said = cause_said(output)
+    pointer = DEFERS_TO.search(said)
+    if pointer is None or not STATUS_ONLY.match(said[: pointer.start()]):
+        return output
+    try:
+        with (root / pointer.group(1).replace("\\", "/")).open(
+            encoding="utf-8", errors="replace"
+        ) as f:
+            text = f.read(ARTIFACT_BYTES)
+    except OSError:
+        return output
+    try:
+        text = _first_error(json.loads(text))
+    except ValueError:
+        pass
+    return text if cause_said(text) else output
 
 
 def failure_cause(output: str) -> str:
@@ -432,7 +481,8 @@ def main(argv: list[str] | None = None, run=stream, root: Path | None = None) ->
             artifact_body(title, command, code, output, always, kept=True),
         )
         artifact = artifact_ref(name, kept=kept is not None)
-        record_failure(failure_message(title, always), command, code, artifact, root, output)
+        source = cause_source(output, root or Path.cwd())
+        record_failure(failure_message(title, always), command, code, artifact, root, source)
     return code
 
 

@@ -12,6 +12,7 @@ requires an empty-on-success artifact to prevent.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -560,6 +561,63 @@ def test_a_failure_files_the_line_as_said_beside_its_folded_cause(tmp_path, monk
     assert "error: 403" in pushed["said"] and "github.com/someone" in pushed["said"]
     assert pushed["cause"] == lw.failure_cause(PUSH_403)
     assert "said" not in keyed, "nothing folded, so nothing said twice"
+
+
+SCRAPE_SAID = "FAILED -- details in logs\\scrape-run.json\n"
+
+
+def _scrape_report(tmp_path, errors):
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    report = {"ok": False, "counts": {"x": 0}, "errors": errors}
+    (tmp_path / "logs" / "scrape-run.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def test_a_status_line_pointing_at_an_artifact_is_followed_into_it(tmp_path, monkeypatch):
+    """6d11553e: a job keeping its terminal to a status line plus the path -- the
+    failure-artifact rule's own shape -- printed `FAILED -- details in <file>` for every
+    failure, so a renamed X op and one dead profile were one cause, and the second read
+    as a fix that had not held. The cause is in the file the line names."""
+    ledger = _ledger(tmp_path, monkeypatch)
+    for first in (
+        "x: error: no timeline data captured (layout change?) <- https://x.com/a",
+        "x: error: profile unavailable <- https://x.com/b",
+    ):
+        _scrape_report(tmp_path, [first, "reddit: later"])
+        lw.main(["--always", "Scrape", "--", "x"], run=lambda _c: (1, SCRAPE_SAID), root=tmp_path)
+
+    renamed, dead = (row["cause"] for row in _fields(ledger))
+    assert renamed != dead
+    assert renamed.startswith("x: error: no timeline data captured")
+    assert "reddit" not in renamed, "the first error, not the last"
+
+
+@pytest.mark.parametrize(
+    ("artifact", "said"),
+    [
+        # A text artifact is read like output: its traceback's exception.
+        ("Traceback:\n  f()\nKeyError: 'k'\n", "KeyError: 'k'"),
+        # Nothing in it names a failure: the status line is still the best there is.
+        ('{"ok": false, "counts": {"x": 0}}', SCRAPE_SAID.strip()),
+        ("", SCRAPE_SAID.strip()),
+    ],
+)
+def test_the_artifact_is_read_by_its_own_shape(tmp_path, artifact, said):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "scrape-run.json").write_text(artifact, encoding="utf-8")
+    assert lw.cause_said(lw.cause_source(SCRAPE_SAID, tmp_path)) == said
+
+
+def test_a_pointer_to_no_file_keeps_the_line_it_was_said_in(tmp_path):
+    assert lw.cause_source(SCRAPE_SAID, tmp_path) == SCRAPE_SAID
+    assert lw.cause_source("KeyError: k\n", tmp_path) == "KeyError: k\n", "no pointer, no read"
+
+
+def test_a_line_naming_its_cause_is_not_traded_for_the_artifact(tmp_path):
+    """social-scraper's fixed line leads with the error; the pointer after it is not
+    a reason to go elsewhere for what the line already says."""
+    _scrape_report(tmp_path, ["x: error: something else"])
+    said = "FAILED -- x: error: profile unavailable -- details in logs/scrape-run.json\n"
+    assert lw.cause_source(said, tmp_path) == said
 
 
 def test_a_ledger_that_cannot_be_written_does_not_fail_the_job(tmp_path, monkeypatch):
