@@ -599,11 +599,37 @@ def open_release_pr(devkit: Path, branch: str) -> int:
     return number if state == "OPEN" else 0
 
 
+def never_had_a_pr(devkit: Path, branch: str) -> bool:
+    """Whether `branch` has never had a PR, open or closed. False when `gh` cannot say.
+
+    The one state in which a pushed release branch is safe to open a PR from unasked:
+    a closed PR is somebody's decision, and an unanswered question is not "never".
+    """
+    history = ["pr", "list", "--head", branch, "--state", "all", "--json", "number"]
+    return _gh_json(history, devkit) == []
+
+
+def resume_refusal(devkit: Path, version: str, state: str) -> str:
+    """Why origin's branch for `version` must be prepared afresh; `""` to resume it.
+
+    `state` is `release_pr`'s answer. `release.unresumable` says whether the branch is
+    exactly the bump `prepare` would push; `never_had_a_pr` then makes sure the empty
+    `state` was "no PR" and not a `gh pr view` that could not answer -- asked last, so
+    a normal run, whose branch is not on origin yet, costs no second `gh` call.
+    """
+    if state:
+        return f"its PR is {state}"
+    why = release.unresumable(devkit, version, _run)
+    if why or never_had_a_pr(devkit, release.branch_for(version)):
+        return why
+    return "gh cannot show that it never had a PR"
+
+
 def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
     """The prepare PR's number, pushing and opening it as needed; `(0, why)` on failure.
 
     Reuses an open PR; otherwise opens one for a branch an earlier run pushed and died
-    before its PR (`release.unresumable` says when that branch is safe to reuse), and
+    before its PR (`resume_refusal` says when that branch is safe to reuse), and
     only failing both cuts the branch afresh. A branch whose PR was *closed* is never
     resumed: closing it was somebody's decision, and `prepare` refuses it out loud.
     """
@@ -612,8 +638,7 @@ def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
     if state == "OPEN":
         _say(f"reusing the open prepare PR #{number} for {branch}")
         return number, ""
-    why = release.unresumable(devkit, version, _run) if not state else f"its PR is {state}"
-    if not why:
+    if not resume_refusal(devkit, version, state):
         _say(f"{branch} is on origin with no PR -- an earlier run stopped before opening it")
     else:
         _say(f"preparing {branch}")

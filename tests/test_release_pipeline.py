@@ -1080,11 +1080,15 @@ def test_release_pr_tells_no_pr_from_a_closed_one(monkeypatch):
     assert rp.open_release_pr(Path("devkit"), "release/v0.0.2") == 6
 
 
-def _pr_stage(monkeypatch, state, why):
-    """Drive `prepare_pr` with `gh` and git stubbed; return the steps it took."""
+def _pr_stage(monkeypatch, state, why, never=True):
+    """Drive `prepare_pr` with `gh` and git stubbed; return the steps it took.
+
+    `never` is `never_had_a_pr`'s answer: False for a branch with a PR in its history,
+    or for a `gh` that could not list it."""
     steps: list[str] = []
     monkeypatch.setattr(rp, "release_pr", lambda _d, _b: (7 if state else 0, state))
     monkeypatch.setattr(rp.release, "unresumable", lambda *_a: steps.append("ask") or why)
+    monkeypatch.setattr(rp, "never_had_a_pr", lambda *_a: steps.append("history") or never)
 
     def prepare(*_a):
         steps.append("prepare")
@@ -1103,7 +1107,47 @@ def test_a_stranded_push_gets_its_pr_without_being_cut_again(monkeypatch):
     steps = _pr_stage(monkeypatch, "", "")
 
     assert rp.prepare_pr(Path("devkit"), "v0.0.2") == (42, "")
-    assert steps == ["ask", "gh pr create"]
+    assert steps == ["ask", "history", "gh pr create"]
+
+
+def test_a_gh_that_cannot_list_the_history_is_not_read_as_no_history(monkeypatch):
+    """An empty `gh pr view` answer is also what a failed `gh` returns, so a resumable
+    branch is resumed only once `gh pr list --state all` says it never had a PR."""
+    steps = _pr_stage(monkeypatch, "", "", never=False)
+
+    rp.prepare_pr(Path("devkit"), "v0.0.2")
+
+    assert steps == ["ask", "history", "prepare", "gh pr create"]
+    assert rp.resume_refusal(Path("devkit"), "v0.0.2", "") == (
+        "gh cannot show that it never had a PR"
+    )
+
+
+def test_never_had_a_pr_is_only_an_empty_answer(monkeypatch):
+    """`[]` is the one "never"; a PR in the list, or no answer at all, is not."""
+    asked: list[list[str]] = []
+    answers = iter([[], [{"number": 7}], None])
+    monkeypatch.setattr(rp, "_gh_json", lambda args, _cwd: asked.append(args) or next(answers))
+
+    assert rp.never_had_a_pr(Path("devkit"), "release/v0.0.2")
+    assert not rp.never_had_a_pr(Path("devkit"), "release/v0.0.2")
+    assert not rp.never_had_a_pr(Path("devkit"), "release/v0.0.2")
+    assert asked[0][:2] == ["pr", "list"]
+    assert asked[0][asked[0].index("--state") + 1] == "all"
+
+
+def test_a_failed_pr_create_is_reported_with_gh_s_words(monkeypatch):
+    _pr_stage(monkeypatch, "", "")
+
+    def refusing(cmd, **_kw):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="HTTP 502: bad gateway")
+
+    monkeypatch.setattr(rp, "_run", refusing)
+
+    assert rp.prepare_pr(Path("devkit"), "v0.0.2") == (
+        0,
+        "pushed release/v0.0.2 but the PR failed: HTTP 502: bad gateway",
+    )
 
 
 def test_a_branch_that_is_not_a_stranded_push_is_prepared(monkeypatch):
