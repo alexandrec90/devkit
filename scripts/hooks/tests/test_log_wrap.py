@@ -117,6 +117,20 @@ def test_the_child_writes_the_utf8_this_wrapper_reads(monkeypatch):
     assert (code, output.strip()) == (0, "✓ done")
 
 
+def test_the_child_s_two_streams_arrive_in_the_order_it_wrote_them(monkeypatch):
+    """A Python child block-buffers stdout into a pipe and flushes it at exit, while
+    stderr goes out at once, so the merged output put every stdout line *after* every
+    stderr line. The cause is read from the last line: the 2026-10-06 Upgrade Projects
+    run warned on stderr that a release was owed, pointed at `logs/upgrade.log`, and was
+    filed as "social-scraper is already on devkit vN.N" -- its last stdout line (583d8e80)."""
+    assert lw.child_env({})["PYTHONUNBUFFERED"] == "1"
+    assert lw.child_env({"PYTHONUNBUFFERED": ""})["PYTHONUNBUFFERED"] == ""
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    script = "import sys; print('first'); print('second', file=sys.stderr); print('third')"
+    code, output = lw.stream([sys.executable, "-c", script])
+    assert (code, output.split()) == (0, ["first", "second", "third"])
+
+
 # --- capping ------------------------------------------------------------------
 
 
@@ -605,6 +619,29 @@ def test_the_artifact_is_read_by_its_own_shape(tmp_path, artifact, said):
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "scrape-run.json").write_text(artifact, encoding="utf-8")
     assert lw.cause_said(lw.cause_source(SCRAPE_SAID, tmp_path)) == said
+
+
+def test_a_python_job_s_closing_pointer_is_still_last_when_it_reaches_the_ledger(
+    tmp_path, monkeypatch
+):
+    """583d8e80, end to end through a real child: upgrade-project.py prints its per-project
+    lines on stdout and closes on stderr with the pointer to its artifact. Buffered, the
+    stdout lines came out after the pointer, so the ledger filed a bystander's "already
+    on devkit" line instead of the owed release the artifact names."""
+    monkeypatch.delenv("PYTHONUNBUFFERED", raising=False)
+    ledger = _ledger(tmp_path, monkeypatch)
+    (tmp_path / "logs").mkdir()
+    owed = "upgrade: devkit main carries 2 vendored change(s) v0.5.3 does not"
+    (tmp_path / "logs" / "upgrade.log").write_text(f"=== (release) ===\n{owed}\n", "utf-8")
+    script = (
+        "import sys; print('upgrade: carameli is already on devkit v0.5.3.'); "
+        "print('upgrade: details in logs/upgrade.log', file=sys.stderr); sys.exit(1)"
+    )
+
+    lw.main(["--always", "Up", "--", sys.executable, "-c", script], root=tmp_path)
+
+    [fields] = _fields(ledger)
+    assert fields["cause"] == lw.failure_cause(owed)
 
 
 def test_a_pointer_to_no_file_keeps_the_line_it_was_said_in(tmp_path):
