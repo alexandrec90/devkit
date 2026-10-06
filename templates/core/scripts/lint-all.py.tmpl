@@ -30,6 +30,16 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "lint-errors.log"
 
+# Linters `pyproject.toml`'s dev group declares, so a missing one is a broken
+# environment rather than an absent optional tool. `run_tool` returns "" for a skip and
+# for a pass alike, so a run that skipped both printed `lint-all: clean` having checked
+# no Python at all. dotenv-linter and the frontend tools keep the note: nothing here
+# declares them, so their absence is a machine without them, not a broken install.
+REQUIRED_TOOLS = ("ruff", "mypy")
+
+# Names `run_tool` skipped for want of the tool; `main` clears it on entry.
+_SKIPPED: list[str] = []
+
 # ruff runs over the whole repo; mypy does not. `scripts/hooks/` and
 # `sync-devkit.py` are the *vendored* harness — byte-identical upstream code that
 # `sync-devkit.py --check` forbids this repo from editing, so reporting type errors
@@ -281,11 +291,13 @@ def run_tool(
     reach only the shell and the linter would hold the pipe open past the bound.
     """
     if _missing_module(cmd):
+        _SKIPPED.append(name)
         print(f"  {name}: not installed — skipped")
         return ""
     try:
         result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
+        _SKIPPED.append(name)
         print(f"  {name}: not installed — skipped")
         return ""
     except subprocess.TimeoutExpired:
@@ -367,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     rerun = rerun_in_tree_venv("ruff", argv)
     if rerun is not None:
         return rerun
+    _SKIPPED.clear()
 
     # `--paths` and `--changed` are the same narrowing, differing only in who names the
     # files; everything downstream treats them identically.
@@ -405,11 +418,30 @@ def main(argv: list[str] | None = None) -> int:
 def _finish(sections: str) -> int:
     """Write the artifact, report where it is, and return the run's exit code."""
     _write_artifact(sections)
+    if unusable := not_clean_reason():
+        print(unusable)
+        return 1
     if sections:
         print(f"\nlint-all: FAILED — details in {ARTIFACT.relative_to(REPO_ROOT)}")
         return 1
     print(f"\nlint-all: clean (artifact cleared: {ARTIFACT.relative_to(REPO_ROOT)})")
     return 0
+
+
+def not_clean_reason() -> str:
+    """The line to print when a REQUIRED linter could not run, else "".
+
+    Not an artifact finding -- no source edit fixes a missing tool -- but a statement
+    that the run cannot be believed, whose honest exit code is non-zero.
+    """
+    absent = [name for name in _SKIPPED if name in REQUIRED_TOOLS]
+    if not absent:
+        return ""
+    return (
+        f"\nlint-all: NOT CLEAN — {', '.join(absent)} could not be run, so nothing was "
+        f"checked for the rules they own. They are declared in pyproject.toml: run this "
+        f"under the project's .venv, or install them (`uv sync --all-extras --all-groups`)."
+    )
 
 
 def _python_passes(targets: list[str], scoped: bool) -> str:

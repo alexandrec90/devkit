@@ -513,6 +513,10 @@ def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linu
     assert "failures.txt" in with_evidence and "ran on Linux" in with_evidence
     assert "ran on Linux" in fix_prompts.pr_prompt(failure(evidence=""))
     assert ".venv interpreter" in fix_prompts.FINISH
+    # db3e57f7: the interpreter was named for the tests only, so a fixer ran roguelike's
+    # lint-all.py under the PATH python, which skipped ruff and mypy and said clean.
+    head = fix_prompts.FINISH.split("python scripts/lint-all.py")[0]
+    assert ".venv interpreter, not the python on PATH" in head and "the linter" in head
     assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
 
 
