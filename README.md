@@ -1502,13 +1502,16 @@ judgement call to `logs/overnight.md` so it can be reversed, and finishes throug
 `/implement-spec <path>` is the one shared [dynamic
 workflow](https://code.claude.com/docs/en/workflows) (`.claude/workflows/implement-spec.js`,
 Claude Code only). Run from a task worktree, it turns a large requirements document into a
-task graph grouped into milestones, kept in the project's own .spec-run directory, builds one milestone per run
-in waves of parallel agents, and ships it through `/ship` as one PR. Builders work in
-detached checkouts of an unbranched snapshot under `logs/spec-run/trees/` and hand back
-patches, so a wave builds on the one before it and nothing is committed before the fix
-pass commits. The next milestone starts in a fresh worktree once that PR merges; a rerun
-in the same tree resumes from the task graph. Pass `{spec, parallel, maxAttempts,
-auditRounds, allMilestones}` instead of a path to tune it.
+task graph grouped into milestones, kept in the project's own .spec-run directory, and
+ships every milestone through `/ship` as its own PR in one run. Builders work in detached
+checkouts of an unbranched snapshot under `logs/spec-run/trees/` and hand back patches, so
+a wave builds on the one before it and nothing is committed before the fix pass commits.
+Once the pass has shipped milestone k, the run switches the same tree to a new
+`spec/<slug>-m<k+1>` branch on that commit, so the PRs stack: merge them in order, and the
+pass's `update-branch` brings each level once its predecessor lands. A rerun in the same
+tree resumes the stack. Pass `{spec, parallel, maxAttempts, auditRounds, onePr,
+maxMilestones, waitMinutes}` instead of a path to tune it; `onePr` ships everything as a
+single PR instead.
 
 Generic audits, compatibility smoke commands, stateful refactor sweeps, and model-to-model
 handoff prompts do not belong in every project. Mechanical constraints such as the

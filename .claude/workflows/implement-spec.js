@@ -1,35 +1,43 @@
 export const meta = {
   name: 'implement-spec',
-  description: 'Implement a large requirements doc one milestone per run: plan a task graph, build waves in parallel checkouts, integrate, audit, then ship through /ship',
-  whenToUse: 'Turning a large spec or requirements document into working code across many agents. Run from a task worktree. Args: spec path, or {spec, parallel, maxAttempts, auditRounds, allMilestones}.',
+  description: 'Implement a large requirements doc as a stack of milestone PRs in one run: plan, build waves in parallel checkouts, integrate, audit, ship each through /ship',
+  whenToUse: 'Turning a large spec or requirements document into working code across many agents. Run from a task worktree. Args: spec path, or {spec, parallel, maxAttempts, auditRounds, onePr, maxMilestones, waitMinutes}.',
   phases: [
     { title: 'Load', detail: 'read the task graph a previous run left in .spec-run/' },
     { title: 'Plan', detail: 'outline the spec, set up the architecture, decompose sections, merge into a milestone graph' },
     { title: 'Build', detail: 'waves of ready tasks, each in its own detached checkout of a snapshot' },
     { title: 'Integrate', detail: 'apply each patch to the integration tree, run its tests, record status' },
     { title: 'Audit', detail: 'check the milestone against the spec; gaps become new tasks' },
-    { title: 'Ship', detail: 'write .spec-run/REPORT.md and the ship intent' },
+    { title: 'Ship', detail: 'write the milestone report and the ship intent' },
+    { title: 'Stack', detail: 'wait for the fix pass to ship the milestone, then branch the next one off it' },
   ],
 }
 
-// The run never commits, pushes or opens a PR (.claude/rules/session-scope.md). Everything
-// it builds accumulates uncommitted in the integration tree -- the task worktree it was
-// started from -- and ships as one PR through /ship at the end. That is what lets wave N
-// build on wave N-1 without waiting on a merge: builders start from a snapshot commit of
-// the tree that sits on no branch, and hand back a patch instead of a branch.
+// The run never commits, pushes or opens a PR (.claude/rules/session-scope.md). Work
+// accumulates uncommitted in the integration tree -- the task worktree the run started in --
+// and each milestone ships through /ship as its own PR.
 //
-// Builders do not use `isolation: 'worktree'`: those worktrees branch from the remote
-// default branch unless `worktree.baseRef` is "head", so they would not see earlier waves.
+// Within a milestone, wave N builds on wave N-1 without a commit: builders start from a
+// snapshot commit of the tree that sits on no branch, and hand back a patch, not a branch.
+// They do not use `isolation: 'worktree'`: those worktrees branch from the remote default
+// branch unless `worktree.baseRef` is "head", so they would not see earlier waves.
 //
-// The task graph lives in .spec-run/ and ships with each PR, so the next milestone can start
-// in a fresh worktree on any machine once this one merges.
+// Across milestones the PRs stack. Once the fix pass has committed and shipped milestone k
+// from this tree, the run switches the same tree to a new branch on that commit and builds
+// k+1 there, so k+1's PR contains k's commit until k merges and the pass's `update-branch`
+// brings it level. It stays in this tree because a worktree-isolated session cannot write
+// to another one, and a checkout nested inside this tree would be reaped with it once
+// milestone k's PR merges.
 const opts = typeof args === 'string' ? { spec: args } : (args || {})
 if (!opts.spec) throw new Error('Pass the spec path, e.g. /implement-spec docs/requirements.md')
 const WAVE = opts.parallel || 4
 const MAX_ATTEMPTS = opts.maxAttempts || 2
 const AUDIT_ROUNDS = opts.auditRounds ?? 2
+const MAX_MILESTONES = opts.maxMilestones || Infinity
+const WAIT_MINUTES = opts.waitMinutes || 120
 const STATE = '.spec-run'
 const SCRATCH = 'logs/spec-run'
+const SLUG = opts.spec.split(/[\\/]/).pop().replace(/\.[^.]*$/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'spec'
 
 const str = { type: 'string' }
 const int = { type: 'integer' }
@@ -48,12 +56,14 @@ const TASK = {
     dependsOn: strs, status: STATUS, attempts: int,
   },
 }
+const SHIPPED = { type: 'object', required: ['milestone', 'branch'], properties: { milestone: int, branch: str } }
 const LOAD_SCHEMA = {
   type: 'object',
-  required: ['branch', 'dirty', 'intentPending', 'exists', 'specPath', 'sections', 'tasks'],
+  required: ['branch', 'dirty', 'intentPending', 'exists', 'specPath', 'sections', 'tasks', 'shipped'],
   properties: {
     branch: str, dirty: { type: 'boolean' }, intentPending: { type: 'boolean' }, exists: { type: 'boolean' },
     specPath: str, sections: { type: 'array', items: SECTION }, tasks: { type: 'array', items: TASK },
+    shipped: { type: 'array', items: SHIPPED },
   },
 }
 const OUTLINE_SCHEMA = {
@@ -85,10 +95,18 @@ const GAPS_SCHEMA = {
     },
   },
 }
+const HANDOFF_SCHEMA = {
+  type: 'object', required: ['outcome', 'detail', 'branch'],
+  properties: {
+    outcome: { type: 'string', enum: ['shipped', 'refused', 'waiting', 'other'] },
+    detail: str, branch: str,
+  },
+}
 
 const CTX = `Shared state for this run lives in ${STATE}/ at the root of the integration tree:
 - ${STATE}/ARCHITECTURE.md: stack, layout, conventions, and the commands to provision, build and test
 - ${STATE}/tasks.json: the task graph; each task has id, title, section, area, milestone, specRefs (line ranges in the spec), acceptance, dependsOn, status, attempts, notes
+- ${STATE}/milestones.json: {"shipped": [{milestone, branch}]}, the milestones already handed to the fix pass
 - ${STATE}/progress.md: append-only log of what each wave did
 Read the spec only by line range, never the whole file at once. Nothing in this run commits, pushes or opens a PR.
 Run git as plain, separate commands with no command substitution or chaining: the worktree isolation check refuses git it cannot verify.`
@@ -100,18 +118,19 @@ const state = await agent(
 - branch: the current branch name (empty if HEAD is detached)
 - dirty: whether \`git status --porcelain\` lists anything outside ${STATE}/
 - intentPending: whether logs/ship-intent.md exists
-- if ${STATE}/tasks.json and ${STATE}/outline.json both exist: exists=true, specPath and sections from outline.json, and for every task in tasks.json its id, title, section, area, milestone, dependsOn, status and attempts. Otherwise exists=false, empty arrays, specPath "${opts.spec}".`,
+- if ${STATE}/tasks.json and ${STATE}/outline.json both exist: exists=true, specPath and sections from outline.json, and for every task in tasks.json its id, title, section, area, milestone, dependsOn, status and attempts. Otherwise exists=false, empty arrays, specPath "${opts.spec}".
+- shipped: the "shipped" list in ${STATE}/milestones.json, or an empty list if there is no such file.`,
   { label: 'load state', phase: 'Load', schema: LOAD_SCHEMA, effort: 'low' },
 )
-// Mirrors `ship.is_shippable`: the intent this run ends with can only ship from a task branch.
+// Mirrors `ship.is_shippable`: the intents this run writes can only ship from a task branch.
 const shippable = b => (b.startsWith('worktree-') && b.length > 'worktree-'.length) || /^[^/]+\/.+/.test(b)
 if (!shippable(state.branch)) {
   throw new Error(`'${state.branch || 'detached HEAD'}' is not a task branch. Start the run from a task worktree (claude --worktree <name>).`)
 }
-if (state.intentPending) throw new Error('logs/ship-intent.md is waiting for the fix pass. Let it ship, then rerun.')
 if (!state.exists && state.dirty) throw new Error('The tree has uncommitted changes that are not this run\'s. Start from a clean task worktree.')
 
-let { specPath, sections, tasks } = state
+let { specPath, sections, tasks, branch } = state
+const shipped = state.shipped
 
 // ---------------------------------------------------------------- Plan
 if (!state.exists) {
@@ -155,7 +174,7 @@ Build the task graph from every file in ${STATE}/sections/ (written by parallel 
 - Merge duplicate or overlapping tasks across sections, keeping all their specRefs and acceptance criteria. Record the section each task came from.
 - Assign final ids (keep the localId where unique).
 - Resolve each externalDeps entry to concrete task ids in dependsOn. Break cycles by splitting tasks.
-- Group the tasks into numbered milestones, 1 upward. Each milestone is one pull request a person reviews and merges before the next starts, so make each a coherent, reviewable slice of roughly 10-25 tasks, foundational work (data model, shared types, auth, config) first. A task depends only on tasks in its own or an earlier milestone.
+- Group the tasks into numbered milestones, 1 upward. Each milestone ships as its own pull request, stacked on the one before, so make each a coherent, reviewable slice of roughly 10-25 tasks, foundational work (data model, shared types, auth, config) first. A task depends only on tasks in its own or an earlier milestone.
 - Every task: status "pending", attempts 0, notes "".
 Write ${STATE}/tasks.json as {"spec": "${specPath}", "tasks": [...]} with full fields.
 Return id, title, section, area, milestone, dependsOn, status and attempts for every task.`,
@@ -166,17 +185,15 @@ Return id, title, section, area, milestone, dependsOn, status and attempts for e
 
 const byId = new Map(tasks.map(t => [t.id, t]))
 const all = () => [...byId.values()]
-const pendingMilestones = all().filter(t => t.status === 'pending').map(t => t.milestone)
 const lastMilestone = Math.max(1, ...all().map(t => t.milestone))
-const target = opts.allMilestones ? lastMilestone : Math.min(lastMilestone, ...pendingMilestones)
-const inScope = t => t.milestone <= target
-log(`${byId.size} tasks, ${all().filter(t => t.status === 'done').length} done; this run builds milestone ${opts.allMilestones ? `1-${target}` : target} of ${lastMilestone}`)
-if (all().filter(inScope).length > 600) log('Large milestone: one run may hit the 1,000-agent cap. Rerun /implement-spec in this tree to continue.')
+const isDone = id => byId.get(id)?.status === 'done'
+const isShipped = m => shipped.some(s => s.milestone === m)
+const milestones = () => [...new Set(all().map(t => t.milestone))].sort((a, b) => a - b)
+log(`${byId.size} tasks in ${lastMilestone} milestones; ${all().filter(t => t.status === 'done').length} done, ${shipped.length} milestones shipped`)
 
 // ---------------------------------------------------------------- Build + Integrate
-const isDone = id => byId.get(id)?.status === 'done'
-
-async function build(round) {
+async function build(lo, hi, round) {
+  const inScope = t => t.milestone >= lo && t.milestone <= hi
   for (let wave = 1; ; wave++) {
     const pending = all().filter(t => t.status === 'pending' && inScope(t))
     if (!pending.length) return
@@ -191,7 +208,7 @@ async function build(round) {
     for (const t of ready) if (picked.length < WAVE && !areas.has(t.area)) { picked.push(t); areas.add(t.area) }
     for (const t of ready) if (picked.length < WAVE && !picked.includes(t)) picked.push(t)
 
-    const label = `m${target}r${round}w${wave}`
+    const label = `m${lo}r${round}w${wave}`
     const tree = t => `${SCRATCH}/trees/${t.id}`
     log(`Wave ${label}: ${picked.map(t => t.id).join(', ')} (${pending.length} pending)`)
 
@@ -203,7 +220,7 @@ async function build(round) {
 Return the commit id.`,
       { label: `snapshot ${label}`, phase: 'Build', schema: SNAPSHOT_SCHEMA, effort: 'low' },
     )
-    if (!snap) throw new Error(`Snapshot for wave ${label} failed. Rerun /implement-spec to continue.`)
+    if (!snap) throw new Error(`Snapshot for wave ${label} failed. Rerun /implement-spec in this tree to continue.`)
 
     // Barrier: the integrator applies a whole wave serially to the one integration tree.
     const built = await parallel(picked.map(t => () => agent(
@@ -246,59 +263,107 @@ Return id, final status and attempts for every task in the reports.`,
 }
 
 // ---------------------------------------------------------------- Audit loop
-for (let round = 1; ; round++) {
-  await build(round)
-  if (round > AUDIT_ROUNDS) break
+async function buildAndAudit(lo, hi) {
+  const final = hi === lastMilestone
+  for (let round = 1; ; round++) {
+    await build(lo, hi, round)
+    if (round > AUDIT_ROUNDS) return
 
-  // The last milestone also audits for requirements no task covers at all.
-  const final = !all().some(t => t.milestone > target && t.status === 'pending')
-  const scoped = sections
-    .map(s => ({ s, ids: all().filter(t => t.section === s.id && t.milestone === target && t.status === 'done').map(t => t.id) }))
-    .filter(x => final || x.ids.length)
-  const audits = await pipeline(scoped, ({ s, ids }) => agent(
-    `${CTX}
+    // The last milestone also audits for requirements no task covers at all.
+    const scoped = sections
+      .map(s => ({ s, ids: all().filter(t => t.section === s.id && t.milestone >= lo && t.milestone <= hi && t.status === 'done').map(t => t.id) }))
+      .filter(x => final || x.ids.length)
+    const audits = await pipeline(scoped, ({ s, ids }) => agent(
+      `${CTX}
 Audit spec section "${s.title}" (lines ${s.startLine}-${s.endLine} of ${specPath}) against this checkout's working tree, uncommitted work included. Change nothing; running tests is fine.
 - For tasks ${ids.join(', ') || '(none)'}: does the code meet every acceptance criterion in ${STATE}/tasks.json, with tests that check it?${final ? `
 - Which requirements in the range does no task in ${STATE}/tasks.json cover?` : ''}
 Skip anything a task with status "blocked" covers; it is already tracked. Report only concrete, spec-grounded gaps, each with specRefs and a one-sentence reason. An empty list is a good answer.`,
-    { label: `audit ${s.id}`, phase: 'Audit', schema: GAPS_SCHEMA },
-  ))
-  const gaps = audits.flatMap((a, i) => (a ? a.gaps.map(g => ({ ...g, section: scoped[i].s.id })) : []))
-  const unaudited = audits.filter(a => !a).length
-  if (unaudited) log(`${unaudited} section audits did not return and were skipped this round`)
-  if (!gaps.length) { log(`Audit round ${round}: no gaps`); break }
-  log(`Audit round ${round}: ${gaps.length} gaps`)
+      { label: `audit m${lo} ${s.id}`, phase: 'Audit', schema: GAPS_SCHEMA },
+    ))
+    const gaps = audits.flatMap((a, i) => (a ? a.gaps.map(g => ({ ...g, section: scoped[i].s.id })) : []))
+    const unaudited = audits.filter(a => !a).length
+    if (unaudited) log(`${unaudited} section audits did not return and were skipped this round`)
+    if (!gaps.length) { log(`Milestone ${lo} audit round ${round}: no gaps`); return }
+    log(`Milestone ${lo} audit round ${round}: ${gaps.length} gaps`)
 
-  const added = await agent(
-    `${CTX}
-Audit round ${round} of milestone ${target} found these gaps:
+    const added = await agent(
+      `${CTX}
+Audit round ${round} of milestone ${hi} found these gaps:
 ${JSON.stringify(gaps, null, 1)}
-Add tasks for them to ${STATE}/tasks.json. Drop gaps an existing task (any status) already covers, merge overlapping gaps, and size new tasks like the existing ones. Ids m${target}-gap${round}-1, m${target}-gap${round}-2, ...; section as given; milestone ${target}; area, specRefs, acceptance, dependsOn (existing ids allowed); status "pending", attempts 0, notes "".
+Add tasks for them to ${STATE}/tasks.json. Drop gaps an existing task (any status) already covers, merge overlapping gaps, and size new tasks like the existing ones. Ids m${hi}-gap${round}-1, m${hi}-gap${round}-2, ...; section as given; milestone ${hi}; area, specRefs, acceptance, dependsOn (existing ids allowed); status "pending", attempts 0, notes "".
 Return only the tasks you added.`,
-    { label: `gap tasks r${round}`, phase: 'Audit', schema: TASKS_SCHEMA },
-  )
-  if (!added || !added.tasks.length) break
-  for (const t of added.tasks) byId.set(t.id, t)
+      { label: `gap tasks m${lo} r${round}`, phase: 'Audit', schema: TASKS_SCHEMA },
+    )
+    if (!added || !added.tasks.length) return
+    for (const t of added.tasks) byId.set(t.id, t)
+  }
 }
 
-// ---------------------------------------------------------------- Ship
+// ---------------------------------------------------------------- Stack
+// Waits for the scheduled fix pass to ship the intent in this tree, then puts the tree on a
+// new branch at the commit the pass made, which is what stacks the next milestone's PR.
+async function handoff(next) {
+  const target = `spec/${SLUG}-m${next}`
+  const h = await agent(
+    `The ship intent in this tree (logs/ship-intent.md) is waiting for the scheduled fix pass, which commits it, pushes and opens its PR. Wait for it. Do not commit, push, or start the fix pass yourself.
+1. Block until logs/ship-intent.md is gone or logs/ship-state.json has stage "refused": one long-running poll that checks every 60 seconds (a Monitor until-loop, or a shell loop with sleep), for at most ${WAIT_MINUTES} minutes. If neither happens, return outcome "waiting".
+2. Read logs/ship-state.json. Stage "refused": return "refused" with the reason; the pass sends a fixer into this tree. Any stage but "shipped" or "empty": return "other" with the stage.
+3. Otherwise \`git status --porcelain\` must print nothing; if it does, return "other" with what is dirty. Then \`git switch -c ${target}\`, adding -2, -3 ... if that branch exists. Return "shipped" with the PR url from ship-state.json as detail and the branch you switched to.`,
+    { label: `handoff m${next}`, phase: 'Stack', schema: HANDOFF_SCHEMA },
+  )
+  if (h && h.outcome === 'shipped') {
+    log(`Shipped ${h.detail}; milestone ${next} stacks on it as ${h.branch}`)
+    return h.branch
+  }
+  const why = h ? `${h.outcome}: ${h.detail}` : 'the handoff agent did not return'
+  throw new Error(`The previous milestone has not shipped (${why}). Rerun /implement-spec in this tree once the fix pass has shipped it; the run resumes there.`)
+}
+
+// ---------------------------------------------------------------- Milestones
+let intentPending = state.intentPending
+const shippedNow = []
+for (let count = 0; count < MAX_MILESTONES; count++) {
+  const lo = milestones().find(m => !isShipped(m))
+  if (lo === undefined) break
+  const hi = opts.onePr ? lastMilestone : lo
+
+  // A branch that already carries a shipped milestone takes no more work: stack a new one.
+  if (intentPending || shipped.some(s => s.branch === branch)) {
+    branch = await handoff(lo)
+    intentPending = false
+  }
+
+  await buildAndAudit(lo, hi)
+
+  const ms = hi === lo ? `milestone ${lo}` : `milestones ${lo}-${hi}`
+  const stacked = shipped.length
+    ? ` Stacked on ${shipped[shipped.length - 1].branch}: merge that PR first; until then this PR's diff includes it.`
+    : ''
+  await agent(
+    `${CTX}
+This run has finished ${ms} of ${lastMilestone}, on branch ${branch}.
+1. Write ${STATE}/REPORT.md: what ${ms} built per spec section, every blocked or pending task with its notes, and anything a person must decide.
+2. Add {"milestone": m, "branch": "${branch}"} for each m from ${lo} to ${hi} to the "shipped" list in ${STATE}/milestones.json, creating it as {"shipped": []} if it is missing.
+3. Ship as .claude/skills/ship/SKILL.md says, writing logs/ship-intent.md last. The subject says what ${ms} delivers; the body says why, which spec sections it covers, which tasks are blocked, and that the task graph is in ${STATE}/tasks.json.${stacked}
+Return the subject.`,
+    { label: `ship m${lo}`, phase: 'Ship' },
+  )
+  for (let m = lo; m <= hi; m++) {
+    shipped.push({ milestone: m, branch })
+    shippedNow.push({ milestone: m, branch })
+  }
+  intentPending = true
+}
+
 const ids = s => all().filter(t => t.status === s).map(t => t.id)
-const remaining = all().filter(t => t.milestone > target && t.status === 'pending').length
-const shipped = await agent(
-  `${CTX}
-This run has finished milestone ${target} of ${lastMilestone}.
-1. Write ${STATE}/REPORT.md: what this milestone built per spec section, every blocked or pending task with its notes, and anything a person must decide.
-2. Ship as .claude/skills/ship/SKILL.md says, writing logs/ship-intent.md last. The subject says what milestone ${target} delivers; the body says why, which spec sections it covers, which tasks are blocked, and that the task graph is in ${STATE}/tasks.json.
-Return the subject and the report in under 300 words.`,
-  { label: 'ship', phase: 'Ship' },
-)
+const left = milestones().filter(m => !isShipped(m)).length
 return {
-  milestone: target,
+  shipped: shippedNow,
   done: ids('done').length,
   blocked: ids('blocked'),
   pending: ids('pending'),
-  next: remaining
-    ? `${remaining} tasks remain in later milestones. Once this PR merges, start a fresh task worktree and run /implement-spec ${opts.spec} again.`
-    : 'Every milestone is built.',
-  shipped,
+  next: left > 0
+    ? `${left} milestones left (maxMilestones stopped the run). Rerun /implement-spec ${opts.spec} in this tree to continue the stack.`
+    : 'Every milestone is shipped. Merge the stacked PRs in order.',
 }
