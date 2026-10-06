@@ -82,7 +82,6 @@ scripts/release-pipeline.py::dispatch_tag_workflow
 scripts/release-pipeline.py::download_failing_tests
 scripts/release-pipeline.py::main_fallback
 scripts/release-pipeline.py::newest_workflow_run
-scripts/release-pipeline.py::open_release_pr
 scripts/release-pipeline.py::parse_version
 scripts/release-pipeline.py::pr_rollup
 scripts/release.py::main_fallback

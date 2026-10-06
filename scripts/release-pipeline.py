@@ -585,12 +585,64 @@ def main_fallback(devkit: Path) -> str:
     return release.bump_fallback(result.stdout, "unused")[1] or ""
 
 
+def release_pr(devkit: Path, branch: str) -> tuple[int, str]:
+    """`(number, state)` of the newest PR from `branch`; `(0, "")` when there is none."""
+    data = _gh_json(["pr", "view", branch, "--json", "number,state"], devkit)
+    if not isinstance(data, dict):
+        return 0, ""
+    return int(data.get("number") or 0), str(data.get("state") or "")
+
+
 def open_release_pr(devkit: Path, branch: str) -> int:
     """The number of the open PR for `branch`, or 0 when there is none."""
-    data = _gh_json(["pr", "view", branch, "--json", "number,state"], devkit)
-    if not isinstance(data, dict) or data.get("state") != "OPEN":
-        return 0
-    return int(data.get("number") or 0)
+    number, state = release_pr(devkit, branch)
+    return number if state == "OPEN" else 0
+
+
+def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
+    """The prepare PR's number, pushing and opening it as needed; `(0, why)` on failure.
+
+    Reuses an open PR; otherwise opens one for a branch an earlier run pushed and died
+    before its PR (`release.unresumable` says when that branch is safe to reuse), and
+    only failing both cuts the branch afresh. A branch whose PR was *closed* is never
+    resumed: closing it was somebody's decision, and `prepare` refuses it out loud.
+    """
+    branch = release.branch_for(version)
+    number, state = release_pr(devkit, branch)
+    if state == "OPEN":
+        _say(f"reusing the open prepare PR #{number} for {branch}")
+        return number, ""
+    why = release.unresumable(devkit, version, _run) if not state else f"its PR is {state}"
+    if not why:
+        _say(f"{branch} is on origin with no PR -- an earlier run stopped before opening it")
+    else:
+        _say(f"preparing {branch}")
+        ok, detail = release.prepare(devkit, version, _run, _say)
+        if not ok:
+            return 0, f"prepare failed: {detail}"
+    created = _run(
+        [
+            "gh",
+            "pr",
+            "create",
+            "--base",
+            "main",
+            "--head",
+            branch,
+            "--title",
+            f"Release {version}",
+            "--body",
+            PR_BODY.format(version=version, expected=EXPECTED_RED_TEST),
+        ],
+        cwd=devkit,
+    )
+    if created.returncode != 0:
+        return 0, f"pushed {branch} but the PR failed: {(created.stderr or created.stdout).strip()}"
+    number = pr_number_from_url(created.stdout) or open_release_pr(devkit, branch)
+    if not number:
+        return 0, f"opened a PR for {branch} but could not read its number"
+    _say(f"opened PR #{number}")
+    return number, ""
 
 
 def wait_for_checks(devkit: Path, number: int) -> None:
@@ -735,50 +787,16 @@ def run_pipeline(
     projects: Sequence[str] = (),
 ) -> int:
     """Execute the release. 0 done, 1 refused, 2 a step failed."""
-    branch = release.branch_for(version)
-
     if main_fallback(devkit) == version:
         # Resumable: the prepare PR has already merged, so the bump is on main and only
         # the tag is missing. Re-running the task after a network failure at step 7
         # should finish the release, not refuse it as half-done.
         _say(f"{release.FALLBACK_CONST} already names {version} on main -- skipping to the tag")
     else:
-        number = open_release_pr(devkit, branch)
-        if number:
-            _say(f"reusing the open prepare PR #{number} for {branch}")
-        else:
-            _say(f"preparing {branch}")
-            ok, detail = release.prepare(devkit, version, _run, _say)
-            if not ok:
-                print(f"release-pipeline: prepare failed: {detail}", file=sys.stderr)
-                return 2
-            created = _run(
-                [
-                    "gh",
-                    "pr",
-                    "create",
-                    "--base",
-                    "main",
-                    "--head",
-                    branch,
-                    "--title",
-                    f"Release {version}",
-                    "--body",
-                    PR_BODY.format(version=version, expected=EXPECTED_RED_TEST),
-                ],
-                cwd=devkit,
-            )
-            if created.returncode != 0:
-                print(
-                    f"release-pipeline: pushed {branch} but the PR failed: "
-                    f"{(created.stderr or created.stdout).strip()}",
-                    file=sys.stderr,
-                )
-                return 2
-            number = pr_number_from_url(created.stdout) or open_release_pr(devkit, branch)
-            if not number:
-                return _stop(f"opened a PR for {branch} but could not read its number")
-            _say(f"opened PR #{number}")
+        number, failure = prepare_pr(devkit, version)
+        if not number:
+            print(f"release-pipeline: {failure}", file=sys.stderr)
+            return 2
 
         _say(f"waiting for the gate on #{number} (one blocking call; this takes minutes)")
         wait_for_checks(devkit, number)

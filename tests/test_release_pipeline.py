@@ -13,6 +13,7 @@ else.
 """
 
 import inspect
+import os
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,7 @@ rp = load_script("scripts/release-pipeline.py")
 rel = load_script("scripts/release.py")
 up = load_script("scripts/upgrade-project.py")
 devkit_project = load_script("scripts/devkit_project.py")
+worktree_env = load_script("scripts/worktree_env.py")
 
 TAGS = ["v0.1.0", "v0.9.0", "v0.10.0", "v0.11.1"]
 
@@ -957,7 +959,175 @@ def test_the_clear_out_happens_before_the_worktree_is_cut(tmp_path):
     assert source.index("discard_stale_branch(devkit, branch, run)") < source.index(
         '"worktree", "add"'
     ), "the worktree is cut before the ref is cleared"
-    assert "release.prepare(devkit, version, _run, _say)" in inspect.getsource(rp.run_pipeline)
+    assert "release.prepare(devkit, version, _run, _say)" in inspect.getsource(rp.prepare_pr)
+    assert "prepare_pr(devkit, version)" in inspect.getsource(rp.run_pipeline)
+
+
+# --- a push that never got its PR ---------------------------------------------
+#
+# 2026-10-06: the nightly run pushed release/v0.11.50, then died in the temp-directory
+# cleanup on a `.pyd` some process still held -- before `gh pr create`. Every later run
+# then refused "release/v0.11.50 is on origin but has no open PR", and the release
+# stalled on a branch that was exactly what the next run would have pushed.
+
+
+def test_a_file_the_cleanup_cannot_delete_does_not_undo_a_pushed_release(tmp_path, monkeypatch):
+    """The crash itself: `TemporaryDirectory` raised out of `prepare` after the push, so
+    the pipeline never reached the PR. A held file is simulated portably -- POSIX would
+    delete an open one -- by refusing its unlink, as Windows refused `_yaml.pyd`."""
+    devkit, _, _ = _a_devkit_with_origin(tmp_path)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(rel.tempfile, "tempdir", str(scratch))
+    real_unlink = os.unlink
+
+    def held(path, *args, **kwargs):
+        if str(path).endswith("held.pyd"):
+            raise PermissionError(13, "Access is denied", str(path))
+        return real_unlink(path, *args, **kwargs)
+
+    def run(cmd, env=None):
+        if "remove" in cmd:  # `git worktree remove --force` meets the same lock
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Permission denied")
+        result = _git_run(cmd, env)
+        if "push" in cmd:
+            (Path(cmd[cmd.index("-C") + 1]) / "held.pyd").write_bytes(b"")
+        return result
+
+    monkeypatch.setattr(os, "unlink", held)
+    ok, detail = rel.prepare(devkit, "v0.0.2", run, lambda _n: None)
+    monkeypatch.undo()
+
+    assert (ok, detail) == (True, "release/v0.0.2")
+    assert rel.pushed_to_origin(devkit, "release/v0.0.2", _git_run) is True
+
+
+def test_the_release_worktree_is_cut_without_a_venv(tmp_path):
+    """The `.pyd` was in a `.venv` the global `post-checkout` hook built for a one-line
+    bump. The add carries the hook's opt-out, spelled as the hook spells it."""
+    devkit, _, _ = _a_devkit_with_origin(tmp_path)
+    seen: dict[str, str | None] = {}
+
+    def recording(cmd, env=None):
+        if "add" in cmd:
+            seen["add"] = None if env is None else env.get(rel.SKIP_PROVISION_VAR)
+        return _git_run(cmd, env)
+
+    ok, detail = rel.prepare(devkit, "v0.0.2", recording, lambda _n: None)
+
+    assert ok, detail
+    assert seen["add"] == "1"
+    assert rel.SKIP_PROVISION_VAR == worktree_env.SKIP_PROVISION_VAR
+    assert rel.unprovisioned_env({"X": "1"}) == {"X": "1", rel.SKIP_PROVISION_VAR: "1"}
+
+
+def test_a_push_prepare_made_is_resumable(tmp_path):
+    devkit, _, _ = _a_devkit_with_origin(tmp_path)
+    ok, detail = rel.prepare(devkit, "v0.0.2", _git_run, lambda _n: None)
+    assert ok, detail
+
+    assert rel.unresumable(devkit, "v0.0.2", _git_run) == ""
+
+
+def test_a_branch_that_is_not_on_origin_is_not_resumable(tmp_path):
+    devkit, _, _ = _a_devkit_with_origin(tmp_path)
+
+    assert rel.unresumable(devkit, "v0.0.2", _git_run) == "not on origin"
+
+
+def test_a_pushed_branch_with_no_bump_is_not_resumable(tmp_path):
+    """The shape `test_a_branch_that_reached_origin_is_never_discarded` builds: pushed,
+    but nothing in it is a bump. Resuming would open a PR releasing nothing."""
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    run("push", "--quiet", "origin", "origin/main:refs/heads/release/v0.0.2")
+
+    assert "0 commit(s)" in rel.unresumable(devkit, "v0.0.2", _git_run)
+
+
+def test_a_pushed_branch_carrying_other_work_is_not_resumable(tmp_path):
+    """Somebody's change rode along: that branch is theirs, not a stranded bump."""
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    run("checkout", "--quiet", "-b", "release/v0.0.2", "origin/main")
+    target = devkit / "scripts" / "new-project.py"
+    target.write_text(f'{rel.FALLBACK_CONST} = "v0.0.2"\n', encoding="utf-8")
+    (devkit / "other.py").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "Release v0.0.2")
+    run("push", "--quiet", "origin", "release/v0.0.2")
+
+    assert "changes more than" in rel.unresumable(devkit, "v0.0.2", _git_run)
+
+
+def test_a_pushed_bump_to_another_version_is_not_resumable(tmp_path):
+    devkit, _, run = _a_devkit_with_origin(tmp_path)
+    run("checkout", "--quiet", "-b", "release/v0.0.2", "origin/main")
+    target = devkit / "scripts" / "new-project.py"
+    target.write_text(f'{rel.FALLBACK_CONST} = "v0.0.3"\n', encoding="utf-8")
+    run("commit", "-am", "Release v0.0.2")
+    run("push", "--quiet", "origin", "release/v0.0.2")
+
+    assert "does not set" in rel.unresumable(devkit, "v0.0.2", _git_run)
+
+
+def test_release_pr_tells_no_pr_from_a_closed_one(monkeypatch):
+    """`prepare_pr` resumes only when there was never a PR, so "none" and "closed" are
+    two answers here, where `open_release_pr` collapses both to 0."""
+    answers = iter([None, {"number": 5, "state": "CLOSED"}, {"number": 6, "state": "OPEN"}])
+    monkeypatch.setattr(rp, "_gh_json", lambda *_a: next(answers))
+
+    assert rp.release_pr(Path("devkit"), "release/v0.0.2") == (0, "")
+    assert rp.release_pr(Path("devkit"), "release/v0.0.2") == (5, "CLOSED")
+    assert rp.open_release_pr(Path("devkit"), "release/v0.0.2") == 6
+
+
+def _pr_stage(monkeypatch, state, why):
+    """Drive `prepare_pr` with `gh` and git stubbed; return the steps it took."""
+    steps: list[str] = []
+    monkeypatch.setattr(rp, "release_pr", lambda _d, _b: (7 if state else 0, state))
+    monkeypatch.setattr(rp.release, "unresumable", lambda *_a: steps.append("ask") or why)
+
+    def prepare(*_a):
+        steps.append("prepare")
+        return True, "release/v0.0.2"
+
+    def run(cmd, **_kw):
+        steps.append(" ".join(cmd[:3]))
+        return subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/42\n", stderr="")
+
+    monkeypatch.setattr(rp.release, "prepare", prepare)
+    monkeypatch.setattr(rp, "_run", run)
+    return steps
+
+
+def test_a_stranded_push_gets_its_pr_without_being_cut_again(monkeypatch):
+    steps = _pr_stage(monkeypatch, "", "")
+
+    assert rp.prepare_pr(Path("devkit"), "v0.0.2") == (42, "")
+    assert steps == ["ask", "gh pr create"]
+
+
+def test_a_branch_that_is_not_a_stranded_push_is_prepared(monkeypatch):
+    steps = _pr_stage(monkeypatch, "", "not on origin")
+
+    assert rp.prepare_pr(Path("devkit"), "v0.0.2") == (42, "")
+    assert steps == ["ask", "prepare", "gh pr create"]
+
+
+def test_a_closed_pr_is_never_resumed_behind_the_closers_back(monkeypatch):
+    """Closing it was a decision; `prepare` then refuses the pushed branch out loud."""
+    steps = _pr_stage(monkeypatch, "CLOSED", "")
+
+    rp.prepare_pr(Path("devkit"), "v0.0.2")
+
+    assert "ask" not in steps
+    assert "prepare" in steps
+
+
+def test_an_open_pr_is_reused_and_nothing_is_pushed(monkeypatch):
+    steps = _pr_stage(monkeypatch, "OPEN", "")
+
+    assert rp.prepare_pr(Path("devkit"), "v0.0.2") == (7, "")
+    assert steps == []
 
 
 def _git_run(cmd, env=None):
