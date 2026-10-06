@@ -100,11 +100,20 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 # exception a traceback ends on, pytest's first failed test, a tool's `error:` line.
 # Without it every failure of one job was one ledger group, so a new cause read as
 # `RECURRED` and quoted an unrelated earlier fix as what not to repeat (950c4a96).
+# A `logging` record at ERROR or above, then at WARNING, is read from its level on, so
+# its timestamp is not part of the cause. A line pointing at an artifact ("FAILED --
+# details in logs\scrape-run.json") names no cause, so it is never a match: as one, every
+# failure of the social-scraper collector was one group, and a WinError 32 read as
+# `RECURRED` over an unrelated fix (6ba2230e). It is still the fallback when nothing
+# else was said, since it says where to look.
 CAUSE_LINES = (
     (re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Interrupt|Exit)\b(?::.*)?$"), "last"),
     (re.compile(r"^(?:FAILED|ERROR)\s"), "first"),
     (re.compile(r"^(?:error|fatal)\b", re.I), "last"),
+    (re.compile(r"\b(?:CRITICAL|ERROR)[\s:]+[\w.]+:"), "last"),
+    (re.compile(r"\bWARNING[\s:]+[\w.]+:"), "last"),
 )
+POINTER = re.compile(r"\bdetails in\b", re.I)
 CAUSE_WIDTH = 120
 # The same line unfolded rides beside it as `said=`, outside the signature: folding read
 # a transient `unable to access 'https://github.com/<owner>/<repo>.git/' ... error: 403`
@@ -196,12 +205,17 @@ def strip_ansi(text: str) -> str:
 
 def cause_said(output: str) -> str:
     """The line of a failed run's output that names why, as the run said it: the
-    exception, the first failed test or the `error:` line, else the last line; `""` for
-    no output. Colour stripped, whitespace folded, bounded by `SAID_WIDTH`."""
+    exception, the first failed test, the `error:` line or a logged error or warning,
+    else the last line; `""` for no output. Colour stripped, whitespace folded, bounded
+    by `SAID_WIDTH`."""
     lines = [line.strip() for line in strip_ansi(output).splitlines() if line.strip()]
     found = lines[-1] if lines else ""
     for pattern, which in CAUSE_LINES:
-        hits = [line for line in lines if pattern.search(line)]
+        hits = [
+            line[match.start() :]
+            for line in lines
+            if not POINTER.search(line) and (match := pattern.search(line))
+        ]
         if hits:
             found = hits[0] if which == "first" else hits[-1]
             break
