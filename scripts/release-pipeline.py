@@ -585,12 +585,18 @@ def main_fallback(devkit: Path) -> str:
     return release.bump_fallback(result.stdout, "unused")[1] or ""
 
 
+def release_pr(devkit: Path, branch: str) -> tuple[int, str]:
+    """`(number, state)` of the newest PR from `branch`; `(0, "")` when there is none."""
+    data = _gh_json(["pr", "view", branch, "--json", "number,state"], devkit)
+    if not isinstance(data, dict):
+        return 0, ""
+    return int(data.get("number") or 0), str(data.get("state") or "")
+
+
 def open_release_pr(devkit: Path, branch: str) -> int:
     """The number of the open PR for `branch`, or 0 when there is none."""
-    data = _gh_json(["pr", "view", branch, "--json", "number,state"], devkit)
-    if not isinstance(data, dict) or data.get("state") != "OPEN":
-        return 0
-    return int(data.get("number") or 0)
+    number, state = release_pr(devkit, branch)
+    return number if state == "OPEN" else 0
 
 
 def never_had_a_pr(devkit: Path, branch: str) -> bool:
@@ -603,22 +609,37 @@ def never_had_a_pr(devkit: Path, branch: str) -> bool:
     return _gh_json(history, devkit) == []
 
 
-def release_pr(devkit: Path, branch: str, version: str) -> tuple[int, str]:
-    """The prepare PR for `branch` as `(number, "")`, or `(0, why)` when there is none.
+def resume_refusal(devkit: Path, version: str, state: str) -> str:
+    """Why origin's branch for `version` must be prepared afresh; `""` to resume it.
 
-    Reuses an open one, opens one for a branch an earlier run pushed but whose
-    `gh pr create` then failed, and otherwise prepares the branch and opens one. The
-    middle case is what stranded `release/v0.11.50`: the push landed, the PR did not,
-    and `prepare` refuses a branch already on origin -- rightly, since it cannot tell a
-    stranded push from a PR someone closed -- so every later run died in `prepare`
-    until a person deleted the branch on both sides. `never_had_a_pr` tells them apart.
+    `state` is `release_pr`'s answer. `release.unresumable` says whether the branch is
+    exactly the bump `prepare` would push; `never_had_a_pr` then makes sure the empty
+    `state` was "no PR" and not a `gh pr view` that could not answer -- asked last, so
+    a normal run, whose branch is not on origin yet, costs no second `gh` call.
     """
-    number = open_release_pr(devkit, branch)
-    if number:
+    if state:
+        return f"its PR is {state}"
+    why = release.unresumable(devkit, version, _run)
+    if why or never_had_a_pr(devkit, release.branch_for(version)):
+        return why
+    return "gh cannot show that it never had a PR"
+
+
+def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
+    """The prepare PR's number, pushing and opening it as needed; `(0, why)` on failure.
+
+    Reuses an open PR; otherwise opens one for a branch an earlier run pushed and died
+    before its PR (`resume_refusal` says when that branch is safe to reuse), and
+    only failing both cuts the branch afresh. A branch whose PR was *closed* is never
+    resumed: closing it was somebody's decision, and `prepare` refuses it out loud.
+    """
+    branch = release.branch_for(version)
+    number, state = release_pr(devkit, branch)
+    if state == "OPEN":
         _say(f"reusing the open prepare PR #{number} for {branch}")
         return number, ""
-    if release.pushed_to_origin(devkit, branch, _run) and never_had_a_pr(devkit, branch):
-        _say(f"{branch} is on origin with no PR -- an earlier run's PR failed; opening it")
+    if not resume_refusal(devkit, version, state):
+        _say(f"{branch} is on origin with no PR -- an earlier run stopped before opening it")
     else:
         _say(f"preparing {branch}")
         ok, detail = release.prepare(devkit, version, _run, _say)
@@ -791,15 +812,13 @@ def run_pipeline(
     projects: Sequence[str] = (),
 ) -> int:
     """Execute the release. 0 done, 1 refused, 2 a step failed."""
-    branch = release.branch_for(version)
-
     if main_fallback(devkit) == version:
         # Resumable: the prepare PR has already merged, so the bump is on main and only
         # the tag is missing. Re-running the task after a network failure at step 7
         # should finish the release, not refuse it as half-done.
         _say(f"{release.FALLBACK_CONST} already names {version} on main -- skipping to the tag")
     else:
-        number, failure = release_pr(devkit, branch, version)
+        number, failure = prepare_pr(devkit, version)
         if not number:
             print(f"release-pipeline: {failure}", file=sys.stderr)
             return 2
