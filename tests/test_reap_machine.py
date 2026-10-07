@@ -20,6 +20,7 @@ from support import load_script
 
 rc_machine = load_script("scripts/rc_machine.py")
 reap_machine = load_script("scripts/reap_machine.py")
+win_process_table = reap_machine.win_process_table
 
 P = reap_machine.Process
 
@@ -123,39 +124,94 @@ def test_posix_rows_split_into_four_columns_with_free_text_last():
     ]
 
 
+def no_native():
+    """A native reader that failed, so a test reaches the PowerShell lister behind it."""
+    return None, "the snapshot failed: refused"
+
+
 def test_the_table_is_none_when_the_lister_fails_or_answers_nothing():
-    assert reap_machine.process_table(lambda argv: completed(returncode=1), windows=True) is None
-    assert reap_machine.process_table(lambda argv: completed("[]"), windows=True) is None
+    def table(run):
+        return reap_machine.process_table(run, windows=True, native=no_native)
+
+    assert table(lambda argv: completed(returncode=1)) is None
+    assert table(lambda argv: completed("[]")) is None
 
     def boom(argv):
         raise OSError("no powershell")
 
-    assert reap_machine.process_table(boom, windows=True) is None
+    assert table(boom) is None
 
 
 def test_an_unread_table_says_why():
+    def why(run):
+        return reap_machine.read_table(run, windows=True, native=no_native)
+
     def slow(argv):
         raise subprocess.TimeoutExpired(argv, 240)
 
-    assert reap_machine.read_table(slow, windows=True) == (
-        None,
-        "the lister did not answer within 240 s",
-    )
+    native = "the snapshot failed: refused, and "
+    assert why(slow) == (None, native + "the lister did not answer within 240 s")
     refused = completed(returncode=1)
     refused.stderr = "Get-CimInstance : Call was canceled.\nAt line:1 char:1\n"
-    assert reap_machine.read_table(lambda argv: refused, windows=True) == (
+    assert why(lambda argv: refused) == (None, native + "the lister exited 1: At line:1 char:1")
+    assert why(lambda argv: completed("[]")) == (
         None,
-        "the lister exited 1: At line:1 char:1",
+        native + "the lister's answer held no process",
     )
-    assert reap_machine.read_table(lambda argv: completed("[]"), windows=True) == (
+    assert reap_machine.read_table(lambda argv: completed(), windows=False) == (
         None,
         "the lister's answer held no process",
     )
 
 
+def test_a_windows_table_is_read_in_process_before_powershell_is_asked():
+    """6114e177: the WMI query stalled past 240 s on a loaded desk, after ba883e41 had
+    already raised its bound from 60 s. Asking it first is what kept failing."""
+
+    def never(argv):
+        raise AssertionError(f"the lister was spawned: {argv}")
+
+    rows = [win_process_table.Row(7, 1, "node.EXE", "node x", private=5, rss=6, created=7.0)]
+    assert reap_machine.read_table(never, windows=True, native=lambda: (rows, "")) == (
+        [P(7, 1, "node", "node x", private=5, rss=6, created=7.0)],
+        "",
+    )
+
+
+def test_a_failed_native_read_falls_back_to_the_lister():
+    text = '[{"ProcessId":7,"ParentProcessId":1,"Name":"node.exe","CommandLine":"x"}]'
+    assert reap_machine.read_table(
+        lambda argv: completed(text), windows=True, native=lambda: ([], "")
+    ) == ([P(7, 1, "node", "x")], "")
+    assert reap_machine.native_table(lambda: ([], "")) == (None, "the native table held no process")
+
+
+def test_posix_never_asks_the_native_reader():
+    def never():
+        raise AssertionError("the native reader was asked off Windows")
+
+    assert reap_machine.process_table(
+        lambda argv: completed("7 1 node x"), windows=False, native=never
+    ) == [P(7, 1, "node", "x")]
+
+
+def test_the_native_table_holds_this_process_with_its_command_line_and_parent():
+    """The real kernel on a Windows desk; anywhere else, a decline that names why."""
+    table, why = reap_machine.native_table()
+    if os.name != "nt":
+        assert (table, why) == (None, "the native table is only implemented on Windows")
+        return
+    assert table is not None
+    me = next(row for row in table if row.pid == os.getpid())
+    assert me.ppid == os.getppid()
+    assert me.name.startswith("python")
+    assert "python" in me.cmdline.lower()
+    assert me.private > 0 and me.rss > 0 and 0 < me.created <= time.time()
+
+
 def test_the_table_read_outlasts_a_loaded_machine(monkeypatch):
     """ba883e41: four passes in a row timed out on a loaded desk at the 60 s bound every
-    other probe shares; the table read has its own, inside the task's ten minutes."""
+    other probe shares; the fallback lister has its own, inside the task's ten minutes."""
     seen = {}
 
     def fake_run(argv, **kwargs):
@@ -163,7 +219,7 @@ def test_the_table_read_outlasts_a_loaded_machine(monkeypatch):
         return completed('[{"ProcessId":7,"ParentProcessId":1,"Name":"x","CommandLine":""}]')
 
     monkeypatch.setattr(reap_machine.subprocess, "run", fake_run)
-    assert reap_machine.process_table(windows=True) == [P(7, 1, "x", "")]
+    assert reap_machine.process_table(windows=True, native=no_native) == [P(7, 1, "x", "")]
     assert reap_machine.QUICK_TIMEOUT < seen["timeout"] == reap_machine.TABLE_TIMEOUT
     reap_machine.run_table_command(["x"])
     assert seen["timeout"] == reap_machine.TABLE_TIMEOUT
@@ -172,9 +228,9 @@ def test_the_table_read_outlasts_a_loaded_machine(monkeypatch):
 
 def test_the_table_is_read_through_the_platform_parser():
     text = '[{"ProcessId":7,"ParentProcessId":1,"Name":"node.exe","CommandLine":"x"}]'
-    assert reap_machine.process_table(lambda argv: completed(text), windows=True) == [
-        P(7, 1, "node", "x")
-    ]
+    assert reap_machine.process_table(
+        lambda argv: completed(text), windows=True, native=no_native
+    ) == [P(7, 1, "node", "x")]
     assert reap_machine.process_table(lambda argv: completed("7 1 node x"), windows=False) == [
         P(7, 1, "node", "x")
     ]

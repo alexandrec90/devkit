@@ -53,6 +53,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_clis
 import rc_machine
+import win_process_table
 
 WINDOWS = os.name == "nt"
 
@@ -60,11 +61,11 @@ WINDOWS = os.name == "nt"
 # lines, and both are the whole question here.
 QUICK_TIMEOUT = 60
 
-# The table read alone gets longer than `QUICK_TIMEOUT`: on an idle desk it takes about a
-# second, but on 2026-10-07, an hour after boot with three fixer sessions and Docker
-# Desktop starting on 16 GB, four passes in a row ran into the 60 s bound (ba883e41), and
-# the pass that read it next took 86 s in all. Four minutes still leaves the pass most
-# of the reap task's ten-minute limit (`install-reap-schedule.task_document`).
+# The PowerShell lister's own bound, now only the fallback behind `win_process_table`: on
+# 2026-10-07 the WMI query ran past 60 s four passes in a row on a loaded 16 GB desk
+# (ba883e41), and past this 240 s twice more (6114e177), which is why it is no longer
+# what a Windows pass asks first. Four minutes still leaves the pass most of the reap
+# task's ten-minute limit (`install-reap-schedule.task_document`).
 TABLE_TIMEOUT = 240
 
 # Process names that mean "a person is on the other end of this": a chain that reaches
@@ -248,18 +249,55 @@ def parse_posix_table(text: str) -> list[Process]:
     return table
 
 
+NativeReader = Callable[[], tuple[list[win_process_table.Row] | None, str]]
+
+
+def native_table(read: NativeReader = win_process_table.read) -> tuple[list[Process] | None, str]:
+    """The Windows table read in-process (`win_process_table`), as `Process` rows."""
+    rows, why = read()
+    if not rows:
+        return None, why or "the native table held no process"
+    return [
+        Process(
+            row.pid,
+            row.ppid,
+            agent_clis.normalise_process(row.image),
+            row.cmdline,
+            private=row.private,
+            rss=row.rss,
+            created=row.created,
+        )
+        for row in rows
+    ], ""
+
+
 def read_table(
-    run: Runner = run_table_command, windows: bool = WINDOWS
+    run: Runner = run_table_command,
+    windows: bool = WINDOWS,
+    native: NativeReader = win_process_table.read,
 ) -> tuple[list[Process] | None, str]:
     """`(every process on the machine, "")`, or `(None, why the machine could not be asked)`.
 
-    An empty table is reported as `None` too: this process is in any table that was
-    actually read, so empty means the lister answered with something the parser could
-    not use, and a pass that trusted it would find nothing owned and reap everything.
-    The reason names the kind -- a timeout, an exit code, an answer nothing parsed --
-    because the four failures that set `TABLE_TIMEOUT` said only "could not be read",
-    and the timeout had to be inferred from how long each run took.
+    On Windows the table is read in-process first, and the PowerShell lister is asked
+    only when that fails -- it is the read that stalled past every bound it was given
+    (`TABLE_TIMEOUT`). An empty table is reported as `None` too: this process is in any
+    table that was actually read, so empty means the lister answered with something the
+    parser could not use, and a pass that trusted it would find nothing owned and reap
+    everything. The reason names the kind -- a timeout, an exit code, an answer nothing
+    parsed -- because the four failures that set `TABLE_TIMEOUT` said only "could not be
+    read", and the timeout had to be inferred from how long each run took.
     """
+    if not windows:
+        return _listed_table(run, windows)
+    table, native_why = native_table(native)
+    if table is not None:
+        return table, ""
+    table, why = _listed_table(run, windows)
+    return table, (f"{native_why}, and {why}" if why else "")
+
+
+def _listed_table(run: Runner, windows: bool) -> tuple[list[Process] | None, str]:
+    """The table as the platform's lister reports it: PowerShell's WMI query, or `ps`."""
     try:
         result = run(table_argv(windows))
     except subprocess.TimeoutExpired as error:
@@ -275,9 +313,13 @@ def read_table(
     return table, ""
 
 
-def process_table(run: Runner = run_table_command, windows: bool = WINDOWS) -> list[Process] | None:
+def process_table(
+    run: Runner = run_table_command,
+    windows: bool = WINDOWS,
+    native: NativeReader = win_process_table.read,
+) -> list[Process] | None:
     """Every process on the machine, or `None` when the machine could not be asked."""
-    return read_table(run, windows)[0]
+    return read_table(run, windows, native)[0]
 
 
 def argv_of(cmdline: str) -> list[str]:
