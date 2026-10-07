@@ -51,13 +51,15 @@ import json
 import re
 import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+import time as _time
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collector_tasks
 import collectors_config as config
+import machine_clock
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -107,6 +109,11 @@ GIT_TIMEOUT = 30
 # The longest one container target can hold a pass: every spawn `keep_running` makes, at
 # its timeout -- two image inspects, three git calls, the build and the health check.
 TARGET_BOUND = 2 * INSPECT_TIMEOUT + 3 * GIT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
+# How long after the machine boots or wakes a silent engine is Docker Desktop still
+# starting rather than down (`wait_for_engine`), and how often it is asked meanwhile.
+# Measured start on this workstation: about three minutes from boot to running containers.
+ENGINE_STARTUP = 600
+ENGINE_POLL = 15
 
 # The tray's three levels, spelled as `tray_state` spells them. Not imported from there:
 # `tray_state` imports this module, and `test_collectors.py` pins the two to each other.
@@ -492,14 +499,46 @@ def maintain_scheduled(
             collector_tasks.keep_removed(collector_tasks.task_name(target.collector), run, report)
 
 
+def wait_for_engine(
+    docker: Docker,
+    awake: float | None,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> list[Container] | None:
+    """`docker.ps()`, asked again every `ENGINE_POLL` seconds while the machine has been
+    up (`awake` seconds, from `machine_clock`) for less than `ENGINE_STARTUP`.
+
+    The job fires at logon, which is exactly when Docker Desktop is still starting: the
+    2026-10-07 logon fire ran 108 seconds after boot, found the engine silent and failed
+    (aea4ccfa), and the containers were up a minute later on their own restart policy.
+    Past the window -- or where the machine cannot say when it came up -- one answer is
+    the answer.
+    """
+    containers = docker.ps()
+    if containers is not None or awake is None or awake >= ENGINE_STARTUP:
+        return containers
+    clock, sleep = clock or _time.monotonic, sleep or _time.sleep
+    deadline = clock() + ENGINE_STARTUP - awake
+    while containers is None and (left := deadline - clock()) > 0:
+        sleep(min(ENGINE_POLL, left))
+        containers = docker.ps()
+    return containers
+
+
 def maintain(
-    chosen: Sequence[Target], docker: Docker, report: Report, health: dict, git: Git | None = None
+    chosen: Sequence[Target],
+    docker: Docker,
+    report: Report,
+    health: dict,
+    git: Git | None = None,
+    awake: float | None = None,
 ) -> None:
     """One pass over the assigned *container* collectors, recording health verdicts into
-    `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker."""
+    `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker. `awake`
+    is how long the machine has been up, which `wait_for_engine` gives Docker to start."""
     if not chosen:
         return
-    containers = docker.ps()
+    containers = wait_for_engine(docker, awake)
     if containers is None:
         if any(t.mode == config.RUN for t in chosen):
             report.fail("docker is not answering -- is Docker Desktop running?")
@@ -901,8 +940,10 @@ def main(
     maintain_scheduled([t for t in chosen if t.collector.scheduled], base, report, run)
     health = load_health(base / HEALTH)
     in_containers = [t for t in chosen if not t.collector.scheduled]
+    since = machine_clock.awake_since()
+    awake = None if since is None else _time.time() - since
     with acting(base / IN_PASS, in_containers):
-        maintain(in_containers, engine, report, health)
+        maintain(in_containers, engine, report, health, awake=awake)
     write_file(base / HEALTH, json.dumps(health, indent=2, sort_keys=True) + "\n")
     return finish()
 

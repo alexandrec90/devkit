@@ -15,13 +15,22 @@ reaches a person.
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from support import LIVE_WORKSPACE, REPO_ROOT, load_script, needs_live_workspace, sweep
 
 ws = load_script("scripts/workspace-status.py")
 harness_triage = load_script("scripts/harness_triage.py")
 log_wrap = load_script("scripts/log-wrap.py")
 status_installer = load_script("scripts/install-workspace-status.py")
+
+
+@pytest.fixture(autouse=True)
+def _machine_long_up(monkeypatch):
+    """`main --notify` waits out a fresh boot (`catch_up_wait`), and a CI runner is
+    always one: no test here may depend on how long the machine running it has been up."""
+    monkeypatch.setattr(ws.machine_clock, "awake_since", lambda now=None: None)
 
 
 def result(name: str, verdict: str) -> sweep.Result:
@@ -740,6 +749,43 @@ def test_a_workstation_that_never_installed_the_task_is_left_alone(tmp_path):
     Windows-only convenience is a line you learn to skim, which is the failure this one
     is trying to fix rather than repeat."""
     assert ws.scheduler_line(tmp_path, now=1_800_000_000.0) == ""
+
+
+def test_a_machine_just_up_gives_reconcile_its_catch_up_fire(tmp_path):
+    """87bae129: off overnight, the daily pass's catch-up fire read a fourteen-hour-old
+    log sixteen seconds before reconcile's own catch-up fire rewrote it."""
+    _logged(tmp_path, 14)
+    assert ws.scheduler_line(tmp_path, now=NOW, resumed=NOW - 7 * 60) == ""
+    after = ws.scheduler_line(tmp_path, now=NOW, resumed=NOW - ws.RECONCILE_GRACE)
+    assert ws.failure_kind(after) == "reconcile-stopped", "a window, not an amnesty"
+    assert ws.failure_kind(ws.scheduler_line(tmp_path, now=NOW, resumed=None)) == (
+        "reconcile-stopped"
+    )
+
+
+def test_the_unattended_run_waits_out_the_window_only_when_it_is_what_keeps_quiet(tmp_path):
+    """Silence alone would hide a stopped reconcile from a daily pass that always fires
+    just after a wake, so the scheduled run waits and asks again."""
+    just_up = NOW - 7 * 60
+    assert ws.catch_up_wait(tmp_path, NOW, just_up) == 0.0, "no log: nothing to wait for"
+    _logged(tmp_path, 14)
+    assert ws.catch_up_wait(tmp_path, NOW, just_up) == ws.RECONCILE_GRACE - 7 * 60
+    assert ws.catch_up_wait(tmp_path, NOW, NOW - ws.RECONCILE_GRACE) == 0.0
+    assert ws.catch_up_wait(tmp_path, NOW, None) == 0.0
+    _logged(tmp_path, 0.1)
+    assert ws.catch_up_wait(tmp_path, NOW, just_up) == 0.0, "a fresh log: nothing to wait for"
+
+
+def test_only_the_notify_run_waits(monkeypatch, tmp_path):
+    waits = []
+    monkeypatch.setattr(ws, "catch_up_wait", lambda *a: 42.0)
+    monkeypatch.setattr(ws, "_time", SimpleNamespace(sleep=waits.append, time=lambda: NOW))
+    monkeypatch.setattr(ws._notify, "notify", lambda title, body: True)
+    _workspace_reporting(monkeypatch, tmp_path, "")
+    assert ws.main([]) == 0
+    assert waits == []
+    assert ws.main(["--notify"]) == 0
+    assert waits == [42.0]
 
 
 def test_the_age_is_coarse_because_the_question_is_days_not_minutes():

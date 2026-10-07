@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
+import machine_clock
 import sweep
 
 STAMP_FILE = Path("logs") / "fix-dispatch.json"
@@ -497,16 +498,7 @@ def booted_at(now: _dt.datetime | None = None) -> _dt.datetime | None:
 
 
 def _uptime() -> float | None:
-    if sys.platform == "win32":
-        import ctypes
-
-        kernel = ctypes.windll.kernel32
-        kernel.GetTickCount64.restype = ctypes.c_ulonglong
-        return float(kernel.GetTickCount64()) / 1000
-    try:
-        return float(Path("/proc/uptime").read_text(encoding="ascii").split()[0])
-    except (OSError, ValueError, IndexError):
-        return None
+    return machine_clock.uptime()
 
 
 def _restarted(last: _dt.datetime, booted: _dt.datetime | None, now: _dt.datetime) -> bool:
