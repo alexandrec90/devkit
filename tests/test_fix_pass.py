@@ -1768,6 +1768,23 @@ def test_a_failed_ship_is_the_exit_code(world, monkeypatch):
     assert "filed    carameli ship-failed: carameli agent/i-0919: push: no" in artifact(world)
 
 
+def test_a_ship_github_failed_is_deferred_and_filed_nowhere(world, monkeypatch):
+    """a0287c8b, 4d942641: GitHub's own 500s filed two ships as harness defects."""
+    one = ship_intent.Intent("carameli", Path("t"), "agent/i-0919", "S", "B")
+    world["intents"] = [one]
+    said = "pr: HTTP 500 (https://api.github.com/repos/o/r/labels/automerge)"
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda intent, python, base: ship_intent.Outcome(intent, ship_intent.DEFERRED, said),
+    )
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) != (
+        fix_pass.EXIT_FAILED
+    )
+    assert f"shipped  carameli agent/i-0919 -- deferred: {said}" in artifact(world)
+    assert "ship-failed" not in artifact(world)
+
+
 def test_dispatching_a_refused_commit_sets_its_intent_aside(monkeypatch, tmp_path):
     """With the intent gone, the fixer's edits are a dirty tree with no intent -- a
     session still working -- until it ships; the next pass does not re-run the commit

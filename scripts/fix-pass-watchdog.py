@@ -285,13 +285,20 @@ def file_once(
 
 
 def rescue_prompt(kind: str, detail: str, branch: str) -> str:
+    """What the rescue session is told. It retires the finding `file_once` filed, against
+    its own branch: unretired, the pass's next ledger sweep was sent at the same defect
+    while the rescue's PR was in review (755ee62b, #564)."""
     return (
         f"The scheduled fix pass itself is failing ({kind}): {detail}. Its full output is in "
         f"{FAILURE_LOG.as_posix()} in this worktree, which is devkit on the fresh branch "
         f"{branch} off the default branch. You are the fix pass's own repair: find why "
         "scripts/fix-pass.py, or a module it loads, fails this way; fix it with a regression "
         "test that fails without the fix; then ship it with the ship skill and stop. Nothing "
-        "else is in scope, and nothing else is shipped until the pass runs again."
+        "else is in scope, and nothing else is shipped until the pass runs again. Once the "
+        f"fix is in your intent, retire the {EVENT} group whose detail starts `{kind}:` -- "
+        "its id is in python scripts/harness_triage.py's output -- with python "
+        "scripts/harness_triage.py --resolve-like <id> --note <what fixed it> --pr "
+        f"{branch}, so no ledger session is sent at it while your PR is open."
     )
 
 

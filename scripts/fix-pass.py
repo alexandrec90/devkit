@@ -181,11 +181,11 @@ def ship_intents(
 ) -> tuple[list[str], list[fix_plan.Failure], bool]:
     """Step 1. `(lines for the record, refused commits as failures, any ship failed)`.
 
-    A push or a PR that failed is retried next pass and filed now; the third element
-    turns the task red rather than green over a branch that did not go out. An intent
-    where no PR can be opened from is filed for the devkit session to move. An intent
-    whose fixer is still busy in its tree waits, and so does one a live session has
-    edited past (`fix_loop.why_held`).
+    A push or a PR that failed is retried next pass and filed now (GitHub's own failure
+    only once it lasts: `ship_intent.DEFERRED`); the third element turns the task red
+    over a branch that did not go out. One no PR can be opened from is filed for the
+    devkit session to move. One whose fixer is still busy in its tree waits, and so does
+    one a live session has edited past (`fix_loop.why_held`).
     """
     lines: list[str] = []
     refused: list[fix_plan.Failure] = []

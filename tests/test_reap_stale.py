@@ -432,7 +432,7 @@ def test_parse_args_defaults_to_the_read_only_mode():
 
 def test_status_reports_and_never_stops(tmp_path, store, monkeypatch, capsys):
     workspace = write_workspace(tmp_path, {rc_config.RC_SETTING: ["carameli"]})
-    monkeypatch.setattr(reap_machine, "process_table", lambda: table())
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (table(), ""))
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     stopped = []
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: stopped.append(pid) or "")
@@ -447,7 +447,7 @@ def test_status_reports_and_never_stops(tmp_path, store, monkeypatch, capsys):
 
 def test_maintain_stops_what_status_would_and_records_it(tmp_path, store, monkeypatch, capsys):
     workspace = write_workspace(tmp_path, {rc_config.RC_SETTING: ["carameli"]})
-    monkeypatch.setattr(reap_machine, "process_table", lambda: table())
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (table(), ""))
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     stopped = []
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: stopped.append(pid) or "")
@@ -461,22 +461,27 @@ def test_maintain_stops_what_status_would_and_records_it(tmp_path, store, monkey
 
 
 def test_an_unreadable_table_assesses_nothing_and_exits_red(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(reap_machine, "process_table", lambda: None)
+    why = "the lister did not answer within 240 s"
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (None, why))
     code = reap.main(["maintain", "--devkit", str(tmp_path)])
     assert code == 2
-    assert "could not be read" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # The artifact says why; the cause line names only the kind, so one defect stays one
+    # ledger group whatever the lister said.
+    assert f"could not be read ({why})" in out
+    assert out.rstrip().splitlines()[-1] == f"error: {reap.NO_TABLE}"
     assert (tmp_path / reap.ARTIFACT).is_file()
 
 
 def test_a_quiet_machine_says_so(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(reap_machine, "process_table", lambda: [P(1, 0, "explorer", "")])
+    monkeypatch.setattr(reap_machine, "read_table", lambda: ([P(1, 0, "explorer", "")], ""))
     assert reap.main(["maintain", "--devkit", str(tmp_path)]) == 0
     assert "nothing left behind" in capsys.readouterr().out
 
 
 def test_a_failed_stop_reddens_the_pass(tmp_path, store, monkeypatch):
     workspace = write_workspace(tmp_path, {rc_config.RC_SETTING: ["carameli"]})
-    monkeypatch.setattr(reap_machine, "process_table", lambda: table())
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (table(), ""))
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: "denied")
     assert reap.main(["reap", "--workspace", str(workspace), "--devkit", str(tmp_path)]) == 2

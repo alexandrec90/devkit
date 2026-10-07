@@ -86,6 +86,10 @@ def test_a_refusal_is_not_retried(monkeypatch, tmp_path):
         ("HTTP 503: No server is currently available", True),
         ('Post "https://api.github.com/x": net/http: TLS handshake timeout', True),
         ("error connecting to api.github.com", True),
+        # 4d942641: how a push words GitHub's 500.
+        ("remote: Internal Server Error", True),
+        ("fatal: unable to access 'https://github.com/o/r.git/': Could not resolve host", True),
+        ("! [remote rejected] main -> main (protected branch hook declined)", False),
         ("HTTP 422: Workflow does not have 'workflow_dispatch'", False),
         ("HTTP 404: Not Found", False),
         ("HTTP 5000 widgets", False),

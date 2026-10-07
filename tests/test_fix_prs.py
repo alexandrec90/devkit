@@ -19,6 +19,7 @@ in and the real `gh` path runs anyway.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -514,6 +515,78 @@ def test_a_reused_trees_locked_caches_reach_its_fixers_prompt(monkeypatch, root)
     made = fix_trees.provenance(root / "carameli" / "t")
     expected = fix_prs.fix_prompts.pr_prompt(failure(), "", "", locked, made)
     assert opened[0]["prompt"] == fix_prs.tab_safe(expected)
+
+
+def test_a_conflicted_prs_resolver_is_told_of_an_earlier_squash_it_still_carries(monkeypatch, root):
+    """6c10216b: only a conflict is asked, and its prompt carries the finding."""
+    asked = []
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    monkeypatch.setattr(fix_prs, "locked_caches", lambda tree: {})
+    monkeypatch.setattr(
+        fix_prs,
+        "squashed_base",
+        lambda tree, base: asked.append(base) or "#96 (head a, squashed as b)",
+    )
+    opened = capture_sessions(monkeypatch)
+    conflicted = failure(signature=(fix_plan.CONFLICT,))
+    assert fix_prs.dispatch_pr(conflicted, root, agent_models.Launch("claude")) == 0
+    assert asked == [conflicted.base]
+    assert "PR #96 (head a, squashed as b) as one commit" in opened[0]["prompt"]
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
+    assert asked == [conflicted.base], "a red PR merges nothing, so nothing is asked"
+
+
+def _git_answers(ancestors: dict[tuple[str, str], int]):
+    """A `git_for` whose `merge-base --is-ancestor A B` exits `ancestors[(A, B)]` (128
+    for a commit it does not know), and every other call exits 0."""
+
+    def git_for(_tree):
+        def git(*args):
+            code = (
+                ancestors.get(args[2:4], 128) if args[:2] == ("merge-base", "--is-ancestor") else 0
+            )
+            return subprocess.CompletedProcess(args, code, "", "")
+
+        return git
+
+    return git_for
+
+
+def _merged(*rows, code=0):
+    return lambda _tree: lambda *args: subprocess.CompletedProcess(args, code, json.dumps(rows), "")
+
+
+def test_squashed_base_names_a_pr_the_branch_carries_but_the_base_holds_only_as_a_squash():
+    squashed = {"number": 96, "headRefOid": "aaaaaaa1", "mergeCommit": {"oid": "bbbbbbb2"}}
+    merged = {"number": 95, "headRefOid": "ccccccc3", "mergeCommit": {"oid": "ddddddd4"}}
+    other = {"number": 94, "headRefOid": "eeeeeee5", "mergeCommit": {"oid": "fffffff6"}}
+    ancestry = {
+        ("aaaaaaa1", "HEAD"): 0,
+        ("aaaaaaa1", "origin/main"): 1,
+        # A real merge: its head is in the base too, so the merge base is right.
+        ("ccccccc3", "HEAD"): 0,
+        ("ccccccc3", "origin/main"): 0,
+        # A PR from some other branch: not carried here.
+        ("eeeeeee5", "HEAD"): 1,
+    }
+    git_for = _git_answers(ancestry)
+    found = fix_trees.squashed_base(Path("t"), "main", git_for, _merged(other, merged, squashed))
+    assert found == "#96 (head aaaaaaa, squashed as bbbbbbb)"
+    assert fix_trees.squashed_base(Path("t"), "main", git_for, _merged(other, merged)) == ""
+
+
+def test_squashed_base_is_silent_when_gh_cannot_say():
+    git_for = _git_answers({})
+    assert fix_trees.squashed_base(Path("t"), "main", git_for, _merged(code=1)) == ""
+
+    def garbled(_tree):
+        return lambda *a: subprocess.CompletedProcess(a, 0, "not json", "")
+
+    assert fix_trees.squashed_base(Path("t"), "main", git_for, garbled) == ""
+    unmerged = {"number": 9, "headRefOid": "a", "mergeCommit": None}
+    assert fix_trees.squashed_base(Path("t"), "main", git_for, _merged(unmerged)) == ""
 
 
 def test_a_reused_tree_says_who_made_it_before_the_stamp_makes_it_the_passs(monkeypatch, root):

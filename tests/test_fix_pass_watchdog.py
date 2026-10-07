@@ -580,6 +580,15 @@ def test_the_rescue_prompt_names_the_failure_the_log_and_the_one_way_out():
     assert "regression test" in text and "ship skill" in text
 
 
+def test_the_rescue_retires_its_own_finding_against_its_branch():
+    """755ee62b: the pass sent a ledger sweep at a `pass-hung` finding whose fix (#564)
+    the rescue had already shipped, because nothing marked the group as in hand."""
+    text = watchdog.rescue_prompt("pass-hung", "ran past 25 minutes", "agent/fix-pass-rescue-x")
+    assert f"retire the {watchdog.EVENT} group whose detail starts `pass-hung:`" in text
+    assert "--resolve-like <id>" in text and "--pr agent/fix-pass-rescue-x" in text
+    assert text.index("ship skill") < text.index("--resolve-like"), "after the fix, not before"
+
+
 def test_the_marks_spelled_here_are_the_ones_the_pass_reads():
     """Stdlib-only, so it cannot import them; this is what keeps the copies equal."""
     fix_reports = load_script("scripts/fix_reports.py")

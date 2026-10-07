@@ -1518,6 +1518,24 @@ def gh_for(path: Path) -> Git:
     return gh
 
 
+# GitHub failing on its own side, or the network between: a server error, as `gh`
+# (`HTTP 500`) or a push (`remote: Internal Server Error`) words it, a timeout, a dropped
+# or refused connection. Asking again may answer it; a refusal -- a 4xx, a rejected
+# ref -- is the same answer every time. bc1ec6d1 (a dispatch), a0287c8b and 4d942641
+# (a ship's PR and push) each filed a minute's outage as a harness defect.
+_TRANSIENT = re.compile(
+    r"\bHTTP 5\d\d\b|internal server error|bad gateway|service unavailable"
+    r"|timeout|timed out|error connecting|connection reset|could not resolve host",
+    re.I,
+)
+
+
+def transient(said: str) -> bool:
+    """Whether a `gh` or `git` call failed on GitHub's side or the network's, not on the
+    request."""
+    return bool(_TRANSIENT.search(said))
+
+
 def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
     """Open a PR for `plan.pr_head`, or find the one already open.
 
