@@ -45,6 +45,8 @@ import argparse
 import datetime as _dt
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -108,6 +110,15 @@ RUN_LOCK_WAIT = 300.0
 # Past the watchdog's 25-minute stop (`fix-pass-watchdog.TIMEOUT`): a pass it killed
 # leaves the lock behind, and the next half-hourly fire breaks it.
 RUN_LOCK_STALE = 26 * 60.0
+
+# The ship step's share of the watchdog's 25 minutes: no intent starts shipping once the
+# step has run this long, and the next pass ships it. Each ship is a commit stage, a push
+# and a PR, none of them bounded, and on 2026-10-07, just after a wake, they ran at a
+# fraction of their speed: ibkr_trader #98's took 17 minutes, data-lake's was still in
+# `ship.py --fix` when the watchdog stopped the pass -- which had sent no one, written no
+# record and left its lock (the 7s that ship takes now is the usual cost). Short, because
+# one ship started just inside it still has to finish, and the pass after it.
+SHIP_BUDGET_SECONDS = 4 * 60.0
 
 # Every CLI the pass spawns before it can say anything, probed by running it: found is
 # not enough. On Windows `python3` is often only the Store alias, which exits 9009, and
@@ -176,8 +187,53 @@ def provision_for_ship(tree: Path) -> str:
     return "provisioned its toolchain: " + ", ".join(step.label for step in steps)
 
 
+def not_shipping(
+    intent: ship_intent.Intent,
+    busy: frozenset[str],
+    now: _dt.datetime,
+    mode: str,
+    journal: Journal | None = None,
+) -> str:
+    """The record line for an intent this pass does not ship, or "" for one it does:
+    held (`fix_loop.why_held`), unshippable (filed), or any intent of a dry run."""
+    where = f"{intent.project} {intent.branch}"
+    if held := fix_loop.why_held(busy, intent.tree, now):
+        return f"{where} -- held: {held}"
+    if intent.blocked:
+        fix_loop.fix_findings.file(
+            journal,
+            "intent-unshippable",
+            intent.project,
+            f"{where}: {intent.blocked}",
+            str(intent.tree),
+        )
+        return f"{where} -- NOT shipped: {intent.blocked}"
+    if mode != fix_cycle.DISPATCH:
+        spent = ship_intent.is_spent(intent)
+        return f"{where} -- {'would set aside, already shipped' if spent else 'would ship'}: {intent.subject}"
+    return ""
+
+
+def shipped_line(outcome: ship_intent.Outcome, where: str) -> str:
+    """One line: a refusal's detail is hook output, and its newlines broke the record
+    into rows no reader of it could attribute. A refusal says why on the line
+    `refusal_reason` picks -- its tail is the hook's boilerplate -- and the rest is
+    evidence; for anything else the tail says why."""
+    detail = outcome.detail
+    if outcome.stage == ship_intent.REFUSED:
+        state = ship_intent.read_state(outcome.intent.tree)
+        if output := str(state.get("output", "")):
+            detail = f"{state.get('step', 'commit')}: {ship_intent.refusal_reason(output)}"
+    return f"{where} -- {outcome.stage}: {' '.join(detail.split())[-240:]}"
+
+
 def ship_intents(
-    root: Path, projects: list[str], mode: str, journal: Journal | None = None
+    root: Path,
+    projects: list[str],
+    mode: str,
+    journal: Journal | None = None,
+    budget: float = SHIP_BUDGET_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[list[str], list[fix_plan.Failure], bool]:
     """Step 1. `(lines for the record, refused commits as failures, any ship failed)`.
 
@@ -185,34 +241,30 @@ def ship_intents(
     only once it lasts: `ship_intent.DEFERRED`); the third element turns the task red
     over a branch that did not go out. One no PR can be opened from is filed for the
     devkit session to move. One whose fixer is still busy in its tree waits, and so does
-    one a live session has edited past (`fix_loop.why_held`).
+    one a live session has edited past (`fix_loop.why_held`), and so does every one left
+    once the step has spent `budget` seconds: the steps after it are what send anyone
+    anywhere.
     """
     lines: list[str] = []
     refused: list[fix_plan.Failure] = []
     failed = False
+    started = clock()
     busy = fix_loop.fixers_working() if mode == fix_cycle.DISPATCH else frozenset()
     now = _dt.datetime.now(_dt.UTC)
     for intent in ship_intent.find_intents(root, projects):
         where = f"{intent.project} {intent.branch}"
-        if held := fix_loop.why_held(busy, intent.tree, now):
-            lines.append(f"{where} -- held: {held}")
+        if line := not_shipping(intent, busy, now, mode, journal):
+            lines.append(line)
             continue
-        if intent.blocked:
-            lines.append(f"{where} -- NOT shipped: {intent.blocked}")
-            fix_loop.fix_findings.file(
-                journal,
-                "intent-unshippable",
-                intent.project,
-                f"{where}: {intent.blocked}",
-                str(intent.tree),
-            )
-            continue
-        if mode != fix_cycle.DISPATCH:
-            spent = ship_intent.is_spent(intent)
+        if (shipping := clock() - started) >= budget:
             lines.append(
-                f"{where} -- {'would set aside, already shipped' if spent else 'would ship'}: {intent.subject}"
+                f"{where} -- held: this pass spent {int(shipping // 60)} min shipping; "
+                f"the next pass ships it"
             )
             continue
+        # Flushed as it starts: the record is written only at the end, so a pass stopped
+        # mid-ship otherwise leaves the watchdog no line saying where it was.
+        print(f"fix-pass: shipping {where}", flush=True)
         base = intent.base or "main"
         if provisioned := provision_for_ship(intent.tree):
             lines.append(f"{where} -- {provisioned}")
@@ -234,16 +286,7 @@ def ship_intents(
                 f"{intent.project} {outcome.intent.branch} (carried off {intent.branch}; "
                 f"{len(moved)} resolution(s) re-pointed)"
             )
-        # One line: a refusal's detail is hook output, and its newlines broke the record
-        # into rows no reader of it could attribute. A refusal says why on the line
-        # `refusal_reason` picks -- its tail is the hook's boilerplate -- and the rest is
-        # evidence; for anything else the tail says why.
-        detail = outcome.detail
-        if outcome.stage == ship_intent.REFUSED:
-            state = ship_intent.read_state(outcome.intent.tree)
-            if output := str(state.get("output", "")):
-                detail = f"{state.get('step', 'commit')}: {ship_intent.refusal_reason(output)}"
-        lines.append(f"{where} -- {outcome.stage}: {' '.join(detail.split())[-240:]}")
+        lines.append(shipped_line(outcome, where))
         if outcome.stage == ship_intent.REFUSED:
             refused.append(ship_intent.refusal_failure(outcome, base))
         if outcome.stage == ship_intent.FAILED:
