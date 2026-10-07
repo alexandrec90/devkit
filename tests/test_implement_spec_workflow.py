@@ -2,7 +2,8 @@
 
 The script has no compiler in this repo's toolchain, so this pins the clauses it exists
 for and runs its control flow under Node against scripted agents. Each clause is a way the
-run would break the harness: committing or pushing instead of shipping through `/ship`,
+run would break the harness: pushing anywhere but its own feature branch, force-pushing
+over a fixer's commits, holding the PR's branch so fixers are sent into the tree mid-build,
 building in worktrees that start from the remote default branch and so cannot see earlier
 waves, or calling the clock and breaking the runtime's resume.
 """
@@ -40,14 +41,49 @@ def test_meta_is_the_first_statement_and_names_the_command():
     assert re.search(r"^\s*name: 'implement-spec',$", _text(), re.MULTILINE)
 
 
-def test_it_leaves_commit_push_and_pr_to_the_fix_pass():
+def test_it_pushes_only_its_own_feature_branch_and_never_forces():
+    """Fixers push to the same branch while the run builds; a force-push would erase them."""
     code = _text()
-    assert not re.search(r"git commit(?!-tree)", code)
-    assert "git push" not in code
-    assert "gh pr" not in code
-    assert ".claude/skills/ship/SKILL.md" in code
-    assert ".claude/skills/ship/SKILL.md" in manifest.MANIFEST
+    assert re.findall(r"git push[^`\\]*", code) == [
+        "git push --no-verify origin HEAD:refs/heads/${FEATURE}"
+    ]
+    assert "const FEATURE = `spec/${SLUG}`" in code
+    assert "Never force-push." in code
+    assert not re.search(r"--force(?!\s+<path>)|-f\b|\+HEAD", code)
+
+
+def test_it_takes_in_fixers_commits_before_every_push():
+    code = " ".join(_text().split())
+    assert "git merge --no-verify --no-edit origin/${FEATURE}" in code
+    assert code.index("git merge --no-verify") < code.index("git push --no-verify")
+
+
+def test_the_tree_never_holds_the_feature_branch():
+    """`fix_trees.existing_tree` reuses a tree that holds a PR's head branch for its fixer."""
+    assert "run \\`git switch --detach\\`" in _text()
+    assert "git switch -c" not in _text()
+
+
+def test_the_pr_is_opened_where_fixers_see_it():
+    """The fix pass skips drafts and auto-merges only its own labelled PRs."""
+    code = " ".join(_text().split())
+    assert "gh pr create --head ${FEATURE}" in code
+    assert "Not a draft" in code
+    assert "Add no label; a person merges it." in code
+
+
+def test_the_session_scope_rule_names_the_exemption():
+    """The rule says sessions never commit or push; the checkpoint must be an exception it
+    names, and the prompt it defers to must say what the exemption covers."""
+    rule = ROOT / ".claude" / "rules" / "session-scope.md"
+    text = " ".join(rule.read_text(encoding="utf-8").split())
+    assert "an `/implement-spec` checkpoint, first clause only" in text
     assert ".claude/rules/session-scope.md" in manifest.MANIFEST
+    code = " ".join(_text().split())
+    assert (
+        "This step is exempt from the commit and push clauses of .claude/rules/session-scope.md"
+        in code
+    )
 
 
 def test_builders_do_not_use_runtime_worktrees():
@@ -75,8 +111,8 @@ const agent = async (prompt, o) => {
   const l = o.label
   labels.push(l)
   if (l === 'load state') return { ...scenario.load, tasks: scenario.load.exists ? structuredClone(tasks) : [] }
-  if (l.startsWith('handoff m')) {
-    return scenario.handoff || { outcome: 'shipped', detail: 'https://pr', branch: 'spec/s-m' + l.slice(9) }
+  if (l.startsWith('checkpoint m')) {
+    return scenario.checkpoint || { pushed: true, commit: 'c' + l.slice(12), pr: 'https://pr/1', detail: '' }
   }
   if (l === 'outline') return { specPath: 's.md', sections: scenario.sections }
   if (l === 'architecture') return 'summary'
@@ -106,7 +142,6 @@ const agent = async (prompt, o) => {
     tasks.push({ ...t })
     return { tasks: [t] }
   }
-  if (l.startsWith('ship m')) return 'subject'
   throw new Error('unexpected agent ' + l)
 }
 const parallel = thunks => Promise.all(thunks.map(t => t().catch(() => null)))
@@ -139,7 +174,7 @@ def _task(tid, milestone=1, deps=(), area="core", status="pending"):
     }
 
 
-def _load(exists=False, branch="worktree-spec", dirty=False, intent=False, shipped=()):
+def _load(exists=False, branch="worktree-spec", dirty=False, intent=False, checkpointed=()):
     return {
         "branch": branch,
         "dirty": dirty,
@@ -147,7 +182,7 @@ def _load(exists=False, branch="worktree-spec", dirty=False, intent=False, shipp
         "exists": exists,
         "specPath": "s.md",
         "sections": SECTIONS if exists else [],
-        "shipped": [{"milestone": m, "branch": b} for m, b in shipped],
+        "checkpointed": list(checkpointed),
     }
 
 
@@ -160,7 +195,7 @@ def _run(tmp_path: Path, **scenario) -> dict:
     scenario.setdefault("sections", SECTIONS)
     scenario.setdefault("failing", [])
     scenario.setdefault("gap", None)
-    scenario.setdefault("handoff", None)
+    scenario.setdefault("checkpoint", None)
     harness = tmp_path / "harness.mjs"
     harness.write_text(HARNESS, encoding="utf-8")
     data = tmp_path / "scenario.json"
@@ -185,19 +220,18 @@ TWO_MILESTONES = [
 ]
 
 
-def test_one_run_ships_every_milestone_as_a_stack(tmp_path):
-    """Milestone 2 is built on a branch cut from the commit the fix pass made for milestone 1."""
+def test_each_milestone_is_pushed_to_one_feature_branch_before_the_next_starts(tmp_path):
+    """Milestone 2 builds on milestone 1 at once: no wait for the fix pass or a merge."""
     out = _run(tmp_path, load=_load(), tasks=TWO_MILESTONES, failing=["bad"])
     labels, result = out["labels"], out["result"]
-    assert labels.index("ship m1") < labels.index("handoff m2") < labels.index("build e")
-    assert labels[-1] == "ship m2"
-    assert result["shipped"] == [
-        {"milestone": 1, "branch": "worktree-spec"},
-        {"milestone": 2, "branch": "spec/s-m2"},
-    ]
+    assert labels.index("checkpoint m1") < labels.index("build e")
+    assert labels[-1] == "checkpoint m2"
+    assert result["branch"] == "spec/s"
+    assert result["pushedThisRun"] == 2
+    assert result["pr"] == "https://pr/1"
     assert result["blocked"] == ["bad"]
     assert result["pending"] == ["d"]
-    assert "Every milestone is shipped" in result["next"]
+    assert "Every milestone is on spec/s" in result["next"]
 
 
 def test_a_wave_never_starts_before_its_dependencies_land(tmp_path):
@@ -209,43 +243,33 @@ def test_a_wave_never_starts_before_its_dependencies_land(tmp_path):
 def test_an_audit_gap_becomes_a_task_built_in_the_same_milestone(tmp_path):
     gap = _task("m1-gap1-1")
     out = _run(tmp_path, load=_load(), tasks=[_task("a")], gap=gap)
-    assert out["labels"].index("build m1-gap1-1") < out["labels"].index("ship m1")
+    assert out["labels"].index("build m1-gap1-1") < out["labels"].index("checkpoint m1")
     assert out["result"]["done"] == 2
 
 
-@pytest.mark.parametrize("intent", [True, False])
-def test_a_rerun_stacks_on_what_already_shipped_without_planning(tmp_path, intent):
-    """Whether milestone 1's intent is still waiting or the pass has shipped it already."""
+@pytest.mark.parametrize("branch", ["", "spec/s"])
+def test_a_rerun_continues_after_the_last_checkpoint_without_planning(tmp_path, branch):
+    """Detached mid-run, or on the feature branch a finished run left behind."""
     tasks = [_task("a", status="done"), _task("e", milestone=2)]
-    load = _load(exists=True, intent=intent, shipped=[(1, "worktree-spec")])
+    load = _load(exists=True, branch=branch, dirty=True, checkpointed=[1])
     labels = _run(tmp_path, load=load, tasks=tasks)["labels"]
-    assert labels[:2] == ["load state", "handoff m2"]
-    assert not {"outline", "architecture", "task graph", "build a"} & set(labels)
-    assert labels[-1] == "ship m2"
+    assert not {"outline", "architecture", "task graph", "build a", "checkpoint m1"} & set(labels)
+    assert labels[-1] == "checkpoint m2"
 
 
-def test_a_refused_milestone_stops_the_stack(tmp_path):
-    refused = {"outcome": "refused", "detail": "ruff", "branch": ""}
-    out = _run(tmp_path, load=_load(), tasks=TWO_MILESTONES, handoff=refused)
-    assert "has not shipped (refused: ruff)" in out["error"]
+def test_a_checkpoint_that_did_not_push_stops_the_run(tmp_path):
+    failed = {"pushed": False, "commit": "", "pr": "", "detail": "auth expired"}
+    out = _run(tmp_path, load=_load(), tasks=TWO_MILESTONES, checkpoint=failed)
+    assert "Checkpoint of milestone 1 did not push (auth expired)" in out["error"]
     assert "build e" not in out["labels"]
 
 
-def test_max_milestones_stops_after_shipping(tmp_path):
+def test_max_milestones_stops_after_a_checkpoint(tmp_path):
     args = {"spec": "docs/s.md", "maxMilestones": 1}
     out = _run(tmp_path, load=_load(), tasks=TWO_MILESTONES, args=args)
-    assert "handoff m2" not in out["labels"]
-    assert out["labels"][-1] == "ship m1"
+    assert "build e" not in out["labels"]
+    assert out["labels"][-1] == "checkpoint m1"
     assert "Rerun /implement-spec" in out["result"]["next"]
-
-
-def test_one_pr_builds_everything_into_a_single_ship(tmp_path):
-    args = {"spec": "docs/s.md", "onePr": True}
-    out = _run(tmp_path, load=_load(), tasks=TWO_MILESTONES, args=args)
-    ships = [label for label in out["labels"] if label.startswith(("ship", "handoff"))]
-    assert ships == ["ship m1"]
-    assert "build e" in out["labels"]
-    assert [s["milestone"] for s in out["result"]["shipped"]] == [1, 2]
 
 
 @pytest.mark.parametrize(
@@ -254,6 +278,7 @@ def test_one_pr_builds_everything_into_a_single_ship(tmp_path):
         (_load(branch="main"), "is not a task branch"),
         (_load(branch=""), "detached HEAD"),
         (_load(dirty=True), "uncommitted changes"),
+        (_load(intent=True), "ship-intent.md would have the fix pass ship this tree"),
     ],
 )
 def test_it_refuses_a_tree_it_cannot_ship_from(tmp_path, load, message):

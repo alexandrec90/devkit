@@ -20,8 +20,9 @@ arrives without, which `uv run pytest` builds lacking the dev extra.
 The scheduled fix pass commits, pushes, opens the PR and runs the full gate in CI; a red
 gate comes back to a fresh session with the failures named.
 
-**Fixer sessions are exempt:** one the fix pass dispatched, as its prompt's first
-sentence says, follows that prompt and [`.claude/fixer.md`](../fixer.md), tests included.
+**Exempt:** a fixer, as its prompt's first sentence says, follows it and
+[fixer.md](../fixer.md), tests included; an `/implement-spec` checkpoint, first clause
+only.
 
 ## An environment that cannot run the checks is part of the fix
 

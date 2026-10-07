@@ -1503,15 +1503,16 @@ judgement call to `logs/overnight.md` so it can be reversed, and finishes throug
 workflow](https://code.claude.com/docs/en/workflows) (`.claude/workflows/implement-spec.js`,
 Claude Code only). Run from a task worktree, it turns a large requirements document into a
 task graph grouped into milestones, kept in the project's own .spec-run directory, and
-ships every milestone through `/ship` as its own PR in one run. Builders work in detached
-checkouts of an unbranched snapshot under `logs/spec-run/trees/` and hand back patches, so
-a wave builds on the one before it and nothing is committed before the fix pass commits.
-Once the pass has shipped milestone k, the run switches the same tree to a new
-`spec/<slug>-m<k+1>` branch on that commit, so the PRs stack: merge them in order, and the
-pass's `update-branch` brings each level once its predecessor lands. A rerun in the same
-tree resumes the stack. Pass `{spec, parallel, maxAttempts, auditRounds, onePr,
-maxMilestones, waitMinutes}` instead of a path to tune it; `onePr` ships everything as a
-single PR instead.
+builds them all onto one feature branch, `spec/<slug>`, with one PR into the default
+branch. Builders work in detached checkouts of an unbranched snapshot under
+`logs/spec-run/trees/` and hand back patches, so a wave builds on the one before it. Each
+finished milestone is committed and pushed with the commit and push gates skipped -- the
+one exemption `session-scope.md` makes for a non-fixer session -- so the next milestone
+starts at once while CI gates the PR and the fix pass's fixers work it. Every checkpoint
+merges the fixers' commits in before it pushes, never force-pushes, and the tree stays on
+a detached HEAD so a fixer cuts its own tree instead of being sent into this one. A rerun
+in the same tree continues after the last checkpoint. Pass `{spec, parallel, maxAttempts,
+auditRounds, maxMilestones}` instead of a path to tune it.
 
 Generic audits, compatibility smoke commands, stateful refactor sweeps, and model-to-model
 handoff prompts do not belong in every project. Mechanical constraints such as the

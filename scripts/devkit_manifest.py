@@ -175,8 +175,8 @@ MANIFEST: tuple[str, ...] = (
     # Vendored rather than per-user because the operator works across machines, and a
     # skill under `~/.claude/` is one more copy per machine that nothing drift-checks.
     ".claude/skills/go-nuts/SKILL.md",
-    # The dynamic workflow that builds a large spec as a stack of milestone PRs, each
-    # shipped through `/ship`. Vendored for the reason `go-nuts` is: a user-level workflow
+    # The dynamic workflow that builds a large spec onto one feature branch, pushing each
+    # milestone for fixers to gate while it builds the next. Vendored for the reason `go-nuts` is: a user-level workflow
     # exists on one machine. Claude Code only; Codex has no workflow runtime to mirror to.
     ".claude/workflows/implement-spec.js",
     # Codex reads CLAUDE.md through its project-document fallback. The remaining
