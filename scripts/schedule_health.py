@@ -181,6 +181,30 @@ def failure_artifact(
     return kept if since is None or written >= since else path
 
 
+def run_artifact(
+    name: str,
+    artifacts: dict[str, str] | None = None,
+    root: Path | None = None,
+    since: _dt.datetime | None = None,
+) -> str:
+    """`failure_artifact`'s choice when the file there is the account of the run at
+    `since` -- present, not empty, and written no earlier than it -- else "".
+
+    What a finding may cite as evidence: `artifact_hint` tells a reader in words that a
+    file is missing, empty or an earlier run's, but a ledger `evidence=` is read as the
+    run's own account by whoever triages it.
+    """
+    path = failure_artifact(name, artifacts, root, since)
+    if not path:
+        return ""
+    try:
+        stat = ((REPO_ROOT if root is None else root) / path).stat()
+    except OSError:
+        return ""
+    written = _dt.datetime.fromtimestamp(stat.st_mtime)
+    return path if stat.st_size and (since is None or written >= since) else ""
+
+
 def artifact_hint(
     name: str,
     artifacts: dict[str, str] | None = None,
@@ -225,6 +249,12 @@ def artifact_hint(
 
     The pointer names `failure_artifact`'s choice, so a run that kept a `.failed` copy is
     read from that rather than from the pass that overwrote it.
+
+    **A full artifact written before `since` is an earlier run's**, and `see` would send
+    the reader to it as this run's account. 631737a8 was that: social-scraper's 13:30
+    fire was skipped because the 13:00 run was still going, and two minutes later the
+    pointer named the log the 12:30 run had left -- the 13:00 run writes only once it
+    ends, which is after the fire it overlapped.
     """
     path = failure_artifact(name, artifacts, root, since)
     if not path:
@@ -236,8 +266,13 @@ def artifact_hint(
         written = _dt.datetime.fromtimestamp(target.stat().st_mtime)
     except OSError:
         return f" -- no {path}: the run predates it, or died before writing one"
-    if size:
+    if size and (since is None or written >= since):
         return f" -- see {path}"
+    if size:
+        return (
+            f" -- {path} was last written {written:%Y-%m-%d %H:%M}, before this run: an "
+            f"earlier run's account, so this one had not finished or died before writing"
+        )
     if since is not None and written > since:
         return (
             f" -- {path} is empty and was rewritten {written:%Y-%m-%d %H:%M}, after this "

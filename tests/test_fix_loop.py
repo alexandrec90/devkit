@@ -642,7 +642,7 @@ def test_a_failing_scheduled_job_is_filed_whatever_wraps_it(ctx):
     [found] = fix_loop.job_findings(ctx, [_job("devkit-worktree-reconcile", 1, ran)])
     assert (found.kind, found.project) == (fix_loop.JOB_KIND, "devkit")
     assert found.detail == "devkit-worktree-reconcile: last run failed (exit 1)", "no time in it"
-    assert found.evidence.endswith("reconcile.log")
+    assert found.evidence == "", "no reconcile.log was written, so none is cited"
     healthy = _job("devkit-worktree-reconcile", 0, ran)
     assert fix_loop.job_findings(ctx, [healthy]) == []
 
@@ -656,7 +656,41 @@ def test_a_job_failure_names_the_failing_runs_kept_copy_as_its_evidence(ctx):
     kept.write_text("# exit=1\n", encoding="utf-8")
     job = fix_loop.schedule_health.Job("devkit-worktree-reconcile", True, 1, ran, None)
     [found] = fix_loop.job_findings(ctx, [job])
-    assert found.evidence == str(kept)
+    assert "reconcile.failed" in Path(found.evidence).name
+    assert Path(found.evidence).read_text(encoding="utf-8") == "# exit=1\n"
+
+
+def _overlapped(ctx, tasks, ran):
+    job = fix_loop.schedule_health.Job(
+        "social-scraper", True, fix_loop.schedule_health.SCHED_REFUSED_ALREADY_RUNNING, ran, None
+    )
+    [found] = fix_loop.job_findings(ctx, [job], tasks=tasks)
+    return found
+
+
+def test_a_job_findings_evidence_is_a_copy_the_next_run_cannot_overwrite(ctx):
+    """631737a8 cited `logs/collector-social-scraper.log`, which every half-hourly run
+    rewrites: by triage it held a later, passing run and nothing of the overlap."""
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    log = ctx.devkit_dir / tasks["social-scraper"]
+    log.parent.mkdir(parents=True)
+    log.write_text("13:00 run: 54 min, outlived the 13:30 fire\n", encoding="utf-8")
+    found = _overlapped(ctx, tasks, _dt.datetime.now() - _dt.timedelta(minutes=5))
+    log.write_text("14:00 run: passed\n", encoding="utf-8")
+    assert Path(found.evidence) != log
+    assert "outlived the 13:30 fire" in Path(found.evidence).read_text(encoding="utf-8")
+
+
+def test_an_artifact_older_than_the_reported_run_is_not_cited_as_its_evidence(ctx):
+    """631737a8 was filed two minutes after the skipped 13:30 fire, while the 13:00 run
+    that overlapped it was still going: the log on disk was the 12:30 run's."""
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    log = ctx.devkit_dir / tasks["social-scraper"]
+    log.parent.mkdir(parents=True)
+    log.write_text("12:30 run: passed\n", encoding="utf-8")
+    found = _overlapped(ctx, tasks, _dt.datetime.now() + _dt.timedelta(minutes=1))
+    assert found.evidence == ""
+    assert "before this run" in found.command
 
 
 def test_devkit_fixes_are_the_open_prs_and_those_merged_inside_the_hold(ctx):
@@ -790,6 +824,9 @@ def test_a_failing_scheduled_collector_is_asked_about_and_filed_against_its_proj
     tasks = {"social-scraper": "logs/collector-social-scraper.log"}
     asked = []
     ran = _dt.datetime.now() - _dt.timedelta(minutes=5)
+    log = ctx.devkit_dir / tasks["social-scraper"]
+    log.parent.mkdir(parents=True)
+    log.write_text("exit 1\n", encoding="utf-8")
     job = fix_loop.schedule_health.Job("social-scraper", True, 1, ran, None)
     monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda root: tasks)
     monkeypatch.setattr(
@@ -799,7 +836,7 @@ def test_a_failing_scheduled_collector_is_asked_about_and_filed_against_its_proj
     assert asked == [frozenset(tasks)]
     assert (found.kind, found.project) == (fix_loop.JOB_KIND, "social-scraper")
     assert found.detail == "social-scraper: last run failed (exit 1)"
-    assert found.evidence.endswith("collector-social-scraper.log")
+    assert "collector-social-scraper" in Path(found.evidence).name
 
 
 _WRAPPED = 'pythonw.exe "C:\\d\\scripts\\log-wrap.py" --always "Scheduled: Reconcile" -- python x'

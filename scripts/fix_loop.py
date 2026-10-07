@@ -396,19 +396,31 @@ def job_findings(
     for line in lines:
         name, head = line.split(":", 1)[0], line.split(" -- ", 1)[0]
         job = by_name.get(name)
-        artifact = schedule_health.failure_artifact(
-            name, artifacts, root=ctx.devkit_dir, since=job.last_run if job else None
-        )
         finding = Finding(
             JOB_KIND,
             name if name in tasks else fix_cycle.DEVKIT,
             _JOB_WHEN.sub("", head),
-            evidence=str(ctx.devkit_dir / artifact) if artifact else "",
             command=line[:300],
         )
         if not _filed_elsewhere(ctx, line, job, finding, items, git):
-            found.append(finding)
+            found.append(finding.at(_job_evidence(ctx, name, artifacts, job)))
     return found + unscheduled(ctx, tasks, frozenset(by_name))
+
+
+def _job_evidence(
+    ctx: Context, name: str, artifacts: dict[str, str], job: schedule_health.Job | None
+) -> str:
+    """A copy of the reported run's own artifact, kept beside the ledger; "" when the
+    file on disk is not that run's account (`schedule_health.run_artifact`).
+
+    Never the artifact's path: 631737a8 cited `logs/collector-social-scraper.log`, which
+    every half-hourly run rewrites, so its triager read a later, passing run there and
+    nothing of the one that overlapped (`fix_findings.kept`)."""
+    since = job.last_run if job else None
+    artifact = schedule_health.run_artifact(name, artifacts, root=ctx.devkit_dir, since=since)
+    if not artifact:
+        return ""
+    return fix_findings.kept(ctx.devkit_dir / artifact, ctx.devkit_dir, Path(artifact).stem)
 
 
 def _filed_elsewhere(

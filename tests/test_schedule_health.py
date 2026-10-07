@@ -232,6 +232,33 @@ def test_a_kept_copy_older_than_the_run_is_an_earlier_failure_and_is_not_cited(t
     assert health.failure_artifact("devkit-something-new", root=tmp_path) == ""
 
 
+def test_a_full_artifact_older_than_the_run_is_named_as_an_earlier_runs(tmp_path):
+    """631737a8: the 13:30 fire was skipped while the 13:00 run went on, and `see` named
+    the log the 12:30 run had left, which the 13:00 run would only rewrite as it ended."""
+    name = "devkit-worktree-reconcile"
+    written(tmp_path, name, body="# exit=0\n", age=NOW - dt.timedelta(minutes=30))
+    ran = NOW - dt.timedelta(minutes=2)
+    overlapped = job(name=name, last_result=health.SCHED_REFUSED_ALREADY_RUNNING, last_run=ran)
+    (line,) = health.problems([overlapped], NOW, root=tmp_path)
+    assert "see" not in line
+    assert "before this run" in line
+    assert health.run_artifact(name, root=tmp_path, since=ran) == ""
+
+
+def test_a_run_artifact_is_only_a_present_full_file_no_older_than_the_run(tmp_path):
+    name = "devkit-worktree-reconcile"
+    ran = NOW - dt.timedelta(hours=1)
+    assert health.run_artifact(name, root=tmp_path, since=ran) == "", "missing"
+    written(tmp_path, name, body="", age=NOW)
+    assert health.run_artifact(name, root=tmp_path, since=ran) == "", "empty"
+    written(tmp_path, name, body="# exit=1\n", age=NOW)
+    assert health.run_artifact(name, root=tmp_path, since=ran) == health.ARTIFACTS[name]
+    assert health.run_artifact(name, root=tmp_path) == health.ARTIFACTS[name], "no run time"
+    kept_copy(tmp_path, name, NOW)
+    assert health.run_artifact(name, root=tmp_path, since=ran) == "logs/reconcile.failed.log"
+    assert health.run_artifact("devkit-something-new", root=tmp_path) == ""
+
+
 def test_a_job_with_no_artifact_is_not_sent_to_an_invented_one():
     """An absent file reads as "the job never ran", which is a different diagnosis --
     so a job outside the table gets no pointer rather than a plausible path."""
