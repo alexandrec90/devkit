@@ -88,6 +88,10 @@ SKIP_PUSH_GATE = "devkit-push-gate"
 SKIPPED = "skipped"  # shipped already at this intent, or not a shippable branch
 REFUSED = "refused"  # the commit stage said no; a failure the pass can dispatch
 FAILED = "failed"  # the push or the PR failed; try again next pass
+# The push or the PR failed on GitHub's side (`sweep.transient`) past every in-pass retry,
+# and has not been failing for `TRANSIENT_GRACE`: tried again next pass, not filed. The
+# state file still reads `FAILED`, so everything that reads it retries as before.
+DEFERRED = "deferred"
 SHIPPED = "shipped"
 EMPTY = "empty"  # nothing changed and nothing committed: the work was all on the ledger
 
@@ -685,11 +689,53 @@ def catch_up(tree: Path, branch: str, runner: Runner) -> str:
     return f"origin/{branch} moved and does not merge into this tree cleanly:\n{output}"
 
 
-def _record_failure(intent: Intent, step: str, detail: str, when: str) -> None:
+def _record_failure(intent: Intent, step: str, detail: str, when: str) -> str:
     """A push or PR that failed, in the state file: left unwritten, an older `shipped`
-    stood and the next pass read the unpushed commit as shipped (3ae36740)."""
-    record = {"stage": FAILED, "step": step, "output": detail, "when": when}
+    stood and the next pass read the unpushed commit as shipped (3ae36740).
+
+    `since` is when this intent first failed, carried over each failure after it, so a
+    transient failure can be told from one that has lasted. Returned.
+    """
+    before = read_state(intent.tree)
+    since = when
+    if before.get("stage") == FAILED and before.get("intent") == intent.digest:
+        since = str(before.get("since") or before.get("when") or when)
+    record = {"stage": FAILED, "step": step, "output": detail, "when": when, "since": since}
     write_state(intent.tree, {**record, "intent": intent.digest})
+    return since
+
+
+# Seconds between in-pass tries of a push or a PR that GitHub failed on its own side.
+# One `HTTP 500` from the labels endpoint (a0287c8b) and one `Internal Server Error` on a
+# push (4d942641), a minute apart, each filed a ship as a harness defect.
+GITHUB_RETRY_SECONDS = (10, 30)
+# How long a transient failure is retried pass after pass before it is filed after all:
+# GitHub is not down for half a day, so one that lasts is something about the request.
+TRANSIENT_GRACE = _dt.timedelta(hours=6)
+
+
+def _retrying(attempt: Callable[[], str]) -> str:
+    """`attempt()`'s error, asked again after each `GITHUB_RETRY_SECONDS` pause while
+    `sweep.transient` says so; "" once it went through."""
+    error = attempt()
+    for seconds in GITHUB_RETRY_SECONDS:
+        if not error or not sweep.transient(error):
+            break
+        _wait(seconds)
+        error = attempt()
+    return error
+
+
+def _failed(intent: Intent, step: str, detail: str, when: str) -> Outcome:
+    """A push or a PR that failed, recorded: `DEFERRED` when GitHub failed on its side
+    and has not done so for `TRANSIENT_GRACE`, else `FAILED`."""
+    since = _record_failure(intent, step, detail, when)
+    try:
+        lasted = _dt.datetime.fromisoformat(when) - _dt.datetime.fromisoformat(since)
+    except ValueError:
+        lasted = TRANSIENT_GRACE
+    stage = DEFERRED if sweep.transient(detail) and lasted < TRANSIENT_GRACE else FAILED
+    return Outcome(intent, stage, f"{step}: {detail}")
 
 
 def _push(intent: Intent, runner: Runner, when: str) -> Outcome | None:
@@ -705,12 +751,16 @@ def _push(intent: Intent, runner: Runner, when: str) -> Outcome | None:
         return Outcome(intent, REFUSED, f"merge: {conflict.strip()[-400:]}")
     env = dict(os.environ)
     env["SKIP"] = SKIP_PUSH_GATE
-    pushed = runner(["git", "push", "-u", "origin", intent.branch], cwd=tree, env=env)
-    if pushed.returncode == 0:
-        return None
-    detail = (pushed.stderr or pushed.stdout or "").strip()[-400:] or f"exit {pushed.returncode}"
-    _record_failure(intent, "push", detail, when)
-    return Outcome(intent, FAILED, f"push: {detail}")
+
+    def push() -> str:
+        pushed = runner(["git", "push", "-u", "origin", intent.branch], cwd=tree, env=env)
+        if pushed.returncode == 0:
+            return ""
+        return (pushed.stderr or pushed.stdout or "").strip()[-400:] or f"exit {pushed.returncode}"
+
+    if detail := _retrying(push):
+        return _failed(intent, "push", detail, when)
+    return None
 
 
 def pr_body(intent: Intent) -> str:
@@ -764,19 +814,22 @@ def ship_one(
     if stopped := _push(intent, runner, when):
         return stopped
 
-    url, _created, error = sweep.ensure_pr(
-        gh_for(tree),
-        sweep.Plan(
-            pr_title=intent.subject,
-            pr_body=pr_body(intent),
-            pr_head=intent.branch,
-            pr_base=base,
-            pr_labels=labels_for(tree),
-        ),
+    plan = sweep.Plan(
+        pr_title=intent.subject,
+        pr_body=pr_body(intent),
+        pr_head=intent.branch,
+        pr_base=base,
+        pr_labels=labels_for(tree),
     )
-    if error:
-        _record_failure(intent, "pr", error, when)
-        return Outcome(intent, FAILED, f"pr: {error}")
+    url = ""
+
+    def open_pr() -> str:
+        nonlocal url
+        url, _created, error = sweep.ensure_pr(gh_for(tree), plan)
+        return error
+
+    if error := _retrying(open_pr):
+        return _failed(intent, "pr", error, when)
     head = runner(["git", "rev-parse", "HEAD"], cwd=tree)
     sha = (head.stdout or "").strip()
     write_state(

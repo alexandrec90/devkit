@@ -18,7 +18,6 @@ Tested in `tests/test_fix_red.py`, and through the pass in `tests/test_fix_pass.
 
 from __future__ import annotations
 
-import re
 import sys
 import time
 from pathlib import Path
@@ -68,12 +67,11 @@ def backlog_failure(
 # fixer at devkit over a GitHub hiccup. A server error or a dropped connection is retried
 # after each of these pauses; a refusal (a 4xx) is not, since asking again changes nothing.
 REGATE_RETRY_SECONDS = (10, 30)
-_TRANSIENT = re.compile(r"\bHTTP 5\d\d\b|timeout|timed out|error connecting|connection reset", re.I)
 
 
 def transient(said: str) -> bool:
     """Whether `gh` failed on GitHub's side or the network's, not on the request."""
-    return bool(_TRANSIENT.search(said))
+    return sweep.transient(said)
 
 
 def regate(project_dir: Path) -> tuple[bool, str]:

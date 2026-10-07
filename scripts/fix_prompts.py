@@ -233,12 +233,36 @@ def _locked_too(locked: dict[str, str] | None) -> str:
     )
 
 
+def _described(number: int) -> str:
+    """Where a PR's own account of itself is. ibkr_trader #98's body said it needed an
+    unmerged data-lake branch; its resolver was told nothing of it, and found out from
+    its targeted tests failing to import (42482fc1)."""
+    return (
+        f" Read the PR's description first (gh pr view {number}): a dependency it names -- "
+        "an unmerged branch of another repository, say -- is one the pinned or shared copy "
+        "here lacks."
+    )
+
+
+def _squashed_too(squashed: str, base: str) -> str:
+    """`fix_trees.squashed_base`'s finding, said as what it does to the merge, or ""."""
+    if not squashed:
+        return ""
+    return (
+        f" origin/{base} holds PR {squashed} as one commit, while this branch still carries "
+        "the commits it squashed: their merge base predates them, so git calls every file "
+        "they added add/add. Resolve against the squash commit as the true base (git "
+        "merge-file per file), not against git's merge base."
+    )
+
+
 def pr_prompt(
     failure: Failure,
     refusal: str = "",
     left: str = "",
     locked: dict[str, str] | None = None,
     made: str = "",
+    squashed: str = "",
 ) -> str:
     """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
 
@@ -247,21 +271,21 @@ def pr_prompt(
     gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
     `refusal` is the tree's `standing_refusal`, which the commit shape already is,
     `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`),
-    `locked` is the tree's `fix_trees.locked_caches`, and `made` is who made a reused
-    tree (`fix_trees.provenance`).
+    `locked` is the tree's `fix_trees.locked_caches`, `made` is who made a reused
+    tree (`fix_trees.provenance`), and `squashed` is `fix_trees.squashed_base`.
     """
     tree_notes = made + _refused_too(refusal) + _locked_too(locked)
     if CONFLICT in failure.signature:
         return _framed(
             f"PR #{failure.number} in {failure.project} has a merge conflict with "
             f"origin/{failure.base}. This worktree is checked out on its head branch "
-            f"{failure.head}.{_left_as_is(left, failure.head)} Merge origin/{failure.base} in and resolve "
-            "the conflicts so "
+            f"{failure.head}.{_left_as_is(left, failure.head)}{_described(failure.number)} "
+            f"Merge origin/{failure.base} in and resolve the conflicts so "
             "that both sides' intent survives -- git diff --check must find no conflict "
             "marker in any file, not only the code -- and leave the merge uncommitted: the fix "
             "pass concludes it with the hooks running, and whatever the gate says after "
-            f"that is the next pass's business, not this session's.{tree_notes} "
-            f"{FINISH}"
+            f"that is the next pass's business, not this session's."
+            f"{_squashed_too(squashed, failure.base)}{tree_notes} {FINISH}"
         )
     if failure.kind == COMMIT:
         return _framed(
@@ -276,6 +300,7 @@ def pr_prompt(
         f"{failure.reason}. Failing: {_ids(failure.signature)}. {_logs(failure)} "
         f"This worktree is checked out on the PR head branch {failure.head}"
         + (f".{_left_as_is(left, failure.head)}" if left else ", already up to date with its base.")
+        + _described(failure.number)
         + " Fix what the gate is failing on, and nothing else about "
         f"the PR.{tree_notes} {FINISH}"
     )

@@ -313,6 +313,17 @@ def test_a_backgrounded_wait_is_one_call_and_its_notice_not_a_poll():
     assert classes([call(loop, "1")]) == ["poll"], "in the foreground it holds the turn"
 
 
+def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
+    """e1043d81 came back after five resolutions, each excusing one more shape of wait,
+    because only a CI gate's wait was written down: a rescue session waited on its own
+    probe's file with a foreground `until` loop, the shape Claude Code's sleep guard
+    names. The rule has to say what the detector accepts -- backgrounded, or `Monitor`."""
+    rule = (REPO_ROOT / ".claude" / "rules" / "engineering.md").read_text(encoding="utf-8")
+    section = rule.split("## Waiting", 1)[1].split("\n## ", 1)[0]
+    assert "run_in_background" in section and "`until` loop" in section
+    assert all(f"`{tool}`" in section for tool in sf.WAIT_TOOLS)
+
+
 def test_a_module_the_tree_itself_holds_is_a_code_defect_not_the_environment(tmp_path):
     """0929-8 switched a test to a bare `import fix_plan`, which resolves only once another
     module has put `scripts/` on the path; collected first, it failed. `fix_plan` is a

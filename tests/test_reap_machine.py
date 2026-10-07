@@ -133,6 +133,43 @@ def test_the_table_is_none_when_the_lister_fails_or_answers_nothing():
     assert reap_machine.process_table(boom, windows=True) is None
 
 
+def test_an_unread_table_says_why():
+    def slow(argv):
+        raise subprocess.TimeoutExpired(argv, 240)
+
+    assert reap_machine.read_table(slow, windows=True) == (
+        None,
+        "the lister did not answer within 240 s",
+    )
+    refused = completed(returncode=1)
+    refused.stderr = "Get-CimInstance : Call was canceled.\nAt line:1 char:1\n"
+    assert reap_machine.read_table(lambda argv: refused, windows=True) == (
+        None,
+        "the lister exited 1: At line:1 char:1",
+    )
+    assert reap_machine.read_table(lambda argv: completed("[]"), windows=True) == (
+        None,
+        "the lister's answer held no process",
+    )
+
+
+def test_the_table_read_outlasts_a_loaded_machine(monkeypatch):
+    """ba883e41: four passes in a row timed out on a loaded desk at the 60 s bound every
+    other probe shares; the table read has its own, inside the task's ten minutes."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return completed('[{"ProcessId":7,"ParentProcessId":1,"Name":"x","CommandLine":""}]')
+
+    monkeypatch.setattr(reap_machine.subprocess, "run", fake_run)
+    assert reap_machine.process_table(windows=True) == [P(7, 1, "x", "")]
+    assert reap_machine.QUICK_TIMEOUT < seen["timeout"] == reap_machine.TABLE_TIMEOUT
+    reap_machine.run_table_command(["x"])
+    assert seen["timeout"] == reap_machine.TABLE_TIMEOUT
+    assert reap_machine.TABLE_TIMEOUT <= 5 * 60  # half of `PT10M`, for the reaps after it
+
+
 def test_the_table_is_read_through_the_platform_parser():
     text = '[{"ProcessId":7,"ParentProcessId":1,"Name":"node.exe","CommandLine":"x"}]'
     assert reap_machine.process_table(lambda argv: completed(text), windows=True) == [

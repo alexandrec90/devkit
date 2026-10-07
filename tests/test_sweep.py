@@ -1532,6 +1532,23 @@ def test_a_failed_pr_creation_is_reported_not_swallowed():
     assert "not authenticated" in error
 
 
+@pytest.mark.parametrize(
+    ("said", "transient"),
+    [
+        # a0287c8b, 4d942641: how `gh` and a push each word GitHub's own 500.
+        ("HTTP 500 (https://api.github.com/repos/o/r/labels/automerge)", True),
+        (
+            "remote: Internal Server Error\n ! [remote rejected] x -> x (Internal Server Error)",
+            True,
+        ),
+        ("gh: not authenticated", False),
+        ("! [rejected] x -> x (non-fast-forward)", False),
+    ],
+)
+def test_transient_tells_githubs_failure_from_a_refusal(said, transient):
+    assert sweep.transient(said) is transient
+
+
 LABELED_PLAN = sweep.Plan(
     pr_title="Adopt devkit v9.9.9",
     pr_body="body",

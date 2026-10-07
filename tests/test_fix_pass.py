@@ -1546,6 +1546,22 @@ def test_ship_intents_in_plan_mode_only_says_what_it_would_do(monkeypatch, tmp_p
     assert lines == ["carameli agent/i -- would ship: S"] and refused == [] and not failed
 
 
+def test_not_shipping_says_nothing_of_an_intent_the_dispatch_ships(tmp_path):
+    one = ship_intent.Intent("carameli", tmp_path, "agent/i", "S", "B")
+    assert fix_pass.not_shipping(one, frozenset(), NOW, fix_cycle.DISPATCH) == ""
+    assert fix_pass.not_shipping(one, frozenset(), NOW, fix_cycle.PLAN) == (
+        "carameli agent/i -- would ship: S"
+    )
+
+
+def test_shipped_line_keeps_the_tail_of_a_detail_on_one_line(tmp_path):
+    one = ship_intent.Intent("carameli", tmp_path, "agent/i", "S", "B")
+    detail = "push rejected\n" + "x" * 300 + "\nremote: the reason"
+    line = fix_pass.shipped_line(ship_intent.Outcome(one, ship_intent.FAILED, detail), "here")
+    assert line.startswith("here -- failed: ") and "\n" not in line
+    assert line.endswith("remote: the reason") and len(line) == len("here -- failed: ") + 240
+
+
 # --- what the last review found ---------------------------------------------------------
 
 
@@ -1806,6 +1822,23 @@ def test_a_failed_ship_is_the_exit_code(world, monkeypatch):
     )
     assert "shipped  carameli agent/i-0919 -- failed: push: no" in artifact(world)
     assert "filed    carameli ship-failed: carameli agent/i-0919: push: no" in artifact(world)
+
+
+def test_a_ship_github_failed_is_deferred_and_filed_nowhere(world, monkeypatch):
+    """a0287c8b, 4d942641: GitHub's own 500s filed two ships as harness defects."""
+    one = ship_intent.Intent("carameli", Path("t"), "agent/i-0919", "S", "B")
+    world["intents"] = [one]
+    said = "pr: HTTP 500 (https://api.github.com/repos/o/r/labels/automerge)"
+    monkeypatch.setattr(
+        fix_pass.ship_intent,
+        "ship_one",
+        lambda intent, python, base: ship_intent.Outcome(intent, ship_intent.DEFERRED, said),
+    )
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) != (
+        fix_pass.EXIT_FAILED
+    )
+    assert f"shipped  carameli agent/i-0919 -- deferred: {said}" in artifact(world)
+    assert "ship-failed" not in artifact(world)
 
 
 def test_dispatching_a_refused_commit_sets_its_intent_aside(monkeypatch, tmp_path):

@@ -399,9 +399,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(text, end="")
         return code
 
-    table = reap_machine.process_table()
+    table, why = reap_machine.read_table()
     if table is None:
-        report.fail(f"{NO_TABLE} -- nothing assessed")
+        report.fail(f"{NO_TABLE} ({why}) -- nothing assessed")
         return finish(2)
 
     plan = build_plan(table, Path(workspace) if workspace else None, root, report)
