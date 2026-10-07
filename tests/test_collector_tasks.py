@@ -8,11 +8,13 @@ that decide whether the project's job runs and whether its failure is seen:
 - a current registration is left alone, a drifted one re-registered, a `stop` one removed;
 - a fire starts what the command `needs` first, and does not run it when that fails --
   saying, on a timeout, whether the engine or the service stalled;
-- the exit code is the command's own, and its output is kept, tail first.
+- the exit code is the command's own, and its output is kept, tail first;
+- the command is told when the scheduler fired, from before its `needs` came up.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import subprocess
 from pathlib import Path
 from typing import ClassVar
@@ -239,9 +241,11 @@ class FakeSpawn:
     def __init__(self, *answers):
         self.answers = list(answers)
         self.calls: list[tuple] = []
+        self.envs: list = []
 
-    def __call__(self, argv, cwd, timeout):
+    def __call__(self, argv, cwd, timeout, env=None):
         self.calls.append((list(argv), Path(cwd).name, timeout))
+        self.envs.append(env)
         return self.answers.pop(0)
 
 
@@ -264,6 +268,33 @@ def test_a_fire_starts_what_it_needs_then_runs_the_command_in_the_checkout(tmp_p
     assert spawn.calls[1][0] == [r"C:\bin\uv.exe", "run", "social-scraper", "scrape"]
     assert spawn.calls[1][2] == tasks.FIRE_TIMEOUT
     assert "reddit: 40 posts" in lines
+
+
+def test_the_command_is_told_when_the_scheduler_fired_not_when_it_started(tmp_path):
+    """45f7adeb: the 17:30 fire reached its scrape at 17:35:44 -- compose took 3m24s and
+    `uv run` 2m20s under load -- and the scrape's cycle deadline, counted from its own
+    start, let it run past the 18:00 fire. The command gets the fire's moment, and only
+    the command: the `needs` spawn is devkit's own."""
+    fired = dt.datetime(2026, 10, 7, 21, 30, 0, 400000, tzinfo=dt.UTC)
+    spawn = FakeSpawn((0, ""), (0, "ok"))
+    tasks.fire(SCRAPER, checkout(tmp_path), spawn, fired=fired)
+    assert spawn.envs == [None, {tasks.FIRED_AT: "2026-10-07T21:30:00+00:00"}]
+
+
+def test_a_fire_with_no_moment_given_stamps_its_own(tmp_path):
+    before = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    fake = FakeSpawn((0, ""), (0, "ok"))
+    spawn: tasks.Spawner = fake  # the fake has `spawn`'s shape, `env` included
+    tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    stamped = dt.datetime.fromisoformat(fake.envs[1][tasks.FIRED_AT])
+    assert before <= stamped <= dt.datetime.now(dt.UTC)
+
+
+def test_a_naive_fire_time_is_this_machines_local_time():
+    naive = dt.datetime(2026, 10, 7, 17, 30)
+    expected = naive.astimezone(dt.UTC).isoformat(timespec="seconds")
+    assert tasks.fired_env(naive) == {tasks.FIRED_AT: expected}
+    assert expected.endswith("+00:00")
 
 
 def test_the_exit_code_is_the_commands_own(tmp_path):
@@ -427,6 +458,19 @@ def test_a_collector_runs_uv_frozen_so_it_never_rewrites_the_checkouts_lock(monk
     )
     assert tasks.stream(["uv", "run", "x"], tmp_path) == 0
     assert ran[0]["env"]["UV_FROZEN"] == "1"
+
+
+def test_a_spawns_env_is_added_to_the_commands_and_cannot_unfreeze_it(monkeypatch, tmp_path):
+    assert tasks.command_env({"PATH": "p"}, {tasks.FIRED_AT: "t"}) == {
+        "PATH": "p",
+        "UV_FROZEN": "1",
+        tasks.FIRED_AT: "t",
+    }
+    FakePopen.hang = False
+    monkeypatch.setattr(tasks.subprocess, "Popen", FakePopen)
+    tasks.spawn(["uv", "run", "x"], tmp_path, 10, {tasks.FIRED_AT: "t"})
+    env = FakePopen.instances[-1].kwargs["env"]
+    assert env[tasks.FIRED_AT] == "t" and env["UV_FROZEN"] == "1"
 
 
 def test_a_timeout_ends_the_whole_tree_and_keeps_what_was_said(monkeypatch, tmp_path):

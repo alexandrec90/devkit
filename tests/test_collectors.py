@@ -1049,7 +1049,7 @@ def test_fire_runs_the_command_and_exits_with_its_code(tmp_path, monkeypatch):
     root = scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
     seen = []
 
-    def spawner(argv, cwd, timeout):
+    def spawner(argv, cwd, timeout, env=None):
         seen.append((list(argv), Path(cwd).name))
         return 4, "x: challenge page"
 
@@ -1064,7 +1064,7 @@ def test_fire_on_a_machine_not_assigned_runs_nothing(tmp_path, monkeypatch):
     """A task the pass has not deleted yet must not become a second writer."""
     scraper_home(tmp_path, monkeypatch, {"social-scraper": STOP})
 
-    def spawner(argv, cwd, timeout):
+    def spawner(argv, cwd, timeout, env=None):
         raise AssertionError("ran on a machine set to stop it")
 
     assert collectors.main(["fire", "social-scraper"], spawner=spawner) == 0
@@ -1183,8 +1183,15 @@ def test_maintain_scheduled_with_nothing_to_keep_asks_nothing(tmp_path, monkeypa
 def test_fire_logs_under_its_own_name_and_returns_the_commands_code(tmp_path, monkeypatch):
     root = scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
     when = dt.datetime(2026, 10, 2, 15, 0)
-    code = collectors.fire("social-scraper", root, when, lambda argv, cwd, timeout: (3, "blocked"))
+    envs = []
+    code = collectors.fire(
+        "social-scraper",
+        root,
+        when,
+        lambda argv, cwd, timeout, env=None: envs.append(env) or (3, "blocked"),
+    )
     assert code == 3
+    assert envs[-1] == collectors.collector_tasks.fired_env(when), "the pass's own moment"
     log = (root / "logs" / "collector-social-scraper.log").read_text(encoding="utf-8")
     assert log.startswith("# collector social-scraper 2026-10-02T15:00:00 -- exit 3")
 
