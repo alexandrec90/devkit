@@ -15,7 +15,9 @@ harness-defect ledger, where the devkit session picks it up on the next pass:
   sessions nobody dispatched, which is most of them.
 - **Whether resolutions held** (`fix_verify.py`): a group retired against a fix that
   never merged is reopened, and one whose fix is still in flight sends no session; once
-  it merges, the rows filed while it waited are retired against it, not re-sent.
+  it merges, the rows filed while it waited are retired against it, not re-sent -- and
+  so is a wrapped job's failed run of code the checkout had not yet moved onto
+  (`_predates_fix`).
 - **Whether what was filed still stands** (`session_friction.outdated`): a friction row
   the detectors on the default branch no longer file is retired, with that reason, and
   one an open PR's detector no longer files is resolved against that PR
@@ -125,6 +127,7 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
     if ctx.writes:
         closed.verified += journal.step("verify", _verify, ctx, default=[])
         closed.verified += journal.step("recheck", _recheck, ctx, default=[])
+        closed.verified += journal.step("predates-fix", _predates_fix, ctx, default=[])
         runner = ship_intent.run_quiet
         closed.stopped = journal.step(
             "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
@@ -432,7 +435,7 @@ def _filed_elsewhere(
     if ran is None:
         return False
     return _resolved_since(finding, items, ran) or _ran_before_fix(
-        ctx.devkit_dir, finding, items, ran, git
+        ctx.devkit_dir, fix_findings.signature(finding), items, ran, git
     )
 
 
@@ -499,6 +502,10 @@ def collector_findings(
     return found
 
 
+# The row a wrapped job's own `log-wrap.py --always` files for a failed run
+# (`log-wrap.FAILED_EVENT`; a hyphenated script, so spelled here rather than imported).
+FAILED_RUN_EVENT = "scheduled-job-failed"
+
 # How long a fix goes on excusing a failing verdict from code older than it: its PR's
 # merge, the checkout's fast-forward and `collectors.py`'s next pass, which redeploys.
 # Past it, a verdict still from older code is one the redeploy never reached.
@@ -522,17 +529,17 @@ def _verdict_predates_fix(
     when = verdict.get(collectors.CODE_AT)
     if verdict.get(collectors.HELD) or not isinstance(when, (int, float)):
         return False
-    made = _last_fix(finding, items)
+    made = _last_fix(fix_findings.signature(finding), items)
     return (
         made is not None and when < made and now.timestamp() - made < REDEPLOY_GRACE.total_seconds()
     )
 
 
 def _ran_before_fix(
-    checkout: Path, finding: Finding, items: list[triage.Item], when: _dt.datetime, git
+    checkout: Path, group: tuple, items: list[triage.Item], when: _dt.datetime, git
 ) -> bool:
-    """Whether the run at `when` (the scheduler's local time) executed code older than
-    its group's latest standing fix, in a checkout that has moved past that fix since.
+    """Whether the run at `when` (naive: the scheduler's local time) executed code older
+    than `group`'s latest standing fix, in a checkout that has moved past that fix since.
 
     cda106d0: `devkit-reap-stale` fired at 19:00:00 and the checkout fast-forwarded onto
     the merged fix at 19:00:02, so the run reported the very failure that fix retired and
@@ -540,7 +547,7 @@ def _ran_before_fix(
     after its resolution, so code committed before it cannot hold it. This defers a
     verdict by one run and never hides one: the next run executes the newer code.
     """
-    made = _last_fix(finding, items)
+    made = _last_fix(group, items)
     if made is None:
         return False
     since = when.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
@@ -549,22 +556,94 @@ def _ran_before_fix(
     return ran is not None and now is not None and ran < made <= now
 
 
-def _last_fix(finding: Finding, items: list[triage.Item]) -> float | None:
-    """When the latest standing resolution of `finding`'s group was made, as a POSIX time."""
-    group = fix_findings.signature(finding)
+def _standing_fix(group: tuple, items: list[triage.Item]) -> triage.Item | None:
+    """The latest standing resolution of `group`, by when it was made; None if none is."""
     ids = {item.id for item in items if item.signature == group}
     verdict = triage.verdicts(items)
-    made = [
-        triage.resolved_at(item)
-        for item in items
-        if item.event == triage.RESOLVED_EVENT
-        and item.fields.get("ref") in ids
-        and verdict.get(item.fields["ref"]) == (item.event, item.stamp)
-    ]
-    try:
-        return max(_dt.datetime.fromisoformat(stamp).timestamp() for stamp in made)
-    except ValueError:  # none standing, or a stamp no ledger writer produces
+    made = []
+    for item in items:
+        if (
+            item.event == triage.RESOLVED_EVENT
+            and item.fields.get("ref") in ids
+            and verdict.get(item.fields["ref"]) == (item.event, item.stamp)
+        ):
+            try:
+                made.append((_dt.datetime.fromisoformat(triage.resolved_at(item)), item))
+            except ValueError:  # a stamp no ledger writer produces
+                continue
+    return max(made, key=lambda pair: pair[0])[1] if made else None
+
+
+def _last_fix(group: tuple, items: list[triage.Item]) -> float | None:
+    """When the latest standing resolution of `group` was made, as a POSIX time."""
+    fix = _standing_fix(group, items)
+    return None if fix is None else _dt.datetime.fromisoformat(triage.resolved_at(fix)).timestamp()
+
+
+def _predates_fix(
+    ctx: Context, git=ship_intent.run_quiet, lookup: fix_verify.Lookup | None = None
+) -> list[str]:
+    """Retire each open failed-run row this machine's `log-wrap.py --always` filed from a
+    run of checkout code older than the merge of its group's standing fix, against that
+    fix's own PR -- so the row lands, or reopens, with it.
+
+    6a65dbe7: reap-stale failed at 19:17, before the checkout fast-forwarded onto #567 at
+    19:18 -- the fix it reported against had merged at 19:04 and was not yet running. A
+    wrapped job files its own row, so `job_findings`' `_ran_before_fix` never saw it, and
+    it read "RECURRED ... that fix did not hold". The bound is the fix's *merge*, not its
+    resolution: #565 merged between the two, so the code that ran was newer than the
+    resolution and still lacked the fix. The row's stamp is the run's end, so a
+    fast-forward during the run reads as the newer code: this can only under-retire.
+    """
+    items = triage.load(ctx.devkit_dir)
+    if lookup is None:
+        lookup = fix_verify.gh_lookup(ctx.root, ctx.projects, sweep.gh_for)
+    host = triage.harness_events.host_name()
+    lines = []
+    for item in triage.open_items(items, (FAILED_RUN_EVENT,)):
+        if item.host != host or item.project != fix_cycle.DEVKIT:
+            continue  # another machine's checkout, or a project's own, ran it
+        fix = _standing_fix(item.signature, items)
+        if fix is None or not (merged := _fix_merged_at(fix, lookup)):
+            continue  # no fix, or one in flight, which `pending_groups` already holds
+        if not _ran_before(ctx.devkit_dir, item.stamp, merged, git):
+            continue
+        ref, pr = fix.fields.get("ref", "-"), fix.fields.get("pr", "-")
+        note = (
+            f"ran code older than the fix for [{ref}] ({pr}), which merged at "
+            f"{merged.isoformat()}; the checkout moved onto it after this run"
+        )
+        made = triage.resolved_at(fix)
+        triage.resolve([item.id], note, pr=pr, root=ctx.devkit_dir, resolved=made)
+        lines.append(f"retired [{item.id}] -- {note}")
+    return lines
+
+
+def _fix_merged_at(fix: triage.Item, lookup: fix_verify.Lookup) -> _dt.datetime | None:
+    """When the PR the resolution `fix` names merged, as `fix_verify` judges it; None
+    while it has not, or when GitHub cannot say."""
+    pr = fix.fields.get("pr", "")
+    resolution = fix_verify.Resolution(fix.fields.get("ref", ""), triage.resolved_at(fix), pr, "")
+    project, what = fix_verify.target(pr)
+    if not what:
         return None
+    merge = fix_verify.landed(resolution, lookup(project, what))
+    # `landed` returns only a merge whose `merged_at` it could read, so this parse holds.
+    return None if merge is None else _dt.datetime.fromisoformat(merge.merged_at)
+
+
+def _ran_before(checkout: Path, stamp: str, merged: _dt.datetime, git) -> bool:
+    """Whether the checkout's HEAD at ledger time `stamp` was committed before `merged`,
+    and its HEAD now was not. A merge commit is made at its PR's `mergedAt`, so a HEAD
+    older than that cannot hold it."""
+    try:
+        when = _dt.datetime.fromisoformat(stamp)
+    except ValueError:  # a stamp no ledger writer produces
+        return False
+    since = when.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    ran = _commit_time(checkout, f"HEAD@{{{since}}}", git)
+    now = _commit_time(checkout, "HEAD", git)
+    return ran is not None and now is not None and ran < merged.timestamp() <= now
 
 
 def _commit_time(checkout: Path, rev: str, git) -> float | None:

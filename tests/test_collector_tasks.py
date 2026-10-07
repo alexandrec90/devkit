@@ -6,7 +6,8 @@ that decide whether the project's job runs and whether its failure is seen:
 - the task runs `collectors.py fire <name>` from the devkit checkout, window-less, never
   under a `devkit-` name;
 - a current registration is left alone, a drifted one re-registered, a `stop` one removed;
-- a fire starts what the command `needs` first, and does not run it when that fails;
+- a fire starts what the command `needs` first, and does not run it when that fails --
+  saying, on a timeout, whether the engine or the service stalled;
 - the exit code is the command's own, and its output is kept, tail first.
 """
 
@@ -16,9 +17,11 @@ import subprocess
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
 from support import load_script
 
 tasks = load_script("scripts/collector_tasks.py")
+log_wrap = load_script("scripts/log-wrap.py")
 config = tasks.config
 devkit_schtasks = tasks.devkit_schtasks
 
@@ -274,6 +277,79 @@ def test_a_need_that_will_not_start_skips_the_command_and_fails(tmp_path):
     assert code == 1 and len(spawn.calls) == 1
     assert any("could not start db" in line for line in lines)
     assert "error during connect: docker not running" in lines
+
+
+def test_a_need_that_failed_ends_on_an_error_line_naming_only_the_kind(tmp_path):
+    spawn = FakeSpawn((1, "error during connect: docker not running"))
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert lines[-1] == "error: docker compose up failed for db"
+
+
+TIMED_OUT = (tasks.TIMED_OUT, "\ntimed out after 600s; ended it and its children")
+
+
+def test_a_need_that_timed_out_with_the_engine_answering_says_the_service_stalled(tmp_path):
+    """3e8e7f26: `up --wait db` printed nothing for 600 s and the log asked whether Docker
+    Desktop was running, while the db had been up and healthy for hours. The re-ask says
+    which stalled, and the cause no longer reads as the scrape's own timeout."""
+    healthy = "NAME STATUS\nsocial-scraper-db-1 Up 4 hours (healthy)"
+    spawn = FakeSpawn(TIMED_OUT, (0, "28.4.0\n"), (0, healthy))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == tasks.TIMED_OUT and len(spawn.calls) == 3
+    assert spawn.calls[1] == (
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
+        "social-scraper",
+        tasks.PROBE,
+    )
+    assert spawn.calls[2][0] == ["docker", "compose", "ps", "--all", "db"]
+    assert not any("Docker Desktop running" in line for line in lines), lines
+    assert any("server 28.4.0" in line for line in lines), lines
+    assert "social-scraper-db-1 Up 4 hours (healthy)" in lines
+    assert lines[-1] == "error: db did not come up healthy within the compose timeout"
+
+
+def test_a_need_that_timed_out_with_the_engine_silent_blames_the_engine(tmp_path):
+    spawn = FakeSpawn(TIMED_OUT, (tasks.TIMED_OUT, "\ntimed out after 30s"))
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert len(spawn.calls) == 2, "compose ps would only hang the same way"
+    assert any("did not answer either (exit 124)" in line for line in lines), lines
+    assert lines[-1] == "error: the Docker engine did not answer"
+
+
+@pytest.mark.parametrize(
+    ("answers", "cause"),
+    [
+        ([TIMED_OUT, (1, "")], "error: the Docker engine did not answer"),
+        ([TIMED_OUT, (0, "28"), (0, "")], "error: db did not come up healthy within the"),
+        ([(1, "Error response from daemon: no such image")], "error: docker compose up failed"),
+    ],
+)
+def test_the_wrapper_files_the_needs_kind_as_the_cause(tmp_path, answers, cause):
+    """What `log-wrap.py` reads off the fire's output is the line `needs_failed` ends on."""
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), FakeSpawn(*answers))
+    found = log_wrap.failure_cause("\n".join(lines))
+    assert found.startswith(cause), found
+
+
+def test_needs_failed_keeps_the_compose_tail_before_its_verdict(tmp_path):
+    out = "\n".join(f"compose {n}" for n in range(60))
+    lines = tasks.needs_failed(("db", "cache"), tmp_path, 1, out, FakeSpawn())
+    assert lines[0] == "could not start db, cache (exit 1), so the command was not run"
+    assert "compose 19" not in lines and "compose 20" in lines and "compose 59" in lines
+    assert lines[-1] == "error: docker compose up failed for db, cache"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("28.4.0\nmore", "28.4.0"),
+        ("\n  27.1  \n", "27.1"),
+        ("", "(nothing)"),
+        ("  \n", "(nothing)"),
+    ],
+)
+def test_first_is_the_first_line_or_says_there_was_none(text, expected):
+    assert tasks.first(text) == expected
 
 
 def test_a_command_with_no_needs_spawns_only_itself(tmp_path):

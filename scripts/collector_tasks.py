@@ -56,6 +56,11 @@ TIME_LIMIT = "PT1H"
 FIRE_TIMEOUT = 55 * 60
 NEEDS_TIMEOUT = 600
 SCHTASKS_TIMEOUT = 60
+# The re-ask after a `compose up` timed out (`needs_failed`): an engine that answers at
+# all answers `docker info` in seconds.
+PROBE = 30
+# `spawn`'s code for a child it ended at its timeout, as `timeout(1)` reports one.
+TIMED_OUT = 124
 
 # Lines of the command's output the log keeps: the tail, where the error is.
 LOG_LINES = 300
@@ -261,7 +266,10 @@ def spawn(argv: Sequence[str], cwd: Path, timeout: int) -> tuple[int, str]:
         kill_tree(process.pid)
         process.kill()
         out, _ = process.communicate()
-        return 124, f"{(out or '').strip()}\ntimed out after {timeout}s; ended it and its children"
+        return (
+            TIMED_OUT,
+            f"{(out or '').strip()}\ntimed out after {timeout}s; ended it and its children",
+        )
     return process.returncode, (out or "").strip()
 
 
@@ -273,6 +281,44 @@ def resolve(argv: Sequence[str], which: Callable[[str], str | None] | None = Non
     found, and the spawn then reports exit 127 naming it."""
     found = (which or shutil.which)(argv[0])
     return [found or argv[0], *argv[1:]]
+
+
+def needs_failed(
+    needs: Sequence[str], checkout: Path, code: int, out: str, run: Spawner
+) -> list[str]:
+    """The log lines for a `compose up --wait` of `needs` that failed, ending on an
+    `error:` line naming only the kind, which `log-wrap.py` files as the cause.
+
+    3e8e7f26: `up --wait db` printed nothing for its whole `NEEDS_TIMEOUT` and the log
+    asked "is Docker Desktop running?" -- it was, with the db up and healthy for hours,
+    and the cause read `timed out after Ns`, the same as the scrape itself running past
+    `FIRE_TIMEOUT`. On a timeout the engine and the services are asked again, briefly, so
+    the log says which of the two stalled while the evidence still exists.
+    """
+    names = ", ".join(needs)
+    lines = [f"could not start {names} (exit {code}), so the command was not run", ""]
+    lines += out.splitlines()[-40:]
+    if code != TIMED_OUT:
+        return [*lines, f"error: docker compose up failed for {names}"]
+    engine, answer = run(["docker", "info", "--format", "{{.ServerVersion}}"], checkout, PROBE)
+    if engine != 0:
+        return [
+            *lines,
+            f"`docker info` did not answer either (exit {engine}): {first(answer)}",
+            "error: the Docker engine did not answer",
+        ]
+    _code, state = run(["docker", "compose", "ps", "--all", *needs], checkout, PROBE)
+    return [
+        *lines,
+        f"the Docker engine answers now (server {first(answer)}); {names} as compose sees it:",
+        *state.splitlines()[-10:],
+        f"error: {names} did not come up healthy within the compose timeout",
+    ]
+
+
+def first(text: str) -> str:
+    """`text`'s first line, or a word saying there was none."""
+    return (text.strip().splitlines() or ["(nothing)"])[0]
 
 
 def fire(
@@ -287,12 +333,7 @@ def fire(
             ["docker", "compose", "up", "-d", "--wait", *collector.needs], checkout, NEEDS_TIMEOUT
         )
         if code != 0:
-            return code, [
-                *lines,
-                f"could not start {', '.join(collector.needs)} (exit {code}), so the "
-                f"command was not run -- is Docker Desktop running?",
-                *out.splitlines()[-40:],
-            ]
+            return code, [*lines, *needs_failed(collector.needs, checkout, code, out, run)]
         lines.append(f"started: {', '.join(collector.needs)}")
     code, out = run(resolve(collector.command), checkout, FIRE_TIMEOUT)
     output = out.splitlines()
