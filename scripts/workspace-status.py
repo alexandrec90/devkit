@@ -64,6 +64,7 @@ import codex_context
 import devkit_jsonc
 import devkit_project
 import harness_triage as _triage
+import machine_clock
 import notify as _notify
 import schedule_health
 import sweep
@@ -103,6 +104,9 @@ _GB = 1024**3
 # than archaeology. Under the permanent checkout's `logs/` for `events_line`'s reason.
 HEADROOM_LOG = Path("logs") / "headroom.log"
 HEADROOM_HISTORY = 400
+# Two reconcile fires (`install-reconcile-task.DEFAULT_INTERVAL_MINUTES`): how long after
+# a boot or wake a stale reconcile log is a catch-up fire not yet run, not a stopped job.
+RECONCILE_GRACE = 30 * 60
 
 # What a crash exits with. Findings exit 0 (see the module docstring); a pass that could
 # not check anything is the job failing, and `log-wrap.py --always` around the scheduled
@@ -478,7 +482,12 @@ def previews_line(source: Path = SOURCE_ROOT, loader=None) -> str:
     return line
 
 
-def scheduler_line(source: Path = SOURCE_ROOT, now: float = 0.0, stale_hours: float = 2.0) -> str:
+def scheduler_line(
+    source: Path = SOURCE_ROOT,
+    now: float = 0.0,
+    stale_hours: float = 2.0,
+    resumed: float | None = None,
+) -> str:
     """Reports an unattended pass that has stopped running; "" while it is running.
 
     Everything automatic in this workspace hangs off one Windows scheduled task, and a
@@ -504,19 +513,43 @@ def scheduler_line(source: Path = SOURCE_ROOT, now: float = 0.0, stale_hours: fl
     the task -- a fresh clone, CI, anyone else's machine -- and a standing line
     demanding a Windows-only convenience be installed is one you learn to skim, which
     is the failure this line is trying to fix rather than repeat.
+
+    Silent, too, for `RECONCILE_GRACE` after the machine came up (`resumed`, from
+    `machine_clock.awake_since`): a machine off overnight has a log as old as the night,
+    and its catch-up fire has not had its turn. The daily pass's own catch-up fire read a
+    fourteen-hour-old log sixteen seconds before reconcile's wrote it (87bae129). The
+    unattended run does not stop at silence -- it waits the window out
+    (`catch_up_wait`) and asks again, or a pass that always fires just after a wake
+    would never report a stopped reconcile at all.
     """
     log = source / worktree.RECONCILE_LOG
+    now = now or _time.time()
     try:
-        age = (now or _time.time()) - log.stat().st_mtime
+        age = now - log.stat().st_mtime
     except OSError:
         return ""
     if age < stale_hours * 3600:
+        return ""
+    if resumed is not None and 0 <= now - resumed < RECONCILE_GRACE:
         return ""
     return (
         f"{RECONCILE_STOPPED}{_age(age)} ago -- boxes are not being reaped and "
         f"checkouts are not being synced "
         f"(fix: python devkit/scripts/install-reconcile-task.py --status)"
     )
+
+
+def catch_up_wait(source: Path, now: float, resumed: float | None) -> float:
+    """Seconds the unattended run waits before its pass: what is left of
+    `RECONCILE_GRACE` when that window is all that keeps `scheduler_line` silent, 0
+    otherwise -- a fresh log, an absent one, or a machine long up has nothing to wait for.
+    """
+    if resumed is None:
+        return 0.0
+    left = resumed + RECONCILE_GRACE - now
+    if left <= 0 or not scheduler_line(source, now):
+        return 0.0
+    return min(left, RECONCILE_GRACE)
 
 
 class _MEMORYSTATUSEX(ctypes.Structure):
@@ -1095,6 +1128,10 @@ def main(argv: list[str] | None = None) -> int:
     workspace = DEFAULT_WORKSPACE
     if not workspace.is_file():
         return 0
+    resumed = machine_clock.awake_since()
+    if args.notify:
+        # The unattended run only: a person at a terminal is not made to wait.
+        _time.sleep(catch_up_wait(SOURCE_ROOT, _time.time(), resumed))
     try:
         names = sweep.parse_workspace(workspace.read_text(encoding="utf-8"))
         if not names:
@@ -1104,7 +1141,9 @@ def main(argv: list[str] | None = None) -> int:
         latest = latest_devkit_tag(root / "devkit")
         behind = projects_behind(root, names, latest) if latest else {}
         schedule = schedule_lines()
-        scheduler = scheduler_fallback(scheduler_line(), schedule, schedule_health.stood_down())
+        scheduler = scheduler_fallback(
+            scheduler_line(resumed=resumed), schedule, schedule_health.stood_down()
+        )
         report = render(
             results,
             behind,
