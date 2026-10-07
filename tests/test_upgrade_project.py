@@ -674,6 +674,23 @@ def test_the_temp_root_plugin_is_wired_in_the_box_before_the_commit(tmp_path, mo
     assert wired == [run.box]
 
 
+def test_a_quiet_addopts_is_dropped_in_the_box_before_the_commit(tmp_path, monkeypatch):
+    """8bbdd581: three consumers still carried the template's old `-q` in `addopts`, so
+    an agent's own `-q` made `-qq` and the run printed no "N passed" line. The template
+    is a one-shot copy, so the adoption box is what drops it."""
+    run = BoxRun(tmp_path, monkeypatch)
+    seen: list[Path] = []
+
+    def unquiet(box):
+        seen.append(box)
+        assert ("add", "-A") not in run.git.calls, "dropped after staging: the commit lacks it"
+        return up.temproot_wiring.UNQUIETED
+
+    monkeypatch.setattr(up.temproot_wiring, "unquiet", unquiet)
+    assert run.run(tmp_path).code == 0
+    assert seen == [run.box]
+
+
 def test_an_untouched_template_is_refreshed_in_the_box_before_the_commit(tmp_path, monkeypatch):
     """114da279: a template is a one-shot copy, so three consumers still ran the whole
     suite bare weeks after the template stopped. The refresh runs in the box, from the

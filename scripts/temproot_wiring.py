@@ -23,6 +23,11 @@ Three edits, all needed together:
   one (pytest reads it ahead of `pyproject.toml`), else in `[tool.pytest.ini_options]`;
 - **a relock** where `uv.lock` records the floor, or `uv sync --locked` refuses the tree.
 
+The same box runs `unquiet` on the same file: it drops a `-q` from `addopts`. The
+template lost its own long ago (an agent adds one, and `-qq` prints no "N passed" line),
+but a template is a one-shot copy, so every project rendered before kept it, and a session
+there re-ran unchanged tests to see a result the output never held (8bbdd581).
+
 `python scripts/temproot_wiring.py <project>` does the same by hand. Tested in
 `tests/test_temproot_wiring.py`.
 """
@@ -49,6 +54,8 @@ FLOOR_TEXT = ".".join(str(part) for part in FLOOR)
 
 WIRED = "wired"
 ALREADY = "already wired"
+UNQUIETED = "dropped `-q` from addopts"
+NOT_QUIET = "no `-q` in addopts"
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -58,6 +65,10 @@ _PIN = re.compile(r"^pytest==([\d.]+)\s*(?:#.*)?$", re.M)
 _SECTION = re.compile(r"^\[tool\.pytest\.ini_options\][ \t]*$", re.M)
 _INI_SECTION = re.compile(r"^\[pytest\][ \t]*$", re.M)
 _NEXT_SECTION = re.compile(r"^\[", re.M)
+# `-q`, `-qq` or `--quiet` as a word of an `addopts` value, with the space before it.
+_QUIET = re.compile(r"\s*(?<!\S)(?:-q+|--quiet)(?!\S)")
+# What precedes an ini `addopts` value on its line: the key, or a continuation's indent.
+_INI_HEAD = re.compile(r"addopts[ \t]*=[ \t]*|[ \t]*")
 
 
 def version(text: str) -> tuple[int, ...]:
@@ -268,6 +279,67 @@ def plan(root: Path) -> tuple[dict[Path, str], str]:
     return edits, ""
 
 
+def _unquiet(value: str) -> str:
+    return _QUIET.sub("", value).strip()
+
+
+def drop_quiet_pyproject(text: str) -> str:
+    """`text` with every quiet flag gone from `[tool.pytest.ini_options]`' one-line string
+    `addopts`; `text` itself, byte for byte, when there is none to drop."""
+    span = _span(text, _SECTION)
+    found = _key_line(text[span[0] : span[1]], "addopts") if span else None
+    single = found and re.fullmatch(r"(addopts[ \t]*=[ \t]*)([\"'])(.*)\2[ \t]*", found.group(0))
+    if not span or not found or not single or not _QUIET.search(single.group(3)):
+        return text
+    head, quote, value = single.groups()
+    start = span[0]
+    line = f"{head}{quote}{_unquiet(value)}{quote}"
+    return text[: start + found.start()] + line + text[start + found.end() :]
+
+
+def drop_quiet_ini(text: str) -> str:
+    """`pytest.ini`'s `[pytest]` with every quiet flag gone from `addopts`, continuation
+    lines included and a line left empty by it dropped; `text` when there is none."""
+    span = _span(text, _INI_SECTION)
+    if span is None:
+        return text
+    start, end = span
+    lines = text[start:end].splitlines(keepends=True)
+    last = _value_end(lines, "addopts")
+    if not last:
+        return text
+    first = next(i for i, line in enumerate(lines) if re.match(r"addopts[ \t]*=", line))
+    kept = []
+    for index in range(first, last):
+        line = lines[index]
+        body = line.rstrip("\n")
+        head = _INI_HEAD.match(body)
+        cut = head.end() if head else 0
+        value = _unquiet(body[cut:])
+        if not _QUIET.search(body[cut:]):
+            kept.append(line)
+        elif value or index == first:
+            kept.append(f"{body[:cut]}{value}".rstrip() + line[len(body) :])
+    if kept == lines[first:last]:
+        return text
+    return text[:start] + "".join([*lines[:first], *kept, *lines[last:]]) + text[end:]
+
+
+def unquiet(root: Path) -> str:
+    """`root`'s own pytest config with no quiet flag in `addopts`: `UNQUIETED` when one
+    was dropped, `NOT_QUIET` when there was none (or no config) to drop."""
+    ini, pyproject = root / "pytest.ini", root / "pyproject.toml"
+    config = ini if ini.is_file() else pyproject
+    if not config.is_file():
+        return NOT_QUIET
+    text = _read(config)
+    new = drop_quiet_ini(text) if config == ini else drop_quiet_pyproject(text)
+    if new == text:
+        return NOT_QUIET
+    _write(config, new, config.read_bytes())
+    return UNQUIETED
+
+
 def wire(root: Path, runner: Runner = sweep.run_windowless) -> str:
     """Wire `root` in place: `WIRED`, `ALREADY`, or why it was left as it was.
 
@@ -298,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     root = Path(args[0] if args else ".").resolve()
     said = wire(root)
-    print(f"temproot-wiring: {root.name}: {said}")
+    print(f"temproot-wiring: {root.name}: {said}; {unquiet(root)}")
     return 0 if said in (WIRED, ALREADY) else 1
 
 
