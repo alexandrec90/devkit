@@ -888,14 +888,91 @@ def test_the_branch_stem_drops_only_the_collision_suffix():
 
 def test_a_failed_push_is_a_failure_not_a_refusal_and_leaves_no_refused_state(tmp_path):
     one = intent(tmp_path)
-    run = Runner({"git push": (1, "", "could not resolve host")})
+    run = Runner({"git push": (1, "", "Permission denied (publickey)")})
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.FAILED and "push" in out.detail
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.FAILED, "recorded, and not as a refusal to cache"
-    assert state["step"] == "push" and "could not resolve host" in state["output"]
+    assert state["step"] == "push" and "Permission denied" in state["output"]
     assert state["intent"] == one.digest and state["when"] == NOW.isoformat(timespec="seconds")
     assert ship_intent.still_refused(one, state, "") is None
+    assert run.verbs().count("git push") == 1, "a refusal is not asked again"
+
+
+class Flaky(Runner):
+    """A `Runner` whose `git push` fails `errors` times, in order, then goes through."""
+
+    def __init__(self, *errors: str):
+        super().__init__()
+        self.errors = list(errors)
+
+    def __call__(self, argv, cwd, env=None):
+        if argv[:2] == ["git", "push"] and self.errors:
+            self.calls.append(([str(a) for a in argv], Path(cwd), env))
+            return subprocess.CompletedProcess(argv, 1, "", self.errors.pop(0))
+        return super().__call__(argv, cwd, env)
+
+
+GITHUB_500 = "remote: Internal Server Error\nremote: Request ID CF97:30974F\n! [remote rejected]"
+
+
+def test_a_push_github_failed_on_its_side_is_asked_again_in_the_pass(tmp_path, monkeypatch):
+    """4d942641: one `remote: Internal Server Error` filed a ship as a harness defect."""
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    run = Flaky(GITHUB_500)
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert waited == [ship_intent.GITHUB_RETRY_SECONDS[0]]
+    assert run.verbs().count("git push") == 2
+
+
+def test_a_pr_github_failed_on_its_side_is_deferred_not_failed(tmp_path, monkeypatch):
+    """a0287c8b: an `HTTP 500` from the labels endpoint, past every retry, reads
+    `deferred` -- which the pass does not file -- and the next pass tries again."""
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    answer = "HTTP 500 (https://api.github.com/repos/o/devkit/labels/automerge)"
+    asked: list[str] = []
+    monkeypatch.setattr(
+        ship_intent.sweep, "ensure_pr", lambda gh, plan: asked.append("pr") or ("", False, answer)
+    )
+    one = intent(tmp_path)
+    out = ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    assert (out.stage, out.detail) == (ship_intent.DEFERRED, f"pr: {answer}")
+    assert len(asked) == 1 + len(ship_intent.GITHUB_RETRY_SECONDS)
+    assert waited == list(ship_intent.GITHUB_RETRY_SECONDS)
+    state = ship_intent.read_state(one.tree)
+    assert state["stage"] == ship_intent.FAILED, "the state still reads as a ship to retry"
+    assert state["since"] == NOW.isoformat(timespec="seconds")
+    assert (one.tree / ship_intent.INTENT_FILE).exists()
+
+
+def test_a_transient_failure_that_lasts_past_the_grace_is_failed_after_all(tmp_path, monkeypatch):
+    """GitHub is not down for six hours; a "server error" that lasts that long is
+    something about the request, and is filed like any other failure."""
+    monkeypatch.setattr(ship_intent, "_wait", lambda seconds: None)
+    one = intent(tmp_path)
+    run = Runner({"git push": (1, "", GITHUB_500)})
+    first = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert first.stage == ship_intent.DEFERRED
+    later = NOW + ship_intent.TRANSIENT_GRACE - _dt.timedelta(minutes=1)
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, later).stage == ship_intent.DEFERRED
+    assert ship_intent.read_state(one.tree)["since"] == NOW.isoformat(timespec="seconds")
+    past = NOW + ship_intent.TRANSIENT_GRACE
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, past).stage == ship_intent.FAILED
+
+
+def test_a_new_intent_starts_its_own_grace(tmp_path, monkeypatch):
+    """`since` belongs to one intent: a fresh one after a long-failing one is not filed on
+    its first transient failure."""
+    monkeypatch.setattr(ship_intent, "_wait", lambda seconds: None)
+    one = intent(tmp_path)
+    old = {"stage": ship_intent.FAILED, "intent": "older", "since": "2026-09-01T00:00:00+00:00"}
+    ship_intent.write_state(one.tree, old)
+    run = Runner({"git push": (1, "", GITHUB_500)})
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.DEFERRED
 
 
 def test_a_push_that_failed_saying_nothing_is_named_by_its_exit_code(tmp_path):

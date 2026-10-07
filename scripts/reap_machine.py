@@ -56,10 +56,16 @@ import rc_machine
 
 WINDOWS = os.name == "nt"
 
-# Reading the whole process table through PowerShell takes a few seconds on a loaded
-# machine; `tasklist` would be quicker but reports neither parent pids nor command lines,
-# and both are the whole question here.
+# `tasklist` would be quicker than PowerShell but reports neither parent pids nor command
+# lines, and both are the whole question here.
 QUICK_TIMEOUT = 60
+
+# The table read alone gets longer than `QUICK_TIMEOUT`: on an idle desk it takes about a
+# second, but on 2026-10-07, an hour after boot with three fixer sessions and Docker
+# Desktop starting on 16 GB, four passes in a row ran into the 60 s bound (ba883e41), and
+# the pass that read it next took 86 s in all. Four minutes still leaves the pass most
+# of the reap task's ten-minute limit (`install-reap-schedule.task_document`).
+TABLE_TIMEOUT = 240
 
 # Process names that mean "a person is on the other end of this": a chain that reaches
 # one of them alive is owned, whatever it is doing and however old it is. Shells are
@@ -152,15 +158,22 @@ class Session:
     project: str
 
 
-def run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def run_command(
+    argv: Sequence[str], timeout: float = QUICK_TIMEOUT
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
         capture_output=True,
         text=True,
         check=False,
-        timeout=QUICK_TIMEOUT,
+        timeout=timeout,
         creationflags=rc_machine.NO_WINDOW,
     )
+
+
+def run_table_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """`run_command` under `TABLE_TIMEOUT`, the table lister's own bound."""
+    return run_command(argv, timeout=TABLE_TIMEOUT)
 
 
 # --- the table -----------------------------------------------------------------
@@ -235,21 +248,36 @@ def parse_posix_table(text: str) -> list[Process]:
     return table
 
 
-def process_table(run: Runner = run_command, windows: bool = WINDOWS) -> list[Process] | None:
-    """Every process on the machine, or `None` when the machine could not be asked.
+def read_table(
+    run: Runner = run_table_command, windows: bool = WINDOWS
+) -> tuple[list[Process] | None, str]:
+    """`(every process on the machine, "")`, or `(None, why the machine could not be asked)`.
 
     An empty table is reported as `None` too: this process is in any table that was
     actually read, so empty means the lister answered with something the parser could
     not use, and a pass that trusted it would find nothing owned and reap everything.
+    The reason names the kind -- a timeout, an exit code, an answer nothing parsed --
+    because the four failures that set `TABLE_TIMEOUT` said only "could not be read",
+    and the timeout had to be inferred from how long each run took.
     """
     try:
         result = run(table_argv(windows))
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except subprocess.TimeoutExpired as error:
+        return None, f"the lister did not answer within {error.timeout:g} s"
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, f"the lister could not run: {error}"
     if result.returncode != 0:
-        return None
+        said = (result.stderr or "").strip().splitlines()
+        return None, f"the lister exited {result.returncode}" + (f": {said[-1]}" if said else "")
     table = parse_windows_table(result.stdout) if windows else parse_posix_table(result.stdout)
-    return table or None
+    if not table:
+        return None, "the lister's answer held no process"
+    return table, ""
+
+
+def process_table(run: Runner = run_table_command, windows: bool = WINDOWS) -> list[Process] | None:
+    """Every process on the machine, or `None` when the machine could not be asked."""
+    return read_table(run, windows)[0]
 
 
 def argv_of(cmdline: str) -> list[str]:

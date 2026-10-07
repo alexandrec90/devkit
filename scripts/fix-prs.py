@@ -66,6 +66,7 @@ from fix_trees import (
     locked_caches,
     provenance,
     provision_tree,
+    squashed_base,
 )
 import gate_evidence
 import sweep
@@ -287,7 +288,9 @@ def dispatch_pr(
     refusal = fix_prompts.standing_refusal(tree)
     # Only this path reuses a tree, so only here can an elevated session's leftovers be.
     left = stale.removeprefix("left as is: ")
-    prompt = tab_safe(fix_prompts.pr_prompt(failure, refusal, left, locked_caches(tree), made))
+    squashed = squashed_base(tree, failure.base) if fix_plan.CONFLICT in failure.signature else ""
+    locked = locked_caches(tree)
+    prompt = tab_safe(fix_prompts.pr_prompt(failure, refusal, left, locked, made, squashed))
     return open_session(launch, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 

@@ -231,6 +231,28 @@ def test_an_unfetchable_sibling_is_said_with_the_only_two_fixes_and_never_a_retr
     assert "Update jobs also fail" not in text, "the sibling is said once, as the cause"
 
 
+def test_a_pr_prompt_sends_its_fixer_to_the_prs_own_description():
+    """42482fc1: ibkr_trader #98's body named the unmerged data-lake branch it needs; its
+    resolver was not pointed there, and found out from tests that would not import."""
+    for shape in (failure(), failure(signature=(fix_plan.CONFLICT,))):
+        text = fix_prompts.pr_prompt(shape)
+        assert f"Read the PR's description first (gh pr view {shape.number})" in text
+    commit = failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",))
+    assert "gh pr view" not in fix_prompts.pr_prompt(commit), "a refused commit has no PR yet"
+
+
+def test_a_resolver_is_told_the_true_base_when_the_base_squashed_part_of_its_branch():
+    """6c10216b: #96 squashed #98's first two commits into main, so `git merge` called
+    eight files add/add against a merge base older than both."""
+    conflicted = failure(signature=(fix_plan.CONFLICT,))
+    squashed = "#96 (head 70aa105, squashed as 1731e5e)"
+    text = fix_prompts.pr_prompt(conflicted, squashed=squashed)
+    assert f"origin/main holds PR {squashed} as one commit" in text
+    assert "squash commit as the true base" in text
+    assert text.endswith(fix_prompts.STOP)
+    assert "squash" not in fix_prompts.pr_prompt(conflicted)
+
+
 def test_a_conflicted_pr_gets_the_resolver_prompt_which_names_no_failure():
     """The gate cannot have run, and a resolver told "also fix the tests" fixes the
     wrong thing; whatever the gate says after the push is the next pass's business."""

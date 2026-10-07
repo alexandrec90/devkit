@@ -16,6 +16,7 @@ Every function here is tested in `tests/test_fix_prs.py` (see `COVERED_BY` in
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -203,6 +204,49 @@ def provenance(tree: Path, owner=owner_sid) -> str:
         else ""
     )
     return f" This tree was not cut for you: {maker}{how}. That is settled; spend no turns on who made it."
+
+
+# How many of the base's newest merged PRs `squashed_base` compares against the branch.
+SQUASH_LOOKBACK = 30
+
+
+def squashed_base(tree: Path, base: str, git_for=sweep.git_for, gh_for=sweep.gh_for) -> str:
+    """`#N (head <sha>, squashed as <sha>)` for a PR `origin/<base>` squash-merged from
+    commits this branch still carries; "" for none, or when git or `gh` cannot say.
+
+    ibkr_trader #98 carried #96's two commits, which main held only as their squash, so
+    the merge base predated both and `git merge origin/main` called eight files add/add;
+    its resolver found the true base by hand (6c10216b). A PR whose head this branch
+    holds but `origin/<base>` does not was squashed or rebased in, not merged.
+    """
+    git = git_for(tree)
+    git("fetch", "--quiet", "origin", base)
+    fields = "number,headRefOid,mergeCommit"
+    listed = gh_for(tree)(
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--base",
+        base,
+        "--limit",
+        str(SQUASH_LOOKBACK),
+        "--json",
+        fields,
+    )
+    try:
+        rows = json.loads(getattr(listed, "stdout", "") or "[]")
+    except ValueError:
+        return ""
+    for row in rows if getattr(listed, "returncode", 1) == 0 and isinstance(rows, list) else []:
+        head = str(row.get("headRefOid") or "")
+        squash = str((row.get("mergeCommit") or {}).get("oid") or "")
+        if not head or not squash:
+            continue
+        carried = git("merge-base", "--is-ancestor", head, "HEAD").returncode == 0
+        if carried and git("merge-base", "--is-ancestor", head, f"origin/{base}").returncode == 1:
+            return f"#{row.get('number')} (head {head[:7]}, squashed as {squash[:7]})"
+    return ""
 
 
 def cut_fresh_tree(
