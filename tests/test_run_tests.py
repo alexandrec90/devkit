@@ -329,6 +329,21 @@ def test_tests_for_names_a_test_file_by_its_module_and_a_test_by_itself(tmp_path
     )
 
 
+@pytest.mark.parametrize("runner", ["devkit", "template"])
+def test_a_module_in_a_package_names_its_package_qualified_test(runner, tmp_path, monkeypatch):
+    """social-scraper, 2026-10-07: `social_scraper/x/scraper.py` named no test, though
+    `tests/test_x_scraper.py` is its test -- a stem two packages share names neither."""
+    module = run_tests if runner == "devkit" else template_runner(monkeypatch)
+    (tmp_path / "tests").mkdir()
+    for name in ("test_x_scraper.py", "test_reddit_scraper.py", "test_cli.py"):
+        (tmp_path / "tests" / name).write_text("", encoding="utf-8")
+    paths = ["app/x/scraper.py", "app/reddit/scraper.py", "app/cli.py", "app/sports/scraper.py"]
+    assert module.tests_for(paths, tmp_path) == (
+        ["tests/test_x_scraper.py", "tests/test_reddit_scraper.py", "tests/test_cli.py"],
+        ["app/sports/scraper.py"],
+    )
+
+
 def test_a_script_template_names_the_scripts_test_and_its_own(tmp_path):
     """A change to `run-tests.py.tmpl` named no test and ran only the contract tests."""
     (tmp_path / "tests").mkdir()
