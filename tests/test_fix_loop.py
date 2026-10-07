@@ -782,6 +782,95 @@ def test_a_job_failure_never_resolved_asks_git_nothing(ctx):
     assert asked == []
 
 
+def _wrapped_failure(ctx, said: str, **fields: str) -> str:
+    """A `log-wrap.py --always` row for a failed Reap Stale run; returns its id."""
+    row = {"project": "devkit", "message": "unattended task 'Scheduled: Reap Stale' failed"}
+    row |= {"cause": "error: the process table could not be read", "said": said, **fields}
+    triage.harness_events.record(fix_loop.FAILED_RUN_EVENT, tuple(row.items()), root=ctx.devkit_dir)
+    [item] = [i for i in triage.load(ctx.devkit_dir) if i.fields.get("said") == said]
+    return item.id
+
+
+def _resolved_then_failed(ctx, **fields: str) -> tuple[str, float]:
+    """A wrapped failure resolved against a branch, then a second one of its group;
+    with the second's id and, as a POSIX time, when that branch's PR merged: an hour
+    after the resolution."""
+    first = _wrapped_failure(ctx, "first")
+    triage.resolve([first], "gave the table read room", pr="agent/x", root=ctx.devkit_dir)
+    [made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    merged = _dt.datetime.fromisoformat(made.stamp) + _dt.timedelta(hours=1)
+    return _wrapped_failure(ctx, "again", **fields), merged.timestamp()
+
+
+def _merged_at(when: float | None, asked: list[tuple[str, str]] | None = None):
+    """A `fix_verify.Lookup` whose one PR merged at `when`, or is still open at None."""
+
+    def lookup(project, what):
+        (asked if asked is not None else []).append((project, what))
+        if when is None:
+            return [fix_loop.fix_verify.Pr("OPEN")]
+        stamp = _dt.datetime.fromtimestamp(when, _dt.UTC).isoformat()
+        return [fix_loop.fix_verify.Pr("MERGED", stamp, "https://github.com/o/devkit/pull/9")]
+
+    return lookup
+
+
+def test_a_wrapped_run_on_code_older_than_its_fix_is_retired_against_that_fix(ctx):
+    """6a65dbe7: reap-stale failed at 19:17 and the checkout fast-forwarded onto the fix,
+    merged at 19:04, only at 19:18. The wrapper filed the row itself, so `job_findings`'
+    check never saw it and the group read "RECURRED ... that fix did not hold". The code
+    that ran was committed *after* the resolution (#565 merged between), so the bound is
+    the merge. Retired against the fix's own PR, made when the fix was, so `fix_verify`
+    lands or reopens it with that fix."""
+    again, merged = _resolved_then_failed(ctx)
+    asked: list[str] = []
+    looked: list[tuple[str, str]] = []
+    git = _git_at(merged - 1800, merged, asked)
+    [line] = fix_loop._predates_fix(ctx, git, _merged_at(merged, looked))
+    assert again in line, line
+    assert looked == [("", "agent/x")]
+    items = triage.load(ctx.devkit_dir)
+    assert triage.open_items(items) == []
+    [mine] = [i for i in items if i.fields.get("ref") == again]
+    assert mine.fields["pr"] == "agent/x"
+    assert triage.resolved_at(mine) == triage.resolved_at(
+        next(i for i in items if i.event == triage.RESOLVED_EVENT)
+    )
+    assert any(rev.startswith("HEAD@{") for rev in asked), asked
+
+
+@pytest.mark.parametrize(
+    ("ran", "head", "fields", "why"),
+    [
+        (0, 60, {}, "the run had the merge and failed anyway"),
+        (-600, -300, {}, "the checkout never moved onto the merge"),
+        (-600, 60, {"host": "the-laptop"}, "another machine's checkout ran it"),
+        (-600, 60, {"project": "carameli"}, "a project's own task ran it"),
+    ],
+)
+def test_a_wrapped_run_that_could_have_held_its_fix_stays_open(ctx, ran, head, fields, why):
+    again, merged = _resolved_then_failed(ctx, **fields)
+    git = _git_at(merged + ran, merged + head, [])
+    assert fix_loop._predates_fix(ctx, git, _merged_at(merged)) == [], why
+    assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [again], why
+
+
+def test_a_wrapped_run_whose_fix_has_not_merged_asks_git_nothing(ctx):
+    """In flight, the group is `pending_groups`' to hold, not a run to excuse."""
+    _resolved_then_failed(ctx)
+    asked: list[str] = []
+    assert fix_loop._predates_fix(ctx, _git_at(0, 0, asked), _merged_at(None)) == []
+    assert asked == []
+
+
+def test_a_wrapped_failure_never_resolved_asks_nothing(ctx):
+    _wrapped_failure(ctx, "only")
+    asked: list[str] = []
+    looked: list[tuple[str, str]] = []
+    assert fix_loop._predates_fix(ctx, _git_at(0, 0, asked), _merged_at(0, looked)) == []
+    assert asked == looked == []
+
+
 def test_a_failing_scheduled_collector_is_asked_about_and_filed_against_its_project(
     ctx, monkeypatch
 ):
