@@ -74,11 +74,26 @@ LOG_LINES = 300
 # lock as committed and never rewrites it.
 COMMAND_ENV = {"UV_FROZEN": "1"}
 
+# When the scheduler fired, as an ISO UTC timestamp in the command's environment. The
+# command's own clock starts minutes later -- the `needs` coming up, `uv run` starting --
+# and the next fire is due one interval after *this* moment, not after that one. 45f7adeb:
+# social-scraper's 17:30 fire reached its scrape at 17:35:44 (compose 3m24s, uv 2m20s
+# under load), so a cycle deadline counted from the scrape's own start ran past 18:00.
+FIRED_AT = "DEVKIT_FIRED_AT"
 
-def command_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+
+def command_env(
+    base: Mapping[str, str] | None = None, extra: Mapping[str, str] | None = None
+) -> dict[str, str]:
     """The environment a collector's command runs in: `base` (this process's) plus
-    `COMMAND_ENV`, so nothing it runs rewrites the checkout's tracked files."""
-    return {**(os.environ if base is None else base), **COMMAND_ENV}
+    `COMMAND_ENV`, so nothing it runs rewrites the checkout's tracked files, plus `extra`
+    (`fire`'s `FIRED_AT`)."""
+    return {**(os.environ if base is None else base), **COMMAND_ENV, **(extra or {})}
+
+
+def fired_env(fired: _dt.datetime) -> dict[str, str]:
+    """`FIRED_AT` for a fire at `fired`; a naive time is this machine's local one."""
+    return {FIRED_AT: fired.astimezone(_dt.UTC).isoformat(timespec="seconds")}
 
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
@@ -238,10 +253,13 @@ def kill_tree(pid: int) -> None:
     )
 
 
-def spawn(argv: Sequence[str], cwd: Path, timeout: int) -> tuple[int, str]:
+def spawn(
+    argv: Sequence[str], cwd: Path, timeout: int, env: Mapping[str, str] | None = None
+) -> tuple[int, str]:
     """`(exit code, stdout+stderr)`; a spawn that could not happen is a code, not a raise.
 
     stderr is merged into stdout, so the log keeps the two in the order they were written.
+    `env` is added to `command_env`'s.
     """
     try:
         process = subprocess.Popen(
@@ -254,7 +272,7 @@ def spawn(argv: Sequence[str], cwd: Path, timeout: int) -> tuple[int, str]:
             encoding="utf-8",
             errors="replace",
             creationflags=NO_WINDOW,
-            env=command_env(),
+            env=command_env(extra=env),
         )
     except FileNotFoundError:
         return 127, f"{argv[0]} is not on PATH"
@@ -273,7 +291,12 @@ def spawn(argv: Sequence[str], cwd: Path, timeout: int) -> tuple[int, str]:
     return process.returncode, (out or "").strip()
 
 
-Spawner = Callable[[Sequence[str], Path, int], tuple[int, str]]
+class Spawner(Protocol):
+    """`spawn`'s shape: `(argv, cwd, timeout)`, and `env` for the command itself."""
+
+    def __call__(
+        self, argv: Sequence[str], cwd: Path, timeout: int, env: Mapping[str, str] | None = ...
+    ) -> tuple[int, str]: ...
 
 
 def resolve(argv: Sequence[str], which: Callable[[str], str | None] | None = None) -> list[str]:
@@ -322,9 +345,17 @@ def first(text: str) -> str:
 
 
 def fire(
-    collector: config.Collector, checkout: Path, run: Spawner = spawn
+    collector: config.Collector,
+    checkout: Path,
+    run: Spawner = spawn,
+    fired: _dt.datetime | None = None,
 ) -> tuple[int, list[str]]:
-    """Run the collector once. `(exit code, log lines)`; the code is the command's own."""
+    """Run the collector once. `(exit code, log lines)`; the code is the command's own.
+
+    The command is told when the scheduler fired (`FIRED_AT`) -- `fired`, now when None
+    -- which is taken before the `needs` come up, since they are part of the cycle.
+    """
+    stamp = fired_env(fired or _dt.datetime.now(_dt.UTC))
     lines = [f"command: {' '.join(collector.command)}", f"cwd: {checkout}"]
     if not (checkout / ".git").exists():
         return 2, [*lines, f"no checkout at {checkout} -- nothing to run"]
@@ -335,7 +366,7 @@ def fire(
         if code != 0:
             return code, [*lines, *needs_failed(collector.needs, checkout, code, out, run)]
         lines.append(f"started: {', '.join(collector.needs)}")
-    code, out = run(resolve(collector.command), checkout, FIRE_TIMEOUT)
+    code, out = run(resolve(collector.command), checkout, FIRE_TIMEOUT, stamp)
     output = out.splitlines()
     if len(output) > LOG_LINES:
         output = [f"... {len(output) - LOG_LINES} earlier lines dropped", *output[-LOG_LINES:]]

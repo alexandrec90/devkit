@@ -8,7 +8,8 @@ run the skill. The signature is one line per group and the sha is the digest of 
 open groups: the dispatch ledger sends nothing twice at the same backlog and looks again
 when a new group opens or a session retires one -- not each time an open group recurs,
 which a job filing every failed run does dozens of times a day. The groups go to the
-session as evidence, `harness_triage.render`'s own text under `logs/gate/`.
+session as evidence, `harness_triage.render`'s own text under `logs/gate/`, beside a
+copy of each group's `artifact=` file (`copy_artifact`).
 
 Tested in `tests/test_fix_backlog.py`.
 """
@@ -70,7 +71,48 @@ def ledger_failure(
     where = root / gate_evidence.evidence_slot(failure)
     shutil.rmtree(where, ignore_errors=True)
     where.mkdir(parents=True, exist_ok=True)
-    (where / triage.ARTIFACT.name).write_text(
-        triage.render(items, history, pending), encoding="utf-8"
-    )
+    copied = [copy_artifact(members[0], devkit_dir, where) for _, members in grouped]
+    notes = [line for line in copied if line]
+    text = triage.render(items, history, pending)
+    if notes:
+        text += "\ncopied beside this file, as they were when the pass read the ledger:\n"
+        text += "".join(f"  {line}\n" for line in notes)
+    (where / triage.ARTIFACT.name).write_text(text, encoding="utf-8")
     return replace(failure, evidence=str(where))
+
+
+def artifact_path(item: triage.Item, devkit_dir: Path) -> Path | None:
+    """The file a row's `artifact=` names, when it exists: relative to the checkout whose
+    `logs/` the job wrote -- devkit's own, or the project's beside it in the workspace."""
+    ref = item.fields.get("artifact", "").strip(" -")
+    if not ref:
+        return None
+    path = Path(ref)
+    if not path.is_absolute():
+        home = (
+            devkit_dir
+            if item.project == fix_cycle.DEVKIT
+            else sweep.default_workspace(devkit_dir).parent / item.project
+        )
+        path = home / path
+    return path if path.is_file() else None
+
+
+def copy_artifact(item: triage.Item, devkit_dir: Path, where: Path) -> str:
+    """Copy `item`'s artifact into the evidence slot `where`; the line saying so, or "".
+
+    8751095b: a scheduled job's ledger group reached its session as the triage text alone,
+    and the failed run's kept output -- which named the 240 s timeout -- was found only by
+    searching the devkit checkout's `logs/`. The copy is named for the group, so two
+    projects' `collector.log` cannot overwrite each other, and is taken now because the
+    job rewrites its `.failed.log` on its next failure.
+    """
+    source = artifact_path(item, devkit_dir)
+    if source is None:
+        return ""
+    name = f"{item.id}-{source.name}"
+    try:
+        shutil.copyfile(source, where / name)
+    except OSError as exc:
+        return f"[{item.id}] {source} could not be copied: {exc}"
+    return f"[{item.id}] {name} <- {source}"

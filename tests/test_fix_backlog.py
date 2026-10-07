@@ -117,3 +117,102 @@ def test_a_group_whose_fix_is_in_flight_is_shown_but_sends_no_session(monkeypatc
     log = (Path(backlog.evidence) / "harness-triage.log").read_text(encoding="utf-8")
     assert "PENDING on 410" in log
     assert len(fix_backlog.ledger_failure(devkit, tmp_path / "ev").signature) == 2, "landed"
+
+
+def failed_job_row(project: str, artifact: str, stamp: str = "2026-10-07T21:00:00+00:00") -> str:
+    return (
+        f"{stamp}\tevent=scheduled-job-failed\tagent=claude\thost=h\tproject={project}"
+        f"\tartifact={artifact}\texit=1\tmessage=unattended task '{project}' failed"
+    )
+
+
+def test_a_failed_jobs_kept_output_rides_beside_the_backlog(monkeypatch, tmp_path):
+    """8751095b: a scheduled job's group reached its session as the triage text alone; the
+    failed run's `.failed.log`, which named the 240 s timeout, was found only by searching
+    the devkit checkout's `logs/`. The copy is taken now, because the job's next failure
+    rewrites the file, and the triage text names both the path and the copy."""
+    devkit = tmp_path / "work" / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    (devkit / "logs" / "scheduled-reap-stale.failed.log").write_text(
+        "timed out after 240 s\n", encoding="utf-8"
+    )
+    project = tmp_path / "work" / "social-scraper" / "logs"
+    project.mkdir(parents=True)
+    (project / "collector.failed.log").write_text("x: empty\n", encoding="utf-8")
+    rows = [
+        failed_job_row("devkit", "logs/scheduled-reap-stale.failed.log"),
+        failed_job_row("social-scraper", "logs/collector.failed.log"),
+        failed_job_row("devkit", "logs/gone.failed.log").replace("'devkit'", "'gone'"),
+    ]
+    shard.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    backlog = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert backlog is not None
+    slot = Path(backlog.evidence)
+    ids = {
+        row.split("project=")[1].split("\t")[0] + row.split("artifact=")[1].split("\t")[0]: (
+            fix_backlog.triage.item_id(row)
+        )
+        for row in rows
+    }
+    reap = ids["devkitlogs/scheduled-reap-stale.failed.log"]
+    scraper = ids["social-scraperlogs/collector.failed.log"]
+    assert (slot / f"{reap}-scheduled-reap-stale.failed.log").read_text(
+        encoding="utf-8"
+    ) == "timed out after 240 s\n"
+    assert (slot / f"{scraper}-collector.failed.log").read_text(encoding="utf-8") == "x: empty\n"
+    log = (slot / "harness-triage.log").read_text(encoding="utf-8")
+    assert "artifact logs/scheduled-reap-stale.failed.log" in log
+    assert f"[{reap}] {reap}-scheduled-reap-stale.failed.log <- " in log
+    assert "gone.failed.log <-" not in log, "a file that is not there is not claimed"
+    assert sorted(p.name for p in slot.iterdir()) == sorted(
+        [
+            "harness-triage.log",
+            f"{reap}-scheduled-reap-stale.failed.log",
+            f"{scraper}-collector.failed.log",
+        ]
+    )
+
+
+def test_a_row_naming_no_artifact_adds_nothing_to_the_evidence(monkeypatch, tmp_path):
+    devkit = tmp_path / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    row = "2026-10-07T21:00:00+00:00\tevent=agent-report\tagent=claude\thost=h\tproject=devkit\tmessage=m"
+    shard.write_text(row + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    backlog = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert backlog is not None
+    assert [p.name for p in Path(backlog.evidence).iterdir()] == ["harness-triage.log"]
+    assert "copied beside" not in (Path(backlog.evidence) / "harness-triage.log").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_an_artifact_that_cannot_be_copied_is_said_not_raised(monkeypatch, tmp_path):
+    devkit = tmp_path / "devkit"
+    (devkit / "logs").mkdir(parents=True)
+    (devkit / "logs" / "job.failed.log").write_text("boom\n", encoding="utf-8")
+    item = fix_backlog.triage.parse_line(failed_job_row("devkit", "logs/job.failed.log"))
+    assert item is not None
+
+    def refuse(src, dst):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(fix_backlog.shutil, "copyfile", refuse)
+    line = fix_backlog.copy_artifact(item, devkit, tmp_path)
+    assert line.startswith(f"[{item.id}] ") and "could not be copied: in use" in line
+
+
+def test_an_absolute_artifact_is_read_where_it_says(tmp_path):
+    kept = tmp_path / "elsewhere" / "run.log"
+    kept.parent.mkdir()
+    kept.write_text("r\n", encoding="utf-8")
+    item = fix_backlog.triage.parse_line(failed_job_row("carameli", str(kept)))
+    assert item is not None
+    assert fix_backlog.artifact_path(item, tmp_path / "devkit") == kept

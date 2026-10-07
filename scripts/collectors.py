@@ -820,7 +820,9 @@ def fire(
         code, lines = 0, ["not assigned `run` on this machine -- nothing run"]
     else:
         checkout = sweep.default_workspace(base).parent / collector.project
-        code, lines = collector_tasks.fire(collector, checkout, spawner or collector_tasks.spawn)
+        code, lines = collector_tasks.fire(
+            collector, checkout, spawner or collector_tasks.spawn, fired=now
+        )
     text = collector_tasks.render(name, code, lines, now)
     write_file(base / collector_tasks.log_path(name), text)
     print(text, end="")

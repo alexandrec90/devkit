@@ -452,7 +452,9 @@ def render(
         # raw ledger for a transcript line the grouped report had already read past.
         # `cwd` anchors any relative path an agent-report's message or command cites, and
         # `said` is the cause as the run printed it, before `cause` folded it (718f71c4).
-        for name in ("cause", "said", "cwd", "command", "evidence", "version"):
+        # `artifact` is a failed job's kept output: left out, 8751095b's sweep found the
+        # 240 s timeout only by searching the checkout's `logs/` for it.
+        for name in ("cause", "said", "cwd", "command", "artifact", "evidence", "version"):
             if head.fields.get(name, "").strip(" -"):
                 lines.append(f"  {name:<6} {head.fields[name]}")
         if len(bucket) > 1:
