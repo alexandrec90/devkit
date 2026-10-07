@@ -141,6 +141,46 @@ def test_an_intent_a_live_session_has_edited_past_is_held(monkeypatch, tmp_path)
     )
 
 
+def test_no_intent_starts_shipping_once_the_ship_budget_is_spent(monkeypatch, tmp_path, capsys):
+    """2026-10-07, just after a wake: ibkr_trader #98's ship took 17 minutes and
+    data-lake's was still in `ship.py --fix` when the watchdog stopped the pass at 25,
+    so it sent no one and wrote no record. A slow ship now costs the intents after it a
+    pass's wait, not the whole pass."""
+    trees = [
+        ship_intent.Intent(project, tmp_path / project, f"agent/{project}", "S", "B")
+        for project in ("ibkr_trader", "data-lake", "devkit")
+    ]
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: trees)
+    elapsed = [0.0]
+    shipped = []
+
+    def slow_ship(intent, python, base):
+        shipped.append(intent.branch)
+        elapsed[0] += 17 * 60
+        return ship_intent.Outcome(intent, "shipped", "u")
+
+    monkeypatch.setattr(fix_pass.ship_intent, "ship_one", slow_ship)
+    lines, refused, failed = fix_pass.ship_intents(
+        tmp_path, [], fix_cycle.DISPATCH, budget=4 * 60, clock=lambda: elapsed[0]
+    )
+    assert shipped == ["agent/ibkr_trader"]
+    assert (refused, failed) == ([], False), "a held intent is neither refused nor failed"
+    assert lines[1:] == [
+        f"{name} agent/{name} -- held: this pass spent 17 min shipping; the next pass ships it"
+        for name in ("data-lake", "devkit")
+    ]
+    # Said as it starts, so a pass stopped mid-ship leaves the watchdog where it was.
+    assert capsys.readouterr().out == "fix-pass: shipping ibkr_trader agent/ibkr_trader\n"
+
+
+def test_the_ship_budget_leaves_room_for_the_rest_of_the_pass():
+    """The steps after shipping are what send anyone: a pass's dispatch half took under
+    three minutes on 2026-10-07, so a 17-minute ship started at the budget's last
+    second, and that half after it, still finish before the watchdog stops the pass."""
+    stop = load_script("scripts/fix-pass-watchdog.py").TIMEOUT.total_seconds()
+    assert fix_pass.SHIP_BUDGET_SECONDS + 17 * 60 + 3 * 60 < stop
+
+
 def failure(**fields) -> fix_plan.Failure:
     base: dict[str, Any] = {
         "kind": fix_plan.PR,
