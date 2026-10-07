@@ -96,6 +96,7 @@ TRAY_MODULES = (
     "collectors",
     "collector_tasks",
     "collectors_config",
+    "machine_clock",
     "devkit_jsonc",
     "sweep",
     "task_branch",

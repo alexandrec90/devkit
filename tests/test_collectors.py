@@ -16,6 +16,7 @@ import datetime as dt
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from support import load_script
@@ -484,6 +485,70 @@ def test_a_silent_engine_fails_a_run_machine_but_not_a_stop_machine(tmp_path):
     report = collectors.Report()
     collectors.maintain([target(tmp_path, mode=STOP)], FakeDocker(None), report, {})
     assert report.failures == 0
+
+
+class Starting(FakeDocker):
+    """An engine that answers from its `answers_at`-th question on: Docker Desktop
+    coming up after a boot."""
+
+    def __init__(self, answers_at):
+        super().__init__([])
+        self.answers_at = answers_at
+
+    def ps(self):
+        super().ps()
+        return self.containers if len(self.calls) >= self.answers_at else None
+
+
+class Clock:
+    """A monotonic clock that `sleep` advances, so a wait costs the test nothing."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def test_the_logon_fire_waits_for_docker_desktop_to_start_and_then_acts(tmp_path, monkeypatch):
+    """aea4ccfa: the logon fire ran 108 seconds after boot, found the engine silent and
+    failed, and the containers were up on their own a minute later."""
+    clock = Clock()
+    monkeypatch.setattr(collectors, "_time", SimpleNamespace(monotonic=clock, sleep=clock.sleep))
+    docker, report = Starting(answers_at=4), collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {}, awake=108.0)
+    assert report.failures == 0
+    assert ("up", "ibkr_trader", "app") in docker.calls
+    assert clock.slept == [collectors.ENGINE_POLL] * 3
+
+
+def test_an_engine_still_silent_when_the_startup_window_closes_fails(tmp_path):
+    clock = Clock()
+    awake = collectors.ENGINE_STARTUP - 40.0
+    docker = Starting(answers_at=10_000)
+    assert collectors.wait_for_engine(docker, awake, clock, clock.sleep) is None
+    assert sum(clock.slept) == 40.0, "waits out the window, and not a second past it"
+    assert clock.slept[-1] == 40.0 - 2 * collectors.ENGINE_POLL
+
+
+@pytest.mark.parametrize("awake", [None, collectors.ENGINE_STARTUP, 86_400.0])
+def test_a_machine_long_up_or_unable_to_say_asks_once(awake):
+    clock = Clock()
+    docker = Starting(answers_at=2)
+    assert collectors.wait_for_engine(docker, awake, clock, clock.sleep) is None
+    assert docker.calls == [("ps",)] and clock.slept == []
+
+
+def test_an_engine_that_answers_at_once_is_never_waited_on():
+    clock = Clock()
+    docker = FakeDocker([])
+    assert collectors.wait_for_engine(docker, 5.0, clock, clock.sleep) == []
+    assert clock.slept == []
 
 
 def test_targets_are_only_the_assigned_collectors(tmp_path):
