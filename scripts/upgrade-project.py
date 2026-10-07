@@ -790,7 +790,8 @@ def plan_lines(name: str, previous: str, tag: str, default_branch: str) -> list[
         f" (fresh off origin/{default_branch})",
         f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>  [in the box]",
         f"  3. load the vendored temp-root plugin from the project's own pytest config"
-        f" ({temproot_wiring.__name__}.wire), and refresh an untouched earlier template"
+        f" ({temproot_wiring.__name__}.wire) with no `-q` in its addopts (.unquiet),"
+        " and refresh an untouched earlier template"
         f" ({template_refresh.__name__}.refresh)",
         f"  4. git add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths",
         f"  5. git commit -m {commit_message(tag, '<n>')!r}",
@@ -823,6 +824,7 @@ def _update_owned_files(name: str, box: Path, source: Path) -> None:
     one it was generated with forever (114da279); its own edits are left alone.
     """
     print(f"upgrade: {name} -- temp-root plugin: {temproot_wiring.wire(box)}")
+    print(f"upgrade: {name} -- pytest addopts: {temproot_wiring.unquiet(box)}")
     for line in template_refresh.refresh(box, source):
         print(f"upgrade: {name} -- {line}")
 
