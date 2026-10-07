@@ -99,6 +99,16 @@ def test_the_walk_follows_the_chain_and_reads_names_where_they_point():
     ]
 
 
+def test_a_unicode_string_is_read_as_utf16_on_every_platform():
+    """`wchar_t` is UTF-32 on the Linux CI, so a `wstring_at` read failed there; a
+    surrogate pair and a length that stops short of the buffer both read as written."""
+    encoded = "a\N{GRINNING FACE}bc".encode("utf-16-le")
+    text = ctypes.create_string_buffer(encoded)
+    string = UNICODE(len(encoded) - 2, len(encoded), ctypes.addressof(text))
+    assert win_process_table.unicode_text(string) == "a\N{GRINNING FACE}b"
+    assert win_process_table.unicode_text(UNICODE()) == ""
+
+
 def test_a_buffer_too_short_for_one_entry_is_no_rows():
     assert win_process_table.parse_processes(ctypes.create_string_buffer(16)) == []
 

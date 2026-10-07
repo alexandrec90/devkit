@@ -139,6 +139,17 @@ def filetime_epoch(ticks: int) -> float:
     return 0.0 if ticks <= EPOCH_AS_FILETIME else (ticks - EPOCH_AS_FILETIME) / 10_000_000
 
 
+def unicode_text(string: UNICODE_STRING) -> str:
+    """The text a `UNICODE_STRING` points at; "" for one with no buffer.
+
+    Its `Length` is in bytes of UTF-16. `ctypes.wstring_at` reads `wchar_t`, which is
+    UTF-32 off Windows, so the bytes are decoded here and the walk reads the same on CI.
+    """
+    if not string.Buffer:
+        return ""
+    return ctypes.string_at(string.Buffer, string.Length).decode("utf-16-le", "replace")
+
+
 def parse_processes(buffer: Any) -> list[Row]:
     """Every entry of a `SystemProcessInformation` answer, command lines left empty.
 
@@ -150,8 +161,7 @@ def parse_processes(buffer: Any) -> list[Row]:
     offset = 0
     while offset + ctypes.sizeof(SYSTEM_PROCESS_INFORMATION) <= len(buffer):
         entry = SYSTEM_PROCESS_INFORMATION.from_buffer(buffer, offset)
-        name = entry.ImageName
-        image = ctypes.wstring_at(name.Buffer, name.Length // 2) if name.Buffer else ""
+        image = unicode_text(entry.ImageName)
         rows.append(
             Row(
                 entry.UniqueProcessId or 0,
@@ -243,8 +253,7 @@ def process_command_line(pid: int) -> str:
         )
         if status < 0:
             return ""
-        text = UNICODE_STRING.from_buffer(buffer)
-        return ctypes.wstring_at(text.Buffer, text.Length // 2) if text.Buffer else ""
+        return unicode_text(UNICODE_STRING.from_buffer(buffer))
     finally:
         kernel32.CloseHandle(handle)
 
