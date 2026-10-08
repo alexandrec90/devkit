@@ -126,7 +126,19 @@ def test_vitest_related_runs_the_trees_own_vitest_on_paths_relative_to_it(runner
     cmd = runner.vitest_related(tmp_path, "frontend", ["frontend/src/a.ts"])
     assert cmd is not None
     assert Path(cmd[0]).parent == front / "node_modules" / ".bin"
-    assert cmd[1:] == ["related", "--run", os.path.join("src", "a.ts")]
+    assert cmd[1:] == [
+        "related",
+        "--run",
+        f"--testTimeout={runner.VITEST_TEST_TIMEOUT_MS}",
+        os.path.join("src", "a.ts"),
+    ]
+
+
+def test_a_local_vitest_run_outlasts_a_loaded_machine(runner):
+    """bff74201: a 28 ms synchronous test timed out at vitest's default 5 s on a machine
+    whose imports took 37 s under parallel jobs. The runner's own run gives a test a
+    minute; vitest's default stays the project's and CI's."""
+    assert runner.VITEST_TEST_TIMEOUT_MS >= 30_000
 
 
 def test_a_typescript_change_runs_vitest_related_and_no_pytest(run_in, tmp_path, capsys):
@@ -138,6 +150,7 @@ def test_a_typescript_change_runs_vitest_related_and_no_pytest(run_in, tmp_path,
     assert cmd[1:] == [
         "related",
         "--run",
+        "--testTimeout=60000",
         os.path.join("src", "game", "map.ts"),
         os.path.join("src", "ui", "hud.ts"),
     ]

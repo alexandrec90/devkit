@@ -298,6 +298,8 @@ class Git:
 class Report:
     lines: list[str] = field(default_factory=list)
     failures: int = 0
+    # The first `fail` line, which `render` repeats last as the run's `error:` line.
+    cause: str = ""
 
     def say(self, line: str) -> None:
         self.lines.append(line)
@@ -305,6 +307,7 @@ class Report:
     def fail(self, line: str) -> None:
         self.lines.append(line)
         self.failures += 1
+        self.cause = self.cause or line
 
 
 @dataclass(frozen=True)
@@ -624,9 +627,14 @@ def status(
         report.say(f"{collector.project}: assigned `{mode}` -- `{collector.service}` {state}")
 
 
-def render(lines: Sequence[str], failures: int, when: _dt.datetime) -> str:
+def render(lines: Sequence[str], failures: int, when: _dt.datetime, cause: str = "") -> str:
+    """The artifact: a head with the failure count, the lines, and a failed run's `cause`
+    last as an `error:` line. `log-wrap.py` files a failed run's cause from that line, and
+    with none it took the run's last line: f783d741 filed `sports_betting: healthy` as the
+    cause of a failure some other line had named."""
     head = f"# collectors {when.isoformat(timespec='seconds')} -- {failures} failure(s)"
-    return "\n".join([head, *lines, ""])
+    tail = [f"error: {cause}"] if failures and cause else []
+    return "\n".join([head, *lines, *tail, ""])
 
 
 def write_file(path: Path, text: str) -> None:
@@ -918,7 +926,7 @@ def main(
 
     def finish() -> int:
         """Write the artifact; 2 when anything in it failed, a typo included."""
-        text = render(report.lines, report.failures, now)
+        text = render(report.lines, report.failures, now, report.cause)
         write_file(base / ARTIFACT, text)
         print(text, end="")
         return 2 if report.failures else 0

@@ -88,3 +88,35 @@ def test_each_failure_is_written_out_readable_beside_the_xml(tmp_path):
     empty.mkdir()
     assert junit_report.write_readable(empty) is None
     assert not (empty / junit_report.READABLE).exists()
+
+
+def test_a_failure_only_the_test_log_names_is_listed_too(tmp_path):
+    """f2b938ee: only the vendored suite writes junit, so PR #576's `failures.txt` named
+    its two vendored-tier failures and not the two `tests/test_scheduled_jobs.py` ones
+    that were only in `run-tests.py`'s `test-failures.log`."""
+    (tmp_path / "test-failures").mkdir()
+    (tmp_path / "test-failures" / "junit-hooks.xml").write_text(REPORT, encoding="utf-8")
+    (tmp_path / "test-failures" / "test-failures.log").write_text(
+        "____ test_spawn ____\nE   assert 1 == 2\n"
+        "= short test summary info =\n"
+        "FAILED tests/test_scheduled_jobs.py::test_spawn - assert 1 == 2\n"
+        "\x1b[31mFAILED tests/test_scheduled_jobs.py::test_other\x1b[0m\n"
+        "FAILED scripts/hooks/tests/test_contract.py::test_drop - KeyError\n",
+        encoding="utf-8",
+    )
+    text = junit_report.write_readable(tmp_path).read_text(encoding="utf-8")
+
+    assert "FAILED tests/test_scheduled_jobs.py::test_spawn\n  assert 1 == 2\n" in text
+    assert "  (traceback in test-failures/test-failures.log)" in text
+    assert "FAILED tests/test_scheduled_jobs.py::test_other\n  (traceback in" in text
+    assert text.count("test_contract.py::test_drop") == 1, "junit's own is not listed twice"
+
+
+def test_a_log_alone_is_enough_for_a_readable_file(tmp_path):
+    (tmp_path / "run.log").write_text("ERROR tests/test_a.py::test_b - boom\n", encoding="utf-8")
+    text = junit_report.write_readable(tmp_path).read_text(encoding="utf-8")
+    assert text == "FAILED tests/test_a.py::test_b\n  boom\n  (traceback in run.log)\n"
+    status = tmp_path / "status"
+    status.mkdir()
+    (status / "run.log").write_text("FAILED -- details in logs/x.log\n", encoding="utf-8")
+    assert junit_report.write_readable(status) is None, "a status line names no test"

@@ -2667,6 +2667,16 @@
 	,
 	"settings": {
 		"powershell.cwd": "carameli",
+		// Agent trees outnumber checkouts many times over, each with its own `.venv` and
+		// `node_modules`: watching them, and listing every one in Source Control, cost VS
+		// Code memory a 16 GB machine running parallel agents did not have. Made live by
+		// hand on 2026-10-08 and adopted here (e6579536).
+		"files.watcherExclude": {
+			"**/.claude/worktrees/**": true,
+			"**/.venv/**": true,
+			"**/node_modules/**": true
+		},
+		"git.detectWorktrees": false,
 		// Projects nothing should be in flight for. `upgrade-project.py --all` passes over
 		// them and `worktree.py` reports any box cut for one as stranded at any age
 		// (`sweep.on_hold`). Naming a project explicitly on the command line still works.
