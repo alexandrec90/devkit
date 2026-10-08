@@ -127,6 +127,12 @@ DESKTOP_IMAGE = "Docker Desktop.exe"
 RESTART_TIMEOUT = 600
 RESTART_EVERY = 3600
 RESTARTED = Path("logs/collectors.engine-restart.json")
+# How long an engine that did not answer the pass's first question is asked again before
+# it is called wedged. 2026-10-08 22:15 UTC: one `docker ps` that did not answer on a
+# loaded machine -- the engine served the scrape's compose call before it and its own
+# event streams after -- restarted Docker Desktop, and the restart shut down
+# social-scraper's db under a scrape mid-run (6c504c34).
+WEDGE_CONFIRM = 180
 
 # The tray's three levels, spelled as `tray_state` spells them. Not imported from there:
 # `tray_state` imports this module, and `test_collectors.py` pins the two to each other.
@@ -242,11 +248,18 @@ def desktop_status(text: str) -> str | None:
 class Docker:
     """Everything that touches the engine: one captured, window-less spawn per call.
     `restarts` is where `revive_engine` records a restart of Docker Desktop; None, as
-    for the tray, makes none."""
+    for the tray, makes none. `holds` names the runs a restart would cut short now
+    (`scheduled_in_flight`); None holds it for nothing."""
 
-    def __init__(self, ps_timeout: int = PS_TIMEOUT, restarts: Path | None = None) -> None:
+    def __init__(
+        self,
+        ps_timeout: int = PS_TIMEOUT,
+        restarts: Path | None = None,
+        holds: Callable[[], Sequence[str]] | None = None,
+    ) -> None:
         self.ps_timeout = ps_timeout
         self.restarts = restarts
+        self.holds = holds
 
     def run(self, argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[int, str]:
         return spawn(argv, timeout, cwd)
@@ -581,6 +594,17 @@ def maintain_scheduled(
             collector_tasks.keep_removed(collector_tasks.task_name(target.collector), run, report)
 
 
+def scheduled_in_flight(chosen: Sequence[Target], run: collector_tasks.Runner) -> list[str]:
+    """The scheduled collectors this machine runs whose task is running right now."""
+    return [
+        t.collector.project
+        for t in chosen
+        if t.collector.scheduled
+        and t.mode == config.RUN
+        and collector_tasks.running(collector_tasks.task_name(t.collector), run)
+    ]
+
+
 def wait_for_engine(
     docker: Docker,
     awake: float | None,
@@ -618,17 +642,26 @@ def last_restart(path: Path) -> float | None:
 
 
 def revive_engine(
-    docker: Docker, report: Report, restarts: Path, clock: float
+    docker: Docker, report: Report, restarts: Path, clock: float, busy: Sequence[str] = ()
 ) -> tuple[list[Container] | None, str]:
     """`(containers, why not)` for an engine `wait_for_engine` has already given up on.
 
     Only a *wedged* engine is restarted: Docker Desktop says `running` and its engine
-    does not answer. A Desktop that is not running was most likely quit by a person, and
+    does not answer for `WEDGE_CONFIRM` more seconds -- one that answers in that time was
+    slow, not wedged. A Desktop that is not running was most likely quit by a person, and
     a timer does not start it behind their back; the answer then says so. A restart is
     made once per `RESTART_EVERY`; `clock` is now, as a POSIX time.
+
+    Nor is it restarted while a scheduled collector's run is in flight (`busy`, from
+    `scheduled_in_flight`): its services outlive a silent engine API, and the restart is
+    what would stop them under it (6c504c34). The next pass restarts it.
     """
     if not docker.desktop_running():
         return None, "docker is not answering and Docker Desktop is not running -- start it"
+    containers = wait_for_engine(docker, ENGINE_STARTUP - WEDGE_CONFIRM)
+    if containers is not None:
+        report.say("docker was slow to answer, not wedged -- it answered when asked again")
+        return containers, ""
     wedged = "docker is not answering though Docker Desktop says it is running"
     last = last_restart(restarts)
     if last is not None and 0 <= clock - last < RESTART_EVERY:
@@ -637,6 +670,12 @@ def revive_engine(
             f"not again within {RESTART_EVERY // 60} minutes of that"
         )
         return None, f"{wedged}, and a restart did not bring its engine back"
+    if busy:
+        report.say(
+            f"not restarting Docker Desktop under {', '.join(busy)}'s scheduled run: "
+            f"the restart would stop the services it is using"
+        )
+        return None, f"{wedged}, and its restart waits for a scheduled collector's run"
     write_file(restarts, json.dumps({STARTED_AT: clock}) + "\n")
     ok, out = docker.restart_desktop()
     containers = docker.ps() if ok else None
@@ -658,14 +697,16 @@ def maintain(
     """One pass over the assigned *container* collectors, recording health verdicts into
     `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker. `awake`
     is how long the machine has been up, which `wait_for_engine` gives Docker to start;
-    an engine silent past that is `revive_engine`'s where `docker.restarts` is set."""
+    an engine silent past that is `revive_engine`'s where `docker.restarts` is set, held
+    for whatever `docker.holds` names."""
     if not chosen:
         return
     containers = wait_for_engine(docker, awake)
     running = any(t.mode == config.RUN for t in chosen)
     why = "docker is not answering -- is Docker Desktop running?"
     if containers is None and running and docker.restarts is not None:
-        containers, why = revive_engine(docker, report, docker.restarts, _clock())
+        busy = docker.holds() if docker.holds else ()
+        containers, why = revive_engine(docker, report, docker.restarts, _clock(), busy)
     if containers is None:
         if running:
             report.fail(why)
@@ -1060,7 +1101,9 @@ def main(
             return finish()
         assignment = acted_on
     chosen = targets(collectors, assignment, sweep.default_workspace(base).parent)
-    engine = docker or Docker(restarts=base / RESTARTED)
+    engine = docker or Docker(
+        restarts=base / RESTARTED, holds=lambda: scheduled_in_flight(chosen, run)
+    )
     if args.mode == "status":
         status(collectors, chosen, engine, report, base, run)
         return finish()

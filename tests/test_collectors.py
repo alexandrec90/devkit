@@ -39,6 +39,7 @@ class FakeDocker:
         self.built_at = built
         self.desktop = False
         self.restarts = None
+        self.holds = None
         self.restart_answer = (True, "")
         self.calls: list[tuple] = []
 
@@ -574,6 +575,15 @@ def test_a_silent_engine_fails_a_run_machine_but_not_a_stop_machine(tmp_path):
     assert report.failures == 0
 
 
+@pytest.fixture
+def instant(monkeypatch):
+    """`collectors._time` on a `Clock`: `revive_engine`'s re-asking costs a test nothing."""
+    clock = Clock()
+    fake = SimpleNamespace(monotonic=clock, sleep=clock.sleep, time=collectors._time.time)
+    monkeypatch.setattr(collectors, "_time", fake)
+    return clock
+
+
 class Wedged(FakeDocker):
     """Docker Desktop says `running`, and its engine answers only once restarted."""
 
@@ -589,7 +599,7 @@ class Wedged(FakeDocker):
         return super().restart_desktop()
 
 
-def test_a_wedged_engine_is_restarted_once_and_the_pass_then_acts(tmp_path):
+def test_a_wedged_engine_is_restarted_once_and_the_pass_then_acts(tmp_path, instant):
     """4436a22a: the engine answered every request with a 500 for six hours behind a
     Docker Desktop that said `running`, and the pass failed every 15 minutes asking
     whether Desktop was running; `docker desktop restart` had it back in minutes."""
@@ -597,13 +607,95 @@ def test_a_wedged_engine_is_restarted_once_and_the_pass_then_acts(tmp_path):
     docker, report = Wedged(restarts), collectors.Report()
     collectors.maintain([target(tmp_path)], docker, report, {})
     assert report.failures == 0
-    assert docker.calls[:4] == [("ps",), ("desktop",), ("restart",), ("ps",)]
+    restart = docker.calls.index(("restart",))
+    assert docker.calls[:2] == [("ps",), ("desktop",)]
+    assert set(docker.calls[2:restart]) == {("ps",)}, "asked again before it is called wedged"
+    assert sum(instant.slept) == collectors.WEDGE_CONFIRM
+    assert docker.calls[restart + 1] == ("ps",)
     assert ("up", "ibkr_trader", "app") in docker.calls
     assert "restarted it" in report.lines[0]
     assert collectors.last_restart(restarts) is not None
 
 
-def test_a_restart_is_not_repeated_within_the_hour(tmp_path):
+class Slow(Wedged):
+    """An engine that misses the pass's first question and answers its `answers_at`-th."""
+
+    def __init__(self, restarts, answers_at):
+        super().__init__(restarts)
+        self.answers_at = answers_at
+        self.asked = 0
+
+    def ps(self):
+        super().ps()
+        self.asked += 1
+        return [] if self.asked >= self.answers_at else None
+
+
+def test_an_engine_slow_to_answer_is_not_restarted(tmp_path, instant):
+    """6c504c34: at 22:15 UTC one `docker ps` that did not answer on a loaded machine
+    restarted Docker Desktop, while the engine was serving the scrape's compose calls;
+    the restart shut down social-scraper's db under its scrape mid-run."""
+    restarts = tmp_path / "restarts.json"
+    docker, report = Slow(restarts, answers_at=4), collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert ("restart",) not in docker.calls
+    assert report.failures == 0 and "slow to answer, not wedged" in report.lines[0]
+    assert ("up", "ibkr_trader", "app") in docker.calls
+    assert not restarts.exists()
+
+
+def test_a_wedged_engine_is_not_restarted_under_a_scheduled_run(tmp_path, instant):
+    """The engine's API can be silent while the containers serve: a scrape writing to its
+    db is cut short by the restart, not by the wedge. The pass after the run restarts."""
+    restarts = tmp_path / "restarts.json"
+    docker, report = Wedged(restarts), collectors.Report()
+
+    def in_flight():
+        return ["social-scraper"]
+
+    docker.holds = in_flight
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert ("restart",) not in docker.calls
+    assert report.failures == 1
+    assert report.lines[-1] == (
+        "docker is not answering though Docker Desktop says it is running, "
+        "and its restart waits for a scheduled collector's run"
+    )
+    assert "social-scraper's scheduled run" in report.lines[0]
+    assert not restarts.exists(), "a held restart is not a restart"
+    docker.holds = list
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    assert ("restart",) in docker.calls
+
+
+def test_the_scheduled_pass_holds_a_restart_for_a_running_scrape(tmp_path, monkeypatch, instant):
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN, "ibkr_trader": RUN})
+    built = []
+
+    def make(**kw):
+        docker = Wedged(kw["restarts"])
+        docker.holds = kw["holds"]
+        built.append(docker)
+        return docker
+
+    monkeypatch.setattr(collectors, "Docker", make)
+    assert collectors.main(["maintain"], run=Running()) == 2
+    assert built[0].holds() == ["social-scraper"]
+    assert ("restart",) not in built[0].calls
+
+
+def test_scheduled_in_flight_names_only_a_running_task_this_machine_runs(tmp_path):
+    scraper = config.Collector("social-scraper", command=("uv", "run", "x"), minutes=30)
+    run_here = collectors.Target(scraper, RUN, tmp_path / "social-scraper")
+    assert collectors.scheduled_in_flight([run_here, target(tmp_path)], Running()) == [
+        "social-scraper"
+    ]
+    assert collectors.scheduled_in_flight([run_here], FakeSchtasks()) == []
+    stopped = collectors.Target(scraper, STOP, tmp_path / "social-scraper")
+    assert collectors.scheduled_in_flight([stopped], Running()) == []
+
+
+def test_a_restart_is_not_repeated_within_the_hour(tmp_path, instant):
     restarts = tmp_path / "restarts.json"
     collectors.write_file(restarts, json.dumps({"started_at": collectors._clock() - 60}))
     docker, report = Wedged(restarts), collectors.Report()
@@ -612,7 +704,7 @@ def test_a_restart_is_not_repeated_within_the_hour(tmp_path):
     assert report.failures == 1 and "restart did not bring" in report.lines[-1]
 
 
-def test_a_restart_older_than_the_hour_is_tried_again(tmp_path):
+def test_a_restart_older_than_the_hour_is_tried_again(tmp_path, instant):
     restarts = tmp_path / "restarts.json"
     old = collectors._clock() - collectors.RESTART_EVERY - 1
     collectors.write_file(restarts, json.dumps({"started_at": old}))
@@ -622,7 +714,7 @@ def test_a_restart_older_than_the_hour_is_tried_again(tmp_path):
     assert collectors.last_restart(restarts) > old
 
 
-def test_a_restart_that_does_not_help_fails_with_a_stable_cause(tmp_path):
+def test_a_restart_that_does_not_help_fails_with_a_stable_cause(tmp_path, instant):
     restarts = tmp_path / "restarts.json"
     docker, report = Wedged(restarts, revives=False), collectors.Report()
     docker.restart_answer = (False, "error: timed out waiting for Docker Desktop\n")
@@ -651,7 +743,7 @@ def test_a_stop_machine_never_restarts_docker(tmp_path):
     assert docker.calls == [("ps",)] and report.failures == 0
 
 
-def test_revive_engine_answers_the_containers_once_the_restart_brings_them(tmp_path):
+def test_revive_engine_answers_the_containers_once_the_restart_brings_them(tmp_path, instant):
     docker, report = Wedged(tmp_path / "r.json"), collectors.Report()
     assert collectors.revive_engine(docker, report, docker.restarts, 1000.0) == ([], "")
     assert collectors.last_restart(docker.restarts) == 1000.0
@@ -670,7 +762,8 @@ def test_the_scheduled_pass_records_its_restarts_beside_its_artifact(tmp_path, m
     built = []
     monkeypatch.setattr(collectors, "Docker", lambda **kw: built.append(kw) or FakeDocker([]))
     collectors.main(["maintain"])
-    assert built == [{"restarts": root / collectors.RESTARTED}]
+    assert [kw["restarts"] for kw in built] == [root / collectors.RESTARTED]
+    assert built[0]["holds"]() == [], "no scheduled collector here, so nothing holds it"
 
 
 STATUS = ["docker", "desktop", "status", "--format", "json"]
