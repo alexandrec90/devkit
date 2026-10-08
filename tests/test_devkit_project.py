@@ -1476,6 +1476,93 @@ def test_a_differing_definition_is_treated_as_the_live_file_s_until_proven_other
     )
 
 
+def test_a_differing_definition_devkit_once_held_is_devkit_s_change_not_a_live_edit():
+    """e6579536: #566 changed a task's detail, the live file still held the old one, and
+    two hand-added settings had made the stamp stale -- so every daily publish refused,
+    naming the task as the live edit. A live value an earlier canonical copy held is the
+    live file behind: publishable, and something an adopt must not revert."""
+    old_task = {"label": "Agents: Resume", "detail": "old"}
+    live = {
+        "tasks": {"tasks": [old_task], "inputs": [{"id": "pick", "options": ["a"]}]},
+        "settings": {"powershell.cwd": "carameli"},
+    }
+    history = [
+        {"tasks": {"tasks": [{"label": "Agents: Resume", "detail": "older"}]}},
+        {"tasks": {"tasks": [old_task]}, "settings": {"powershell.cwd": "devkit"}},
+    ]
+    problems = [
+        "definition differs: Agents: Resume",
+        "input definition differs: pick",
+        "setting differs: powershell.cwd",
+        "setting in the workspace but not in devkit: mine",
+    ]
+    judged = devkit_project.behind(problems, live, history)
+    assert judged == [
+        f"{devkit_project.AHEAD_CHANGE}definition differs: Agents: Resume",
+        "input definition differs: pick",
+        "setting differs: powershell.cwd",
+        "setting in the workspace but not in devkit: mine",
+    ], "only a value devkit's copy once held is settled"
+    assert devkit_project.canonical_only(judged) == [judged[0]], "an adopt would revert it"
+    assert devkit_project.behind(problems[:1], live, []) == problems[:1], "no history, no change"
+
+
+def test_judged_drift_asks_history_only_about_a_differs_line(tmp_path):
+    asked: list[Path] = []
+
+    def history(live):
+        asked.append(live)
+        return [{"settings": {"a": 1}}]
+
+    live = tmp_path / "w.code-workspace"
+    ahead = devkit_project.judged_drift(live, {"settings": {}}, {"settings": {"a": 2}}, history)
+    assert ahead == ["setting missing from the workspace: a"] and asked == []
+    moved = devkit_project.judged_drift(
+        live, {"settings": {"a": 1}}, {"settings": {"a": 2}}, history
+    )
+    assert moved == [f"{devkit_project.AHEAD_CHANGE}setting differs: a"] and asked == [live]
+
+
+def _commit_canonical(canonical: Path) -> None:
+    """Commit `canonical` in a repository of its own, as devkit's checkout holds it."""
+    if not (canonical.parent / ".git").exists():
+        subprocess.run(["git", "init", "-q"], cwd=canonical.parent, check=True)
+    for args in (
+        ["add", canonical.name],
+        ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "c"],
+    ):
+        subprocess.run(["git", *args], cwd=canonical.parent, check=True, capture_output=True)
+
+
+def test_canonical_history_is_each_committed_copy_newest_first(workspace_pair):
+    canonical, live = workspace_pair
+    assert list(devkit_project.canonical_history(live)) == [], "no repository, no history"
+    for cwd in ("one", "two"):
+        _set_switches(canonical, **{"powershell.cwd": cwd})
+        _commit_canonical(canonical)
+    _set_switches(canonical, **{"powershell.cwd": "uncommitted"})
+    seen = [copy["settings"]["powershell.cwd"] for copy in devkit_project.canonical_history(live)]
+    assert seen == ["two", "one"]
+    assert len(list(devkit_project.canonical_history(live, depth=1))) == 1
+
+
+def test_a_publish_goes_through_once_the_live_edit_is_merged_and_devkit_moved_on(workspace_pair):
+    """The end state e6579536 needed: the hand-added settings merged into devkit's copy,
+    a task devkit changed since, a stale stamp -- and the publish delivers the task."""
+    canonical, live = workspace_pair
+    _commit_canonical(canonical)
+    payload = devkit_jsonc_loads(canonical.read_text(encoding="utf-8"))
+    payload["tasks"]["tasks"][0]["detail"] = "devkit's newer wording"
+    canonical.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+    devkit_project.stamp_path(live).unlink(missing_ok=True)
+
+    outcome, problems = devkit_project.publish_workspace(live)
+
+    assert outcome == devkit_project.RENDER_PUBLISHED, problems
+    assert problems and all(p.startswith(devkit_project.AHEAD_CHANGE) for p in problems)
+    assert "devkit's newer wording" in live.read_text(encoding="utf-8")
+
+
 def test_adopt_refuses_to_delete_canonical_content_the_live_file_lacks(workspace_pair):
     """An adopt is a whole-file overwrite, so it is only safe while devkit's copy has
     nothing of its own. Against a canonical copy that is ahead -- the state of every

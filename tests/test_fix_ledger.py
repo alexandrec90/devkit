@@ -60,6 +60,32 @@ def test_a_nightly_read_at_its_bases_tip_is_keyed_there():
     )
 
 
+def test_a_refused_commit_is_keyed_by_its_branch_so_each_tree_is_its_own_problem(tmp_path):
+    """787d0750: every refused commit was target `0`, so social-scraper's
+    happy-drifting-sprout, refused by detect-secrets, was filed fixers-exhausted with no
+    fixer ever sent at it -- the two attempts had gone to other trees' detect-secrets
+    refusals. A retry of one tree's intent is still the same problem."""
+
+    def refused(branch: str, digest: str) -> fix_plan.Decision:
+        fields = {"kind": fix_plan.COMMIT, "number": 0, "head": branch, "sha": digest}
+        sig = ("fixers refused: Detect secrets....Failed",)
+        return fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(**fields, signature=sig),))
+
+    path = tmp_path / "dispatch.json"
+    for branch, digest in (("worktree-a", "64e09c"), ("worktree-b", "9f0312")):
+        sent = refused(branch, digest)
+        fix_ledger.record(
+            path, fix_ledger.decision_key(sent), "n", NOW, fix_ledger.problem_key(sent)
+        )
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.attempts(refused("worktree-happy-drifting-sprout", "9fbc9e"), ledger) == 0
+    assert fix_ledger.attempts(refused("worktree-a", "rewritten"), ledger) == 1
+    assert fix_ledger.failure_key(refused("worktree-a", "64e09c").failures[0]).startswith(
+        "commit:carameli:worktree-a:64e09c:"
+    )
+    assert fix_ledger.target(failure()) == "412", "a PR is still its number"
+
+
 def test_a_key_says_which_kind_of_failure_it_names():
     assert fix_ledger.key_kind(fix_ledger.failure_key(failure())) == fix_plan.PR
     assert fix_ledger.key_kind("ledger:devkit:0:abc:def") == fix_plan.LEDGER

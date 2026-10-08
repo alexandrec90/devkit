@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_findings
 import harness_triage as triage
+import sweep
 
 
 def finding(**fields) -> fix_findings.Finding:
@@ -104,6 +106,20 @@ def test_a_step_past_the_deadline_is_listed_late_not_run(tmp_path):
     assert journal.late == ["plan"] and journal.crashed == []
     assert traced == ["collect", "send"], "only a step that runs is traced"
     assert fix_findings.Journal(tmp_path).step("x", lambda: 1) == 1, "no deadline, no skip"
+
+
+def test_a_step_started_in_time_has_its_gh_calls_end_by_the_deadline(tmp_path):
+    """2e2e7804: the pass's `verify` and `collect` reads started well inside its deadline
+    and ran on past the watchdog's stop, each `gh` call bounded only by its own 600 s. A
+    step's `sweep.run_bounded` calls now end at the deadline; `always` keeps its own."""
+    journal = fix_findings.Journal(tmp_path, left=lambda: 1.0)
+    hang = [sys.executable, "-c", "import time; time.sleep(60)"]
+    started = time.monotonic()
+    done = journal.step("collect", lambda: sweep.run_bounded(hang, sweep.GH_TIMEOUT))
+    assert time.monotonic() - started < 30
+    assert done.returncode == sweep.TIMED_OUT
+    assert journal.step("send", lambda: sweep._until, always=True) is None
+    assert sweep._until is None, "the bound ends with the step"
 
 
 def test_the_pass_adds_its_own_error_classes(tmp_path):

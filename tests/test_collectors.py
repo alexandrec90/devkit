@@ -370,6 +370,82 @@ def test_redeploy_with_a_checkout_git_cannot_read_records_only_the_build(tmp_pat
     assert got == {collectors.CODE_AT: 1000.0} and report.lines == []
 
 
+class SiblingGit(FakeGit):
+    """`FakeGit` answering per checkout, by its directory's name."""
+
+    def __init__(self, heads: dict, held: dict | None = None):
+        super().__init__()
+        self.heads, self.helds = heads, held or {}
+
+    def head(self, checkout):
+        self.calls.append(f"head {Path(checkout).name}")
+        return self.heads.get(Path(checkout).name)
+
+    def held(self, checkout):
+        self.calls.append(f"held {Path(checkout).name}")
+        return self.helds.get(Path(checkout).name, "")
+
+
+def built_from(tmp_path, *siblings):
+    checkout = target(tmp_path).checkout
+    collector = config.Collector("ibkr_trader", "app", ("h",), builds_from=siblings)
+    return collectors.Target(collector, RUN, checkout)
+
+
+def test_a_merge_in_a_checkout_the_image_copies_redeploys_it(tmp_path):
+    """110defb0: ibkr_trader's image `COPY`s data-lake, whose fix would otherwise have
+    reached the container only with ibkr_trader's next unrelated merge."""
+    git = SiblingGit({"ibkr_trader": ("aaa", 1500.0), "data-lake": ("bbb", 2500.0)})
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        built_from(tmp_path, "data-lake"), ours(tmp_path), docker, git, report, {}
+    )
+    assert got == {collectors.CODE_AT: 2500.0, "deployed": True}
+    assert any("onto data-lake@bbb" in line for line in report.lines)
+    unlisted = collectors.redeploy(target(tmp_path), ours(tmp_path), docker, git, report, {})
+    assert unlisted == {collectors.CODE_AT: 2000.0}, "not built from it, not redeployed for it"
+
+
+def test_a_checkout_built_from_that_is_not_merged_code_holds_the_redeploy(tmp_path):
+    git = SiblingGit(
+        {"ibkr_trader": ("aaa", 1500.0), "data-lake": ("bbb", 2500.0)},
+        held={"data-lake": "the checkout has uncommitted edits"},
+    )
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        built_from(tmp_path, "data-lake"), ours(tmp_path), docker, git, report, {}
+    )
+    assert got == {
+        collectors.CODE_AT: 2000.0,
+        collectors.HELD: "data-lake: the checkout has uncommitted edits",
+    }
+    assert not any(call[0] == "deploy" for call in docker.calls)
+
+
+def test_a_checkout_built_from_that_git_cannot_read_is_left_out(tmp_path):
+    git = SiblingGit({"ibkr_trader": ("aaa", 2500.0)})
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(built_from(tmp_path, "gone"), ours(tmp_path), docker, git, report, {})
+    assert got == {collectors.CODE_AT: 2500.0, "deployed": True}
+    assert "held gone" not in git.calls
+
+
+def test_source_heads_is_the_checkout_then_each_it_builds_from_that_git_can_read(tmp_path):
+    git = SiblingGit({"ibkr_trader": ("aaa", 1.0), "data-lake": ("bbb", 2.0)})
+    t = built_from(tmp_path, "data-lake", "gone")
+    assert collectors.source_heads(t, git) == [
+        (t.checkout, ("aaa", 1.0)),
+        (t.checkout.parent / "data-lake", ("bbb", 2.0)),
+    ]
+    assert collectors.source_heads(target(tmp_path), git) == [(t.checkout, ("aaa", 1.0))]
+
+
+def test_held_in_names_only_a_checkout_built_from(tmp_path):
+    t = built_from(tmp_path, "data-lake")
+    assert collectors._held_in(t, t.checkout, "why") == "why"
+    assert collectors._held_in(t, t.checkout.parent / "data-lake", "why") == "data-lake: why"
+
+
 def test_spawn_names_the_missing_program(monkeypatch):
     def fake_run(argv, **kwargs):
         raise FileNotFoundError(argv[0])
@@ -597,17 +673,20 @@ def test_the_scheduled_pass_records_its_restarts_beside_its_artifact(tmp_path, m
     assert built == [{"restarts": root / collectors.RESTARTED}]
 
 
+STATUS = ["docker", "desktop", "status", "--format", "json"]
+DESKTOP_UP = '"Docker Desktop.exe","17592","RDP-Tcp#5","1","79,860 K"'
+NO_DESKTOP = "INFO: No tasks are running which match the specified criteria."
+
+
 @pytest.mark.parametrize(
     ("code", "out", "expected"),
     [
         (0, '{"SessionID": "x", "Status": "running"}', True),
         (0, '{"Status": "stopped"}', False),
-        (0, "not json", False),
-        (0, "[]", False),
-        (1, '{"Status": "running"}', False),
+        (0, 'request returned 500 Internal Server Error\n{"Status": "running"}', True),
     ],
 )
-def test_docker_desktop_is_running_only_when_it_says_so(code, out, expected):
+def test_docker_desktop_answers_by_its_own_status_when_it_gives_one(code, out, expected):
     docker = collectors.Docker()
     asked: list[list[str]] = []
 
@@ -617,7 +696,51 @@ def test_docker_desktop_is_running_only_when_it_says_so(code, out, expected):
 
     docker.run = run
     assert docker.desktop_running() is expected
-    assert asked == [["docker", "desktop", "status", "--format", "json"]]
+    assert asked == [STATUS], "a readable status is the answer: no second question"
+
+
+@pytest.mark.parametrize(
+    ("code", "out"),
+    [(0, "not json"), (0, "[]"), (1, '{"Status": "running"}'), (124, "timed out after 30s")],
+)
+@pytest.mark.parametrize(("tasks", "expected"), [(DESKTOP_UP, True), (NO_DESKTOP, False)])
+def test_a_status_that_failed_is_answered_by_desktops_process(
+    monkeypatch, code, out, tasks, expected
+):
+    """2026-10-08 21:31 and 21:46: the status failed while the Desktop the 20:15 revive
+    started was up, the pass said "not running -- start it", and stood the revive down."""
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    docker = collectors.Docker()
+
+    def run(argv, timeout, cwd=None):
+        return (code, out) if argv == STATUS else (0, tasks)
+
+    docker.run = run
+    assert docker.desktop_running() is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "status"),
+    [
+        ('{"Status": "running"}', "running"),
+        ('warning: context "x" not found\n{\n "Status": "stopped"\n}\n', "stopped"),
+        ('{"Status": 3}', None),
+        ("[]", None),
+        ("", None),
+        ("{not json}", None),
+    ],
+)
+def test_desktop_status_reads_the_object_wherever_it_sits(text, status):
+    assert collectors.desktop_status(text) == status
+
+
+def test_off_windows_a_failed_status_is_not_running(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "posix")
+    docker = collectors.Docker()
+    docker.run = lambda argv, timeout, cwd=None: (
+        pytest.fail(f"asked {argv}") if argv != STATUS else (1, "")
+    )
+    assert docker.desktop_running() is False
 
 
 def test_the_restart_is_docker_desktops_own_bounded_by_its_timeout():
@@ -744,6 +867,11 @@ def test_a_run_row_says_how_the_collector_is(tmp_path, containers, health, level
         containers = [ours(tmp_path, state=containers)]
     got_level, detail = collectors.row(target(tmp_path), containers, {"ibkr_trader": health})
     assert got_level == level and words in detail
+
+
+def test_a_silent_engine_row_is_spelled_exactly_as_the_fix_pass_skips_it(tmp_path):
+    """`fix_loop.collector_findings` leaves this row to the collectors job by equality."""
+    assert collectors.row(target(tmp_path), None, {}) == (collectors.FAIL, collectors.NOT_ANSWERING)
 
 
 def test_a_stop_row_is_green_unless_the_collector_is_running_here(tmp_path):
