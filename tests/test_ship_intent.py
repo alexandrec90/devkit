@@ -417,6 +417,7 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
     assert out.stage == ship_intent.SHIPPED and out.url == "https://x/pull/7"
     assert run.verbs() == [
         "git status",
+        "git fetch",  # `refresh_base`, before anything reads `origin/main`
         "git rev-parse",  # `lands_nothing` asks after `MERGE_HEAD`,
         "git merge-base",  # then the fork, answered "" here: unknown, so it ships
         "git add",
@@ -428,8 +429,8 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
         "git push",
         "git rev-parse",
     ]
-    fix, add, commit = run.calls[4:7]
-    push = run.calls[9]
+    fix, add, commit = run.calls[5:8]
+    push = run.calls[10]
     assert fix[0][1:] == ["scripts/ship.py", "--fix"] and fix[1] == one.tree
     assert add[0] == ["git", "add", "-A"]
     assert commit[0] == ["git", "commit", "-F", str(ship_intent.INTENT_FILE)]
@@ -1319,13 +1320,54 @@ def test_a_clean_tree_with_nothing_committed_opens_no_pr_and_sets_the_intent_asi
     run = Runner({"git rev-list": (0, "0\n", "")}, porcelain="")
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.EMPTY and plans == []
-    assert run.verbs() == ["git status", "git rev-parse", "git rev-list"]
+    assert run.verbs() == ["git status", "git rev-parse", "git fetch", "git rev-list"]
     assert run.calls[1][0] == ["git", "rev-parse", "--git-path", "MERGE_HEAD"], "no merge"
-    assert run.calls[2][0] == ["git", "rev-list", "--count", "origin/main..HEAD"]
+    assert run.calls[3][0] == ["git", "rev-list", "--count", "origin/main..HEAD"]
     assert not (one.tree / ship_intent.INTENT_FILE).exists()
     assert (one.tree / ship_intent.SHIPPED_FILE).is_file(), "the session's outcome, kept"
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.EMPTY and state["intent"] == one.digest
+
+
+class StaleBase(Runner):
+    """A tree whose `origin/main` predates the merge of its own commits: two ahead until
+    the base is fetched, level with it after."""
+
+    def __init__(self):
+        super().__init__(porcelain="")
+        self.fetched = False
+
+    def __call__(self, argv, cwd, env=None):
+        if argv[:2] == ["git", "fetch"] and argv[-1] == "+refs/heads/main:refs/remotes/origin/main":
+            self.fetched = True
+        if argv[:2] == ["git", "rev-list"]:
+            self.calls.append(([str(a) for a in argv], Path(cwd), env))
+            return subprocess.CompletedProcess(argv, 0, "0\n" if self.fetched else "2\n", "")
+        return super().__call__(argv, cwd, env)
+
+
+def test_a_branch_merged_since_the_last_fetch_is_nothing_to_ship(tmp_path, monkeypatch):
+    """07c1172a: data-lake's tree pushed its commit by hand and #55 merged it; the next
+    pass read a stale `origin/main`, counted two commits ahead, and `gh pr create`
+    refused the branch ("No commits between main and ...") as a `ship-failed`."""
+    plans = capture_plans(monkeypatch)
+    one = intent(tmp_path)
+    run = StaleBase()
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.EMPTY and plans == []
+    assert "git push" not in run.verbs()
+
+
+def test_refresh_base_fetches_only_the_base_into_its_remote_ref(tmp_path):
+    run = Runner({"git fetch": (128, "", "could not resolve host")})
+    ship_intent.refresh_base(tmp_path, "master", run)
+    assert run.calls == [
+        (
+            ["git", "fetch", "--quiet", "origin", "+refs/heads/master:refs/remotes/origin/master"],
+            tmp_path,
+            None,
+        )
+    ], "a failed fetch is not a raise: the stale ref answers as before"
 
 
 @pytest.mark.parametrize(
@@ -1739,7 +1781,7 @@ def test_a_refusal_nothing_has_changed_since_is_not_run_again(tmp_path):
     )
     # Asked first whether the work has landed on the base since -- a refusal of work
     # that merged elsewhere is nothing to hold (e21febb8) -- and then held, unrun.
-    assert run.verbs() == ["git status", "git rev-parse", "git merge-base"], (
+    assert run.verbs() == ["git status", "git fetch", "git rev-parse", "git merge-base"], (
         "no fixers, no commit: the stored refusal stands"
     )
     moved = Runner(porcelain=" M a.py\n M b.py\n")

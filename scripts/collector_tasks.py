@@ -37,6 +37,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time as _time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PureWindowsPath
 from typing import Protocol
@@ -56,9 +57,16 @@ TIME_LIMIT = "PT1H"
 FIRE_TIMEOUT = 55 * 60
 NEEDS_TIMEOUT = 600
 SCHTASKS_TIMEOUT = 60
-# The re-ask after a `compose up` timed out (`needs_failed`): an engine that answers at
+# The re-ask after a `compose up` failed (`needs_failed`): an engine that answers at
 # all answers `docker info` in seconds.
 PROBE = 30
+# How long a fire whose `compose up` failed fast on a silent engine waits for it, and how
+# often it asks, before trying once more (`start_needs`). The collectors pass restarts a
+# wedged Docker Desktop (`collectors.revive_engine`), which took four to five minutes on
+# 2026-10-08; a fire landing inside one failed at once, "docker compose up failed for db",
+# the cause that recurred through fourteen resolutions of other things (74c2ccd2).
+ENGINE_WAIT = 360
+ENGINE_POLL = 15
 # How long the output of a child already killed at its timeout is waited for.
 REAP_TIMEOUT = 30
 # `spawn`'s code for a child it ended at its timeout, as `timeout(1)` reports one.
@@ -322,8 +330,55 @@ def resolve(argv: Sequence[str], which: Callable[[str], str | None] | None = Non
     return [found or argv[0], *argv[1:]]
 
 
+def probe(checkout: Path, run: Spawner) -> tuple[int, str]:
+    """`docker info`'s `(exit code, server version)`: whether the engine answers at all."""
+    return run(["docker", "info", "--format", "{{.ServerVersion}}"], checkout, PROBE)
+
+
+def await_engine(checkout: Path, run: Spawner) -> tuple[int, str]:
+    """`probe`, asked every `ENGINE_POLL` seconds until it answers or `ENGINE_WAIT` has
+    passed; its last answer."""
+    deadline = _time.monotonic() + ENGINE_WAIT
+    answer = (1, "")
+    while (left := deadline - _time.monotonic()) > 0:
+        _time.sleep(min(ENGINE_POLL, left))
+        answer = probe(checkout, run)
+        if answer[0] == 0:
+            break
+    return answer
+
+
+def start_needs(
+    needs: Sequence[str], checkout: Path, run: Spawner
+) -> tuple[int, str, tuple[int, str] | None]:
+    """`compose up --wait` of `needs`: `(exit code, output, the engine's last answer)`.
+
+    A fast failure is asked whether the engine answers. A silent one is waited for
+    (`await_engine`) and the start tried once more once it answers: a fire landing in a
+    Docker Desktop restart is a fire minutes late, not one lost. The engine's answer is
+    None where nobody asked -- a start that went through or timed out.
+    """
+    up = ["docker", "compose", "up", "-d", "--wait", *needs]
+    code, out = run(up, checkout, NEEDS_TIMEOUT)
+    if code in (0, TIMED_OUT):
+        return code, out, None
+    engine = probe(checkout, run)
+    if engine[0] == 0:
+        return code, out, engine
+    engine = await_engine(checkout, run)
+    if engine[0] != 0:
+        return code, out, engine
+    code, out = run(up, checkout, NEEDS_TIMEOUT)
+    return code, out, None
+
+
 def needs_failed(
-    needs: Sequence[str], checkout: Path, code: int, out: str, run: Spawner
+    needs: Sequence[str],
+    checkout: Path,
+    code: int,
+    out: str,
+    run: Spawner,
+    engine: tuple[int, str] | None = None,
 ) -> list[str]:
     """The log lines for a `compose up --wait` of `needs` that failed, ending on an
     `error:` line naming only the kind, which `log-wrap.py` files as the cause.
@@ -331,21 +386,22 @@ def needs_failed(
     3e8e7f26: `up --wait db` printed nothing for its whole `NEEDS_TIMEOUT` and the log
     asked "is Docker Desktop running?" -- it was, with the db up and healthy for hours,
     and the cause read `timed out after Ns`, the same as the scrape itself running past
-    `FIRE_TIMEOUT`. On a timeout the engine and the services are asked again, briefly, so
-    the log says which of the two stalled while the evidence still exists.
+    `FIRE_TIMEOUT`. So the engine is asked again (`engine`, when `start_needs` already
+    asked it), and on a timeout the services too, so the log says which stalled while the
+    evidence still exists. A silent engine is its own cause, whatever compose said.
     """
     names = ", ".join(needs)
     lines = [f"could not start {names} (exit {code}), so the command was not run", ""]
     lines += out.splitlines()[-40:]
-    if code != TIMED_OUT:
-        return [*lines, f"error: docker compose up failed for {names}"]
-    engine, answer = run(["docker", "info", "--format", "{{.ServerVersion}}"], checkout, PROBE)
-    if engine != 0:
+    status, answer = engine or probe(checkout, run)
+    if status != 0:
         return [
             *lines,
-            f"`docker info` did not answer either (exit {engine}): {first(answer)}",
+            f"`docker info` did not answer either (exit {status}): {first(answer)}",
             "error: the Docker engine did not answer",
         ]
+    if code != TIMED_OUT:
+        return [*lines, f"error: docker compose up failed for {names}"]
     _code, state = run(["docker", "compose", "ps", "--all", *needs], checkout, PROBE)
     return [
         *lines,
@@ -376,11 +432,10 @@ def fire(
     if not (checkout / ".git").exists():
         return 2, [*lines, f"no checkout at {checkout} -- nothing to run"]
     if collector.needs:
-        code, out = run(
-            ["docker", "compose", "up", "-d", "--wait", *collector.needs], checkout, NEEDS_TIMEOUT
-        )
+        code, out, engine = start_needs(collector.needs, checkout, run)
         if code != 0:
-            return code, [*lines, *needs_failed(collector.needs, checkout, code, out, run)]
+            failed = needs_failed(collector.needs, checkout, code, out, run, engine)
+            return code, [*lines, *failed]
         lines.append(f"started: {', '.join(collector.needs)}")
     code, out = run(resolve(collector.command), checkout, FIRE_TIMEOUT, stamp)
     output = out.splitlines()
