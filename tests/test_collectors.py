@@ -1172,6 +1172,23 @@ def test_render_heads_the_artifact_with_the_time_and_failure_count():
     assert text == "# collectors 2026-09-29T04:15:00 -- 1 failure(s)\na\nb\n"
 
 
+def test_a_failed_pass_ends_on_its_cause_not_on_a_healthy_line():
+    """f783d741: `log-wrap.py` filed `sports_betting: healthy`, the run's last line, as
+    the cause of a pass some earlier line had failed. The first failure is repeated last
+    as an `error:` line, which is what `log-wrap.cause_said` reads."""
+    report = collectors.Report()
+    report.fail("ibkr_trader: could not start `app` -- boom")
+    report.fail("social-scraper: second")
+    report.say("sports_betting: healthy")
+    text = collectors.render(report.lines, report.failures, dt.datetime(2026, 10, 8), report.cause)
+    assert text.splitlines()[-1] == "error: ibkr_trader: could not start `app` -- boom"
+    wrap = load_script("scripts/log-wrap.py")
+    assert wrap.cause_said(text) == "error: ibkr_trader: could not start `app` -- boom"
+    clean = collectors.Report()
+    clean.say("sports_betting: healthy")
+    assert "error:" not in collectors.render(clean.lines, 0, dt.datetime(2026, 10, 8), clean.cause)
+
+
 def test_parse_args_defaults_to_read_only_status():
     args = collectors.parse_args([])
     assert (args.mode, args.projects) == ("status", [])

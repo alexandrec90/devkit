@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as _dt
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -531,8 +532,37 @@ def test_the_pass_is_run_and_a_hang_is_cut_off(tmp_path, monkeypatch):
     script.write_text(
         "import time\nprint('started', flush=True)\ntime.sleep(30)\n", encoding="utf-8"
     )
-    code, _ = watchdog.run_pass([], _dt.timedelta(seconds=2))
+    code, output = watchdog.run_pass([], _dt.timedelta(seconds=2))
     assert code is None
+    assert output == "started\n", "what it said before the stop is kept"
+
+
+def test_a_pass_stopped_at_its_timeout_is_not_waited_on_through_an_orphan(tmp_path, monkeypatch):
+    """fd5af1b1: `subprocess.run(timeout=)` ended the pass alone and then read its pipes
+    with no bound, held open by a process the pass had started whose own parent had
+    exited -- so no kill reached it -- and the watchdog ran on for hours, skipping fires.
+    The orphan here holds the pass's output for 30 s; the stop comes back well before."""
+    script = tmp_path / "pass.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        'orphaner = \'import subprocess, sys; subprocess.Popen([sys.executable, "-c", '
+        '"import time; time.sleep(30)"])\'\n'
+        "subprocess.run([sys.executable, '-c', orphaner])\n"
+        "print('started', flush=True)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(watchdog, "PASS", script)
+    started = time.monotonic()
+    code, output = watchdog.run_pass([], _dt.timedelta(seconds=3))
+    assert code is None and "started" in output
+    assert time.monotonic() - started < 20, "waited on the orphan's pipe"
+
+
+def test_ending_a_tree_that_is_already_gone_raises_nothing():
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait()
+    watchdog.end_tree(process)
 
 
 def test_the_pass_runs_in_utf8_mode_so_no_runner_decodes_with_the_console_page(

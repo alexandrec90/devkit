@@ -194,6 +194,48 @@ def test_a_row_naming_no_artifact_adds_nothing_to_the_evidence(monkeypatch, tmp_
     )
 
 
+def _local(stamp: str) -> str:
+    """`stamp` (UTC ISO) as `log-wrap.py` writes `# when:`, in this machine's local time."""
+    return fix_backlog._dt.datetime.fromisoformat(stamp).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_a_later_failures_copy_is_not_handed_over_as_this_groups(tmp_path):
+    """96d2638e / e711daa0: a row naming the job's `.failed.log` was copied as its own
+    evidence when the file held the job's newest failure, hours after the row was filed.
+    A copy whose `# when:` is the row's is still taken."""
+    devkit = tmp_path / "devkit"
+    (devkit / "logs").mkdir(parents=True)
+    kept = devkit / "logs" / "job.failed.log"
+    kept.write_text(
+        f"# source: x\n# task: Job\n# when: {_local('2026-10-08T16:30:33+00:00')}\n# exit: 2\nnewest\n",
+        encoding="utf-8",
+    )
+    older = fix_backlog.triage.parse_line(
+        failed_job_row("devkit", "logs/job.failed.log", "2026-10-08T15:24:18+00:00")
+    )
+    own = fix_backlog.triage.parse_line(
+        failed_job_row("devkit", "logs/job.failed.log", "2026-10-08T16:30:34+00:00")
+    )
+    assert older is not None and own is not None
+
+    line = fix_backlog.copy_artifact(older, devkit, tmp_path)
+    assert "not copied: it holds the failure of" in line and "cause/said" in line
+    assert not (tmp_path / f"{older.id}-job.failed.log").exists()
+    assert "<-" in fix_backlog.copy_artifact(own, devkit, tmp_path)
+    assert (tmp_path / f"{own.id}-job.failed.log").exists()
+
+
+def test_an_artifact_with_no_stamp_is_not_judged(tmp_path):
+    source = tmp_path / "plain.log"
+    source.write_text("no header\n", encoding="utf-8")
+    assert fix_backlog.later_failure(source, "2026-10-08T15:24:18+00:00") is None
+    stamped = tmp_path / "bad.log"
+    stamped.write_text("# when: yesterday\n", encoding="utf-8")
+    assert fix_backlog.later_failure(stamped, "2026-10-08T15:24:18+00:00") is None
+    assert fix_backlog.later_failure(source, "not a stamp") is None
+    assert fix_backlog.later_failure(tmp_path / "missing.log", "2026-10-08T15:24:18") is None
+
+
 def test_an_artifact_that_cannot_be_copied_is_said_not_raised(monkeypatch, tmp_path):
     devkit = tmp_path / "devkit"
     (devkit / "logs").mkdir(parents=True)

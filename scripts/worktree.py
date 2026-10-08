@@ -3106,14 +3106,18 @@ def known_projects(workspace: Path) -> list[str]:
 
 
 def run_steps(
-    cwd: Path, steps: tuple[tuple[str, ...], ...], timeout: float = 300.0
+    cwd: Path,
+    steps: tuple[tuple[str, ...], ...],
+    timeout: float = 300.0,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[list[str], str, str]:
     """Run git argv in `cwd`, stopping at the first failure. `(ran, failed, error)`.
 
     Bounded because `new` is reachable from a PreToolUse hook (`worktree-guard.py`),
     where an unbounded `git fetch` against an unreachable remote does not fail — it
     hangs the agent's tool call. A timeout is reported as an ordinary step failure, so
-    the fetch-is-optional path in `apply_new` handles it like any other.
+    the fetch-is-optional path in `apply_new` handles it like any other. `env` is the
+    whole environment, the caller's own when None.
     """
     ran: list[str] = []
     for step in steps:
@@ -3126,6 +3130,7 @@ def run_steps(
                 timeout=timeout,
                 check=False,
                 creationflags=sweep.NO_WINDOW,
+                env=None if env is None else dict(env),
             )
         except subprocess.TimeoutExpired:
             return ran, rendered, f"timed out after {timeout:g}s"
@@ -3792,6 +3797,38 @@ def plan_respawn(
     return plan_new(project, workspace, slug=slug, session=session, fetch=fetch, quiet=quiet)
 
 
+def cut_worktree(
+    source: Path, steps: tuple[tuple[str, ...], ...], timeout: float
+) -> tuple[bool, list[str]]:
+    """Run a box's git `steps` in `source` with the hook's provisioning skipped. `(ok, notes)`.
+
+    The `post-checkout` hook provisions a tree inside the `worktree add` it runs under,
+    bounded at `worktree_env.PROVISION_TIMEOUT` -- longer than `timeout`, which killed
+    carameli's v0.11.52 adoption `worktree add` at 300 s while the hook's
+    `scripts/bootstrap.py` ran on to 600 s (4a9086cf, 77a810f7). `apply_new` provisions
+    the box after the cut, under its own bound and reported, so the hook only names and
+    links it.
+
+    A failed `fetch` is a stale base, not a failure: the worktree still gets cut from
+    whatever `origin/<default>` says locally, which is what an offline machine has.
+    Anything else leaves nothing behind to clean up, because the lease is only written
+    after the worktree exists.
+    """
+    notes: list[str] = []
+    cut_env = {**os.environ, worktree_env.SKIP_PROVISION_VAR: "1"}
+    _, failed, error = run_steps(source, steps, timeout=timeout, env=cut_env)
+    if failed.startswith("git fetch"):
+        notes.append(
+            f"fetch failed ({error.splitlines()[0] if error else 'no detail'}) — "
+            f"the box is cut from a possibly stale origin/<default>"
+        )
+        _, failed, error = run_steps(source, steps[1:], timeout=timeout, env=cut_env)
+    if failed:
+        notes.append(f"FAILED at `{failed}`: {error}")
+        return False, notes
+    return True, notes
+
+
 def apply_new(
     plan: SpawnPlan, workspace: Path, timeout: float = 300.0, provision: bool = True
 ) -> tuple[bool, list[str]]:
@@ -3808,24 +3845,11 @@ def apply_new(
     """
     root = workspace.parent
     source = root / plan.box.project
-    notes: list[str] = []
     boxes_root(root).mkdir(parents=True, exist_ok=True)
 
-    _, failed, error = run_steps(source, plan.steps, timeout=timeout)
-    if failed:
-        # A failed `fetch` is a stale base, not a failure: the worktree still gets cut
-        # from whatever `origin/<default>` says locally, which is what an offline
-        # machine has. Anything else leaves nothing behind to clean up, because the
-        # lease is only written after the worktree exists.
-        if failed.startswith("git fetch"):
-            notes.append(
-                f"fetch failed ({error.splitlines()[0] if error else 'no detail'}) — "
-                f"the box is cut from a possibly stale origin/<default>"
-            )
-            _, failed, error = run_steps(source, plan.steps[1:], timeout=timeout)
-        if failed:
-            notes.append(f"FAILED at `{failed}`: {error}")
-            return False, notes
+    cut, notes = cut_worktree(source, plan.steps, timeout)
+    if not cut:
+        return False, notes
 
     path = Path(plan.path)
 

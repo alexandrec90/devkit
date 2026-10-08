@@ -322,6 +322,12 @@ def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
     section = rule.split("## Waiting", 1)[1].split("\n## ", 1)[0]
     assert "run_in_background" in section and "`until` loop" in section
     assert all(f"`{tool}`" in section for tool in sf.WAIT_TOOLS)
+    # fae93f39, the seventh: a subagent armed `Monitor` and then waited in a foreground
+    # `until` loop anyway, since a subagent that ends its turn has returned -- the notice
+    # the rule promised never reaches it. The rule names the one shape that works there.
+    flat = " ".join(section.split())
+    assert "A subagent gets no notice before it returns" in flat
+    assert "in the foreground instead" in flat
 
 
 def test_a_module_the_tree_itself_holds_is_a_code_defect_not_the_environment(tmp_path):

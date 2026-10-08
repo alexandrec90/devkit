@@ -2642,6 +2642,65 @@ def test_a_box_is_provisioned_when_it_is_created(workspace, monkeypatch):
     assert ran == [plan.provision]
 
 
+def test_the_cut_leaves_provisioning_to_the_box_not_the_checkout_hook(workspace, monkeypatch):
+    """4a9086cf / 77a810f7: the `post-checkout` hook ran carameli's 600 s-bounded
+    `scripts/bootstrap.py` inside a `worktree add` bounded at 300 s, so the adoption's
+    box was never cut. The box provisions itself after the cut, so the hook is told to
+    skip -- for every step, the fetch-failed retry included."""
+    envs: list[dict] = []
+
+    def fake_run_steps(cwd, steps, timeout=300.0, env=None):
+        envs.append(dict(env or {}))
+        return ([], "git fetch origin", "offline") if len(envs) == 1 else ([], "", "")
+
+    monkeypatch.setattr(worktree, "run_steps", fake_run_steps)
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    monkeypatch.setattr(worktree, "run_provision", lambda *a, **k: (True, []))
+    plan = _spawned(workspace, provision=(worktree.ProvisionStep("uv sync", ("uv", "sync")),))
+
+    ok, _ = worktree.apply_new(plan, workspace)
+    assert ok is True and len(envs) == 2
+    assert all(env.get(worktree.worktree_env.SKIP_PROVISION_VAR) == "1" for env in envs)
+
+
+def test_cut_worktree_retries_past_a_failed_fetch_and_reports_any_other_failure(monkeypatch):
+    seen: list[tuple[tuple[str, ...], ...]] = []
+    fetch = ("fetch", "origin")
+    add = ("worktree", "add", "x")
+
+    def fails_at(*failing: str):
+        def fake_run_steps(cwd, steps, timeout=300.0, env=None):
+            seen.append(steps)
+            rendered = "git " + " ".join(steps[0])
+            return ([], rendered, "boom\nmore") if rendered in failing else ([], "", "")
+
+        return fake_run_steps
+
+    monkeypatch.setattr(worktree, "run_steps", fails_at("git fetch origin"))
+    ok, notes = worktree.cut_worktree(Path("."), (fetch, add), 5.0)
+    assert ok and seen == [(fetch, add), (add,)]
+    assert notes == ["fetch failed (boom) — the box is cut from a possibly stale origin/<default>"]
+    monkeypatch.setattr(worktree, "run_steps", fails_at("git worktree add x"))
+    ok, notes = worktree.cut_worktree(Path("."), (add,), 5.0)
+    assert not ok and notes == ["FAILED at `git worktree add x`: boom\nmore"]
+
+
+def test_run_steps_hands_git_the_environment_it_is_given(tmp_path):
+    """The hook reads `SKIP_PROVISION_VAR` from the environment `git` passes it."""
+    import os as _os
+
+    env = {**_os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "devkit.probe"}
+    env["GIT_CONFIG_VALUE_0"] = "set"
+    step = (("config", "--get", "devkit.probe"),)
+    assert worktree.run_steps(tmp_path, step, env=env) == (
+        ["git config --get devkit.probe"],
+        "",
+        "",
+    )
+    _, failed, _ = worktree.run_steps(tmp_path, step)
+    assert failed == "git config --get devkit.probe", "without it, git has no such key"
+
+
 def test_a_box_cut_by_the_hook_names_the_install_it_skipped(workspace, monkeypatch):
     """The guard cannot wait minutes for an install, so the message has to carry the
     command -- otherwise the agent's first `/ship` hits the lint gate with no ruff."""

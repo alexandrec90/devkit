@@ -2671,7 +2671,8 @@
 		// .claude/worktrees (devkit's alone are ~100k files) and a .venv each. The
 		// default watcher exclude covers only node_modules' children, and the git
 		// extension opens every worktree `git worktree list` names as a repository of
-		// its own, each with its own status refresh.
+		// its own, each with its own status refresh. Made live by hand on 2026-10-08 and
+		// adopted here (e6579536).
 		"files.watcherExclude": {
 			"**/.claude/worktrees/**": true,
 			"**/.venv/**": true,

@@ -1471,6 +1471,76 @@ def test_a_failing_step_stops_the_rest():
     assert ("branch", "-d", "gone") not in git.calls
 
 
+class RacedGit(FakeGit):
+    """Fails each step in `raced` once, as git does when another process moved the ref."""
+
+    def __init__(self, raced: str, error: str):
+        super().__init__()
+        self.raced, self.error, self.done = raced, error, False
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        if not self.done and self.raced in " ".join(args):
+            self.done = True
+            return subprocess.CompletedProcess(["git", *args], 128, "", self.error)
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+
+def test_a_step_that_lost_a_race_for_a_ref_is_run_once_more():
+    """85ef9bc3: VS Code's own `git pull` fast-forwarded ibkr_trader in the middle of
+    reconcile's merge, and reconcile said the state needed a human. Git writes nothing
+    when it cannot take the lock, so the step is run again."""
+    error = (
+        "fatal: update_ref failed for ref 'HEAD': cannot lock ref 'HEAD': is at "
+        "25a9da439efd573c14b1c75e795fc5f8c7912d4b but expected ceca15e8b8dcd14d76475964382c747545f92fbe"
+    )
+    paused: list[float] = []
+    git = RacedGit("merge", error)
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=paused.append)
+    assert result.ok
+    assert git.calls.count(("merge", "--ff-only", "origin/main")) == 2
+    assert paused == [sweep.REF_RACE_PAUSE]
+    lock = RacedGit("checkout", "fatal: Unable to create 'C:/x/.git/index.lock': File exists.")
+    assert sweep.apply_plan("proj", Path("."), PLAN, git=lock, pause=paused.append).ok
+
+
+def test_any_other_refusal_is_not_retried():
+    paused: list[float] = []
+    git = FakeGit(fail_on="merge")
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=paused.append)
+    assert not result.ok and paused == []
+    assert git.calls.count(("merge", "--ff-only", "origin/main")) == 1
+
+
+def test_run_step_reads_a_race_off_stdout_too_and_passes_a_success_straight_through():
+    paused: list[float] = []
+    calls: list[tuple[str, ...]] = []
+
+    def raced_on_stdout(*args: str):
+        calls.append(args)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(["git", *args], 1, "error: cannot lock ref", "")
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+    assert sweep.run_step(raced_on_stdout, ("fetch",), paused.append).returncode == 0
+    assert calls == [("fetch",), ("fetch",)] and paused == [sweep.REF_RACE_PAUSE]
+    clean = FakeGit()
+    assert sweep.run_step(clean, ("status",), paused.append).returncode == 0
+    assert clean.calls == [("status",)] and len(paused) == 1, "a success is not rerun"
+
+
+def test_a_race_lost_twice_still_fails():
+    class Always(FakeGit):
+        def __call__(self, *args: str):
+            self.calls.append(args)
+            return subprocess.CompletedProcess(["git", *args], 128, "", "cannot lock ref 'HEAD'")
+
+    git = Always()
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=lambda _s: None)
+    assert not result.ok and "cannot lock ref" in result.error
+    assert git.calls == [("checkout", "main")] * 2
+
+
 class FakeGh:
     """A `gh(*args)` stand-in. `existing` is the URL `pr view` reports, "" for none."""
 

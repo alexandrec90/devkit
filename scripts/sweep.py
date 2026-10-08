@@ -1749,12 +1749,37 @@ class Applied:
         return not self.failed and not self.plan.refusal
 
 
+# A step refused because another git process held or moved a ref under it. Git writes
+# nothing when it cannot take the lock, so running the step once more is safe.
+# 85ef9bc3: VS Code's `git pull --tags origin main` fast-forwarded ibkr_trader at
+# 10:51:23 while reconcile's `merge --ff-only origin/main` was under way, and reconcile
+# reported "git refused, the state needs a human" over a checkout already up to date.
+REF_RACE = re.compile(
+    r"cannot lock ref|is at [0-9a-f]+ but expected [0-9a-f]+|Unable to create '[^']*\.lock'",
+    re.I,
+)
+REF_RACE_PAUSE = 2.0
+
+
+def run_step(git: Git, step: tuple[str, ...], pause: Callable[[float], None] = time.sleep):
+    """`git(*step)`, run once more after `REF_RACE_PAUSE` when another process raced it
+    for a ref (`REF_RACE`)."""
+    completed = git(*step)
+    if completed.returncode != 0 and REF_RACE.search(
+        f"{completed.stderr or ''}\n{completed.stdout or ''}"
+    ):
+        pause(REF_RACE_PAUSE)
+        completed = git(*step)
+    return completed
+
+
 def apply_plan(
     name: str,
     path: Path,
     plan: Plan,
     git: Git | None = None,
     gh: Git | None = None,
+    pause: Callable[[float], None] = time.sleep,
 ) -> Applied:
     """Run a plan's steps in order, stopping at the first failure.
 
@@ -1762,14 +1787,15 @@ def apply_plan(
     the earlier ones succeeded (nothing is deleted before the checkout that moved
     off it), so continuing past a failure is how a safe plan turns unsafe. The PR
     is the last thing of all, for the same reason: a PR opened on a branch whose
-    push failed points at a ref the remote does not have.
+    push failed points at a ref the remote does not have. A step that lost a race for a
+    ref is run once more (`run_step`) before it counts as failed.
     """
     result = Applied(name=name, plan=plan)
     if plan.refusal:
         return result
     git = git or git_for(path)
     for step in plan.steps:
-        completed = git(*step)
+        completed = run_step(git, step, pause)
         rendered = "git " + " ".join(step)
         if completed.returncode != 0:
             result.failed = rendered
