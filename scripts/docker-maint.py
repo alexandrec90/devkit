@@ -71,6 +71,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agent_clis
 import docker_vhdx
 
 MODES = ("up", "down", "stop-idle", "restart-engine", "fix", "prune")
@@ -240,10 +241,60 @@ def poll_engine(timeout: int = POLL_TIMEOUT) -> bool:
     return False
 
 
-def stop_docker() -> None:
+# How long `stop_docker` waits for every name in `DOCKER_PROCESSES` to be gone. A launch
+# that finds the old `Docker Desktop.exe` still exiting stalls on Docker Desktop's
+# "lingering processes detected" dialog (2026-10-08: `PID 5848 could not be terminated`),
+# and an unattended restart has nobody to click it. Killing everything and waiting about
+# five seconds brought the engine up in twelve; a minute is that with room to spare.
+EXIT_TIMEOUT = 60
+EXIT_POLL_INTERVAL = 1
+
+
+def lingering(names: set[str] | None) -> list[str]:
+    """Which of `DOCKER_PROCESSES` are still in `names`, a set of running process names
+    (`agent_clis.running_processes`). Every one of them when the machine could not be
+    asked: unknown is still running, so the wait goes on."""
+    if names is None:
+        return list(DOCKER_PROCESSES)
+    return [name for name in DOCKER_PROCESSES if agent_clis.normalise_process(name) in names]
+
+
+def wait_for_exit(
+    timeout: float = EXIT_TIMEOUT,
+    listing: Callable[[], set[str] | None] = agent_clis.running_processes,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[str]:
+    """Block until no name in `DOCKER_PROCESSES` is running, or `timeout` passes.
+
+    The names still running at the deadline, `[]` once all are gone.
+    """
+    deadline = clock() + timeout
+    while True:
+        left = lingering(listing())
+        if not left or clock() >= deadline:
+            return left
+        sleep(EXIT_POLL_INTERVAL)
+
+
+def stop_docker(wait: Callable[[], list[str]] = wait_for_exit) -> None:
+    """Kill Docker Desktop, shut WSL down, and wait until its processes have exited.
+
+    `taskkill /F` returns once the kill is issued, not once the process is gone, so
+    without the wait the `start_docker` after it races the old process's exit. One more
+    `/F` for whatever outlived the wait, then the start goes ahead with a warning: the
+    dialog it may meet is a worse outcome than a failed poll, but no start at all is
+    worse still.
+    """
     for name in DOCKER_PROCESSES:
         run(["taskkill", "/F", "/IM", f"{name}.exe", "/T"], timeout=30)
     run(["wsl", "--shutdown"], timeout=60)
+    left = wait()
+    if not left:
+        return
+    print(f"  [warn] still running after {EXIT_TIMEOUT}s: {', '.join(left)}")
+    for name in left:
+        run(["taskkill", "/F", "/IM", f"{name}.exe", "/T"], timeout=30)
 
 
 def start_docker_service() -> None:

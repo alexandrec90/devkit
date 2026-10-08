@@ -716,6 +716,68 @@ def test_a_stop_and_start_polls_the_cold_budget_not_the_warm_one(monkeypatch, mo
     assert seen == [docker_maint.COLD_POLL_TIMEOUT]
 
 
+# --- waiting for the stop to finish --------------------------------------------
+#
+# 2026-10-08: the first relaunch after killing a wedged Docker Desktop stalled on its
+# "lingering processes detected" dialog, because the old `Docker Desktop.exe` had not
+# exited when the new one started. `taskkill /F` returns once the kill is issued.
+
+RUNNING = {"docker desktop", "com.docker.backend", "explorer"}
+
+
+def test_lingering_names_the_docker_processes_still_running():
+    assert docker_maint.lingering(RUNNING) == ["Docker Desktop", "com.docker.backend"]
+    assert docker_maint.lingering({"explorer"}) == []
+
+
+def test_an_unanswerable_process_list_reads_as_everything_still_running():
+    assert docker_maint.lingering(None) == docker_maint.DOCKER_PROCESSES
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def test_wait_for_exit_returns_once_everything_is_gone():
+    clock = Clock()
+    answers = iter([RUNNING, None, {"docker desktop"}, {"explorer"}])
+    left = docker_maint.wait_for_exit(10, lambda: next(answers), clock.sleep, clock)
+    assert left == []
+    assert clock.now == 3 * docker_maint.EXIT_POLL_INTERVAL
+
+
+def test_wait_for_exit_gives_up_at_its_deadline_naming_the_survivors():
+    clock = Clock()
+    left = docker_maint.wait_for_exit(5, lambda: {"docker desktop"}, clock.sleep, clock)
+    assert left == ["Docker Desktop"]
+    assert clock.now == 5
+
+
+def test_the_stop_waits_after_the_shutdown_and_before_returning(commands):
+    order: list[str] = []
+
+    def wait():
+        order.append(f"wait after {len(commands)} commands")
+        return []
+
+    docker_maint.stop_docker(wait=wait)
+    assert commands[-1] == ["wsl", "--shutdown"]
+    assert order == [f"wait after {len(commands)} commands"]
+
+
+def test_a_survivor_of_the_wait_is_killed_again_and_the_stop_still_returns(commands, capsys):
+    docker_maint.stop_docker(wait=lambda: ["Docker Desktop"])
+    assert commands[-1] == ["taskkill", "/F", "/IM", "Docker Desktop.exe", "/T"]
+    assert "still running" in capsys.readouterr().out
+
+
 # --- restarting what the stop actually killed ---------------------------------
 #
 # 2026-08-20: `restart-engine`, `fix` and `prune --generic` all left the engine

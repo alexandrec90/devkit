@@ -471,6 +471,73 @@ def test_the_pattern_is_a_parameter():
     assert reap_machine.dev_servers(custom) == []
 
 
+# --- docker CLIs --------------------------------------------------------------------
+
+NOW = 1_800_000_000.0
+OLD = NOW - 2 * reap_machine.DOCKER_CLI_MIN_AGE_SECONDS
+DOCKER = r'"C:\Program Files\Docker\Docker\resources\bin\docker.exe"'
+
+
+def docker_table():
+    """The 2026-10-08 machine: an orphaned `compose up --wait` and its plugin child, a
+    harness's `compose down` under a live python under a live session, and Docker
+    Desktop's own `docker stats` under a Docker Desktop whose launcher has exited."""
+    return [
+        P(1, 0, "explorer", "explorer.exe"),
+        P(10, 1, "claude", "claude"),
+        P(11, 10, "python", "python fix.py", created=OLD),
+        P(12, 11, "docker", f"{DOCKER} compose -p x down -v", created=OLD),
+        P(20, 5844, "docker", f"{DOCKER} compose up -d --wait db", created=OLD),
+        P(21, 20, "docker-compose", "docker-compose.exe compose up -d --wait db", created=OLD),
+        P(30, 777, "docker desktop", '"Docker Desktop.exe"', created=OLD),
+        P(31, 30, "com.docker.backend", "com.docker.backend.exe", created=OLD),
+        P(32, 30, "docker", f"{DOCKER} stats --no-stream", created=OLD),
+        P(33, 31, "docker", f"{DOCKER} version", created=OLD),
+    ]
+
+
+def test_an_orphaned_docker_cli_is_reaped_at_its_top_only():
+    assert [row.pid for row in reap_machine.docker_clis(docker_table(), NOW)] == [20]
+
+
+def test_a_docker_cli_with_a_live_owner_is_never_in_scope():
+    """The CLIs that piled up behind the wedged engine had owners -- a harness, Docker
+    Desktop itself -- and cleared once the engine restarted. Reaping them would have
+    broken the harness's teardown and the dashboard, and fixed nothing."""
+    pids = {row.pid for row in reap_machine.docker_clis(docker_table(), NOW)}
+    assert not pids & {12, 32, 33}
+
+
+def test_a_young_or_undated_orphan_is_kept():
+    young = NOW - reap_machine.DOCKER_CLI_MIN_AGE_SECONDS + 60
+    rows = [
+        P(20, 5844, "docker", f"{DOCKER} compose up -d", created=young),
+        P(40, 5845, "docker", f"{DOCKER} build .", created=0.0),
+    ]
+    assert reap_machine.docker_clis(rows, NOW) == []
+    exactly = [P(20, 5844, "docker", "docker ps", created=NOW - 60)]
+    assert reap_machine.docker_clis(exactly, NOW, min_age=60) == exactly
+
+
+def test_only_a_docker_image_is_a_docker_cli():
+    """A command line that names docker is an editor, a shell or a script, not a CLI."""
+    rows = [
+        P(1, 999, "python", "python scripts/docker-maint.py up", created=OLD),
+        P(2, 999, "bash", "bash -c 'docker compose up'", created=OLD),
+        P(3, 999, "com.docker.backend", "com.docker.backend.exe", created=OLD),
+    ]
+    assert reap_machine.docker_clis(rows, NOW) == []
+
+
+def test_docker_desktop_hosts_docker_clis_and_nothing_else():
+    """Its own `docker stats` is owned; a vite under it is still an orphan, since the
+    docker hosts are not `HOSTS`."""
+    assert "docker desktop" not in reap_machine.HOSTS
+    assert reap_machine.HOSTS <= reap_machine.DOCKER_HOSTS
+    rows = [*docker_table(), P(34, 30, "node", r'"node" C:\p\node_modules\vite\bin\vite.js')]
+    assert 34 in {row.pid for row in reap_machine.dev_servers(rows)}
+
+
 # --- stopping ----------------------------------------------------------------------
 
 
