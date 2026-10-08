@@ -553,6 +553,17 @@ def test_the_pass_runs_in_utf8_mode_so_no_runner_decodes_with_the_console_page(
     assert watchdog.run_pass([]) == (0, "1 '\\u201d'\n")
 
 
+def test_the_pass_is_told_how_long_it_has(tmp_path, monkeypatch):
+    """The pass stops launching sessions before this stop rather than being killed in the
+    middle of one (2026-10-08 01:00), so it has to know the stop -- a rerun's included,
+    which gets only what is left of the fire. `fix-pass.WINDOW_ENV`, spelled here."""
+    script = tmp_path / "pass.py"
+    script.write_text("import os\nprint(os.environ['DEVKIT_FIX_PASS_SECONDS'])\n", encoding="utf-8")
+    monkeypatch.setattr(watchdog, "PASS", script)
+    assert watchdog.run_pass([], _dt.timedelta(minutes=7)) == (0, "420\n")
+    assert load_script("scripts/fix-pass.py").WINDOW_ENV == watchdog.WINDOW_ENV
+
+
 def test_a_signature_is_filed_once_and_the_state_survives_corruption(tmp_path, monkeypatch):
     monkeypatch.setattr(watchdog, "REPO_ROOT", tmp_path)
     state = watchdog.load_state(tmp_path / "missing.json")

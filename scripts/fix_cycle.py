@@ -405,6 +405,8 @@ class Account:
     dependabot: tuple[str, ...] = ()
     drift: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
+    # What a pass past its send deadline left to the next one (`fix-pass.LATE`).
+    late: tuple[str, ...] = ()
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -437,6 +439,7 @@ def render(account: Account) -> str:
         ("dependabot", account.dependabot),
         ("drift", account.drift),
         ("issue", account.issues),
+        ("late", account.late),
     ):
         lines += labelled(label, rows)
     lines.append(f"ledger   {account.backlog} open on the harness-defect ledger")

@@ -44,11 +44,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -131,6 +133,38 @@ class Outcome:
     url: str = ""
 
 
+class OutOfTime(Exception):
+    """A spawn still running at the deadline `bounded` set, ended with everything under
+    it (`ended`) -- or one that deadline had already passed, never started."""
+
+    def __init__(self, message: str, ended: bool) -> None:
+        super().__init__(message)
+        self.ended = ended
+
+
+# The `time.monotonic()` past which `run_quiet` spawns nothing and ends what it spawned;
+# None outside `bounded`. A module value rather than a runner argument because the
+# commit stage's spawns run several calls deep under `ship_one`, which takes its runner
+# from every caller and every test as `run_quiet` itself.
+_deadline: float | None = None
+
+
+@contextmanager
+def bounded(deadline: float | None) -> Iterator[None]:
+    """Every `run_quiet` inside ends by `deadline` or raises `OutOfTime`.
+
+    The pass's one unbounded step was a ship: on 2026-10-08 a roguelike commit's hooks
+    ran past fifteen minutes on a machine short of memory, and the watchdog stopped the
+    pass in it, with no record written and its lock left behind.
+    """
+    global _deadline
+    before, _deadline = _deadline, deadline
+    try:
+        yield
+    finally:
+        _deadline = before
+
+
 def run_quiet(
     argv: list[str], cwd: Path | str | None = None, env: dict[str, str] | None = None, **kwargs
 ):
@@ -142,11 +176,13 @@ def run_quiet(
     `cwd`, its own `capture_output`. The first dispatch the pass ever made died on
     `TypeError` here, with the record unwritten, because every test on either side
     had replaced the other. The window flag and a non-raising call are forced; the
-    rest is the caller's.
+    rest is the caller's. Inside `bounded`, it ends by the deadline (`_run_bounded`).
     """
     options: dict = {"capture_output": True, "text": True}
     options.update(kwargs)
     options["check"] = False
+    if _deadline is not None and "timeout" not in options:
+        return _run_bounded(argv, cwd, env, options, _deadline - time.monotonic())
     return subprocess.run(
         argv,
         cwd=None if cwd is None else str(cwd),
@@ -154,6 +190,78 @@ def run_quiet(
         creationflags=sweep.NO_WINDOW,
         **options,
     )
+
+
+def _run_bounded(argv: list[str], cwd, env, options: dict, seconds: float):
+    """`subprocess.run` that ends the whole tree when `seconds` run out: `OutOfTime`.
+
+    Not `subprocess.run(timeout=)`, which ends the child alone: `git commit`'s hooks
+    outlive it holding its pipes, and the read after the kill waits on them for as long
+    as they run -- the very wait the timeout was for.
+    """
+    shown = " ".join(map(str, argv[:3]))
+    if seconds <= 0:
+        raise OutOfTime(f"`{shown}` not started: past the pass's deadline", ended=False)
+    options = dict(options)
+    options.pop("check", None)
+    data = options.pop("input", None)
+    if options.pop("capture_output", False):
+        options["stdout"] = options["stderr"] = subprocess.PIPE
+    if data is not None:
+        options["stdin"] = subprocess.PIPE
+    if sys.platform != "win32":
+        options["start_new_session"] = True  # one group, so `_end_tree` can take all of it
+    cwd = None if cwd is None else str(cwd)
+    flags = sweep.NO_WINDOW
+    with subprocess.Popen(argv, cwd=cwd, env=env, creationflags=flags, **options) as process:
+        try:
+            out, err = process.communicate(data, timeout=seconds)
+        except subprocess.TimeoutExpired:
+            _end_tree(process)
+            raise OutOfTime(
+                f"`{shown}` still running at the pass's deadline; ended it", ended=True
+            ) from None
+    return subprocess.CompletedProcess(argv, process.returncode, out, err)
+
+
+def _end_tree(process: subprocess.Popen) -> None:
+    """End `process` and everything under it, then reap it (`collector_tasks.kill_tree`'s
+    reason: `Popen.kill` takes the child alone)."""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            capture_output=True,
+            check=False,
+            timeout=60,
+            creationflags=sweep.NO_WINDOW,
+        )
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)  # the session `_run_bounded` started
+        except ProcessLookupError:
+            pass
+    process.kill()
+    process.communicate()
+
+
+def clear_index_lock(tree: Path) -> bool:
+    """Remove the tree's `index.lock` after `OutOfTime` ended what held it; whether one
+    was there. A `git commit` ended in its hooks leaves the lock behind, and every git
+    step the next pass takes in the tree is refused on it until something removes it.
+    Only after an end the pass itself made: its intents are held while a session works."""
+    try:
+        found = run_quiet(["git", "rev-parse", "--git-path", "index.lock"], cwd=tree)
+    except OSError:
+        return False
+    if found.returncode != 0 or not (found.stdout or "").strip():
+        return False
+    lock = Path(found.stdout.strip())
+    lock = lock if lock.is_absolute() else tree / lock
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 # --- the intent file ----------------------------------------------------------------

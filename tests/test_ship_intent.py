@@ -10,6 +10,7 @@ import datetime as _dt
 import os
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -55,6 +56,58 @@ class Runner:
 
 def gh_ok(*_a):
     return lambda *args: subprocess.CompletedProcess(["gh", *args], 0, "https://x/pull/7", "")
+
+
+# --- the pass's deadline ------------------------------------------------------------
+
+
+def test_a_bounded_spawn_ends_its_whole_tree_at_the_deadline(tmp_path):
+    """2026-10-08 01:30: a `git commit` whose hooks ran past fifteen minutes. A child
+    that leaves a grandchild holding its pipes is the shape that matters: ending the
+    child alone, the read after it waits for the grandchild."""
+    grandchild = "import time; time.sleep(60)"
+    child = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        "print('started', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    started = time.monotonic()
+    with pytest.raises(ship_intent.OutOfTime) as stopped:
+        with ship_intent.bounded(time.monotonic() + 3):
+            ship_intent.run_quiet([sys.executable, "-c", child], cwd=tmp_path)
+    assert time.monotonic() - started < 30
+    assert stopped.value.ended and "still running at the pass's deadline" in str(stopped.value)
+
+
+def test_a_bounded_spawn_past_the_deadline_never_starts(tmp_path):
+    marker = tmp_path / "ran"
+    with pytest.raises(ship_intent.OutOfTime) as stopped:
+        with ship_intent.bounded(time.monotonic() - 1):
+            ship_intent.run_quiet(
+                [sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"], cwd=tmp_path
+            )
+    assert not stopped.value.ended and not marker.exists()
+
+
+def test_a_bounded_spawn_in_time_answers_as_subprocess_run_does(tmp_path):
+    script = "import sys; print(sys.stdin.read().upper()); sys.exit(3)"
+    with ship_intent.bounded(time.monotonic() + 60):
+        done = ship_intent.run_quiet([sys.executable, "-c", script], cwd=tmp_path, input="hi")
+    assert (done.returncode, done.stdout.strip(), done.stderr) == (3, "HI", "")
+    assert ship_intent._deadline is None, "the bound ends with its block"
+    unbounded = ship_intent.run_quiet([sys.executable, "-c", script], input="ok")
+    assert (unbounded.returncode, unbounded.stdout.strip()) == (3, "OK")
+
+
+def test_the_index_lock_an_ended_commit_left_is_removed(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    lock = tmp_path / ".git" / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    assert ship_intent.clear_index_lock(tmp_path)
+    assert not lock.exists()
+    assert not ship_intent.clear_index_lock(tmp_path), "no lock, nothing to say"
+    assert not ship_intent.clear_index_lock(tmp_path / "not-a-repo-child-missing")
 
 
 # --- the intent file ----------------------------------------------------------------

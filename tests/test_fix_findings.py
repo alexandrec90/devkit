@@ -90,6 +90,22 @@ def test_an_interrupt_is_not_swallowed_as_a_finding(tmp_path):
         journal.step("x", interrupted)
 
 
+def test_a_step_past_the_deadline_is_listed_late_not_run(tmp_path):
+    """The watchdog stopped two passes on 2026-10-08 with their record unwritten. Past
+    the deadline a step returns its default and is named, so the pass reaches its
+    record; one that keeps its own time (`always`) still runs."""
+    left = [60.0]
+    traced: list[str] = []
+    journal = fix_findings.Journal(tmp_path, left=lambda: left[0], trace=traced.append)
+    assert journal.step("collect", lambda: "read", default="none") == "read"
+    left[0] = 0.0
+    assert journal.step("plan", lambda: pytest.fail("ran late"), default="none") == "none"
+    assert journal.step("send", lambda: "held", default="none", always=True) == "held"
+    assert journal.late == ["plan"] and journal.crashed == []
+    assert traced == ["collect", "send"], "only a step that runs is traced"
+    assert fix_findings.Journal(tmp_path).step("x", lambda: 1) == 1, "no deadline, no skip"
+
+
 def test_the_pass_adds_its_own_error_classes(tmp_path):
     class ProjectError(Exception):
         pass

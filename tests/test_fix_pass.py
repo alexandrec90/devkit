@@ -1102,6 +1102,99 @@ def test_a_session_the_machine_has_no_memory_for_is_held_for_the_next_pass(world
     )
 
 
+def test_no_session_is_launched_once_the_pass_is_out_of_time(world, tmp_path):
+    """2026-10-08 01:00: a five-minute ship and fifteen minutes of reading left the send
+    to start at minute 20, and its three launches took five more -- the watchdog stopped
+    the pass after the last one, with no record written and its lock left behind. A
+    session not launched is held, unrecorded, for the next pass; an update opens none
+    and still goes."""
+    send = fix_pass.fix_send
+    go = [
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),)),
+        fix_plan.Decision(fix_plan.UPDATE, "n", (failure(number=2, behind=True),)),
+    ]
+    ctx = _ctx(tmp_path)
+    sent, capped, _ = send.send_all(go, ctx, "claude", left=lambda: 0.0)
+    assert sent == ["carameli #2 -- update"]
+    [(held, why)] = capped
+    assert held.failures[0].number == 1 and why.startswith(send.HELD_FOR_TIME)
+    assert len(fix_ledger.read_ledger(ctx.ledger_path)) == 1, "#1 is free to go next pass"
+    assert send.send_all(go[:1], ctx, "claude", left=lambda: 60.0)[0] == ["carameli #1 -- dispatch"]
+
+
+def test_a_pass_out_of_time_still_writes_its_record_and_leaves_the_rest(world, tmp_path):
+    """What the watchdog's stop cost on 2026-10-08 was the record, the history line and
+    the lock -- not the work, which the next pass does. So past its deadline the pass
+    starts no further step, says which it left, and finishes."""
+    world["failures"] = [failure()]
+    world["intents"] = [ship_intent.Intent("carameli", tmp_path / "t", "agent/i", "S", "B")]
+    history = tmp_path / "devkit" / fix_pass.HISTORY
+    code = fix_pass.run(world["workspace"], fix_cycle.DISPATCH, _launch(), NOW, deadline=0.0)
+    assert code == fix_pass.EXIT_OK
+    assert world["shipped"] == [] and world["dispatched"] == []
+    assert world["installers"] == [] and world["upkeep"] == []
+    [late] = [line for line in artifact(world).splitlines() if line.startswith("late")]
+    assert late.startswith(f"late     {fix_pass.LATE}: ship, merge, read-back, collect")
+    assert late.endswith("current, installers, drift, issues"), "the send runs regardless"
+    assert history.is_file()
+
+
+def test_a_ship_still_running_at_the_deadline_is_ended_and_held(monkeypatch, tmp_path):
+    """2026-10-08 01:30: one roguelike commit's hooks ran past fifteen minutes and the
+    watchdog stopped the pass inside it. Ended at the deadline, the ship is neither
+    refused (no fixer is sent at a machine being slow) nor failed; the lock the ended
+    `git commit` left is removed, and the next pass ships it. A ship that never started
+    leaves whatever lock is there alone: nothing of the pass's held it."""
+    trees = [
+        ship_intent.Intent(project, tmp_path / project, f"agent/{project}", "S", "B")
+        for project in ("roguelike", "devkit")
+    ]
+    monkeypatch.setattr(fix_pass.ship_intent, "find_intents", lambda root, projects: trees)
+    deadlines = []
+
+    def out_of_time(intent, python, base):
+        deadlines.append(fix_pass.ship_intent._deadline)
+        ended = intent.project == "roguelike"
+        raise ship_intent.OutOfTime("`git commit -F` ended" if ended else "not started", ended)
+
+    monkeypatch.setattr(fix_pass.ship_intent, "ship_one", out_of_time)
+    cleared = []
+    monkeypatch.setattr(
+        fix_pass.ship_intent, "clear_index_lock", lambda tree: cleared.append(tree) or True
+    )
+    lines, refused, failed = fix_pass.ship_intents(tmp_path, [], fix_cycle.DISPATCH, deadline=123.0)
+    assert deadlines == [123.0, 123.0], "each ship runs bounded by the pass's deadline"
+    assert fix_pass.ship_intent._deadline is None, "and nothing after it is"
+    assert (refused, failed) == ([], False)
+    assert cleared == [tmp_path / "roguelike"]
+    assert lines == [
+        "roguelike agent/roguelike -- held: `git commit -F` ended (its index.lock removed); "
+        "the next pass ships it",
+        "devkit agent/devkit -- held: not started; the next pass ships it",
+    ]
+
+
+def test_the_pass_takes_its_window_from_the_watchdog(monkeypatch):
+    """A rerun after a mid-pass merge gets only what is left of the fire, so the pass
+    reads its window from the watchdog rather than assuming the whole of it."""
+    assert fix_pass.window({fix_pass.WINDOW_ENV: "600"}) == 600.0
+    full = load_script("scripts/fix-pass-watchdog.py").TIMEOUT.total_seconds()
+    assert fix_pass.window({}) == full == fix_pass.WINDOW_SECONDS
+    assert fix_pass.window({fix_pass.WINDOW_ENV: "soon"}) == full
+    # One launch took 2.5 minutes on 2026-10-08; the one started at the deadline, and the
+    # record after it, still finish inside the window.
+    assert 2.5 * 60 < fix_pass.SEND_RESERVE_SECONDS < full
+
+
+def test_every_step_says_when_it_starts(world, capsys):
+    """The 01:00 pass was stopped with nothing in its output past the launches, and the
+    rescue had to rebuild the timeline from file times. Each step is now a flushed line."""
+    fix_pass.run(world["workspace"], fix_cycle.PLAN, _launch(), NOW)
+    out = capsys.readouterr().out
+    for name in ("ship", "read-back", "collect", "plan", "send", "drift", "issues"):
+        assert f"fix-pass: step {name} at " in out
+
+
 def test_a_second_devkit_session_waits_for_the_one_still_working(world, tmp_path):
     """Two sessions at one backlog was a waste the dispatch ledger could not see: its
     key changes the moment a new finding lands, while the first session is mid-sweep."""
@@ -1265,7 +1358,7 @@ def test_a_plan_pass_and_an_unmakeable_lock_run_regardless(tmp_path, monkeypatch
     """A plan ships and sends nothing, so it never waits; and a lock that could not be made
     at all is no evidence of another pass, so the pass runs as it did before the lock."""
     workspace = tmp_path / "alex.code-workspace"
-    monkeypatch.setattr(fix_pass, "run", lambda ws, mode, launch: 5)
+    monkeypatch.setattr(fix_pass, "run", lambda ws, mode, launch, deadline=None: 5)
     with fix_pass.worktree.named_lock(tmp_path, fix_pass.RUN_LOCK_NAME, 0.1, 60.0):
         assert fix_pass.run_alone(workspace, fix_cycle.PLAN, _launch(), wait=0.1) == 5
     unmakeable = tmp_path / "other"
@@ -1442,7 +1535,9 @@ def test_an_elevated_plan_or_scheduled_pass_still_runs_in_place(world, monkeypat
     monkeypatch.setattr(fix_pass.agent_tabs, "is_elevated", lambda: True)
     monkeypatch.setattr(fix_pass, "missing_tools", lambda: [])
     ran = []
-    monkeypatch.setattr(fix_pass, "run", lambda ws, mode, launch: ran.append(mode) or 0)
+    monkeypatch.setattr(
+        fix_pass, "run", lambda ws, mode, launch, deadline=None: ran.append(mode) or 0
+    )
     workspace = str(world["workspace"])
     assert fix_pass.main(["--mode", "plan", "--workspace", workspace]) == 0
     assert ran == [fix_cycle.PLAN]
