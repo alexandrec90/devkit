@@ -118,6 +118,36 @@ def test_a_dir_fd_flavoured_callback_is_recorded_rather_than_replayed(tmp_path, 
     assert "nested" in error
 
 
+def test_an_entry_gone_by_the_retry_is_deleted_not_failed(tmp_path, monkeypatch):
+    """A delete Windows refused because the entry was already *delete-pending* -- git's
+    own `worktree remove` had marked it and a handle was still open -- finds it gone by
+    the time the hook retries. That is the outcome the delete wanted, not a failure:
+    reap-stale filed `fix-harness-ledger-1007-4` as "could not be removed" over
+    `The system cannot find the file specified` on a tree that was no longer on disk
+    (ad9e1a06)."""
+    box_dir = tmp_path / "demo--x-0806"
+
+    def pending_rmtree(target, onexc=None, **_kwargs):
+        onexc(os.rmdir, str(target), PermissionError(13, "Access is denied"))
+
+    monkeypatch.setattr(shutil, "rmtree", pending_rmtree)
+    assert box_teardown.remove_tree_longpath(box_dir) == ""
+
+
+def test_delete_refused_tells_the_filesystem_from_git():
+    """A tree gone after the filesystem refused git is reaped; one gone after git itself
+    refused is not, so the two spellings must stay apart."""
+    assert box_teardown.delete_refused("error: failed to delete 'C:/x': Permission denied")
+    assert not box_teardown.delete_refused("fatal: 'C:/x' contains modified or untracked files")
+
+
+def test_a_tree_already_gone_is_removed(tmp_path):
+    """The root itself missing -- a concurrent reaper, or a delete-pending directory
+    that closed between the caller's check and this call -- raises from `rmtree` before
+    any hook runs. Nothing is left to delete, so nothing failed."""
+    assert box_teardown.remove_tree_longpath(tmp_path / "gone") == ""
+
+
 def test_the_hook_leaves_the_directories_it_touched_traversable(tmp_path, monkeypatch):
     """Clearing the read-only bit must not cost read and execute.
 
@@ -364,6 +394,14 @@ def test_engine_unreachable_reads_each_platforms_spelling_and_nothing_else():
     )
     assert not box_teardown.engine_unreachable("Error response from daemon: volume is in use")
     assert not box_teardown.engine_unreachable("")
+
+
+def test_a_wedged_engines_ping_is_unreachable_but_a_500_elsewhere_is_not():
+    """2026-10-08: Docker Desktop answered, and its engine's ping was a 500 for hours."""
+    route = "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine"
+    said = "request returned 500 Internal Server Error for API route and version {}, check"
+    assert box_teardown.engine_unreachable(said.format(f"{route}/_ping"))
+    assert not box_teardown.engine_unreachable(said.format(f"{route}/v1.55/containers/x/stop"))
 
 
 def test_an_access_denied_delete_is_a_filesystem_failure_not_a_dirty_refusal(tmp_path):

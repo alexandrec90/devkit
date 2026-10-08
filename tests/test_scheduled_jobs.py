@@ -1074,6 +1074,14 @@ def test_a_spawn_named_as_a_type_is_not_handed_out():
         "    q: subprocess.Popen = p\n"
     )
     assert spawn_references(source) == [2]
+    # The default beside an annotation is still a value; a string annotation is no node.
+    source = (
+        "import subprocess\n"
+        "async def f(p: subprocess.Popen, q: 'x' = None) -> subprocess.Popen:\n"
+        "    return p\n"
+        "def g(runner: subprocess.Popen = subprocess.Popen): ...\n"
+    )
+    assert spawn_references(source) == [4]
 
 
 def test_no_module_a_job_reaches_hands_out_a_raw_spawn():

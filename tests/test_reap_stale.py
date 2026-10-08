@@ -390,7 +390,14 @@ def test_each_way_a_session_tree_fails_files_its_own_kind(tmp_path, monkeypatch)
             return subprocess.CompletedProcess(argv, 255, "", "fatal: Invalid argument")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
+    def git_refuses(argv):
+        if "remove" in argv:
+            return subprocess.CompletedProcess(argv, 128, "", "fatal: validation failed")
+        return run(argv)
+
     refused = lambda path: ("denied", [])
+    # Gone, and refused in git's words rather than the filesystem's: a tree gone after a
+    # *delete* refusal is reaped (ad9e1a06), so it would file no kind at all.
     gone = st.Tree(checkout / "gone", "agent/gone", "abc", False)
     reaps = {
         "a merged session tree's stack would not come down": st.reap(
@@ -399,7 +406,7 @@ def test_each_way_a_session_tree_fails_files_its_own_kind(tmp_path, monkeypatch)
         "a merged session tree could not be removed after git refused it": st.reap(
             tree("husked"), checkout, run, remove=refused
         ),
-        "git refused to remove a merged session tree": st.reap(gone, checkout, run),
+        "git refused to remove a merged session tree": st.reap(gone, checkout, git_refuses),
     }
     for kind, error in reaps.items():
         line, failed = st.reap_outcome(gone.path, error)

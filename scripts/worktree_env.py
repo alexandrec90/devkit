@@ -38,7 +38,9 @@ before the session's first turn, whoever cut the tree, so it runs the project's 
 provisioner -- the manifest's `install_command` when it is one plain command, else the
 `uv sync` that `scripts/hooks/toolchain.py` would name -- when the checkout it was cut
 from already has a `.venv`, which is the one on-disk fact that says this machine
-provisions this project and its cache is warm. A cold checkout gets nothing and
+provisions this project and its cache is warm -- and only in a tree an agent tier cut
+(`agent_tree`): a scratch `git worktree add` elsewhere is named the command and left
+bare, since nobody works in it. A cold checkout gets nothing and
 `ship.py --preflight` still names the command; `DEVKIT_SKIP_WORKTREE_PROVISION=1`
 skips the step for a `git worktree add` that wants a bare tree. Anything else that
 leaves a tree unprovisioned -- a failure, a missing `uv`, a command that needs a shell --
@@ -88,6 +90,57 @@ def run_windowless(*args, **kwargs) -> subprocess.CompletedProcess:
     """`sweep.run_windowless`, spelled here for the reason `NO_WINDOW` is."""
     flags = kwargs.pop("creationflags", 0)
     return subprocess.run(*args, creationflags=flags | NO_WINDOW, **kwargs)
+
+
+# Seconds between `run_reporting`'s "still running" lines.
+HEARTBEAT = 30
+
+
+def _say(line: str) -> None:
+    print(line, flush=True)
+
+
+def run_reporting(
+    argv,
+    *,
+    timeout: float | None = None,
+    interval: float = HEARTBEAT,
+    say=_say,
+    **kwargs,
+) -> subprocess.CompletedProcess:
+    """`run_windowless`, saying every `interval` seconds that the command is still going.
+
+    1be306c4: a cold `uv sync` ran 582 s inside `git worktree add` with its output
+    captured, so the caller saw nothing until it ended and a slow sync read exactly like a
+    hung one -- the session waiting on it hit its tool's 600 s cap with no way to tell.
+    Captured output is kept, as `run` keeps it; a timeout kills the child and raises
+    `TimeoutExpired`, as `run` does; so do `check` and `capture_output`.
+    """
+    check = kwargs.pop("check", False)
+    if kwargs.pop("capture_output", False):
+        kwargs["stdout"] = kwargs["stderr"] = subprocess.PIPE
+    flags = kwargs.pop("creationflags", 0)
+    label = " ".join([Path(str(argv[0])).stem, *map(str, argv[1:])])[:160]
+    started = time.monotonic()
+    with subprocess.Popen(argv, creationflags=flags | NO_WINDOW, **kwargs) as proc:
+        while True:
+            elapsed = time.monotonic() - started
+            if timeout is not None and elapsed >= timeout:
+                proc.kill()
+                proc.communicate()
+                raise subprocess.TimeoutExpired(argv, timeout)
+            wait = interval if timeout is None else min(interval, timeout - elapsed)
+            try:
+                out, err = proc.communicate(timeout=wait)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - started
+                if timeout is None or elapsed < timeout:
+                    say(f"devkit: `{label}` still running after {elapsed:.0f}s")
+    done = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    if check:
+        done.check_returncode()
+    return done
 
 
 # `post-checkout` is handed `<old-oid> <new-oid> <branch-flag>`. A **fresh** checkout --
@@ -613,7 +666,7 @@ def git_env(environ: Mapping[str, str]) -> dict[str, str]:
 def provision(
     here: Path,
     checkout: Path,
-    runner=run_windowless,
+    runner=run_reporting,
     environ: Mapping[str, str] | None = None,
     uv: str | None = None,
 ) -> str:
@@ -621,7 +674,8 @@ def provision(
 
     "" when nothing ran. Captured rather than streamed: `uv sync` on the warm path prints
     a progress screen worth nothing to the person whose `worktree add` this is inside,
-    and the failure tail is relayed with the command so the fix is one paste.
+    and the failure tail is relayed with the command so the fix is one paste. What runs
+    is said before it starts, and `run_reporting` says it is still running meanwhile.
     """
     env = os.environ if environ is None else environ
     if env.get(SKIP_PROVISION_VAR):
@@ -635,6 +689,7 @@ def provision(
     # `C:\...\Scripts\uv.EXE sync` is not one anybody types.
     spelled = tool.install_command or " ".join((UV_SYNC[0], *command[1:]))
     mark_provisioned(here, False)
+    _say(f"devkit: provisioning {here} -- `{spelled}` (a cold cache takes minutes)")
     started = time.monotonic()
     try:
         done = runner(
@@ -740,7 +795,7 @@ def is_unprovisioned_tree_update(args: list[str], here: Path) -> bool:
 def main(
     argv: list[str] | None = None,
     root: Path | None = None,
-    runner=run_windowless,
+    runner=run_reporting,
     environ: Mapping[str, str] | None = None,
 ) -> int:
     """The hook. Always exits 0: git ignores a `post-checkout` status, and a traceback
@@ -754,7 +809,7 @@ def main(
 def index_change_main(
     argv: list[str] | None = None,
     root: Path | None = None,
-    runner=run_windowless,
+    runner=run_reporting,
     environ: Mapping[str, str] | None = None,
 ) -> int:
     """The `post-index-change` hook: the same set-up, for a tree cut `--no-checkout`.
@@ -772,15 +827,61 @@ def _set_up(here: Path, runner, environ: Mapping[str, str] | None) -> int:
     checkout = checkout_of(here)
     if checkout is None:
         return 0
-    for line in (
-        name_compose_project(here, checkout),
+    lines = [name_compose_project(here, checkout)]
+    if agent_tree(here, environ):
         # Before the sync, which cannot resolve a path source that is not there yet.
-        *link_path_sources(here, checkout, runner=runner, environ=environ),
-        provision(here, checkout, runner=runner, environ=environ),
-    ):
+        lines += link_path_sources(here, checkout, runner=runner, environ=environ)
+        lines.append(provision(here, checkout, runner=runner, environ=environ))
+    elif Toolchain.observe(here, checkout).command():
+        lines.append(
+            f"devkit: {here} is in no agent worktree tier, so it was not provisioned -- "
+            f"`python <devkit>/scripts/worktree.py provision {here} --yes` gives it a .venv"
+        )
+    for line in lines:
         if line:
             print(line)
     return 0
+
+
+# `worktree_tiers.ALL_TIERS`, one `(segments, depth, home_env, home_default)` row per
+# tier: copied because this hook is installed alone, and held equal to the owner by
+# `tests/test_worktree_env.py` and `tests/test_worktree_tiers_single_source.py`.
+AGENT_TIERS = (
+    ((".claude", "worktrees"), 1, "", ""),
+    (("worktrees",), 2, "CODEX_HOME", "~/.codex"),
+    ((".worktrees",), 1, "", ""),
+)
+
+
+def _same_dir(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+def agent_tree(here: Path, environ: Mapping[str, str] | None = None) -> bool:
+    """Whether `here` sits where an agent tier cuts its worktrees -- the trees somebody
+    works in, and so the only ones this hook provisions.
+
+    9d690d5a: a throwaway `git worktree add --detach <tmp> HEAD`, cut for a test baseline,
+    ran a 236 s `uv sync` that blew its caller's timeout, and the `.venv` it left made
+    `git worktree remove --force` fail. Shape only, as `worktree_tiers.match` is; a
+    detached tier's base must also be the runtime's home.
+    """
+    env = os.environ if environ is None else environ
+    parents = Path(os.path.abspath(here)).parents
+    for segments, depth, home_env, home_default in AGENT_TIERS:
+        anchor_at = depth - 1 + len(segments)
+        if len(parents) <= anchor_at:
+            continue
+        if any(
+            parents[depth - 1 + offset].name != wanted
+            for offset, wanted in enumerate(reversed(segments))
+        ):
+            continue
+        home = ((env.get(home_env, "") or "").strip() or home_default) if home_env else ""
+        if home and not _same_dir(parents[anchor_at], Path(home).expanduser()):
+            continue
+        return True
+    return False
 
 
 if __name__ == "__main__":

@@ -28,6 +28,20 @@ def test_provisioning_runs_the_one_verb_with_yes_and_reports_a_failure(tmp_path,
     assert tree_provision.argv(tmp_path)[-1] == "--yes"
 
 
+def test_what_runs_is_said_before_it_starts(tmp_path, capsys):
+    """1be306c4: the output is captured, so a cold `uv sync` was minutes of silence and
+    a slow provision read like a hung one."""
+    seen = []
+
+    def runner(argv, **_kwargs):
+        seen.append(capsys.readouterr().out)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    tree_provision.provision(tmp_path, runner)
+    assert f"provisioning {tmp_path}" in seen[0]
+    assert "provision" in seen[0] and "--yes" in seen[0]
+
+
 def test_the_childs_output_is_read_as_utf8_and_a_failure_is_left_as_the_trees_friction(
     tmp_path,
 ):
