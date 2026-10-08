@@ -41,6 +41,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import locale
 import os
 import re
 import shutil
@@ -197,7 +198,11 @@ def _run_bounded(argv: list[str], cwd, env, options: dict, seconds: float):
 
     Not `subprocess.run(timeout=)`, which ends the child alone: `git commit`'s hooks
     outlive it holding its pipes, and the read after the kill waits on them for as long
-    as they run -- the very wait the timeout was for.
+    as they run -- the very wait the timeout was for. Nor pipes at all: what it captures
+    goes through temporary files (`_spooled`), and the wait is on the child, never on an
+    end-of-file. On 2026-10-08 a ship ended at the deadline came back four minutes late,
+    and the watchdog stopped the pass: `taskkill /T` follows live parents only, so a hook
+    process whose shell had exited survived it holding the pipe, and the read waited.
     """
     shown = " ".join(map(str, argv[:3]))
     if seconds <= 0:
@@ -207,27 +212,68 @@ def _run_bounded(argv: list[str], cwd, env, options: dict, seconds: float):
     data = options.pop("input", None)
     if options.pop("capture_output", False):
         options["stdout"] = options["stderr"] = subprocess.PIPE
-    if data is not None:
-        options["stdin"] = subprocess.PIPE
     if sys.platform != "win32":
         options["start_new_session"] = True  # one group, so `_end_tree` can take all of it
     cwd = None if cwd is None else str(cwd)
-    with subprocess.Popen(
-        argv, cwd=cwd, env=env, creationflags=sweep.NO_WINDOW, **options
-    ) as process:
+    with _spooled(options, data) as spools:
+        process = subprocess.Popen(argv, cwd=cwd, env=env, creationflags=sweep.NO_WINDOW, **options)
         try:
-            out, err = process.communicate(data, timeout=seconds)
+            code = process.wait(timeout=seconds)
         except subprocess.TimeoutExpired:
             _end_tree(process)
             raise OutOfTime(
                 f"`{shown}` still running at the pass's deadline; ended it", ended=True
             ) from None
-    return subprocess.CompletedProcess(argv, process.returncode, out, err)
+        out, err = (_read_back(spools.get(name), options) for name in ("stdout", "stderr"))
+    return subprocess.CompletedProcess(argv, code, out, err)
+
+
+@contextmanager
+def _spooled(options: dict, data) -> Iterator[dict]:
+    """A temporary file in `options` for stdin when there is `data`, and for each of
+    stdout and stderr asked to be `PIPE`; yields the output ones by name, and closes all."""
+    spools: dict = {}
+    try:
+        if data is not None:
+            spools["stdin"] = tempfile.TemporaryFile()
+            spools["stdin"].write(
+                data.encode(_encoding(options)) if isinstance(data, str) else data
+            )
+            spools["stdin"].seek(0)
+            options["stdin"] = spools["stdin"]
+        for name in ("stdout", "stderr"):
+            if options.get(name) == subprocess.PIPE:
+                options[name] = spools[name] = tempfile.TemporaryFile()
+        yield spools
+    finally:
+        for spool in spools.values():
+            spool.close()
+
+
+def _encoding(options: dict) -> str:
+    """The encoding `subprocess.run` would use in text mode for these `options`."""
+    return options.get("encoding") or locale.getpreferredencoding(False)
+
+
+def _read_back(spool, options: dict):
+    """What `subprocess.run` would have returned for one captured stream: None when it
+    was not captured, else its bytes, or in text mode its text with newlines translated."""
+    if spool is None:
+        return None
+    spool.seek(0)
+    raw = spool.read()
+    keys = ("text", "universal_newlines", "encoding", "errors")
+    if not any(options.get(key) for key in keys):
+        return raw
+    text = raw.decode(_encoding(options), options.get("errors") or "strict")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _end_tree(process: subprocess.Popen) -> None:
     """End `process` and everything under it, then reap it (`collector_tasks.kill_tree`'s
-    reason: `Popen.kill` takes the child alone)."""
+    reason: `Popen.kill` takes the child alone). Reaped by its exit, not by reading its
+    output to the end: an orphan the end missed may hold that open for as long as it
+    runs."""
     if sys.platform == "win32":
         subprocess.run(
             ["taskkill", "/F", "/T", "/PID", str(process.pid)],
@@ -242,7 +288,7 @@ def _end_tree(process: subprocess.Popen) -> None:
         except ProcessLookupError:
             pass
     process.kill()
-    process.communicate()
+    process.wait()
 
 
 def clear_index_lock(tree: Path) -> bool:
