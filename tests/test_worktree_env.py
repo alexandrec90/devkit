@@ -8,6 +8,7 @@ is the thing under test, and a stub would only assert that the stub works.
 
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from support import load_script
+from support import load_script, worktree_tiers
 
 wt_env = load_script("scripts/worktree_env.py")
 
@@ -511,12 +512,119 @@ def test_a_checkout_without_a_venv_gets_no_sync_at_worktree_time(tmp_path):
     assert run.calls == []
 
 
+def test_the_sync_is_announced_before_it_runs(tmp_path, capsys):
+    """1be306c4: a cold `uv sync` ran 582 s inside `git worktree add` and printed only its
+    result, so nobody watching could tell a slow sync from a hung one. The line naming
+    what runs, and where, is out before the command starts."""
+    checkout, tree = _provisionable(tmp_path)
+    seen: list[str] = []
+
+    class _Watching(_Run):
+        def __call__(self, argv, **kwargs):
+            seen.append(capsys.readouterr().out)
+            return super().__call__(argv, **kwargs)
+
+    wt_env.provision(tree, checkout, runner=_Watching(), environ={}, uv="uv")
+    assert "uv sync --all-extras --all-groups" in seen[0]
+    assert str(tree) in seen[0]
+
+
+def test_a_long_command_says_it_is_still_running_and_keeps_its_output():
+    said: list[str] = []
+    done = wt_env.run_reporting(
+        [sys.executable, "-c", "import time; time.sleep(0.8); print('ok')"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        interval=0.1,
+        say=said.append,
+    )
+    assert done.returncode == 0
+    assert done.stdout.strip() == "ok"
+    assert said, "no heartbeat while the command ran"
+    assert all("still running after" in line for line in said)
+
+
+def test_a_command_past_its_timeout_is_killed_and_raises_as_run_does():
+    with pytest.raises(subprocess.TimeoutExpired):
+        wt_env.run_reporting(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            capture_output=True,
+            timeout=0.5,
+            interval=0.1,
+            say=lambda _line: None,
+        )
+
+
+def test_a_failed_command_under_check_raises_as_run_does():
+    with pytest.raises(subprocess.CalledProcessError):
+        wt_env.run_reporting([sys.executable, "-c", "raise SystemExit(3)"], check=True)
+
+
+def test_the_hooks_spawn_through_the_heartbeat_runner():
+    """A runner the tests can replace, defaulting to the one that reports while it waits."""
+    for hook in (wt_env.main, wt_env.index_change_main, wt_env.provision):
+        assert inspect.signature(hook).parameters["runner"].default is wt_env.run_reporting
+
+
+# --- only a tree an agent tier cut is provisioned (9d690d5a) ---------------------
+
+
+def _tier_path(tier, anchor: Path, name: str = "topic") -> Path:
+    return anchor.joinpath(*tier.segments, *(["0a1b2c"] * (tier.depth - 1)), name)
+
+
+def test_the_tier_shapes_are_worktree_tiers_own():
+    """Installed alone into `~/.devkit/git-hooks`, the hook cannot import
+    `worktree_tiers`, so it keeps a copy of the shapes and this holds the two equal."""
+    assert wt_env.AGENT_TIERS == tuple(
+        (tier.segments, tier.depth, tier.home_env, tier.home_default)
+        for tier in worktree_tiers.ALL_TIERS
+    )
+
+
+@pytest.mark.parametrize("tier", worktree_tiers.ALL_TIERS, ids=lambda tier: tier.agent)
+def test_a_tree_in_any_agent_tier_is_one_to_provision(tmp_path, tier):
+    anchor = tmp_path / "anchor"
+    env = {tier.home_env: str(anchor)} if tier.home_env else {}
+    assert wt_env.agent_tree(_tier_path(tier, anchor), env) is True
+
+
+def test_a_scratch_tree_matches_no_tier(tmp_path):
+    assert wt_env.agent_tree(tmp_path / "scratch", {}) is False
+    elsewhere = {"CODEX_HOME": str(tmp_path / "codex")}
+    assert wt_env.agent_tree(tmp_path / "worktrees" / "0a1b2c" / "x", elsewhere) is False
+    assert wt_env.agent_tree(tmp_path / "codex" / "worktrees" / "0a1b2c" / "x", elsewhere)
+
+
+def test_a_scratch_worktree_is_named_but_not_provisioned(tmp_path, monkeypatch, capsys):
+    """9d690d5a: a throwaway `git worktree add --detach <tmp> HEAD`, cut for a pre-merge
+    test baseline, ran a 236 s `uv sync` that blew its caller's timeout, and the `.venv`
+    it left made `git worktree remove --force` fail. A tree no agent tier cut is nobody's
+    workplace; its compose name still applies, since that guards the checkout's volumes."""
+    checkout = _repo(tmp_path / "carameli")
+    (checkout / ".venv").mkdir()
+    tree = tmp_path / "scratch"
+    _git(checkout, "worktree", "add", "--quiet", "--detach", str(tree), "HEAD")
+    (tree / "uv.lock").write_text("", encoding="utf-8")
+    monkeypatch.setattr(wt_env.shutil, "which", lambda name: "uv")
+    run = _Run()
+    assert wt_env.main([NULL40, REAL, "1"], root=tree, runner=run, environ={}) == 0
+    assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
+    out = capsys.readouterr().out
+    assert run.calls == []
+    assert "COMPOSE_PROJECT_NAME=carameli-scratch" in out
+    assert "not provisioned" in out and "worktree.py provision" in out
+    assert not (tree / wt_env.FRICTION_FILE).exists()
+
+
 def test_main_provisions_the_tree_alongside_naming_its_stack(tmp_path, monkeypatch, capsys):
     """One hook, two lines: the compose name and the venv, each only when its own
     conditions hold, and neither able to stop the other."""
     checkout = _repo(tmp_path / "carameli")
     (checkout / ".venv").mkdir()
-    tree = _worktree(checkout, tmp_path / "wt")
+    tree = _worktree(checkout, checkout / ".claude" / "worktrees" / "wt")
     (tree / "uv.lock").write_text("", encoding="utf-8")
     monkeypatch.setattr(wt_env.shutil, "which", lambda name: "uv")
     run = _Run()
@@ -805,7 +913,7 @@ def test_a_no_checkout_worktree_filled_by_a_reset_is_provisioned(tmp_path, monke
         f'#!/bin/sh\necho "post-checkout" >> "{fired.as_posix()}"\n', encoding="utf-8"
     )
     (hooks / "post-checkout").chmod(0o755)
-    tree = tmp_path / "wt"
+    tree = checkout / ".claude" / "worktrees" / "wt"
     hooked = ("-c", f"core.hooksPath={hooks.as_posix()}")
     subprocess.run(
         ["git", "-C", str(checkout), *hooked, "worktree", "add", "--no-checkout", "-q", str(tree)],

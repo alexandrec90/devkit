@@ -60,7 +60,11 @@ def provision(tree: Path, runner=sweep.run_windowless) -> bool:
     file, which the next pass files on the ledger: printed alone, it reached nobody.
 
     Read as UTF-8: the console code page could not decode a byte of `uv`'s output, and
-    the reader thread's traceback in the pass's output read as the pass crashing."""
+    the reader thread's traceback in the pass's output read as the pass crashing.
+
+    What runs, and where, is said before it starts: the output is captured, and a cold
+    `uv sync` is minutes of nothing otherwise (1be306c4)."""
+    print(f"  provisioning {tree} ({' '.join(argv(tree)[1:])})", flush=True)
     done = runner(
         argv(tree),
         check=False,

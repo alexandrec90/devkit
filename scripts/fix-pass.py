@@ -122,9 +122,17 @@ SHIP_BUDGET_SECONDS = 4 * 60.0
 
 # Every CLI the pass spawns before it can say anything, probed by running it: found is
 # not enough. On Windows `python3` is often only the Store alias, which exits 9009, and
-# every git hook runs through it. `gh auth status` rather than `--version`: a `gh`
-# whose token expired answers every read with nothing, which reads as nothing red.
-REQUIRED_TOOLS = {"git": ("--version",), "gh": ("auth", "status"), "python3": ("-c", "")}
+# every git hook runs through it. `gh auth token` rather than `--version`: it fails when
+# no credential is stored, and reads nothing but the store.
+REQUIRED_TOOLS = {"git": ("--version",), "gh": ("auth", "token"), "python3": ("-c", "")}
+# A stored token can still be one GitHub refuses, and a `gh` whose token expired answers
+# every read with nothing, which reads as nothing red -- so `gh auth status` is asked
+# too. But it asks api.github.com, and failing on its exit code alone refused the whole
+# pass as "not usable from this PATH", telling the operator to restart VS Code, when
+# GitHub merely did not answer (f455f3fe, `gh` installed and logged in). Only its saying
+# the token is invalid counts; GitHub being down is each step's to meet, not the PATH's.
+GH_STATUS = ("gh", "auth", "status")
+GH_REFUSED_SAYS = "invalid"
 
 
 def runs(argv: list[str]) -> bool:
@@ -135,8 +143,22 @@ def runs(argv: list[str]) -> bool:
         return False
 
 
+def gh_token_refused() -> bool:
+    """Whether `gh auth status` says the stored token is invalid; a status that failed
+    for any other reason -- GitHub not answering -- is not that."""
+    try:
+        done = ship_intent.run_quiet(list(GH_STATUS))
+    except OSError:
+        return False
+    said = f"{done.stdout or ''}\n{done.stderr or ''}".lower()
+    return done.returncode != 0 and GH_REFUSED_SAYS in said
+
+
 def missing_tools() -> list[str]:
-    return [tool for tool, args in REQUIRED_TOOLS.items() if not runs([tool, *args])]
+    missing = [tool for tool, args in REQUIRED_TOOLS.items() if not runs([tool, *args])]
+    if "gh" not in missing and gh_token_refused():
+        missing.insert(list(REQUIRED_TOOLS).index("gh"), "gh")
+    return missing
 
 
 def write_artifact(text: str, root: Path | None = None) -> Path:
