@@ -17,6 +17,8 @@ from support import REPO_ROOT, devkit_project, load_script
 
 rs = load_script("scripts/resume-sessions.py")
 agent_models = load_script("scripts/agent_models.py")
+fix_prompts = load_script("scripts/fix_prompts.py")
+watchdog = load_script("scripts/fix-pass-watchdog.py")
 
 
 # --- fixtures ---------------------------------------------------------------
@@ -286,6 +288,37 @@ def test_collect_walks_every_project_directory(tmp_path):
     write_transcript(store, "two", cwd=cwd, slug="proj-b")
     write_transcript(store, "sub", cwd=cwd, slug="proj-b", sidechain=True)
     assert {s.session_id for s in rs.collect(store, "claude")} == {"one", "two"}
+
+
+def test_a_fixer_session_is_not_collected(tmp_path):
+    """The fix pass opens a batch a run; resuming them would crowd out the person's own."""
+    store, cwd = tmp_path / "store", tmp_path / "repo"
+    cwd.mkdir()
+    write_transcript(store, "mine", cwd=cwd, prompt="add the task")
+    write_transcript(store, "fixer", cwd=cwd, prompt=fix_prompts.ROLE + " Fix PR #12.")
+    write_codex_rollout(tmp_path / "codex", "codex-fixer", cwd=cwd, prompt=fix_prompts.ROLE)
+    assert [s.session_id for s in rs.collect(store, "claude")] == ["mine"]
+    assert rs.collect(tmp_path / "codex", "codex") == []
+
+
+def test_a_fixer_is_known_by_its_role_sentence_alone(tmp_path):
+    """A transcript from before `ROLE`'s later clauses were reworded is still a fixer."""
+    reworded = "You are a fixer session, dispatched by the fix pass. Something else now."
+    assert rs.is_fixer(session("old", 1.0, tmp_path, prompt=reworded))
+
+
+def test_a_person_talking_about_fixers_is_not_one(tmp_path):
+    for prompt in ("how frequently does scheduled fixer run?", "resume my fixer session"):
+        assert not rs.is_fixer(session("mine", 1.0, tmp_path, prompt=prompt))
+
+
+def test_every_prompt_the_fix_pass_sends_opens_as_a_fixer(tmp_path):
+    """Pinned to the real prompt builders, so a reworded opening cannot slip past."""
+    prompts = [fix_prompts._framed("Fix the thing.")]
+    prompts.append(watchdog.rescue_prompt("crashed", "a traceback", "agent/fix-pass-rescue-1"))
+    for prompt in prompts:
+        first_line = prompt.splitlines()[0].strip()
+        assert rs.is_fixer(session("fixer", 1.0, tmp_path, prompt=first_line)), prompt[:80]
 
 
 def test_collect_on_a_machine_with_no_store_is_empty(tmp_path):
@@ -746,8 +779,8 @@ def test_each_agent_store_honours_its_config_home(monkeypatch, tmp_path):
 def test_the_script_is_stdlib_only():
     """devkit ships no runtime dependencies, and this runs from a VS Code task.
 
-    `agent_clis`, `agent_models`, `task_input` and `wt_profile` are the only non-stdlib
-    names allowed, and none is a dependency: all four are sibling scripts in the same
+    `agent_clis`, `agent_models`, `fix_prompts`, `task_input` and `wt_profile` are the only
+    non-stdlib names allowed, and none is a dependency: all five are sibling scripts in the same
     directory, reached through the `sys.path` insert above them, and each is stdlib-only
     itself. Naming them here rather than widening the rule keeps a real third-party
     import from slipping in behind the exception.
@@ -762,6 +795,7 @@ def test_the_script_is_stdlib_only():
                 "agent_models",
                 "argparse",
                 "collections",
+                "fix_prompts",
                 "json",
                 "os",
                 "re",

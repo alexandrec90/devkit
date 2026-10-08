@@ -24,12 +24,17 @@ The tabs are laid out **oldest first** in the Windows Terminal already open, so 
 left to right walks forward through the day; `wt_args` owns both halves, over the same
 `agent_tabs.tab_argv` a *fresh* session opens in.
 
-Two kinds of transcript are deliberately skipped, and both would otherwise displace a
+Three kinds of transcript are deliberately skipped, and each would otherwise displace a
 real session out of the requested set:
 
 - **Claude sidechains.** A subagent's transcript is a session file like any other and is
   written more recently than the parent that spawned it. `--resume` on one reopens a
   subagent's context, which is never what "resume my last session" means.
+- **Fixer sessions.** The fix pass dispatches a batch of them every run, in either CLI,
+  and they finish on their own; a desk that ran one pass overnight would otherwise open
+  only fixers in the morning. One is known by its opening prompt, which always begins
+  with `fix_prompts.ROLE` -- the sentence the pass uses to tell the session what it is --
+  or, for the watchdog's rescue of the pass itself, with that rescue's own opening.
 - **A directory that is gone.** A reaped box takes its checkout with it; `--resume`
   keyed to that directory has nothing to reopen. These are reported by name rather
   than passed over silently — a session you remember working in, missing from the
@@ -72,6 +77,7 @@ import agent_tabs
 import task_input
 import wt_profile
 from agent_models import NOTHING_PICKED, Launch, add_arguments
+from fix_prompts import ROLE
 
 # The update stage, taken as an argument so a test of the launch path cannot spawn a real
 # updater by forgetting to stub one. `agent_clis.run_pass` is its only production value.
@@ -105,6 +111,13 @@ _WRAPPED_RE = re.compile(r"<(command-[a-z-]+|local-command-[a-z]+|system-reminde
 # Codex persists these as user-role input blocks before the first thing the human
 # typed. They are context, not a useful tab title.
 _CODEX_CONTEXT_PREFIXES = ("# AGENTS.md instructions", "<environment_context>")
+
+# How an unattended fix session's prompt opens: the role sentence of every fix-pass
+# prompt, and the watchdog's rescue of the pass itself (`fix-pass-watchdog.rescue_prompt`,
+# spelled here because that script is loaded by no one; a test pins the two together).
+# `ROLE`'s first sentence only: the rest has been reworded before, and a fixer transcript
+# from before a rewording is still a fixer. `Session.prompt` is the prompt's first line.
+FIXER_OPENINGS = (ROLE.partition(". ")[0] + ".", "The scheduled fix pass itself is failing (")
 
 
 @dataclass(frozen=True)
@@ -272,6 +285,11 @@ def parse_codex_session(path: Path) -> Session | None:
     return Session(agent="codex", session_id=session_id, cwd=Path(cwd), prompt=prompt, mtime=mtime)
 
 
+def is_fixer(session: Session) -> bool:
+    """Whether the fix pass dispatched this session rather than a person opening it."""
+    return session.prompt.startswith(FIXER_OPENINGS)
+
+
 def collect(root: Path, agent: str) -> list[Session]:
     """Every resumable session for the chosen agent, in no particular order."""
     if not root.is_dir():
@@ -280,7 +298,7 @@ def collect(root: Path, agent: str) -> list[Session]:
         found = (parse_claude_session(path) for path in root.glob("*/*.jsonl"))
     else:
         found = (parse_codex_session(path) for path in root.rglob("rollout-*.jsonl"))
-    return [session for session in found if session is not None]
+    return [session for session in found if session is not None and not is_fixer(session)]
 
 
 # --- choosing which to reopen ------------------------------------------------
