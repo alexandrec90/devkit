@@ -31,6 +31,10 @@ which survives this file crashing). Two rules hold it together:
    (`fix_drift.py`), any other drift reported and left; tracker issues whose workflow is
    green at the tip closed (`fix_issues.py`).
 
+The pass keeps inside the watchdog's stop (`send_deadline`): past its deadline the ship
+under way is ended and held, no further step starts and no session is launched, and the
+record says what was left. Each step prints a line as it starts.
+
 Every pass appends a line to `logs/fix-pass.history.jsonl`, which `fix_stall` reads.
 `"devkit.fixPass"` in the workspace file is `off` (the default), `plan` (write it all,
 do nothing) or `dispatch`. Scheduled runs use `claude-bg`. The record is
@@ -43,10 +47,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -120,11 +125,42 @@ RUN_LOCK_STALE = 26 * 60.0
 # one ship started just inside it still has to finish, and the pass after it.
 SHIP_BUDGET_SECONDS = 4 * 60.0
 
+# The seconds this run has before the watchdog stops it, handed over by the watchdog
+# (`fix-pass-watchdog.WINDOW_ENV`): a rerun after a mid-pass merge gets only what is left
+# of the fire. A pass started any other way assumes the whole of the watchdog's stop.
+WINDOW_ENV = "DEVKIT_FIX_PASS_SECONDS"
+WINDOW_SECONDS = 25 * 60.0
+# What the pass keeps back from that stop: past it, the ship under way is ended
+# (`ship_intent.bounded`), no further step starts (`Journal.left`) and no session is
+# launched. That evening the watchdog stopped two passes running -- each with no record,
+# no history line and its lock left behind. At 01:00 the reading steps took fifteen
+# minutes after a five-minute ship, and the send began at minute 20, launching three
+# sessions at up to 2.5 minutes each. At 01:30 one roguelike commit's hooks ran past
+# fifteen minutes. The step under way at the deadline still has to finish, and the
+# record after it.
+SEND_RESERVE_SECONDS = 5 * 60.0
+LATE = "left to the next pass, past the deadline"
+# The send step's result when it raised: nothing sent, nothing held, the task red.
+UNSENT: tuple[tuple, tuple, int] = ((), (), EXIT_FAILED)
+
 # Every CLI the pass spawns before it can say anything, probed by running it: found is
 # not enough. On Windows `python3` is often only the Store alias, which exits 9009, and
 # every git hook runs through it. `gh auth status` rather than `--version`: a `gh`
 # whose token expired answers every read with nothing, which reads as nothing red.
 REQUIRED_TOOLS = {"git": ("--version",), "gh": ("auth", "status"), "python3": ("-c", "")}
+
+
+def window(env: Mapping[str, str] = os.environ) -> float:
+    """The seconds this run has before the watchdog stops it (`WINDOW_ENV`)."""
+    try:
+        return float(env.get(WINDOW_ENV, ""))
+    except ValueError:
+        return WINDOW_SECONDS
+
+
+def send_deadline(started: float, env: Mapping[str, str] = os.environ) -> float:
+    """The `time.monotonic()` past which a pass started at `started` launches no one."""
+    return started + window(env) - SEND_RESERVE_SECONDS
 
 
 def runs(argv: list[str]) -> bool:
@@ -227,6 +263,36 @@ def shipped_line(outcome: ship_intent.Outcome, where: str) -> str:
     return f"{where} -- {outcome.stage}: {' '.join(detail.split())[-240:]}"
 
 
+def carried_where(intent: ship_intent.Intent, outcome: ship_intent.Outcome, root: Path) -> str:
+    """The record's name for a ship carried off a retired branch, re-pointing the
+    resolutions that named it.
+
+    The record names what went out, or it reads as a merged branch shipping again. The
+    session's resolutions named the retired name too, whose PR predates them, so they
+    follow the fix to its new one. A hand-named branch never headed a PR, so every
+    resolution naming it does.
+    """
+    if intent.adopt:
+        since = ship_intent.EVER
+    else:
+        since = ship_intent.retired_at(intent.tree, intent.branch)
+    moved = fix_loop.triage.repoint(
+        intent.branch, outcome.intent.branch, since, root / fix_cycle.DEVKIT
+    )
+    return (
+        f"{intent.project} {outcome.intent.branch} (carried off {intent.branch}; "
+        f"{len(moved)} resolution(s) re-pointed)"
+    )
+
+
+def deadline_of(journal: Journal | None) -> float | None:
+    """The `time.monotonic()` the journal's deadline falls at (`Journal.left`), or None
+    for a journal with none: what `ship_intent.bounded` ends a ship by."""
+    if journal is None or journal.left is None:
+        return None
+    return time.monotonic() + journal.left()
+
+
 def ship_intents(
     root: Path,
     projects: list[str],
@@ -243,7 +309,9 @@ def ship_intents(
     devkit session to move. One whose fixer is still busy in its tree waits, and so does
     one a live session has edited past (`fix_loop.why_held`), and so does every one left
     once the step has spent `budget` seconds: the steps after it are what send anyone
-    anywhere.
+    anywhere. The budget bounds when a ship may start; the journal's deadline
+    (`Journal.left`) bounds the one under way, which is ended there and held for the
+    next pass.
     """
     lines: list[str] = []
     refused: list[fix_plan.Failure] = []
@@ -269,23 +337,20 @@ def ship_intents(
         if provisioned := provision_for_ship(intent.tree):
             lines.append(f"{where} -- {provisioned}")
         # Read after provisioning, so the commit stage runs with the `.venv` just made.
-        outcome = ship_intent.ship_one(intent, push_gate.interpreter(intent.tree), base)
+        python = push_gate.interpreter(intent.tree)
+        try:
+            with ship_intent.bounded(deadline_of(journal)):
+                outcome = ship_intent.ship_one(intent, python, base)
+        except ship_intent.OutOfTime as stopped:
+            # Ended, not refused: nothing about the change said no, so no fixer is sent.
+            cleared = stopped.ended and ship_intent.clear_index_lock(intent.tree)
+            lines.append(
+                f"{where} -- held: {stopped}{' (its index.lock removed)' if cleared else ''}"
+                f"; the next pass ships it"
+            )
+            continue
         if outcome.intent.branch != intent.branch:
-            # Carried off a retired name: the record names what went out, or it reads as
-            # a merged branch shipping again. The session's resolutions named the retired
-            # name too, whose PR predates them, so they follow the fix to its new one. A
-            # hand-named branch never headed a PR, so every resolution naming it does.
-            if intent.adopt:
-                since = ship_intent.EVER
-            else:
-                since = ship_intent.retired_at(intent.tree, intent.branch)
-            moved = fix_loop.triage.repoint(
-                intent.branch, outcome.intent.branch, since, root / fix_cycle.DEVKIT
-            )
-            where = (
-                f"{intent.project} {outcome.intent.branch} (carried off {intent.branch}; "
-                f"{len(moved)} resolution(s) re-pointed)"
-            )
+            where = carried_where(intent, outcome, root)
         lines.append(shipped_line(outcome, where))
         if outcome.stage == ship_intent.REFUSED:
             refused.append(ship_intent.refusal_failure(outcome, base))
@@ -329,8 +394,10 @@ def _ship_and_merge(
     root: Path, projects: list[str], mode: str, journal: Journal
 ) -> tuple[list[str], list[fix_plan.Failure], bool, list[str]]:
     """Steps 1 and 2, each isolated: `(shipped lines, refusals, ship failed, merged)`."""
+    # Not failed by default: a crash is already `journal.crashed`, and one left for time
+    # is late.
     shipped, refused, failed = journal.step(
-        "ship", ship_intents, root, projects, mode, journal, default=([], [], True)
+        "ship", ship_intents, root, projects, mode, journal, default=([], [], False)
     )
     if mode != fix_cycle.DISPATCH:
         return shipped, refused, failed, []
@@ -417,13 +484,74 @@ def context(workspace: Path, mode: str, now: _dt.datetime) -> fix_loop.Context:
     return fix_loop.Context(root, projects, devkit_dir, ledger_path, history, mode, now, booted)
 
 
+def pass_journal(devkit_dir: Path, deadline: float) -> Journal:
+    """The pass's journal: its step errors, `deadline` (a `time.monotonic()`) as
+    `Journal.left`, and a flushed line as each step starts (`Journal.trace`), so the
+    watchdog's log of a pass it stopped names the step its minutes went to."""
+    begun = time.monotonic()
+    errors = (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError)
+    return Journal(
+        devkit_dir,
+        errors=fix_loop.fix_findings.STEP_ERRORS + errors,
+        left=lambda: deadline - time.monotonic(),
+        trace=lambda name: print(
+            f"fix-pass: step {name} at {int(time.monotonic() - begun)}s", flush=True
+        ),
+    )
+
+
+def release_and_plan(
+    workspace: Path,
+    ctx: fix_loop.Context,
+    journal: Journal,
+    failures: list[fix_plan.Failure],
+    green: bool | str | None,
+    backlog: fix_plan.Failure | None,
+) -> tuple[str, tuple]:
+    """Step 4's release and plan, each isolated: `(release line, decide's result)`, the
+    plan falling back to the harness alone when it raises."""
+    step = journal.step
+    newest = step("newest-release", gate_evidence.newest_release, ctx.devkit_dir, default="")
+    dispatching = ctx.mode == fix_cycle.DISPATCH
+    release = step(
+        "release",
+        fix_release.cut_release,
+        workspace,
+        newest,
+        green,
+        dispatching,
+        ctx.now,
+        default="",
+    )
+    adopting = step(
+        "adoptions", fix_release.pending_adoptions, ctx.root, ctx.projects, newest, default=[]
+    )
+    prefixes = fix_release.adoption_prefixes()
+    fallback = fix_cycle.only_the_harness(backlog)
+    return release, step(
+        "plan", decide, failures, green, newest, adopting, prefixes, default=fallback
+    )
+
+
+def late_lines(journal: Journal) -> tuple[str, ...]:
+    """The record's line naming every step left for the deadline (`Journal.late`). Past
+    it the record is what is left to protect: the watchdog's stop would take it, the
+    history line and the lock, and every skipped step keeps for a pass."""
+    return (f"{LATE}: {', '.join(journal.late)}",) if journal.late else ()
+
+
 def run(
     workspace: Path,
     mode: str,
     launch: agent_models.Launch,
     now: _dt.datetime | None = None,
+    deadline: float | None = None,
 ) -> int:
+    """One pass. `deadline` is the `time.monotonic()` past which it ends the ship under
+    way, starts no further step and launches no session (`send_deadline`); by default,
+    measured from this call."""
     now = now or _dt.datetime.now(_dt.UTC)
+    deadline = send_deadline(time.monotonic()) if deadline is None else deadline
     if mode == fix_cycle.OFF:
         # A switched-off fire did nothing, so it says so only where nothing else has:
         # every half hour it would otherwise erase the record a manual pass just wrote.
@@ -432,9 +560,7 @@ def run(
         return EXIT_OK
     ctx = context(workspace, mode, now)
     root, projects, devkit_dir = ctx.root, ctx.projects, ctx.devkit_dir
-    errors = (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError)
-    journal = Journal(devkit_dir, errors=fix_loop.fix_findings.STEP_ERRORS + errors)
-    prefixes = fix_release.adoption_prefixes()
+    journal = pass_journal(devkit_dir, deadline)
     step = journal.step
 
     shipped, refused, ship_failed, merged = _ship_and_merge(root, projects, mode, journal)
@@ -450,24 +576,19 @@ def run(
     closed.verified += step("pending", fix_loop.recheck_open, ctx, default=[])
     backlog = step("backlog", fix_red.backlog_failure, workspace, closed.in_flight, default=None)
     failures += [backlog] if backlog else []
-    newest = step("newest-release", gate_evidence.newest_release, devkit_dir, default="")
-    dispatching = mode == fix_cycle.DISPATCH
-    release = step(
-        "release", fix_release.cut_release, workspace, newest, green, dispatching, now, default=""
-    )
-    adopting = step("adoptions", fix_release.pending_adoptions, root, projects, newest, default=[])
-    fallback = fix_cycle.only_the_harness(backlog)
-    harness, go, held, skipped = step(
-        "plan", decide, failures, green, newest, adopting, prefixes, default=fallback
+    release, (harness, go, held, skipped) = release_and_plan(
+        workspace, ctx, journal, failures, green, backlog
     )
 
     # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current.
     go, held, moved = step("current", fix_send.hold_if_moved, go, held, ctx, default=(go, held, ""))
     items = fix_loop.triage.load(devkit_dir)
+    # Run past the deadline too, holding each session it would launch out loud: a pass
+    # that skipped it would leave its decisions out of the record altogether.
     sent, capped, worst = step(
-        "send", send_all, go, ctx, launch, journal, closed, items, default=([], [], EXIT_FAILED)
+        "send", send_all, go, ctx, launch, journal, closed, items, default=UNSENT, always=True
     )
-    if dispatching:
+    if mode == fix_cycle.DISPATCH:
         step("installers", refresh_installers, workspace, journal, default=2)
     drift, issues = tend(workspace, ctx, journal)
     filed += fix_loop.record(ctx, journal)
@@ -489,7 +610,10 @@ def run(
         fix_loop.backlog(ctx),
         tuple(closed.stopped),
         tuple(closed.verified),
-        *(tuple(rows) for rows in (unsent, drift, issues)),
+        dependabot=tuple(unsent),
+        drift=tuple(drift),
+        issues=tuple(issues),
+        late=late_lines(journal),
     )
     publish(account, now)
     return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
@@ -579,6 +703,7 @@ def run_alone(
     launch: agent_models.Launch,
     wait: float = RUN_LOCK_WAIT,
     stale: float = RUN_LOCK_STALE,
+    deadline: float | None = None,
 ) -> int:
     """`run`, with no other dispatching pass on the machine running beside it.
 
@@ -587,10 +712,11 @@ def run_alone(
     in another checkout, so left alone the record here was the previous pass's, which
     the supervisor read back as this one's. A lock that could
     not be made at all -- no lock directory standing -- is no evidence of another pass,
-    so the pass runs, as it did before there was a lock.
+    so the pass runs, as it did before there was a lock. `deadline` is `run`'s, and the
+    wait for the lock counts against it.
     """
     if mode != fix_cycle.DISPATCH:
-        return run(workspace, mode, launch)
+        return run(workspace, mode, launch, deadline=deadline)
     root = workspace.parent
     with worktree.named_lock(root, RUN_LOCK_NAME, wait, stale) as held:
         lock = worktree.boxes_root(root) / RUN_LOCK_NAME
@@ -602,10 +728,12 @@ def run_alone(
             print(f"fix-pass: {why}")
             write_artifact(f"fix-pass: yielded -- {why}")
             return EXIT_OK
-        return run(workspace, mode, launch)
+        return run(workspace, mode, launch, deadline=deadline)
 
 
 def main(argv: list[str] | None = None) -> int:
+    # From the start: the watchdog's stop counts the preflight and the lock wait too.
+    deadline = send_deadline(time.monotonic())
     fix_send.pin_loaded(REPO_ROOT)  # before anything can fast-forward the checkout
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     workspace = args.workspace.resolve()
@@ -635,7 +763,7 @@ def main(argv: list[str] | None = None) -> int:
     if mode != fix_cycle.OFF and (trusted := git_trust.adopt(workspace.parent, write=writes)):
         print(trusted)
     try:
-        return run_alone(workspace, mode, launch)
+        return run_alone(workspace, mode, launch, deadline=deadline)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:
         print(f"fix-pass: {exc}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {exc}")

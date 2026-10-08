@@ -57,6 +57,9 @@ EVENT = "fix-pass-finding"
 # Under the task's half-hour interval, so two passes never overlap.
 TIMEOUT = _dt.timedelta(minutes=25)
 MIN_RERUN = _dt.timedelta(minutes=5)
+# `fix-pass.WINDOW_ENV`, spelled here because this file imports nothing the pass does: the
+# seconds this run of the pass has before it is stopped, which it launches no session past.
+WINDOW_ENV = "DEVKIT_FIX_PASS_SECONDS"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 MODE = re.compile(r'"devkit\.fixPass"\s*:\s*"(\w+)"')
 RESCUE_PREFIX = "agent/fix-pass-rescue"
@@ -182,7 +185,9 @@ def run_pass(argv: list[str], timeout: _dt.timedelta = TIMEOUT) -> tuple[int | N
 
     The pass runs in UTF-8 mode: dozens of its runners use `text=True` with no encoding,
     and on a cp1252 console a child's `”` killed their reader thread and lost output.
+    It is told `timeout` too, so it can finish inside it rather than be stopped.
     """
+    window = str(int(timeout.total_seconds()))
     try:
         done = subprocess.run(
             [console_python(), str(PASS), *argv],
@@ -190,7 +195,7 @@ def run_pass(argv: list[str], timeout: _dt.timedelta = TIMEOUT) -> tuple[int | N
             text=True,
             encoding="utf-8",
             errors="replace",
-            env={**os.environ, "PYTHONUTF8": "1"},
+            env={**os.environ, "PYTHONUTF8": "1", WINDOW_ENV: window},
             check=False,
             timeout=timeout.total_seconds(),
             creationflags=NO_WINDOW,

@@ -220,12 +220,34 @@ class Journal:
     findings: list[Finding] = field(default_factory=list)
     crashed: list[str] = field(default_factory=list)
     errors: tuple[type[Exception], ...] = STEP_ERRORS
+    # Told each step's name as it starts: the pass prints it, so a pass the watchdog
+    # stopped leaves a timeline of where its minutes went.
+    trace: Callable[[str], None] | None = None
+    # Seconds before the pass's deadline; at or past it a step is not run but listed in
+    # `late`, so the pass reaches its record before the watchdog stops it.
+    left: Callable[[], float] | None = None
+    late: list[str] = field(default_factory=list)
 
     def add(self, *found: Finding) -> None:
         self.findings.extend(found)
 
-    def step(self, name: str, fn: Callable[..., object], *args, default=None, **kwargs):
-        """`fn(*args, **kwargs)`, or `default` with a finding when it raises."""
+    def step(
+        self,
+        name: str,
+        fn: Callable[..., object],
+        *args,
+        default=None,
+        always: bool = False,
+        **kwargs,
+    ):
+        """`fn(*args, **kwargs)`, or `default` with a finding when it raises -- or, past
+        the deadline, `default` with `name` in `late`, unless `always` (a step that keeps
+        its own time)."""
+        if not always and self.left is not None and self.left() <= 0:
+            self.late.append(name)
+            return default
+        if self.trace is not None:
+            self.trace(name)
         try:
             return fn(*args, **kwargs)
         except self.errors as exc:
