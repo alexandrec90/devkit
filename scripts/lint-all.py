@@ -241,6 +241,8 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 # Wall-clock bound on one linter, in seconds. See the template's copy for why.
 TOOL_TIMEOUT = 600.0
+# The head of the block `ruff check --fix --show-fixes` lists its fixes under.
+FIXED_HEAD = re.compile(r"^Fixed \d+ errors?:$")
 
 
 def run_tool(name: str, cmd: list[str], fix_hint: str, timeout: float = TOOL_TIMEOUT) -> str:
@@ -309,6 +311,27 @@ def not_clean_reason() -> str:
     )
 
 
+def applied_fixes(output: str) -> list[str]:
+    """`path -- <count> <times> <rule> (<name>), ...` per file the `--show-fixes` block of
+    a `ruff check --fix` run names; none when it fixed nothing.
+
+    An unsafe fix changes code, not layout: F841 deleted an assignment from a test being
+    written, and the run said only "ruff: ok" (802b5602). Each change is printed so a
+    rewrite is never silent, as the commit stage's own fixers are not.
+    """
+    rows = output.splitlines()
+    start = next((i for i, row in enumerate(rows) if FIXED_HEAD.match(row)), len(rows))
+    files: list[tuple[str, list[str]]] = []
+    for row in rows[start + 1 :]:
+        if not row.strip():
+            break
+        if row.startswith("- "):
+            files.append((row[2:].rstrip(":"), []))
+        elif files:
+            files[-1][1].append(row.strip())
+    return [f"{path} -- {', '.join(codes)}" for path, codes in files]
+
+
 def python_sections(targets: list[str]) -> str:
     """The ruff and mypy sections for `targets`, the whole repo when empty."""
     scope = targets or ["."]
@@ -316,11 +339,14 @@ def python_sections(targets: list[str]) -> str:
     # must stay sequential relative to each other. No `--exclude` guard here: see the
     # module docstring — devkit formats its own harness, and CI's `ruff format --check`
     # is what would fail if it did not.
-    subprocess.run(
-        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes"],
+    fixed = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes", "--show-fixes"],
         cwd=REPO_ROOT,
         capture_output=True,
+        text=True,
     )
+    for line in applied_fixes(fixed.stdout or ""):
+        print(f"  ruff --fix changed {line}")
     subprocess.run(
         [sys.executable, "-m", "ruff", "format", *scope],
         cwd=REPO_ROOT,

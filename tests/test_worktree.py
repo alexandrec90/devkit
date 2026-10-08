@@ -2663,6 +2663,28 @@ def test_the_cut_leaves_provisioning_to_the_box_not_the_checkout_hook(workspace,
     assert all(env.get(worktree.worktree_env.SKIP_PROVISION_VAR) == "1" for env in envs)
 
 
+def test_cut_worktree_retries_past_a_failed_fetch_and_reports_any_other_failure(monkeypatch):
+    seen: list[tuple[tuple[str, ...], ...]] = []
+    fetch = ("fetch", "origin")
+    add = ("worktree", "add", "x")
+
+    def fails_at(*failing: str):
+        def fake_run_steps(cwd, steps, timeout=300.0, env=None):
+            seen.append(steps)
+            rendered = "git " + " ".join(steps[0])
+            return ([], rendered, "boom\nmore") if rendered in failing else ([], "", "")
+
+        return fake_run_steps
+
+    monkeypatch.setattr(worktree, "run_steps", fails_at("git fetch origin"))
+    ok, notes = worktree.cut_worktree(Path("."), (fetch, add), 5.0)
+    assert ok and seen == [(fetch, add), (add,)]
+    assert notes == ["fetch failed (boom) — the box is cut from a possibly stale origin/<default>"]
+    monkeypatch.setattr(worktree, "run_steps", fails_at("git worktree add x"))
+    ok, notes = worktree.cut_worktree(Path("."), (add,), 5.0)
+    assert not ok and notes == ["FAILED at `git worktree add x`: boom\nmore"]
+
+
 def test_run_steps_hands_git_the_environment_it_is_given(tmp_path):
     """The hook reads `SKIP_PROVISION_VAR` from the environment `git` passes it."""
     import os as _os

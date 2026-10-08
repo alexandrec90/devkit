@@ -48,6 +48,7 @@ import argparse
 import contextlib
 import datetime as _dt
 import json
+import os
 import re
 import subprocess
 import sys
@@ -122,6 +123,7 @@ ENGINE_POLL = 15
 # `RESTART_EVERY`, recorded in `RESTARTED`, so a restart that does not help is not
 # repeated every pass.
 DESKTOP_TIMEOUT = 30
+DESKTOP_IMAGE = "Docker Desktop.exe"
 RESTART_TIMEOUT = 600
 RESTART_EVERY = 3600
 RESTARTED = Path("logs/collectors.engine-restart.json")
@@ -132,6 +134,8 @@ OK, WARN, FAIL = "ok", "warn", "fail"
 ROW_PREFIX = "collector: "
 # A row's state when the project's own verdict is the failing part.
 HEALTH_FAILING = "health check failing"
+# A `run` row's state when the engine itself is silent: the machine's, not the project's.
+NOT_ANSWERING = "docker is not answering"
 # The line a health command may print naming its failing jobs, as ibkr_trader's does:
 # `unhealthy: social, reddit`. The row carries them into the state, so each job's failure
 # is its own group: without them, `social` missing boto3 read as `reddit`'s fixed failure
@@ -222,6 +226,19 @@ def parse_created(text: str) -> float | None:
     return when.timestamp() if when.tzinfo else None
 
 
+def desktop_status(text: str) -> str | None:
+    """The `Status` `docker desktop status --format json` printed, or None when it printed
+    none. The JSON object is read wherever it sits: `spawn` merges stderr in, so a warning
+    the CLI writes beside it must not turn "running" into an unreadable answer."""
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        said = json.loads(text[start : end + 1]) if 0 <= start < end else None
+    except ValueError:
+        return None
+    status = said.get("Status") if isinstance(said, dict) else None
+    return status if isinstance(status, str) else None
+
+
 class Docker:
     """Everything that touches the engine: one captured, window-less spawn per call.
     `restarts` is where `revive_engine` records a restart of Docker Desktop; None, as
@@ -276,13 +293,26 @@ class Docker:
         return code == 0, out
 
     def desktop_running(self) -> bool:
-        """Whether Docker Desktop itself says it is running, whatever its engine says."""
+        """Whether Docker Desktop is running, whatever its engine says: its own status when
+        it gives a readable one, else whether its process is up (`desktop_process`).
+
+        A status that failed is not one saying "stopped": on 2026-10-08 the 21:31 and 21:46
+        passes read Desktop as quit -- "start it" -- and stood the revive down, while the
+        Desktop the 20:15 revive had started was up the whole time and its engine wedged.
+        """
         code, out = self.run(["docker", "desktop", "status", "--format", "json"], DESKTOP_TIMEOUT)
-        try:
-            said = json.loads(out) if code == 0 else None
-        except ValueError:
+        said = desktop_status(out) if code == 0 else None
+        if said is not None:
+            return said == "running"
+        return self.desktop_process()
+
+    def desktop_process(self) -> bool:
+        """Whether `DESKTOP_IMAGE` is running on this machine; never off Windows."""
+        if os.name != "nt":
             return False
-        return isinstance(said, dict) and said.get("Status") == "running"
+        argv = ["tasklist", "/FI", f"IMAGENAME eq {DESKTOP_IMAGE}", "/FO", "CSV", "/NH"]
+        code, out = self.run(argv, DESKTOP_TIMEOUT)
+        return code == 0 and f'"{DESKTOP_IMAGE.lower()}"' in out.lower()
 
     def restart_desktop(self) -> tuple[bool, str]:
         # Docker's own restart, not `docker-maint.py restart-engine`: that one taskkills
@@ -410,15 +440,22 @@ def redeploy(
     target: Target, box: Container, docker: Docker, git: Git, report: Report, last: dict
 ) -> dict:
     """Rebuild `box` onto the checkout's HEAD when its code is older and HEAD is merged
-    code. Returns what to record: `code_at`, `held` when a redeploy was owed and refused,
-    and `deployed` when this pass redeployed (and so must skip the health check)."""
+    code -- the newest HEAD among the checkout and those it `builds_from`, each of which
+    must be merged code. Returns what to record: `code_at`, `held` when a redeploy was
+    owed and refused, and `deployed` when this pass redeployed (and so must skip the
+    health check)."""
     name, service = target.collector.project, target.collector.service
     known = code_at(box, docker, last)
-    head = git.head(target.checkout) if known is not None else None
-    if known is None or head is None or head[1] <= known:
-        return {CODE_AT: known} if known is not None else {}
-    sha, committed = head
-    held = git.held(target.checkout)
+    if known is None:
+        return {}
+    heads = source_heads(target, git)
+    newest = max(heads, key=lambda pair: pair[1][1], default=None)
+    if newest is None or newest[1][1] <= known:
+        return {CODE_AT: known}
+    where, (sha, committed) = newest
+    sha = sha if where == target.checkout else f"{where.name}@{sha}"
+    # Every checkout the image copies is baked into it, so each must be merged code.
+    held = next((_held_in(target, w, why) for w, _head in heads if (why := git.held(w))), "")
     if held:
         report.say(
             f"{name}: `{service}` runs code older than {sha} and was not redeployed -- {held}"
@@ -433,6 +470,18 @@ def redeploy(
         return {CODE_AT: known}
     report.say(f"{name}: redeployed `{service}` onto {sha} -- its code was older")
     return {CODE_AT: committed, "deployed": True}
+
+
+def source_heads(target: Target, git: Git) -> list[tuple[Path, tuple[str, float]]]:
+    """`(checkout, its HEAD)` for the target's checkout and each it `builds_from`, leaving
+    out any git cannot read."""
+    roots = [target.checkout, *(target.checkout.parent / s for s in target.collector.builds_from)]
+    return [(root, head) for root in roots if (head := git.head(root)) is not None]
+
+
+def _held_in(target: Target, where: Path, why: str) -> str:
+    """`Git.held`'s answer for `where`, naming it when it is a checkout built from."""
+    return why if where == target.checkout else f"{where.name}: {why}"
 
 
 def keep_running(
@@ -735,7 +784,7 @@ def row(
             return WARN, "running here, but this machine is set to stop it"
         return OK, "off on this machine (by choice)"
     if containers is None:
-        return FAIL, "docker is not answering"
+        return FAIL, NOT_ANSWERING
     box = find(containers, target.checkout, target.collector.service)
     if box is None or not box.running:
         return down_row(box, busy)

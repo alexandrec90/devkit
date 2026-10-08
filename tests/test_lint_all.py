@@ -192,16 +192,55 @@ def test_scope_unknown_fails_and_puts_gits_answer_in_the_artifact(monkeypatch, t
 
 def test_python_sections_lints_the_targets_or_else_the_whole_repo(monkeypatch):
     fixed: list[list[str]] = []
-    monkeypatch.setattr(lint_all.subprocess, "run", lambda cmd, **kw: fixed.append(cmd[3:]))
+
+    def run(cmd, **kw):
+        fixed.append(cmd[3:])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(lint_all.subprocess, "run", run)
     monkeypatch.setattr(lint_all, "run_tool", lambda name, cmd, hint: f"{name} {cmd[3:]};")
     assert lint_all.python_sections(["a.py"]) == (
         "ruff ['check', 'a.py', '--output-format=full'];mypy ['a.py', '--show-error-codes'];"
     )
-    assert fixed == [["check", "a.py", "--fix", "--unsafe-fixes"], ["format", "a.py"]]
+    assert fixed == [
+        ["check", "a.py", "--fix", "--unsafe-fixes", "--show-fixes"],
+        ["format", "a.py"],
+    ]
     assert lint_all.python_sections([]) == (
         "ruff ['check', '.', '--output-format=full'];"
         f"mypy {[*lint_all.MYPY_SCOPE, '--show-error-codes']};"
     )
+
+
+# ruff's own spelling of "times" in its `--show-fixes` block.
+TIMES = "\N{MULTIPLICATION SIGN}"
+
+
+def test_applied_fixes_reads_ruffs_show_fixes_block():
+    output = (
+        "F821 Undefined name `g`\n --> a.py:3:5\n\n"
+        f"Fixed 3 errors:\n- a.py:\n    1 {TIMES} F841 (unused-variable)\n"
+        f"    1 {TIMES} F401 (unused-import)\n"
+        f"- tests/b.py:\n    1 {TIMES} F541 (f-string-missing-placeholders)\n\n"
+        "Found 4 errors (3 fixed, 1 remaining).\n"
+    )
+    assert lint_all.applied_fixes(output) == [
+        f"a.py -- 1 {TIMES} F841 (unused-variable), 1 {TIMES} F401 (unused-import)",
+        f"tests/b.py -- 1 {TIMES} F541 (f-string-missing-placeholders)",
+    ]
+    assert lint_all.applied_fixes("All checks passed!\n") == []
+
+
+def test_a_fix_that_rewrote_a_file_is_said_not_passed_over_as_ok(tmp_path):
+    """802b5602: an unsafe F841 fix deleted an assignment from a test mid-edit, and the
+    run printed only "ruff: ok". The rewrite is named on the terminal, by file and rule."""
+    root = build_repo(tmp_path / "repo")
+    (root / "mid_edit.py").write_text(
+        "def f() -> int:\n    open_now = len([])\n    return 1\n", encoding="utf-8"
+    )
+    result = run_lint(root, "--changed", "--no-secrets")
+    said = f"ruff --fix changed mid_edit.py -- 1 {TIMES} F841 (unused-variable)"
+    assert said in result.stdout, result.stdout + result.stderr
 
 
 def test_an_explicit_path_list_needs_no_git(tmp_path):

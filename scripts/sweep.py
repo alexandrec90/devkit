@@ -64,7 +64,8 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -215,17 +216,56 @@ TIMED_OUT = 124
 KILL_GRACE = 10
 
 
+# The `time.monotonic()` past which no `run_bounded` call runs on, whatever its own
+# timeout: a caller's own stop, set with `until`. None outside one.
+_until: float | None = None
+
+
+@contextmanager
+def until(deadline: float | None) -> Iterator[None]:
+    """Every `run_bounded` inside -- each `gh_for` and `git_for` call -- ends by
+    `deadline` (a `time.monotonic()`), or is not started past it (`TIMED_OUT` either
+    way); None adds no bound. Nested, the earlier deadline holds.
+
+    A per-call timeout bounds one call, not a step that makes many: on 2026-10-08 the
+    fix pass's `verify` read took eleven minutes and its `collect` read was still running
+    twelve minutes later, each `gh` call inside its own 600 s, and the watchdog stopped
+    the pass with no record written (2e2e7804).
+    """
+    global _until
+    before = _until
+    if deadline is not None and (before is None or deadline < before):
+        _until = deadline
+    try:
+        yield
+    finally:
+        _until = before
+
+
+def _within_until(timeout: float | None) -> float | None:
+    """`timeout` cut to what is left before `until`'s deadline; never below zero."""
+    if _until is None:
+        return timeout
+    left = max(_until - time.monotonic(), 0.0)
+    return left if timeout is None else min(timeout, left)
+
+
 def run_bounded(
     argv: list[str], timeout: float | None, **kwargs
 ) -> subprocess.CompletedProcess[str]:
     """`argv` run captured, window-less and unchecked, ended **with its whole process
-    tree** at `timeout` seconds (returncode `TIMED_OUT`); `None` is unbounded.
+    tree** at `timeout` seconds (returncode `TIMED_OUT`); `None` is unbounded. Inside
+    `until`, the deadline bounds it too, and past it the call is not started.
 
     Not `subprocess.run(timeout=)`: on its timeout that kills the direct child only and
     then reads its pipes to the end, unbounded, on Windows -- and `git fetch`'s
     `git-remote-https`, or the `gh` a wrapper started, still holds them. The bound would
     stop the clock and leave the wait.
     """
+    timeout = _within_until(timeout)
+    if timeout is not None and timeout <= 0:
+        said = "not started: past the caller's deadline"
+        return subprocess.CompletedProcess(argv, TIMED_OUT, "", said)
     if timeout is None:
         return run_windowless(argv, capture_output=True, text=True, check=False, **kwargs)
     process = subprocess.Popen(

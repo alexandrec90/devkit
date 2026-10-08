@@ -112,6 +112,17 @@ def test_a_failure_only_the_test_log_names_is_listed_too(tmp_path):
     assert text.count("test_contract.py::test_drop") == 1, "junit's own is not listed twice"
 
 
+def test_logged_failures_skips_an_id_already_named_and_lists_each_id_once(tmp_path):
+    line = "FAILED tests/test_a.py::test_b - boom\n"
+    (tmp_path / "one.log").write_text(line, encoding="utf-8")
+    (tmp_path / "two.log").write_text(line + "FAILED tests/test_a.py::test_c\n", encoding="utf-8")
+    named = {"tests/test_a.py::test_c"}
+    blocks = junit_report.logged_failures(tmp_path, named)
+    assert blocks == ["FAILED tests/test_a.py::test_b\n  boom\n  (traceback in one.log)"]
+    assert named == {"tests/test_a.py::test_b", "tests/test_a.py::test_c"}
+    assert junit_report.logged_failures(tmp_path / "absent", set()) == []
+
+
 def test_a_log_alone_is_enough_for_a_readable_file(tmp_path):
     (tmp_path / "run.log").write_text("ERROR tests/test_a.py::test_b - boom\n", encoding="utf-8")
     text = junit_report.write_readable(tmp_path).read_text(encoding="utf-8")

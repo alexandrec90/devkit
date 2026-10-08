@@ -94,6 +94,8 @@ def run_windowless(*args, **kwargs) -> subprocess.CompletedProcess:
 
 # Seconds between `run_reporting`'s "still running" lines.
 HEARTBEAT = 30
+# Seconds a killed child's output is waited for; past it, it is given up on.
+REAP_GRACE = 10
 
 
 def _say(line: str) -> None:
@@ -114,7 +116,8 @@ def run_reporting(
     captured, so the caller saw nothing until it ended and a slow sync read exactly like a
     hung one -- the session waiting on it hit its tool's 600 s cap with no way to tell.
     Captured output is kept, as `run` keeps it; a timeout kills the child and raises
-    `TimeoutExpired`, as `run` does; so do `check` and `capture_output`.
+    `TimeoutExpired`, as `run` does, carrying what the child had said by then; so do
+    `check` and `capture_output`.
     """
     check = kwargs.pop("check", False)
     if kwargs.pop("capture_output", False):
@@ -127,8 +130,11 @@ def run_reporting(
             elapsed = time.monotonic() - started
             if timeout is not None and elapsed >= timeout:
                 proc.kill()
-                proc.communicate()
-                raise subprocess.TimeoutExpired(argv, timeout)
+                try:
+                    out, err = proc.communicate(timeout=REAP_GRACE)
+                except subprocess.TimeoutExpired:
+                    out = err = None  # a grandchild holds the pipe: say nothing, not hang
+                raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
             wait = interval if timeout is None else min(interval, timeout - elapsed)
             try:
                 out, err = proc.communicate(timeout=wait)
@@ -702,9 +708,12 @@ def provision(
             timeout=PROVISION_TIMEOUT,
             check=False,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as stopped:
+        said = last_said(stopped.stderr, stopped.output)
         return _trouble(
-            here, f"devkit: `{spelled}` did not finish in {PROVISION_TIMEOUT}s; run it here by hand"
+            here,
+            f"devkit: `{spelled}` did not finish in {PROVISION_TIMEOUT}s"
+            f"{f' (it last said: {said})' if said else ''}; run it here by hand",
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return _trouble(here, f"devkit: could not run `{spelled}` ({exc}); run it here by hand")
@@ -714,6 +723,21 @@ def provision(
     elapsed = time.monotonic() - started
     mark_provisioned(here, True)
     return f"devkit: {VENV_DIR} provisioned by `{spelled}` in {elapsed:.0f}s (this worktree's own)"
+
+
+def last_said(*streams: str | bytes | None) -> str:
+    """The last line any of `streams` holds, one line and cut short; "" for none.
+
+    88de458c: a `uv sync` that takes 19 s warm here ran past 600 s while the machine was
+    loaded, and the line said only that -- not whether uv was waiting on its cache lock,
+    downloading or building. What it last printed is the one witness of that.
+    """
+    for stream in streams:
+        text = stream.decode("utf-8", "replace") if isinstance(stream, bytes) else stream or ""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return lines[-1][:200]
+    return ""
 
 
 def mark_provisioned(here: Path, ok: bool) -> None:

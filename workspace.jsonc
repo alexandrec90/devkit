@@ -2667,10 +2667,12 @@
 	,
 	"settings": {
 		"powershell.cwd": "carameli",
-		// Agent trees outnumber checkouts many times over, each with its own `.venv` and
-		// `node_modules`: watching them, and listing every one in Source Control, cost VS
-		// Code memory a 16 GB machine running parallel agents did not have. Made live by
-		// hand on 2026-10-08 and adopted here (e6579536).
+		// Memory on a 16 GB box: the folders above hold ~75 agent worktrees under
+		// .claude/worktrees (devkit's alone are ~100k files) and a .venv each. The
+		// default watcher exclude covers only node_modules' children, and the git
+		// extension opens every worktree `git worktree list` names as a repository of
+		// its own, each with its own status refresh. Made live by hand on 2026-10-08 and
+		// adopted here (e6579536).
 		"files.watcherExclude": {
 			"**/.claude/worktrees/**": true,
 			"**/.venv/**": true,
@@ -2724,7 +2726,9 @@
 		// Scheduled Task named after the collector (never `devkit-`: it is not devkit's
 		// job), after starting the compose services it `needs`. Its exit code is the verdict.
 		"devkit.collectors": {
-			"ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"] },
+			// `buildsFrom`: its image copies the sibling data-lake checkout in, so a merge
+			// there redeploys it as one in ibkr_trader does.
+			"ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"], "buildsFrom": ["data-lake"] },
 			"sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"] },
 			// On the host, not in a container: it drives the installed Chrome with the
 			// browser profiles in its checkout.

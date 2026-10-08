@@ -1512,6 +1512,23 @@ def test_any_other_refusal_is_not_retried():
     assert git.calls.count(("merge", "--ff-only", "origin/main")) == 1
 
 
+def test_run_step_reads_a_race_off_stdout_too_and_passes_a_success_straight_through():
+    paused: list[float] = []
+    calls: list[tuple[str, ...]] = []
+
+    def raced_on_stdout(*args: str):
+        calls.append(args)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(["git", *args], 1, "error: cannot lock ref", "")
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+    assert sweep.run_step(raced_on_stdout, ("fetch",), paused.append).returncode == 0
+    assert calls == [("fetch",), ("fetch",)] and paused == [sweep.REF_RACE_PAUSE]
+    clean = FakeGit()
+    assert sweep.run_step(clean, ("status",), paused.append).returncode == 0
+    assert clean.calls == [("status",)] and len(paused) == 1, "a success is not rerun"
+
+
 def test_a_race_lost_twice_still_fails():
     class Always(FakeGit):
         def __call__(self, *args: str):
@@ -2226,6 +2243,36 @@ def test_a_bounded_run_ends_a_grandchild_holding_its_pipes():
     done = sweep.run_bounded([sys.executable, "-c", child], 2)
     assert time.monotonic() - started < 30
     assert done.returncode == sweep.TIMED_OUT and "timed out after 2s" in done.stderr
+
+
+def test_until_ends_a_call_at_its_deadline_whatever_the_call_allows():
+    """2e2e7804: a fix-pass step made `gh` calls each bounded at 600 s, and the step ran
+    past the watchdog's stop. Inside `until`, the deadline ends the call -- a local git
+    call with no timeout of its own included -- and past it nothing is started."""
+    hang = [sys.executable, "-c", "import time; time.sleep(60)"]
+    started = time.monotonic()
+    with sweep.until(time.monotonic() + 1):
+        done = sweep.run_bounded(hang, sweep.GH_TIMEOUT)
+    with sweep.until(time.monotonic() + 1):
+        unbounded = sweep.run_bounded(hang, None)
+    assert time.monotonic() - started < 45
+    assert done.returncode == unbounded.returncode == sweep.TIMED_OUT
+    with sweep.until(time.monotonic() - 1):
+        late = sweep.run_bounded(["no-such-program-devkit"], None)
+    assert late.returncode == sweep.TIMED_OUT and "not started" in late.stderr
+
+
+def test_until_keeps_the_earlier_deadline_and_restores_the_outer_one():
+    assert sweep._until is None
+    with sweep.until(100.0):
+        with sweep.until(200.0):
+            assert sweep._until == 100.0
+        with sweep.until(50.0):
+            assert sweep._until == 50.0
+        with sweep.until(None):
+            assert sweep._until == 100.0
+        assert sweep._until == 100.0
+    assert sweep._until is None
 
 
 def test_a_bounded_run_returns_what_a_finished_command_said():
