@@ -1029,22 +1029,32 @@ def test_a_stream_call_is_guarded_only_by_an_if_that_tests_the_stream():
 
 
 def spawn_references(source: str) -> list[int]:
-    """Lines naming `subprocess.<spawn>` as a value rather than calling it. A type
-    annotation (`process: subprocess.Popen`) names the type and hands out nothing."""
+    """Lines naming `subprocess.<spawn>` as a value rather than calling it, or as a type."""
     tree = ast.parse(source)
     called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
-    annotations = [
-        node.annotation for node in ast.walk(tree) if isinstance(node, (ast.arg, ast.AnnAssign))
-    ] + [node.returns for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
-    typed = {id(part) for note in annotations if note is not None for part in ast.walk(note)}
+    typed = {id(part) for annotation in _annotations(tree) for part in ast.walk(annotation)}
     return [
         node.lineno
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
         and node.attr in SPAWN_ATTRS
         and _is_subprocess(node.value)
-        and id(node) not in called | typed
+        and id(node) not in called
+        and id(node) not in typed
     ]
+
+
+def _annotations(tree: ast.AST) -> list[ast.expr]:
+    """Every annotation in `tree`: a parameter's, a return's, an annotated assignment's."""
+    found: list[ast.expr | None] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg):
+            found.append(node.annotation)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            found.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            found.append(node.annotation)
+    return [annotation for annotation in found if annotation is not None]
 
 
 def test_a_spawn_passed_by_reference_is_found():
@@ -1055,15 +1065,23 @@ def test_a_spawn_passed_by_reference_is_found():
     assert spawn_references("import subprocess\nr = subprocess.Popen\n") == [2]
 
 
-def test_a_spawn_named_as_a_type_is_not_one_handed_out():
+def test_a_spawn_named_as_a_type_is_not_handed_out():
+    """`ship_intent._end_tree(process: subprocess.Popen)` read as a raw spawn: a type
+    annotation names the class, and nothing can call it through the annotation."""
     source = (
         "import subprocess\n"
-        "def f(p: subprocess.Popen, q: 'x' = None) -> subprocess.Popen:\n"
-        "    r: subprocess.Popen = p\n"
-        "    return r\n"
+        "def f(p: subprocess.Popen, r=subprocess.run) -> subprocess.Popen:\n"
+        "    q: subprocess.Popen = p\n"
+    )
+    assert spawn_references(source) == [2]
+    # The default beside an annotation is still a value; a string annotation is no node.
+    source = (
+        "import subprocess\n"
+        "async def f(p: subprocess.Popen, q: 'x' = None) -> subprocess.Popen:\n"
+        "    return p\n"
         "def g(runner: subprocess.Popen = subprocess.Popen): ...\n"
     )
-    assert spawn_references(source) == [5]
+    assert spawn_references(source) == [4]
 
 
 def test_no_module_a_job_reaches_hands_out_a_raw_spawn():

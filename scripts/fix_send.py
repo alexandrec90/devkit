@@ -15,6 +15,7 @@ import io
 import json
 import re
 import sys
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -111,6 +112,10 @@ def hold_if_moved(
 SESSION_MB = 500
 MEMORY_FLOOR_MB = 2048
 HELD_FOR_MEMORY = "held for memory"
+# Why a session is not launched by a pass past its deadline (`fix-pass.SEND_RESERVE_SECONDS`
+# before the watchdog's stop). A launch provisions a tree and starts a session, 1-2.5
+# minutes each on 2026-10-08, and the pass stopped after its third had no record written.
+HELD_FOR_TIME = "held for time"
 
 
 def update_branch(failure: fix_plan.Failure, root: Path) -> int:
@@ -227,8 +232,10 @@ def send_all(
     only for a dispatch that opened. `items` is the harness-defect ledger, for what
     became of each problem's escalation; `closed` says which devkit session is still
     working, which holds another, and which tree each problem's fixer worked in, which
-    is what an escalation names.
+    is what an escalation names. At or past the journal's deadline (`Journal.left`), no
+    session is launched (`HELD_FOR_TIME`).
     """
+    left = None if journal is None else journal.left
     closed = closed or fix_loop.Closed()
     ledger = fix_ledger.read_ledger(ctx.ledger_path)
     sent: list[str] = []
@@ -246,7 +253,7 @@ def send_all(
         if verdict.finding and journal is not None:
             journal.add(verdict.finding.at(closed.trees.get(problem, "")))
         why = verdict.why if not verdict.go else _no_memory(decision, room)
-        if why:
+        if why := why or _no_time(decision, left):
             capped.append((decision, why))
             continue
         if room is not None and decision.action not in fix_plan.NO_SESSION:
@@ -270,6 +277,14 @@ def _no_memory(decision: fix_plan.Decision, room: int | None) -> str:
     return (
         f"{HELD_FOR_MEMORY}: {room} MB free, a session needs {SESSION_MB} above {MEMORY_FLOOR_MB}"
     )
+
+
+def _no_time(decision: fix_plan.Decision, left: Callable[[], float] | None) -> str:
+    """Why this pass launches no more sessions, or "": its send deadline has passed. An
+    update or a rerun opens no session and is one call, so it is never held for time."""
+    if left is None or decision.action in fix_plan.NO_SESSION or left() > 0:
+        return ""
+    return f"{HELD_FOR_TIME}: this pass is past its send deadline; the next pass sends it"
 
 
 def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:

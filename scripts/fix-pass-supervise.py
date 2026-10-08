@@ -88,6 +88,7 @@ TRACKED_WAITS = (
     "held until the devkit session",
     "a session is working in",
     "held for memory",  # fix_send.HELD_FOR_MEMORY
+    "held for time",  # fix_send.HELD_FOR_TIME: the next pass, with a fresh deadline
     "pending devkit #",  # fix_send.named_by: the PR it names lifts it, merged or closed
 )
 # Record lines that are a failure, and the finding kind that must be open for each.

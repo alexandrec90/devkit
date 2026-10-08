@@ -10,6 +10,7 @@ import datetime as _dt
 import os
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -55,6 +56,108 @@ class Runner:
 
 def gh_ok(*_a):
     return lambda *args: subprocess.CompletedProcess(["gh", *args], 0, "https://x/pull/7", "")
+
+
+# --- the pass's deadline ------------------------------------------------------------
+
+
+def test_a_bounded_spawn_ends_its_whole_tree_at_the_deadline(tmp_path):
+    """2026-10-08 01:30: a `git commit` whose hooks ran past fifteen minutes. A child
+    that leaves a grandchild holding its pipes is the shape that matters: ending the
+    child alone, the read after it waits for the grandchild."""
+    grandchild = "import time; time.sleep(60)"
+    child = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        "print('started', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    started = time.monotonic()
+    with pytest.raises(ship_intent.OutOfTime) as stopped:
+        with ship_intent.bounded(time.monotonic() + 3):
+            ship_intent.run_quiet([sys.executable, "-c", child], cwd=tmp_path)
+    assert time.monotonic() - started < 30
+    assert stopped.value.ended and "still running at the pass's deadline" in str(stopped.value)
+
+
+# A child whose own child has exited, leaving a grandchild that holds the child's output
+# handles: an orphan, which `taskkill /T` cannot reach because the parent link it walks
+# is gone. The shape of a hook's process left behind by a shell that had already exited.
+ORPHAN_HOLDING_OUTPUT = (
+    "import subprocess, sys\n"
+    "subprocess.Popen([sys.executable, '-c', 'import subprocess, sys; "
+    'subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], '
+    "stdout=sys.stdout, stderr=sys.stderr)'], stdout=sys.stdout, stderr=sys.stderr).wait()\n"
+    "print('started', flush=True)\n"
+)
+
+
+def test_a_bounded_spawn_ended_at_the_deadline_waits_on_no_orphan(tmp_path):
+    """2026-10-08 14:44: the social-scraper ship, ended at the pass's deadline, came back
+    four minutes later, which took the record's whole reserve and the watchdog stopped the
+    pass (`pass-hung`). The read after the end waited on an orphan still holding the
+    pipe."""
+    child = ORPHAN_HOLDING_OUTPUT + "import time; time.sleep(60)\n"
+    started = time.monotonic()
+    with pytest.raises(ship_intent.OutOfTime) as stopped:
+        with ship_intent.bounded(time.monotonic() + 3):
+            ship_intent.run_quiet([sys.executable, "-c", child], cwd=tmp_path)
+    assert time.monotonic() - started < 30
+    assert stopped.value.ended
+
+
+def test_a_bounded_spawn_that_exits_in_time_waits_on_no_orphan(tmp_path):
+    """The same orphan under a child that finished: what it said, when it exits -- not
+    `OutOfTime` at the deadline for a ship that was done."""
+    child = ORPHAN_HOLDING_OUTPUT + "print('done', file=sys.stderr)\nsys.exit(4)\n"
+    started = time.monotonic()
+    with ship_intent.bounded(time.monotonic() + 20):
+        done = ship_intent.run_quiet([sys.executable, "-c", child], cwd=tmp_path)
+    assert time.monotonic() - started < 15
+    assert (done.returncode, done.stdout.strip(), done.stderr.strip()) == (4, "started", "done")
+
+
+def test_a_bounded_spawn_reads_back_as_text_or_bytes_as_asked(tmp_path):
+    script = "import sys; sys.stdout.buffer.write(b'a\\r\\nb\\xe2\\x80\\x9d')"
+    with ship_intent.bounded(time.monotonic() + 60):
+        text = ship_intent.run_quiet([sys.executable, "-c", script], encoding="utf-8")
+        raw = ship_intent.run_quiet([sys.executable, "-c", script], text=False)
+        quiet = ship_intent.run_quiet(
+            [sys.executable, "-c", script], capture_output=False, stdout=subprocess.DEVNULL
+        )
+    assert text.stdout == "a\nb\N{RIGHT DOUBLE QUOTATION MARK}"
+    assert raw.stdout == b"a\r\nb\xe2\x80\x9d"
+    assert (quiet.returncode, quiet.stdout) == (0, None)
+
+
+def test_a_bounded_spawn_past_the_deadline_never_starts(tmp_path):
+    marker = tmp_path / "ran"
+    with pytest.raises(ship_intent.OutOfTime) as stopped:
+        with ship_intent.bounded(time.monotonic() - 1):
+            ship_intent.run_quiet(
+                [sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"], cwd=tmp_path
+            )
+    assert not stopped.value.ended and not marker.exists()
+
+
+def test_a_bounded_spawn_in_time_answers_as_subprocess_run_does(tmp_path):
+    script = "import sys; print(sys.stdin.read().upper()); sys.exit(3)"
+    with ship_intent.bounded(time.monotonic() + 60):
+        done = ship_intent.run_quiet([sys.executable, "-c", script], cwd=tmp_path, input="hi")
+    assert (done.returncode, done.stdout.strip(), done.stderr) == (3, "HI", "")
+    assert ship_intent._deadline is None, "the bound ends with its block"
+    unbounded = ship_intent.run_quiet([sys.executable, "-c", script], input="ok")
+    assert (unbounded.returncode, unbounded.stdout.strip()) == (3, "OK")
+
+
+def test_the_index_lock_an_ended_commit_left_is_removed(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    lock = tmp_path / ".git" / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    assert ship_intent.clear_index_lock(tmp_path)
+    assert not lock.exists()
+    assert not ship_intent.clear_index_lock(tmp_path), "no lock, nothing to say"
+    assert not ship_intent.clear_index_lock(tmp_path / "not-a-repo-child-missing")
 
 
 # --- the intent file ----------------------------------------------------------------
