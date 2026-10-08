@@ -225,7 +225,6 @@ def send_all(
     journal: Journal | None = None,
     closed: fix_loop.Closed | None = None,
     items: list | None = None,
-    left: Callable[[], float] | None = None,
 ) -> tuple[list[str], list[tuple[fix_plan.Decision, str]], int]:
     """Steps 5 and 6: what the phase let through, each under `fix_budget.budget`.
 
@@ -233,9 +232,10 @@ def send_all(
     only for a dispatch that opened. `items` is the harness-defect ledger, for what
     became of each problem's escalation; `closed` says which devkit session is still
     working, which holds another, and which tree each problem's fixer worked in, which
-    is what an escalation names. `left` is the seconds before the pass's send deadline:
-    at or past it, no session is launched (`HELD_FOR_TIME`).
+    is what an escalation names. At or past the journal's deadline (`Journal.left`), no
+    session is launched (`HELD_FOR_TIME`).
     """
+    left = None if journal is None else journal.left
     closed = closed or fix_loop.Closed()
     ledger = fix_ledger.read_ledger(ctx.ledger_path)
     sent: list[str] = []

@@ -212,8 +212,9 @@ def _run_bounded(argv: list[str], cwd, env, options: dict, seconds: float):
     if sys.platform != "win32":
         options["start_new_session"] = True  # one group, so `_end_tree` can take all of it
     cwd = None if cwd is None else str(cwd)
-    flags = sweep.NO_WINDOW
-    with subprocess.Popen(argv, cwd=cwd, env=env, creationflags=flags, **options) as process:
+    with subprocess.Popen(
+        argv, cwd=cwd, env=env, creationflags=sweep.NO_WINDOW, **options
+    ) as process:
         try:
             out, err = process.communicate(data, timeout=seconds)
         except subprocess.TimeoutExpired:

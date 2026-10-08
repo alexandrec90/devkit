@@ -12,6 +12,7 @@ import datetime as _dt
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -1114,12 +1115,14 @@ def test_no_session_is_launched_once_the_pass_is_out_of_time(world, tmp_path):
         fix_plan.Decision(fix_plan.UPDATE, "n", (failure(number=2, behind=True),)),
     ]
     ctx = _ctx(tmp_path)
-    sent, capped, _ = send.send_all(go, ctx, "claude", left=lambda: 0.0)
+    late = fix_pass.Journal(tmp_path, left=lambda: 0.0)
+    sent, capped, _ = send.send_all(go, ctx, "claude", late)
     assert sent == ["carameli #2 -- update"]
     [(held, why)] = capped
     assert held.failures[0].number == 1 and why.startswith(send.HELD_FOR_TIME)
     assert len(fix_ledger.read_ledger(ctx.ledger_path)) == 1, "#1 is free to go next pass"
-    assert send.send_all(go[:1], ctx, "claude", left=lambda: 60.0)[0] == ["carameli #1 -- dispatch"]
+    in_time = fix_pass.Journal(tmp_path, left=lambda: 60.0)
+    assert send.send_all(go[:1], ctx, "claude", in_time)[0] == ["carameli #1 -- dispatch"]
 
 
 def test_a_pass_out_of_time_still_writes_its_record_and_leaves_the_rest(world, tmp_path):
@@ -1162,8 +1165,12 @@ def test_a_ship_still_running_at_the_deadline_is_ended_and_held(monkeypatch, tmp
     monkeypatch.setattr(
         fix_pass.ship_intent, "clear_index_lock", lambda tree: cleared.append(tree) or True
     )
-    lines, refused, failed = fix_pass.ship_intents(tmp_path, [], fix_cycle.DISPATCH, deadline=123.0)
-    assert deadlines == [123.0, 123.0], "each ship runs bounded by the pass's deadline"
+    journal = fix_pass.Journal(tmp_path, left=lambda: 60.0)
+    before = time.monotonic()
+    lines, refused, failed = fix_pass.ship_intents(tmp_path, [], fix_cycle.DISPATCH, journal)
+    after = time.monotonic()
+    assert len(deadlines) == 2, "each ship runs bounded by the pass's deadline"
+    assert all(before + 60 <= deadline <= after + 60 for deadline in deadlines)
     assert fix_pass.ship_intent._deadline is None, "and nothing after it is"
     assert (refused, failed) == ([], False)
     assert cleared == [tmp_path / "roguelike"]
@@ -1184,6 +1191,51 @@ def test_the_pass_takes_its_window_from_the_watchdog(monkeypatch):
     # One launch took 2.5 minutes on 2026-10-08; the one started at the deadline, and the
     # record after it, still finish inside the window.
     assert 2.5 * 60 < fix_pass.SEND_RESERVE_SECONDS < full
+    reserve = fix_pass.SEND_RESERVE_SECONDS
+    assert fix_pass.send_deadline(100.0, {fix_pass.WINDOW_ENV: "600"}) == 100.0 + 600 - reserve
+
+
+def test_the_deadline_a_ship_is_bounded_by_is_the_journals():
+    """`ship_intent.bounded` takes a `time.monotonic()`; the journal holds seconds left.
+    A journal with no deadline -- a test's, a manual step's -- bounds nothing."""
+    assert fix_pass.deadline_of(None) is None
+    assert fix_pass.deadline_of(fix_pass.Journal(Path("d"))) is None
+    before = time.monotonic()
+    at = fix_pass.deadline_of(fix_pass.Journal(Path("d"), left=lambda: 30.0))
+    assert at is not None and before + 30 <= at <= time.monotonic() + 30
+
+
+def test_the_pass_journal_counts_down_to_its_deadline_and_traces_each_step(capsys):
+    journal = fix_pass.pass_journal(Path("d"), time.monotonic() + 600)
+    assert journal.left is not None and 590 < journal.left() <= 600
+    assert journal.step("collect", lambda: "read") == "read"
+    assert capsys.readouterr().out.startswith("fix-pass: step collect at 0s")
+    late = fix_pass.pass_journal(Path("d"), time.monotonic() - 1)
+    assert late.step("plan", lambda: pytest.fail("ran late"), default="none") == "none"
+    assert fix_pass.late_lines(late) == (f"{fix_pass.LATE}: plan",)
+    assert fix_pass.late_lines(journal) == (), "a pass in time says nothing about lateness"
+
+
+def test_release_and_plan_falls_back_to_the_harness_alone(monkeypatch, tmp_path):
+    """Each half isolated: a plan that raised still leaves the release, and routes only
+    the harness backlog."""
+    monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda devkit_dir: "v9")
+    cut = []
+    monkeypatch.setattr(
+        fix_pass.fix_release, "cut_release", lambda *a: cut.append(a) or "released v10"
+    )
+    monkeypatch.setattr(fix_pass.fix_release, "pending_adoptions", lambda *a: ["carameli"])
+
+    def broken(*_a):
+        raise OSError("plan broke")
+
+    monkeypatch.setattr(fix_pass, "decide", broken)
+    ctx = _ctx(tmp_path, fix_cycle.DISPATCH)
+    journal = fix_pass.Journal(tmp_path)
+    release, planned = fix_pass.release_and_plan(Path("ws"), ctx, journal, [], True, None)
+    assert release == "released v10" and cut[0][:4] == (Path("ws"), "v9", True, True)
+    assert planned == fix_cycle.only_the_harness(None)
+    assert journal.crashed, "the plan's crash is the journal's"
 
 
 def test_every_step_says_when_it_starts(world, capsys):
@@ -1603,6 +1655,10 @@ def test_an_adopted_branch_re_points_every_resolution_naming_it(monkeypatch, tmp
     [line], _, _ = fix_pass.ship_intents(tmp_path, ["ss"], fix_cycle.DISPATCH)
     assert line.startswith("ss agent/memory-cap (carried off memory-cap; 1 resolution(s)")
     assert pointed == [("memory-cap", "agent/memory-cap", ship_intent.EVER)]
+    outcome = ship_intent.Outcome(moved, ship_intent.SHIPPED, "u/pull/9", "u/pull/9")
+    assert fix_pass.carried_where(found, outcome, tmp_path) == (
+        "ss agent/memory-cap (carried off memory-cap; 1 resolution(s) re-pointed)"
+    )
 
 
 def test_a_refused_intent_is_recorded_by_the_line_that_says_why(monkeypatch, tmp_path):
