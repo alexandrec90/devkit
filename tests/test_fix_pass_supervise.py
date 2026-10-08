@@ -382,11 +382,25 @@ def test_an_iteration_runs_the_pass_reads_its_record_and_what_it_filed(tmp_path,
     workspace = _workspace(tmp_path)
     record = tmp_path / "fix-pass.log"
     monkeypatch.setattr(supervise, "RECORD", record)
+    # Every ledger row a second after the last, as on a loaded machine: a row is
+    # content-addressed with its stamp, so a second one is a new id.
+    ticks = iter(range(1, 100))
+
+    class Clock(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW + _dt.timedelta(seconds=next(ticks))
+
+    events = supervise.fix_findings.harness_events
+    monkeypatch.setattr(events, "_dt", type("dt", (), {"datetime": Clock, "UTC": _dt.UTC}))
 
     def fake_pass(ws, mode):
         record.write_text("capped   carameli #1 -- needs a human\n", encoding="utf-8")
         finding = supervise.fix_findings.Finding("ship-failed", "carameli", "x")
-        supervise.fix_findings.record_all([finding], [], tmp_path / "devkit")
+        # Against the open ledger, as the pass files: with no items the second iteration
+        # wrote a second row, whose id differs once the clock crosses a second.
+        open_now = supervise.triage.load(tmp_path / "devkit")
+        supervise.fix_findings.record_all([finding], open_now, tmp_path / "devkit")
         return 0, ""
 
     monkeypatch.setattr(supervise, "run_pass", fake_pass)

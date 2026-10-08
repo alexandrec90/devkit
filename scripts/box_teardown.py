@@ -227,6 +227,11 @@ def _retry_delete(failed_path: str, set_aside: bool = False) -> str:
     so it escaped the hook's `except` and aborted the very walk the hook exists to keep
     going. Windows takes the path-based branch and never showed it; CI did, on the first
     run.
+
+    **An entry gone by the retry is deleted.** Windows refuses a delete-pending entry --
+    git's own `worktree remove` marked it, and a handle was still open -- and it vanishes
+    when that handle closes, so the retry finds nothing (ad9e1a06: a merged tree filed as
+    "could not be removed" that was no longer on disk).
     """
     _make_deletable(failed_path)
     try:
@@ -234,6 +239,8 @@ def _retry_delete(failed_path: str, set_aside: bool = False) -> str:
             os.rmdir(failed_path)
         else:
             os.unlink(failed_path)
+    except FileNotFoundError:
+        return ""
     except OSError as exc:
         if set_aside and _set_aside(failed_path):
             return ""
@@ -399,6 +406,10 @@ DAEMON_DOWN_SIGNS = (
     "error during connect",
     "the docker daemon is not running",
     "open //./pipe/",
+    # A wedged engine behind a Docker Desktop that still answers: its ping is a 500, the
+    # pipe spelled URL-encoded (2026-10-08, six hours of it). Only the ping: a 500 on any
+    # other route is the engine answering about one request.
+    "dockerdesktoplinuxengine/_ping",
 )
 
 
@@ -434,6 +445,9 @@ def fallback_applies(path: Path, error: str) -> bool:
     because a previous removal died partway -- which no `git worktree remove` can
     ever succeed on again.
     """
-    if any(said in error for said in _DELETE_FAILED_SAYS):
-        return True
-    return not (path / ".git").exists()
+    return delete_refused(error) or not (path / ".git").exists()
+
+
+def delete_refused(error: str) -> bool:
+    """Whether `error` is the filesystem refusing a delete, in a spelling seen before."""
+    return any(said in error for said in _DELETE_FAILED_SAYS)

@@ -251,7 +251,9 @@ def reap(
 
     `noise` is cleared first -- generated files deleted, line-ending-only changes checked
     out -- so the removal needs no `--force`, and git still refuses anything else. A
-    refusal from the filesystem rather than from git is finished with `remove`.
+    refusal from the filesystem rather than from git is finished with `remove`; one whose
+    directory is gone by then -- delete-pending when git asked, released since -- has
+    nothing left to finish, and only the registration is pruned (ad9e1a06).
     """
     error = down_stack(tree, checkout, run)
     if error:
@@ -265,6 +267,9 @@ def reap(
     if removed.returncode == 0:
         return ""
     said = (removed.stderr or "").strip()[-200:]
+    if box_teardown.delete_refused(said) and not tree.path.exists():
+        run(["git", "-C", str(checkout), "worktree", "prune"])
+        return ""
     if not (tree.path.is_dir() and box_teardown.fallback_applies(tree.path, said)):
         return f"git worktree remove refused: {said}"
     error, _notes = (remove or box_teardown.force_remove_box)(tree.path)

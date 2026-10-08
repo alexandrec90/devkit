@@ -1492,6 +1492,53 @@ def test_runs_is_the_exit_code_and_an_unspawnable_binary_is_false(monkeypatch):
     assert fix_pass.runs(["gh", "--version"]) is False
 
 
+def gh_answering(status_code, status_said):
+    def fake(argv, **_kwargs):
+        if argv[:3] == ["gh", "auth", "status"]:
+            return subprocess.CompletedProcess(argv, status_code, "", status_said)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    return fake
+
+
+def test_github_not_answering_is_not_a_gh_missing_from_path(monkeypatch):
+    """f455f3fe: `gh auth status` asks api.github.com, and its failing on a network blip
+    refused the pass as "not usable from this PATH" with `gh` installed and logged in."""
+    said = "X Timeout trying to log in to github.com account alexandrec90 (keyring)"
+    monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", gh_answering(1, said))
+    assert MISSING_TOOLS() == []
+
+
+def test_a_token_github_refuses_is_still_a_missing_gh(monkeypatch):
+    said = (
+        "X Failed to log in to github.com account a (keyring)\n- The token in keyring is invalid."
+    )
+    monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", gh_answering(1, said))
+    assert MISSING_TOOLS() == ["gh"]
+
+
+def test_gh_token_refused_is_false_when_gh_cannot_be_run_or_says_nothing_of_it(monkeypatch):
+    def unspawnable(*_a, **_k):
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", unspawnable)
+    assert fix_pass.gh_token_refused() is False
+    monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", gh_answering(0, "invalid"))
+    assert fix_pass.gh_token_refused() is False, "a status that passed refused nothing"
+
+
+def test_no_stored_credential_is_a_missing_gh_without_asking_github(monkeypatch):
+    spawned = []
+
+    def fake(argv, **_kwargs):
+        spawned.append(argv)
+        return subprocess.CompletedProcess(argv, 1 if argv[:3] == ["gh", "auth", "token"] else 0)
+
+    monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", fake)
+    assert MISSING_TOOLS() == ["gh"]
+    assert ["gh", "auth", "status"] not in spawned
+
+
 def test_missing_tools_is_empty_when_every_tool_runs(monkeypatch):
     monkeypatch.setattr(
         fix_pass.ship_intent.subprocess,

@@ -489,10 +489,47 @@ def test_kill_tree_asks_taskkill_for_the_subtree_window_less(monkeypatch):
     seen = []
     monkeypatch.setattr(tasks.os, "name", "nt")
     monkeypatch.setattr(tasks.subprocess, "run", lambda argv, **kw: seen.append((argv, kw)))
-    tasks.kill_tree(7)
+    assert tasks.kill_tree(7) == ""
     ((argv, kwargs),) = seen
     assert argv == ["taskkill", "/F", "/T", "/PID", "7"]
     assert kwargs["creationflags"] == tasks.NO_WINDOW
+
+
+@pytest.mark.parametrize(
+    ("error", "said"),
+    [
+        (subprocess.TimeoutExpired(["taskkill"], 60), "did not finish within 60s"),
+        (OSError("access denied"), "could not run: access denied"),
+    ],
+)
+def test_a_taskkill_that_fails_is_said_not_raised(monkeypatch, error, said):
+    """a4796ff6: `taskkill` ran past its minute and its `TimeoutExpired` replaced the
+    log of the fire that had timed out with a traceback about the cleanup."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+
+    def run(argv, **kw):
+        raise error
+
+    monkeypatch.setattr(tasks.subprocess, "run", run)
+    assert said in tasks.kill_tree(7)
+
+
+class Held(FakePopen):
+    """A child whose pipe a surviving grandchild holds: every wait times out."""
+
+    def communicate(self, timeout=None):
+        self.waits += 1
+        raise subprocess.TimeoutExpired(self.argv, timeout)
+
+
+def test_a_timeout_whose_children_survive_still_returns(monkeypatch, tmp_path):
+    monkeypatch.setattr(tasks.subprocess, "Popen", Held)
+    monkeypatch.setattr(tasks, "kill_tree", lambda pid: "taskkill did not finish within 60s")
+    code, out = tasks.spawn(["uv"], tmp_path, 10)
+    assert code == tasks.TIMED_OUT and Held.instances[-1].killed
+    assert out.strip() == "timed out after 10s; ended it, but not its children: " + (
+        "taskkill did not finish within 60s"
+    )
 
 
 # --- a run by hand ------------------------------------------------------------------

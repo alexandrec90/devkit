@@ -59,6 +59,8 @@ SCHTASKS_TIMEOUT = 60
 # The re-ask after a `compose up` timed out (`needs_failed`): an engine that answers at
 # all answers `docker info` in seconds.
 PROBE = 30
+# How long the output of a child already killed at its timeout is waited for.
+REAP_TIMEOUT = 30
 # `spawn`'s code for a child it ended at its timeout, as `timeout(1)` reports one.
 TIMED_OUT = 124
 
@@ -235,22 +237,33 @@ def describe(collector: config.Collector, root: Path, python: str, run: Runner) 
 # --- one fire ----------------------------------------------------------------------
 
 
-def kill_tree(pid: int) -> None:
-    """End `pid` and everything under it.
+def kill_tree(pid: int) -> str:
+    """End `pid` and everything under it; "" when that was done, else why it was not.
 
     `Popen.kill` ends only the direct child -- `uv` -- and leaves the interpreter and the
     Chrome it drives running, still holding the browser profile's lock, so every later
     fire fails on that lock. `taskkill /T` takes the subtree; elsewhere, the child alone.
+
+    Best effort, never a raise. a4796ff6: on a machine loaded by a wedged
+    Docker engine `taskkill` itself ran past its minute, and the `TimeoutExpired` it
+    raised replaced the log of the fire that had timed out with a traceback about the
+    cleanup. The caller still kills the direct child either way.
     """
     if os.name != "nt":
-        return
-    subprocess.run(
-        ["taskkill", "/F", "/T", "/PID", str(pid)],
-        capture_output=True,
-        timeout=SCHTASKS_TIMEOUT,
-        check=False,
-        creationflags=NO_WINDOW,
-    )
+        return ""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+            timeout=SCHTASKS_TIMEOUT,
+            check=False,
+            creationflags=NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return f"taskkill did not finish within {SCHTASKS_TIMEOUT}s"
+    except OSError as exc:
+        return f"taskkill could not run: {exc}"
+    return ""
 
 
 def spawn(
@@ -281,13 +294,16 @@ def spawn(
     try:
         out, _ = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        kill_tree(process.pid)
+        stuck = kill_tree(process.pid)
         process.kill()
-        out, _ = process.communicate()
-        return (
-            TIMED_OUT,
-            f"{(out or '').strip()}\ntimed out after {timeout}s; ended it and its children",
-        )
+        try:
+            out, _ = process.communicate(timeout=REAP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # A grandchild taskkill could not end still holds the pipe open, and an
+            # unbounded wait here would hold the fire until the scheduler killed it.
+            out = ""
+        ended = f"ended it, but not its children: {stuck}" if stuck else "ended it and its children"
+        return TIMED_OUT, f"{(out or '').strip()}\ntimed out after {timeout}s; {ended}"
     return process.returncode, (out or "").strip()
 
 

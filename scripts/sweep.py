@@ -59,6 +59,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import re
 import subprocess
 import sys
@@ -199,6 +200,74 @@ def run_windowless(*args, **kwargs) -> subprocess.CompletedProcess:
     """
     flags = kwargs.pop("creationflags", 0)
     return subprocess.run(*args, creationflags=flags | NO_WINDOW, **kwargs)
+
+
+# Seconds a git call that talks to the remote (`NETWORK_VERBS`) and any `gh` call may
+# take. Unbounded, a fetch stalled on the network or on a credential prompt nobody can
+# see held the scheduled reconcile from 01:04 to 05:15, so every fire between was skipped
+# or ended by the scheduler's own hour limit with no log written (fb1f5465).
+NETWORK_TIMEOUT = 300
+GH_TIMEOUT = 600
+NETWORK_VERBS = frozenset({"fetch", "ls-remote", "pull"})
+# `run_bounded`'s returncode for a call it ended, `timeout(1)`'s spelling.
+TIMED_OUT = 124
+# How long the ended tree is given to close its pipes before its output is abandoned.
+KILL_GRACE = 10
+
+
+def run_bounded(
+    argv: list[str], timeout: float | None, **kwargs
+) -> subprocess.CompletedProcess[str]:
+    """`argv` run captured, window-less and unchecked, ended **with its whole process
+    tree** at `timeout` seconds (returncode `TIMED_OUT`); `None` is unbounded.
+
+    Not `subprocess.run(timeout=)`: on its timeout that kills the direct child only and
+    then reads its pipes to the end, unbounded, on Windows -- and `git fetch`'s
+    `git-remote-https`, or the `gh` a wrapper started, still holds them. The bound would
+    stop the clock and leave the wait.
+    """
+    if timeout is None:
+        return run_windowless(argv, capture_output=True, text=True, check=False, **kwargs)
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        creationflags=NO_WINDOW,
+        start_new_session=sys.platform != "win32",
+        **kwargs,
+    )
+    try:
+        out, err = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _end_tree(process)
+        try:
+            out, err = process.communicate(timeout=KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        said = f"{err or ''}\ntimed out after {timeout:g}s; ended it and its children"
+        return subprocess.CompletedProcess(argv, TIMED_OUT, out or "", said.strip())
+    return subprocess.CompletedProcess(argv, process.returncode, out, err)
+
+
+def _end_tree(process: subprocess.Popen) -> None:
+    """End `process` and every descendant: `taskkill /T` on Windows, the session's
+    process group elsewhere (`run_bounded` started it as a group leader)."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=60,
+                check=False,
+                creationflags=NO_WINDOW,
+            )
+        else:
+            os.killpg(process.pid, 9)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    process.kill()
 
 
 def console_python() -> str:
@@ -1226,12 +1295,10 @@ def git_for(path: Path) -> Git:
     a push that skips the pre-push gate needs (`release.push_env`)."""
 
     def git(*args: str, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+        # Only what talks to the remote is bounded: a push runs the pre-push gate.
+        return run_bounded(
             ["git", "-C", str(path), *args],
-            capture_output=True,
-            text=True,
-            check=False,
-            creationflags=NO_WINDOW,
+            NETWORK_TIMEOUT if args and args[0] in NETWORK_VERBS else None,
             env=None if env is None else dict(env),
         )
 
@@ -1506,14 +1573,7 @@ def gh_for(path: Path) -> Git:
     """
 
     def gh(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["gh", *args],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            check=False,
-            creationflags=NO_WINDOW,
-        )
+        return run_bounded(["gh", *args], GH_TIMEOUT, cwd=str(path))
 
     return gh
 
