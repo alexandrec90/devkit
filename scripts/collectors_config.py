@@ -78,6 +78,11 @@ class Collector:
     `health` is not run (`collectors.settling`): until each job inside has fired on the
     new code, the verdict is the old code's. Set it to the longest interval of a job
     whose failure would otherwise outlive the fix that cured it.
+
+    `builds_from` (`buildsFrom`) names the sibling checkouts a container's image copies in
+    beside its own -- ibkr_trader's `COPY data-lake` -- so a merge there redeploys it as
+    one in the project does (`collectors.redeploy`). Without it a data-lake fix reached
+    the container only with ibkr_trader's next unrelated merge (110defb0).
     """
 
     project: str
@@ -87,6 +92,7 @@ class Collector:
     minutes: int = 0
     needs: tuple[str, ...] = ()
     settle: int = DEFAULT_SETTLE
+    builds_from: tuple[str, ...] = ()
 
     @property
     def scheduled(self) -> bool:
@@ -143,6 +149,11 @@ def _entry(project: str, raw: object) -> tuple[Collector | None, str]:
         )
     if "command" in raw:
         return _scheduled_entry(project, raw)
+    return _container_entry(project, raw)
+
+
+def _container_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
+    """A `service` entry, or `None` and the reason it was refused."""
     service = raw.get("service")
     if not isinstance(service, str) or not service:
         return None, f"{project}: no `service` -- which compose service is the collector?"
@@ -153,7 +164,10 @@ def _entry(project: str, raw: object) -> tuple[Collector | None, str]:
     # `bool` is an `int`, as for `minutes`.
     if isinstance(settle, bool) or not isinstance(settle, int) or settle < 0:
         return None, f"{project}: `settle` must be a whole number of minutes, 0 or more"
-    return Collector(project, service, tuple(health), settle=settle), ""
+    builds_from = _argv(raw.get("buildsFrom", []))
+    if builds_from is None or any("/" in name or "\\" in name for name in builds_from):
+        return None, f"{project}: `buildsFrom` must be a list of sibling checkout names"
+    return Collector(project, service, tuple(health), settle=settle, builds_from=builds_from), ""
 
 
 def parse_setting(text: str) -> tuple[list[Collector], list[str]]:

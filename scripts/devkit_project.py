@@ -43,6 +43,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1251,14 +1252,20 @@ PLAIN_KEYS = ("folders", "extensions", "settings", "launch", "remoteAuthority")
 # below, so a reworded message cannot silently empty either of them.
 #
 # Every other line is treated as *possibly live-authored* -- including the "differs"
-# forms, which name a key both copies have and say nothing about who moved it last. That
+# forms, which name a key both copies have and say nothing about who moved it last,
+# unless git shows devkit's copy once held the live value (`AHEAD_CHANGE`). That
 # asymmetry is the point: a wrong guess on a canonical-ahead line republishes a task git
 # already holds, and a wrong guess the other way discards an edit nothing holds at all.
 AHEAD_TASK = "missing from the workspace: "
 AHEAD_INPUT = "missing input: "
 AHEAD_FOLDER = "folder missing from the workspace: "
 AHEAD_SETTING = "setting missing from the workspace: "
-CANONICAL_AHEAD = (AHEAD_TASK, AHEAD_INPUT, AHEAD_FOLDER, AHEAD_SETTING)
+# A "differs" line whose live side is what devkit's copy held at an earlier commit
+# (`behind`): devkit changed it since the last render, and nobody edited the live file.
+AHEAD_CHANGE = "changed in devkit since the live file's copy: "
+CANONICAL_AHEAD = (AHEAD_TASK, AHEAD_INPUT, AHEAD_FOLDER, AHEAD_SETTING, AHEAD_CHANGE)
+# How far back `behind` looks for the live side of a "differs" line.
+HISTORY_DEPTH = 40
 
 # The operator's switches: settings a machine sets for itself, in its live file, and
 # that devkit's copy only gives a default for. `devkit.fixPass` turns this machine's
@@ -1284,6 +1291,73 @@ def live_only(problems: list[str]) -> list[str]:
 def canonical_only(problems: list[str]) -> list[str]:
     """The differences an `--adopt-workspace` would delete from the canonical copy."""
     return [p for p in problems if p.startswith(CANONICAL_AHEAD)]
+
+
+# A "differs" line's prefix -> how to find what it names in a parsed workspace file.
+_DIFFERS: dict[str, Callable[[dict, str], object]] = {
+    "definition differs: ": lambda payload, label: _by_label(_tasks_of(payload)).get(label),
+    "input definition differs: ": lambda payload, name: {
+        i.get("id"): i for i in _tasks_of(payload).get("inputs", [])
+    }.get(name),
+    "setting differs: ": lambda payload, key: (payload.get("settings") or {}).get(key),
+}
+
+
+def _tasks_of(payload: dict) -> dict:
+    block = payload.get("tasks") if isinstance(payload, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
+def behind(problems: list[str], live: dict, history: Iterable[dict]) -> list[str]:
+    """`problems` with each "differs" line relabelled `AHEAD_CHANGE` when its live side is
+    what an earlier canonical copy in `history` (this machine's view of each) held.
+
+    A "differs" line names a key both copies carry and not who moved it, so it armed the
+    refusal whoever had: #566 changed one task's detail on 2026-10-07, the live file had
+    two settings added by hand that afternoon, and every daily publish refused from then
+    on (e6579536) -- naming the task as if it were the hand edit, and `--force` the only
+    way through. git knows the answer: a live value devkit's copy once held is the live
+    file behind, which a publish is for and an adopt must not revert.
+    """
+    past = list(history)
+    settled: list[str] = []
+    for line in problems:
+        prefix = next((p for p in _DIFFERS if line.startswith(p)), "")
+        name = line.removeprefix(prefix)
+        if prefix and (value := _DIFFERS[prefix](live, name)) is not None:
+            if any(_DIFFERS[prefix](old, name) == value for old in past):
+                line = f"{AHEAD_CHANGE}{line}"
+        settled.append(line)
+    return settled
+
+
+def judged_drift(
+    live: Path,
+    payload: dict,
+    canonical: dict,
+    history: Callable[[Path], Iterable[dict]] | None = None,
+) -> list[str]:
+    """`workspace_drift`, with what devkit changed since the live file's copy relabelled
+    (`behind`); git is asked only when a "differs" line is there to settle."""
+    problems = workspace_drift(payload, canonical)
+    if not any(line.startswith(tuple(_DIFFERS)) for line in problems):
+        return problems
+    return behind(problems, payload, (history or canonical_history)(live))
+
+
+def canonical_history(live: Path, depth: int = HISTORY_DEPTH) -> Iterator[dict]:
+    """Each committed `workspace.jsonc` of the last `depth`, newest first, as the machine
+    `live` belongs to renders it (`machine_view`); nothing where git cannot say."""
+    git = sweep.git_for(CANONICAL_WORKSPACE.parent)
+    shas = git("log", f"-{depth}", "--format=%H", "--", CANONICAL_WORKSPACE.name)
+    for sha in (shas.stdout or "").split() if shas.returncode == 0 else []:
+        shown = git("show", f"{sha}:{CANONICAL_WORKSPACE.name}")
+        if shown.returncode != 0:
+            continue
+        try:
+            yield devkit_jsonc.loads(machine_view(shown.stdout, live.parent)[0])
+        except ValueError:  # RegistryEditError included: a copy that would not render
+            continue
 
 
 def stamp_path(workspace: Path) -> Path:
@@ -1671,7 +1745,7 @@ def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str
         return RENDER_PUBLISHED, [f"{live.name} did not exist -- created from the canonical copy"]
     text = live.read_text(encoding="utf-8")
     payload = devkit_jsonc.loads(text)
-    problems = workspace_drift(payload, devkit_jsonc.loads(canonical))
+    problems = judged_drift(live, payload, devkit_jsonc.loads(canonical))
     if not problems:
         write_stamp(live, semantic_digest(text))
         return RENDER_CURRENT, []
@@ -1722,7 +1796,7 @@ def adopt_workspace(live: Path, text: str, *, force: bool = False) -> int:
     """
     canonical, left_out = canonical_view(live) if CANONICAL_WORKSPACE.is_file() else ("", [])
     losses = canonical_only(
-        workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
+        judged_drift(live, devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
         if canonical
         else []
     )
@@ -1761,7 +1835,7 @@ def check_workspace(live: Path, text: str) -> int:
     be about the text the caller validated.
     """
     canonical, left_out = canonical_view(live)
-    problems = workspace_drift(devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
+    problems = judged_drift(live, devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
     if not problems:
         print(f"{live.name}: matches {CANONICAL_WORKSPACE.name}")
         if left_out:

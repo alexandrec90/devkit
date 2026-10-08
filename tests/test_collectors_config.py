@@ -47,6 +47,21 @@ def test_a_container_collector_may_set_its_settle(settle):
     assert found == [config.Collector("p", "s", (), settle=settle)] and notes == []
 
 
+def test_a_container_collector_may_name_the_checkouts_its_image_copies():
+    text = workspace({config.SETTING: {"p": {"service": "s", "buildsFrom": ["data-lake"]}}})
+    found, notes = config.parse_setting(text)
+    assert found == [config.Collector("p", "s", (), builds_from=("data-lake",))] and notes == []
+
+
+def test_the_workspace_declares_what_ibkr_trader_s_image_copies():
+    """Its Dockerfile `COPY`s the sibling data-lake checkout (110defb0)."""
+    found, _notes = config.parse_setting(
+        (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
+    )
+    [ibkr] = [c for c in found if c.project == "ibkr_trader"]
+    assert ibkr.builds_from == ("data-lake",)
+
+
 def test_no_setting_declares_nothing_and_says_nothing():
     assert config.parse_setting(workspace({})) == ([], [])
 
@@ -62,6 +77,8 @@ def test_no_setting_declares_nothing_and_says_nothing():
         ({"service": "app", "settle": -1}, "0 or more"),
         ({"service": "app", "settle": "60"}, "0 or more"),
         ({"service": "app", "settle": True}, "0 or more"),
+        ({"service": "app", "buildsFrom": "data-lake"}, "sibling checkout names"),
+        ({"service": "app", "buildsFrom": ["../data-lake"]}, "sibling checkout names"),
         ({"command": [], "minutes": 30}, "non-empty list"),
         ({"command": "uv run x", "minutes": 30}, "non-empty list"),
         ({"command": ["uv"]}, "positive whole number"),

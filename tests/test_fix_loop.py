@@ -1008,12 +1008,22 @@ def test_each_unhealthy_job_a_collector_names_is_its_own_group(ctx):
     [
         ("not running (Exited (1) 3 hours ago)", "not running"),
         ("no container -- see logs/collectors.log", "no container"),
-        ("docker is not answering", "docker is not answering"),
     ],
 )
 def test_a_collector_findings_detail_survives_its_recurrences(ctx, detail, state):
     [found] = fix_loop.collector_findings(ctx, [("collector: x", fix_loop.collectors.FAIL, detail)])
     assert found.detail == f"x: {state}"
+
+
+def test_a_silent_engine_is_left_to_the_collectors_job_that_files_it_once(ctx):
+    """5cfe1e8a, df8dd4c0: the engine being silent is the machine's, and `collectors.py
+    maintain` fails on it under `log-wrap.py --always` -- once, revive and all. Read off
+    the tray as well, it was one more group per project, filed mid-revive."""
+    silent = [
+        ("collector: ibkr_trader", fix_loop.collectors.FAIL, fix_loop.collectors.NOT_ANSWERING),
+        ("collector: sports_betting", fix_loop.collectors.FAIL, "docker is not answering"),
+    ]
+    assert fix_loop.collector_findings(ctx, silent) == []
 
 
 def _resolved_collector(ctx) -> tuple[tuple[str, str, str], float]:

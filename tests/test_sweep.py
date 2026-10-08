@@ -2175,6 +2175,36 @@ def test_a_bounded_run_ends_a_grandchild_holding_its_pipes():
     assert done.returncode == sweep.TIMED_OUT and "timed out after 2s" in done.stderr
 
 
+def test_until_ends_a_call_at_its_deadline_whatever_the_call_allows():
+    """2e2e7804: a fix-pass step made `gh` calls each bounded at 600 s, and the step ran
+    past the watchdog's stop. Inside `until`, the deadline ends the call -- a local git
+    call with no timeout of its own included -- and past it nothing is started."""
+    hang = [sys.executable, "-c", "import time; time.sleep(60)"]
+    started = time.monotonic()
+    with sweep.until(time.monotonic() + 1):
+        done = sweep.run_bounded(hang, sweep.GH_TIMEOUT)
+    with sweep.until(time.monotonic() + 1):
+        unbounded = sweep.run_bounded(hang, None)
+    assert time.monotonic() - started < 45
+    assert done.returncode == unbounded.returncode == sweep.TIMED_OUT
+    with sweep.until(time.monotonic() - 1):
+        late = sweep.run_bounded(["no-such-program-devkit"], None)
+    assert late.returncode == sweep.TIMED_OUT and "not started" in late.stderr
+
+
+def test_until_keeps_the_earlier_deadline_and_restores_the_outer_one():
+    assert sweep._until is None
+    with sweep.until(100.0):
+        with sweep.until(200.0):
+            assert sweep._until == 100.0
+        with sweep.until(50.0):
+            assert sweep._until == 50.0
+        with sweep.until(None):
+            assert sweep._until == 100.0
+        assert sweep._until == 100.0
+    assert sweep._until is None
+
+
 def test_a_bounded_run_returns_what_a_finished_command_said():
     done = sweep.run_bounded([sys.executable, "-c", "print('hi')"], 30)
     assert (done.returncode, done.stdout.strip()) == (0, "hi")

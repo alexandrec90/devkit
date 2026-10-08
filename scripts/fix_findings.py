@@ -26,6 +26,7 @@ import datetime as _dt
 import hashlib
 import subprocess
 import sys
+import time
 import traceback
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
@@ -33,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_triage as triage
+import sweep
 
 harness_events = triage.harness_events
 
@@ -242,14 +244,20 @@ class Journal:
     ):
         """`fn(*args, **kwargs)`, or `default` with a finding when it raises -- or, past
         the deadline, `default` with `name` in `late`, unless `always` (a step that keeps
-        its own time)."""
-        if not always and self.left is not None and self.left() <= 0:
-            self.late.append(name)
-            return default
+        its own time). A step started before the deadline has its `gh` and git calls end
+        by it (`sweep.until`): a step that starts in time is not one that ends in time."""
+        deadline = None
+        if not always and self.left is not None:
+            left = self.left()
+            if left <= 0:
+                self.late.append(name)
+                return default
+            deadline = time.monotonic() + left
         if self.trace is not None:
             self.trace(name)
         try:
-            return fn(*args, **kwargs)
+            with sweep.until(deadline):
+                return fn(*args, **kwargs)
         except self.errors as exc:
             trace = traceback.format_exc()
             where = evidence_file(trace, self.devkit_dir, f"step-{name}")
