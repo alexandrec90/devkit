@@ -26,7 +26,7 @@ restart, not this job's to stop; a dev server whose ancestry reaches a living ed
 terminal or agent is owned however old it is. The settings live beside
 `devkit.remoteControl` in the workspace file:
 
-    "devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true}
+    "devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true, "dockerClis": true}
 
 Stdlib only, and every decision is an importable function tested in
 `tests/test_reap_stale.py`.
@@ -90,14 +90,15 @@ class Settings:
     session_idle_minutes: int = DEFAULT_SESSION_IDLE_MINUTES
     dev_servers: bool = True
     dev_server_pattern: str = reap_machine.DEV_SERVER_PATTERN
+    docker_clis: bool = True
 
 
 def parse_settings(text: str) -> Settings:
     """Read `SETTING` out of a workspace file, defaults for anything missing or malformed.
 
     Same leniency as `rc_config.parse_config`, for its reason: a scheduled task whose
-    stdout goes nowhere must not crash on a hand-edited file. `devServers` is a bare
-    bool only, so a string cannot switch a reap on.
+    stdout goes nowhere must not crash on a hand-edited file. `devServers` and
+    `dockerClis` are bare bools only, so a string cannot switch a reap off.
     """
     try:
         payload = devkit_jsonc.loads(text)
@@ -119,6 +120,7 @@ def parse_settings(text: str) -> Settings:
         dev_server_pattern=(
             pattern if isinstance(pattern, str) and pattern else reap_machine.DEV_SERVER_PATTERN
         ),
+        docker_clis=raw.get("dockerClis") is not False,
     )
 
 
@@ -225,6 +227,20 @@ def assess_dev_servers(plan: Plan) -> list[Finding]:
     return findings
 
 
+def assess_docker_clis(plan: Plan) -> list[Finding]:
+    """Orphaned docker CLIs past their minimum age, every one reapable, as dev servers are."""
+    if not plan.settings.docker_clis:
+        return []
+    findings = []
+    for row in reap_machine.docker_clis(plan.table, plan.now):
+        argv = reap_machine.argv_of(row.cmdline)
+        shown = " ".join([row.name, *(token.strip('"') for token in argv[1:5])])
+        minutes = int((plan.now - row.created) // 60)
+        label = f"docker cli pid {row.pid} `{shown}`"
+        findings.append(Finding(row, label, f"no living owner above it, {minutes} min old", True))
+    return findings
+
+
 def assess(plan: Plan) -> list[Finding]:
     """Every finding, sessions first so a stray's verdict can read theirs.
 
@@ -232,7 +248,12 @@ def assess(plan: Plan) -> list[Finding]:
     twice: `act` skips a row whose ancestor is also on the list.
     """
     session_findings = assess_sessions(plan)
-    return [*session_findings, *assess_strays(plan, session_findings), *assess_dev_servers(plan)]
+    return [
+        *session_findings,
+        *assess_strays(plan, session_findings),
+        *assess_dev_servers(plan),
+        *assess_docker_clis(plan),
+    ]
 
 
 # --- acting ----------------------------------------------------------------------

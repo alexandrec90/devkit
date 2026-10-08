@@ -14,7 +14,6 @@ scripts/docker-maint.py::find_delegate
 scripts/docker-maint.py::generic_down
 scripts/docker-maint.py::generic_up
 scripts/docker-maint.py::poll_engine
-scripts/docker-maint.py::stop_docker
 scripts/git-merge-default.py::fetch
 scripts/git-merge-default.py::held_in_the_stash
 scripts/git-merge-default.py::merge_around_local_changes

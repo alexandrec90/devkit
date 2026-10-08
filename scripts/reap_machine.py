@@ -30,6 +30,12 @@ different owner of record:
   it running. Harmless in memory, not in effect: two such held pytest's shared temp root
   and failed every other run's teardown with `WinError 5`. It is matched as a dev server
   is, image first, so one classification and one setting cover both.
+- **An orphaned docker CLI** -- `docker` or `docker-compose`, the same shape again. On
+  2026-10-08 a `docker compose up -d --wait db` whose parent had died spun 650
+  CPU-seconds against a wedged engine and never exited. Matched by image alone, since
+  every docker CLI is a candidate, and kept until `DOCKER_CLI_MIN_AGE_SECONDS` old: one
+  whose owner is alive -- a harness's `compose down`, Docker Desktop's own `docker
+  stats` -- is never in scope, however many pile up behind a wedged engine.
 
 **Unknown is busy**, as in `rc_machine`: a table that cannot be read is `None` and the
 pass reaps nothing; a transcript store that cannot be read makes every session active;
@@ -106,6 +112,27 @@ DEV_SERVER_PATTERN = (
     r"|\bnpm(-cli\.js|\.exe|\.cmd)?\"?\s+run\s+dev\b"
     r"|(^|\s)-m\s+pytest\b|(^\"?|[\\/])pytest(\.exe)?\"?(\s|$)"
 )
+
+# The docker CLI images. `docker compose` runs the `docker-compose` plugin as a child of
+# `docker`, so only the top of such a pair is ever returned.
+DOCKER_CLI_NAMES = frozenset({"docker", "docker-compose"})
+
+# Docker Desktop's own processes own the CLIs they run (`docker stats` for the dashboard).
+# They are hosts for a docker CLI and for nothing else: Docker Desktop started by a
+# scheduled restart has a dead parent itself, so `HOSTS` alone would read its children
+# as orphans.
+DOCKER_HOSTS = HOSTS | {
+    "docker desktop",
+    "com.docker.backend",
+    "com.docker.build",
+    "com.docker.service",
+}
+
+# How old an unowned docker CLI must be before it is reaped. Its owner is gone, so
+# nobody is reading what it prints, but a `compose up --wait` or a `build` legitimately
+# runs for minutes, and a pid whose parent exited a moment ago is the one row a table
+# snapshot can get wrong. Twice the reap interval: an orphan lives at most three passes.
+DOCKER_CLI_MIN_AGE_SECONDS = 30 * 60
 
 # Seconds between the polite `taskkill` and the `/F`. Shorter than `rc_machine`'s: a
 # leftover has, by definition, nobody waiting on what it writes on the way out.
@@ -483,6 +510,31 @@ def dev_servers(
         if is_hosted(table, row.pid, hosts):
             continue
         if any(parent.pid in matched for parent in ancestors(table, row.pid)):
+            continue
+        orphans.append(row)
+    return sorted(orphans, key=lambda row: row.pid)
+
+
+def docker_clis(
+    table: Sequence[Process],
+    now: float,
+    min_age: float = DOCKER_CLI_MIN_AGE_SECONDS,
+    hosts: frozenset[str] = DOCKER_HOSTS,
+) -> list[Process]:
+    """Docker CLIs with no living owner, at least `min_age` seconds old -- tops only.
+
+    An unknown start time (`created` 0.0, as on every POSIX row) is too young to reap:
+    unknown is busy. The age is the top's own, so a young `docker` over an old
+    `docker-compose` is still young.
+    """
+    matched = {row.pid: row for row in table if row.name in DOCKER_CLI_NAMES}
+    orphans = []
+    for row in matched.values():
+        if is_hosted(table, row.pid, hosts):
+            continue
+        if any(parent.pid in matched for parent in ancestors(table, row.pid)):
+            continue
+        if row.created <= 0 or now - row.created < min_age:
             continue
         orphans.append(row)
     return sorted(orphans, key=lambda row: row.pid)

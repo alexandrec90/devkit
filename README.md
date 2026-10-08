@@ -1142,6 +1142,11 @@ candidates; anything whose activity cannot be read is kept. `status` prints ever
 with its verdict and touches nothing; `maintain` acts, and appends each process it stopped
 to `logs/reap-stale.history.log`, which is never rewritten.
 
+A `docker` or `docker-compose` CLI with no living owner, half an hour old, is reaped the
+same way (`dockerClis`). On 2026-10-08 an orphaned `compose up --wait` spun for hours
+against a wedged engine. A CLI whose owner is alive, Docker Desktop's own included, is
+never in scope.
+
 The same pass reaps a session worktree (`.claude/worktrees/<name>`, and Codex's) whose PR
 merged at the tree's `HEAD`, once it is clean and no transcript has moved in it for
 twelve hours, taking down the compose project it named in its `.env` with it
@@ -1153,7 +1158,7 @@ shell. The settings sit beside
 `devkit.remoteControl`:
 
 ```jsonc
-"devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true}
+"devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true, "dockerClis": true}
 ```
 
 ```bash
