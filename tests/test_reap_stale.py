@@ -203,6 +203,43 @@ def test_dev_servers_can_be_switched_off(tmp_path, store):
     assert reap.assess_dev_servers(plan_for(tmp_path, store, dev_servers=False)) == []
 
 
+# --- docker CLIs and the engine -----------------------------------------------------
+
+DOCKER = r'"C:\Program Files\Docker\Docker\resources\bin\docker.exe"'
+
+
+def docker_plan(tmp_path, store, **kw):
+    plan = plan_for(tmp_path, store, **kw)
+    plan.table = [
+        *plan.table,
+        P(70, 5844, "docker", f"{DOCKER} compose up -d --wait db", created=NOW - 3 * 3600),
+        P(71, 70, "docker-compose", "docker-compose.exe up", created=NOW - 3 * 3600),
+        P(72, 12, "docker", f"{DOCKER} compose down", created=NOW - 3 * 3600),
+    ]
+    return plan
+
+
+def test_an_orphaned_docker_cli_is_reaped_and_labelled_by_what_it_runs(tmp_path, store):
+    findings = reap.assess_docker_clis(docker_plan(tmp_path, store))
+    assert verdicts(findings) == {70: True}
+    assert findings[0].label == "docker cli pid 70 `docker compose up -d --wait`"
+    assert findings[0].reason == "no living owner above it, 180 min old"
+
+
+def test_docker_clis_can_be_switched_off(tmp_path, store):
+    assert reap.assess_docker_clis(docker_plan(tmp_path, store, docker_clis=False)) == []
+
+
+def test_assess_ends_with_the_docker_clis(tmp_path, store):
+    findings = reap.assess(docker_plan(tmp_path, store))
+    assert findings[-1].row.pid == 70
+
+
+def test_only_a_bare_false_switches_docker_clis_off():
+    assert reap.parse_settings(workspace_text({"dockerClis": "no"})).docker_clis
+    assert not reap.parse_settings(workspace_text({"dockerClis": False})).docker_clis
+
+
 def test_assess_puts_sessions_before_strays_before_dev_servers(tmp_path, store):
     kinds = [finding.label.split()[0] for finding in reap.assess(plan_for(tmp_path, store))]
     assert kinds == ["session", "session", "session", "stray", "stray", "dev"]
@@ -485,3 +522,23 @@ def test_a_failed_stop_reddens_the_pass(tmp_path, store, monkeypatch):
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: "denied")
     assert reap.main(["reap", "--workspace", str(workspace), "--devkit", str(tmp_path)]) == 2
+
+
+def test_maintain_reaps_an_orphaned_docker_cli_and_records_it(tmp_path, monkeypatch, capsys):
+    """The 2026-10-08 orphan: a `compose up --wait` whose parent died, hours old, under
+    a Docker Desktop that is itself running. Only the orphan is stopped."""
+    now = time.time()
+    rows = [
+        P(1, 0, "explorer", ""),
+        P(40, 1, "docker desktop", "Docker Desktop.exe", created=now - 5 * 3600),
+        P(41, 40, "docker", f"{DOCKER} stats --no-stream", created=now - 5 * 3600),
+        P(70, 5844, "docker", f"{DOCKER} compose up -d --wait db", created=now - 3 * 3600),
+    ]
+    stopped = []
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (rows, ""))
+    monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: stopped.append(pid) or "")
+    assert reap.main(["maintain", "--devkit", str(tmp_path)]) == 0
+    assert stopped == [70]
+    assert "docker cli pid 70" in capsys.readouterr().out
+    history = (tmp_path / reap.HISTORY).read_text(encoding="utf-8")
+    assert "docker cli pid 70" in history
