@@ -114,6 +114,17 @@ TARGET_BOUND = 2 * INSPECT_TIMEOUT + 3 * GIT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEO
 # Measured start on this workstation: about three minutes from boot to running containers.
 ENGINE_STARTUP = 600
 ENGINE_POLL = 15
+# An engine still silent past that window behind a Docker Desktop that says `running` is
+# wedged, and nothing else on the machine brings it back (`revive_engine`). 2026-10-08:
+# the engine answered every request with a 500 for six hours while Desktop reported
+# itself running, and four ledger groups filed against it (4436a22a x14) before
+# `docker desktop restart` had it answering in two and a half minutes. One restart per
+# `RESTART_EVERY`, recorded in `RESTARTED`, so a restart that does not help is not
+# repeated every pass.
+DESKTOP_TIMEOUT = 30
+RESTART_TIMEOUT = 600
+RESTART_EVERY = 3600
+RESTARTED = Path("logs/collectors.engine-restart.json")
 
 # The tray's three levels, spelled as `tray_state` spells them. Not imported from there:
 # `tray_state` imports this module, and `test_collectors.py` pins the two to each other.
@@ -212,10 +223,13 @@ def parse_created(text: str) -> float | None:
 
 
 class Docker:
-    """Everything that touches the engine: one captured, window-less spawn per call."""
+    """Everything that touches the engine: one captured, window-less spawn per call.
+    `restarts` is where `revive_engine` records a restart of Docker Desktop; None, as
+    for the tray, makes none."""
 
-    def __init__(self, ps_timeout: int = PS_TIMEOUT) -> None:
+    def __init__(self, ps_timeout: int = PS_TIMEOUT, restarts: Path | None = None) -> None:
         self.ps_timeout = ps_timeout
+        self.restarts = restarts
 
     def run(self, argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[int, str]:
         return spawn(argv, timeout, cwd)
@@ -258,6 +272,25 @@ class Docker:
         # leaves the running container as it was.
         code, out = self.run(
             ["docker", "compose", "up", "-d", "--build", service], UP_TIMEOUT, checkout
+        )
+        return code == 0, out
+
+    def desktop_running(self) -> bool:
+        """Whether Docker Desktop itself says it is running, whatever its engine says."""
+        code, out = self.run(["docker", "desktop", "status", "--format", "json"], DESKTOP_TIMEOUT)
+        try:
+            said = json.loads(out) if code == 0 else None
+        except ValueError:
+            return False
+        return isinstance(said, dict) and said.get("Status") == "running"
+
+    def restart_desktop(self) -> tuple[bool, str]:
+        # Docker's own restart, not `docker-maint.py restart-engine`: that one taskkills
+        # the service and runs `wsl --shutdown`, which a timer must not do to every WSL
+        # distro the user has open.
+        code, out = self.run(
+            ["docker", "desktop", "restart", "--timeout", str(RESTART_TIMEOUT)],
+            RESTART_TIMEOUT + DESKTOP_TIMEOUT,
         )
         return code == 0, out
 
@@ -528,6 +561,46 @@ def wait_for_engine(
     return containers
 
 
+def last_restart(path: Path) -> float | None:
+    """When `revive_engine` last restarted Docker Desktop, or None when it has not."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    when = raw.get(STARTED_AT) if isinstance(raw, dict) else None
+    return when if isinstance(when, (int, float)) else None
+
+
+def revive_engine(
+    docker: Docker, report: Report, restarts: Path, clock: float
+) -> tuple[list[Container] | None, str]:
+    """`(containers, why not)` for an engine `wait_for_engine` has already given up on.
+
+    Only a *wedged* engine is restarted: Docker Desktop says `running` and its engine
+    does not answer. A Desktop that is not running was most likely quit by a person, and
+    a timer does not start it behind their back; the answer then says so. A restart is
+    made once per `RESTART_EVERY`; `clock` is now, as a POSIX time.
+    """
+    if not docker.desktop_running():
+        return None, "docker is not answering and Docker Desktop is not running -- start it"
+    wedged = "docker is not answering though Docker Desktop says it is running"
+    last = last_restart(restarts)
+    if last is not None and 0 <= clock - last < RESTART_EVERY:
+        report.say(
+            f"Docker Desktop was restarted {int((clock - last) // 60)} min ago; "
+            f"not again within {RESTART_EVERY // 60} minutes of that"
+        )
+        return None, f"{wedged}, and a restart did not bring its engine back"
+    write_file(restarts, json.dumps({STARTED_AT: clock}) + "\n")
+    ok, out = docker.restart_desktop()
+    containers = docker.ps() if ok else None
+    if containers is None:
+        report.say(f"`docker desktop restart`: {first_line(out) or 'no output'}")
+        return None, f"{wedged}, and a restart did not bring its engine back"
+    report.say("the docker engine was wedged behind a running Docker Desktop -- restarted it")
+    return containers, ""
+
+
 def maintain(
     chosen: Sequence[Target],
     docker: Docker,
@@ -538,13 +611,18 @@ def maintain(
 ) -> None:
     """One pass over the assigned *container* collectors, recording health verdicts into
     `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker. `awake`
-    is how long the machine has been up, which `wait_for_engine` gives Docker to start."""
+    is how long the machine has been up, which `wait_for_engine` gives Docker to start;
+    an engine silent past that is `revive_engine`'s where `docker.restarts` is set."""
     if not chosen:
         return
     containers = wait_for_engine(docker, awake)
+    running = any(t.mode == config.RUN for t in chosen)
+    why = "docker is not answering -- is Docker Desktop running?"
+    if containers is None and running and docker.restarts is not None:
+        containers, why = revive_engine(docker, report, docker.restarts, _clock())
     if containers is None:
-        if any(t.mode == config.RUN for t in chosen):
-            report.fail("docker is not answering -- is Docker Desktop running?")
+        if running:
+            report.fail(why)
         else:
             report.say("docker is not answering, so nothing here can be running")
         return
@@ -941,7 +1019,7 @@ def main(
             return finish()
         assignment = acted_on
     chosen = targets(collectors, assignment, sweep.default_workspace(base).parent)
-    engine = docker or Docker()
+    engine = docker or Docker(restarts=base / RESTARTED)
     if args.mode == "status":
         status(collectors, chosen, engine, report, base, run)
         return finish()

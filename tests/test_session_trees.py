@@ -177,6 +177,25 @@ def test_a_removal_the_filesystem_refused_partway_is_finished(tmp_path):
     assert calls[-1][-2:] == ["worktree", "prune"]
 
 
+def test_a_tree_gone_after_a_filesystem_refusal_is_reaped(tmp_path):
+    """ad9e1a06: git's delete was refused (`Permission denied`) on a directory it had
+    already marked for deletion, and the directory went when the last handle closed.
+    Nothing is left to finish, so the registration is pruned and the reap succeeded --
+    it is not "git worktree remove refused"."""
+    one = tree(tmp_path)  # never created: gone by the time git's refusal returns
+    calls: list[list[str]] = []
+    said = "error: failed to delete 'C:/x/fix-1007-4': Permission denied"
+    removed, remove = _remover("should not be asked")
+
+    def run(argv):
+        calls.append(argv)
+        return done(255, err=said) if "remove" in argv else done()
+
+    assert st.reap(one, tmp_path / "carameli", run, remove=remove) == ""
+    assert removed == []
+    assert calls[-1][-2:] == ["worktree", "prune"]
+
+
 def test_a_finish_that_fails_too_names_both_failures(tmp_path):
     one = tree(tmp_path)
     one.path.mkdir(parents=True)

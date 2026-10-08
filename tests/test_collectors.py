@@ -37,7 +37,18 @@ class FakeDocker:
         self.up_ok = up_ok
         self.health_answer = health
         self.built_at = built
+        self.desktop = False
+        self.restarts = None
+        self.restart_answer = (True, "")
         self.calls: list[tuple] = []
+
+    def desktop_running(self):
+        self.calls.append(("desktop",))
+        return self.desktop
+
+    def restart_desktop(self):
+        self.calls.append(("restart",))
+        return self.restart_answer
 
     def built(self, container):
         self.calls.append(("built", container.id))
@@ -485,6 +496,150 @@ def test_a_silent_engine_fails_a_run_machine_but_not_a_stop_machine(tmp_path):
     report = collectors.Report()
     collectors.maintain([target(tmp_path, mode=STOP)], FakeDocker(None), report, {})
     assert report.failures == 0
+
+
+class Wedged(FakeDocker):
+    """Docker Desktop says `running`, and its engine answers only once restarted."""
+
+    def __init__(self, restarts, revives=True):
+        super().__init__(None)
+        self.desktop = True
+        self.restarts = restarts
+        self.revives = revives
+
+    def restart_desktop(self):
+        if self.revives:
+            self.containers = []
+        return super().restart_desktop()
+
+
+def test_a_wedged_engine_is_restarted_once_and_the_pass_then_acts(tmp_path):
+    """4436a22a: the engine answered every request with a 500 for six hours behind a
+    Docker Desktop that said `running`, and the pass failed every 15 minutes asking
+    whether Desktop was running; `docker desktop restart` had it back in minutes."""
+    restarts = tmp_path / "restarts.json"
+    docker, report = Wedged(restarts), collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 0
+    assert docker.calls[:4] == [("ps",), ("desktop",), ("restart",), ("ps",)]
+    assert ("up", "ibkr_trader", "app") in docker.calls
+    assert "restarted it" in report.lines[0]
+    assert collectors.last_restart(restarts) is not None
+
+
+def test_a_restart_is_not_repeated_within_the_hour(tmp_path):
+    restarts = tmp_path / "restarts.json"
+    collectors.write_file(restarts, json.dumps({"started_at": collectors._clock() - 60}))
+    docker, report = Wedged(restarts), collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert ("restart",) not in docker.calls
+    assert report.failures == 1 and "restart did not bring" in report.lines[-1]
+
+
+def test_a_restart_older_than_the_hour_is_tried_again(tmp_path):
+    restarts = tmp_path / "restarts.json"
+    old = collectors._clock() - collectors.RESTART_EVERY - 1
+    collectors.write_file(restarts, json.dumps({"started_at": old}))
+    docker = Wedged(restarts)
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    assert ("restart",) in docker.calls
+    assert collectors.last_restart(restarts) > old
+
+
+def test_a_restart_that_does_not_help_fails_with_a_stable_cause(tmp_path):
+    restarts = tmp_path / "restarts.json"
+    docker, report = Wedged(restarts, revives=False), collectors.Report()
+    docker.restart_answer = (False, "error: timed out waiting for Docker Desktop\n")
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 1
+    assert report.lines[-1] == (
+        "docker is not answering though Docker Desktop says it is running, "
+        "and a restart did not bring its engine back"
+    )
+    assert "timed out waiting" in report.lines[0]
+    assert collectors.last_restart(restarts) is not None, "a failed restart still counts"
+
+
+def test_a_docker_desktop_someone_quit_is_not_started_behind_their_back(tmp_path):
+    docker, report = Wedged(tmp_path / "r.json"), collectors.Report()
+    docker.desktop = False
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert ("restart",) not in docker.calls
+    assert report.failures == 1 and "Docker Desktop is not running" in report.lines[0]
+    assert not (tmp_path / "r.json").exists()
+
+
+def test_a_stop_machine_never_restarts_docker(tmp_path):
+    docker, report = Wedged(tmp_path / "r.json"), collectors.Report()
+    collectors.maintain([target(tmp_path, mode=STOP)], docker, report, {})
+    assert docker.calls == [("ps",)] and report.failures == 0
+
+
+def test_revive_engine_answers_the_containers_once_the_restart_brings_them(tmp_path):
+    docker, report = Wedged(tmp_path / "r.json"), collectors.Report()
+    assert collectors.revive_engine(docker, report, docker.restarts, 1000.0) == ([], "")
+    assert collectors.last_restart(docker.restarts) == 1000.0
+
+
+def test_no_restart_record_means_no_restart(tmp_path):
+    """The tray's `Docker` and a test's carry none: only the scheduled pass restarts."""
+    docker, report = Wedged(None), collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert docker.calls == [("ps",)] and report.failures == 1
+    assert collectors.Docker().restarts is None
+
+
+def test_the_scheduled_pass_records_its_restarts_beside_its_artifact(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    built = []
+    monkeypatch.setattr(collectors, "Docker", lambda **kw: built.append(kw) or FakeDocker([]))
+    collectors.main(["maintain"])
+    assert built == [{"restarts": root / collectors.RESTARTED}]
+
+
+@pytest.mark.parametrize(
+    ("code", "out", "expected"),
+    [
+        (0, '{"SessionID": "x", "Status": "running"}', True),
+        (0, '{"Status": "stopped"}', False),
+        (0, "not json", False),
+        (0, "[]", False),
+        (1, '{"Status": "running"}', False),
+    ],
+)
+def test_docker_desktop_is_running_only_when_it_says_so(code, out, expected):
+    docker = collectors.Docker()
+    asked: list[list[str]] = []
+
+    def run(argv, timeout, cwd=None):
+        asked.append(list(argv))
+        return code, out
+
+    docker.run = run
+    assert docker.desktop_running() is expected
+    assert asked == [["docker", "desktop", "status", "--format", "json"]]
+
+
+def test_the_restart_is_docker_desktops_own_bounded_by_its_timeout():
+    docker = collectors.Docker()
+    asked: list[tuple] = []
+
+    def run(argv, timeout, cwd=None):
+        asked.append((list(argv), timeout))
+        return 0, "Restarting Docker Desktop"
+
+    docker.run = run
+    assert docker.restart_desktop() == (True, "Restarting Docker Desktop")
+    argv, timeout = asked[0]
+    assert argv[:3] == ["docker", "desktop", "restart"]
+    assert timeout > collectors.RESTART_TIMEOUT
+
+
+def test_an_unreadable_restart_record_is_no_restart(tmp_path):
+    path = tmp_path / "r.json"
+    assert collectors.last_restart(path) is None
+    path.write_text("[1]", encoding="utf-8")
+    assert collectors.last_restart(path) is None
 
 
 class Starting(FakeDocker):

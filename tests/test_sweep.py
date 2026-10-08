@@ -10,6 +10,8 @@ import datetime as dt
 import json
 import os
 import subprocess
+import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -2173,22 +2175,62 @@ def test_shared_remotes_are_called_out():
     assert sweep.dedupe_note(results) == {url: ["carameli", "carameli-b"]}
 
 
-def test_gh_for_runs_gh_in_the_checkout_without_raising_or_a_window(monkeypatch, tmp_path):
+def test_gh_for_runs_gh_in_the_checkout_bounded(monkeypatch, tmp_path):
     """`gh` has no `-C`, so the binding is the working directory; a refusal is returned,
-    never raised, because every caller reads `returncode` itself."""
+    never raised, because every caller reads `returncode` itself. Every call is bounded:
+    the scheduled reconcile runs it, and an unbounded one held the job past its next
+    fires until the scheduler's hour limit ended it (fb1f5465)."""
     seen: list = []
 
-    def run(argv, **kwargs):
-        seen.append((argv, kwargs))
+    def run(argv, timeout, **kwargs):
+        seen.append((argv, timeout, kwargs))
         return subprocess.CompletedProcess(argv, 1, "", "no")
 
-    monkeypatch.setattr(sweep.subprocess, "run", run)
+    monkeypatch.setattr(sweep, "run_bounded", run)
     done = sweep.gh_for(tmp_path)("pr", "list")
     assert done.returncode == 1
-    [(argv, kwargs)] = seen
+    [(argv, timeout, kwargs)] = seen
     assert argv == ["gh", "pr", "list"]
-    assert kwargs["cwd"] == str(tmp_path) and kwargs["check"] is False
-    assert kwargs["creationflags"] == sweep.NO_WINDOW
+    assert kwargs["cwd"] == str(tmp_path) and timeout == sweep.GH_TIMEOUT
+
+
+@pytest.mark.parametrize(
+    ("verb", "bounded"), [("fetch", True), ("ls-remote", True), ("status", False)]
+)
+def test_git_for_bounds_what_talks_to_the_remote(monkeypatch, tmp_path, verb, bounded):
+    """fb1f5465: `sweep.inspect`'s `git fetch` had no timeout, so a fetch stalled on the
+    network or an invisible credential prompt held the scheduled reconcile for hours.
+    A local verb stays unbounded: a push through a pre-push gate legitimately runs long."""
+    seen: list = []
+    monkeypatch.setattr(
+        sweep, "run_bounded", lambda argv, timeout, **kw: seen.append(timeout) or done_ok(argv)
+    )
+    sweep.git_for(tmp_path)(verb)
+    assert seen == [sweep.NETWORK_TIMEOUT if bounded else None]
+
+
+def done_ok(argv):
+    return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def test_a_bounded_run_ends_a_grandchild_holding_its_pipes():
+    """The Windows half of fb1f5465: `subprocess.run(timeout=)` kills only the child and
+    then waits, unbounded, for its pipes -- which `git fetch`'s `git-remote-https` still
+    holds. The whole tree is ended, so the call returns at its timeout."""
+    grandchild = "import time; time.sleep(60)"
+    child = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}]); time.sleep(60)"
+    )
+    started = time.monotonic()
+    done = sweep.run_bounded([sys.executable, "-c", child], 2)
+    assert time.monotonic() - started < 30
+    assert done.returncode == sweep.TIMED_OUT and "timed out after 2s" in done.stderr
+
+
+def test_a_bounded_run_returns_what_a_finished_command_said():
+    done = sweep.run_bounded([sys.executable, "-c", "print('hi')"], 30)
+    assert (done.returncode, done.stdout.strip()) == (0, "hi")
 
 
 def test_git_for_inherits_the_environment_unless_a_push_hands_it_one(tmp_path):
