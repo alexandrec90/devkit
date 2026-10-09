@@ -126,6 +126,27 @@ def log_path(name: str) -> Path:
     return Path(f"logs/collector-{name}.log")
 
 
+def start_path(name: str) -> Path:
+    """When the fire's latest run began, relative to the devkit checkout.
+
+    Written before the command runs, since `log_path` is written only once the run ends:
+    a run still going when the scheduler skipped the next fire had left no record of its
+    start, so the pass judged it by the skipped fire's time and filed a run begun before
+    its fix merged as that fix not holding (4933b284).
+    """
+    return Path(f"logs/collector-{name}.started")
+
+
+def started_at(path: Path) -> _dt.datetime | None:
+    """The start recorded at `path` (`start_path`), as naive local time like the
+    scheduler's; None when there is none or it does not parse."""
+    try:
+        when = _dt.datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return when.astimezone().replace(tzinfo=None) if when.tzinfo else when
+
+
 def interpreter() -> str:
     """The task's `<Command>`: the window-less twin of a console interpreter.
 

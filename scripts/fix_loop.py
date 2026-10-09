@@ -47,6 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bg_sessions
+import collector_tasks
 import collectors
 import fix_cycle
 import fix_findings
@@ -443,12 +444,30 @@ def _filed_elsewhere(
         return False
     if JOB_FAILED_RUN in line and "log-wrap.py" in job.command and "--always" in job.command:
         return True
-    ran = job.last_run
+    ran = _run_began(ctx, finding, job)
     if ran is None:
         return False
+    # A collector's task runs its own project's code, not devkit's.
+    code = ctx.devkit_dir if finding.project == fix_cycle.DEVKIT else ctx.root / finding.project
     return _resolved_since(finding, items, ran) or _ran_before_fix(
-        ctx.devkit_dir, fix_findings.signature(finding), items, ran, git
+        code, fix_findings.signature(finding), items, ran, git
     )
+
+
+def _run_began(ctx: Context, finding: Finding, job: schedule_health.Job) -> _dt.datetime | None:
+    """When the run a scheduler line reports began, in the scheduler's local time.
+
+    `last_run`, but for a collector's fire skipped behind a run still going: that line
+    reports the earlier run, whose start `collectors.py fire` recorded. 4933b284 judged
+    the 16:30 scrape by the 17:00 skip, though it began four minutes before its fix
+    merged. A recorded start no earlier than the skip is not that run's."""
+    ran = job.last_run
+    if ran is None or finding.project == fix_cycle.DEVKIT:
+        return ran
+    if job.last_result not in schedule_health.OVERLAPPING:
+        return ran
+    began = collector_tasks.started_at(ctx.devkit_dir / collector_tasks.start_path(job.name))
+    return began if began is not None and began < ran else ran
 
 
 # A collector this machine runs whose task the scheduler has never heard of.

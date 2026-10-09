@@ -809,6 +809,64 @@ def test_a_job_run_that_could_have_held_its_fix_is_filed(ctx, ran, head, code, s
     assert len(fix_loop.job_findings(ctx, [job], git)) == 1, why
 
 
+SCRAPER_TASKS = {"social-scraper": "logs/collector-social-scraper.log"}
+
+
+def _overlap_after_fix(ctx) -> tuple[fix_loop.schedule_health.Job, float, Path]:
+    """social-scraper's overlap filed and resolved, then its fire skipped again 40 min
+    after the resolution; with the resolution's POSIX time and where a fire records its
+    start, which nothing has written yet."""
+    found = _overlapped(ctx, SCRAPER_TASKS, _dt.datetime.now() - _dt.timedelta(hours=2))
+    fix_findings.record_all([found], [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "ended a stuck scrape at its hard deadline", root=ctx.devkit_dir)
+    [made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    skipped = _dt.datetime.now() + _dt.timedelta(minutes=40)  # the scheduler's local time
+    job = fix_loop.schedule_health.Job(
+        "social-scraper", True, fix_loop.schedule_health.SCHED_REFUSED_ALREADY_RUNNING, skipped
+    )
+    marker = ctx.devkit_dir / fix_loop.collector_tasks.start_path("social-scraper")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    return job, _dt.datetime.fromisoformat(made.stamp).timestamp(), marker
+
+
+def test_an_overlap_behind_a_run_begun_before_the_fix_is_judged_by_that_runs_start(ctx):
+    """4933b284: social-scraper's 17:00 fire was skipped behind the 16:30 run, which began
+    four minutes before the hard-deadline fix merged into social-scraper. The pass asked
+    devkit's reflog about 17:00 and filed the fix as not holding. The run that overlapped
+    ran the project's code, as it stood when that run began."""
+    job, made, marker = _overlap_after_fix(ctx)
+    began = job.last_run - _dt.timedelta(minutes=30)  # after the resolution, before the skip
+    marker.write_text(began.astimezone().isoformat(), encoding="utf-8")
+    asked: list[list[str]] = []
+
+    def git(argv, **_):
+        asked.append(argv)
+        when = made + 60 if argv[-1] == "HEAD" else made - 600
+        return subprocess.CompletedProcess(argv, 0, f"{when:.0f}\n", "")
+
+    assert fix_loop.job_findings(ctx, [job], git, SCRAPER_TASKS) == [], "the next run tests it"
+    since = began.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    checkout = str(ctx.root / "social-scraper")
+    assert asked[0] == ["git", "-C", checkout, "log", "-1", "--format=%ct", f"HEAD@{{{since}}}"]
+
+
+@pytest.mark.parametrize("began", [None, 1], ids=["no start recorded", "recorded after the skip"])
+def test_an_overlap_with_no_earlier_recorded_start_is_judged_by_the_skipped_fire(ctx, began):
+    """No start -- a fire from before `collectors.py` recorded one -- or one no earlier
+    than the skip, which cannot be the run that held the task: the skip's own time."""
+    job, made, marker = _overlap_after_fix(ctx)
+    if began is not None:
+        marker.write_text(
+            (job.last_run + _dt.timedelta(minutes=began)).astimezone().isoformat(), "utf-8"
+        )
+    asked: list[str] = []
+    found = fix_loop.job_findings(ctx, [job], _git_at(made + 60, made + 120, asked), SCRAPER_TASKS)
+    assert len(found) == 1, "the run had the fix and overlapped anyway"
+    since = job.last_run.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    assert asked[0] == f"HEAD@{{{since}}}"
+
+
 def test_a_job_failure_never_resolved_asks_git_nothing(ctx):
     asked: list[str] = []
     job = _job("devkit-reap-stale", 2, NOW)

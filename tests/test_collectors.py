@@ -1638,6 +1638,29 @@ def test_fire_logs_under_its_own_name_and_returns_the_commands_code(tmp_path, mo
     assert log.startswith("# collector social-scraper 2026-10-02T15:00:00 -- exit 3")
 
 
+def test_fire_records_when_its_run_began_before_the_command_runs(tmp_path, monkeypatch):
+    """4933b284: a run still going when the next fire was skipped had written nothing,
+    since the log is written at the end, so the pass judged it by the skipped fire's
+    time and called a run begun before its fix merged a fix that did not hold."""
+    root = scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    when = dt.datetime(2026, 10, 9, 16, 30)
+    marker = root / collectors.collector_tasks.start_path("social-scraper")
+    seen = []
+
+    def spawner(argv, cwd, timeout, env=None):
+        seen.append(collectors.collector_tasks.started_at(marker))
+        return 0, "ok"
+
+    assert collectors.fire("social-scraper", root, when, spawner) == 0
+    assert seen == [when], "recorded before the command ran, as the scheduler's local time"
+
+
+def test_a_fire_that_runs_nothing_records_no_start(tmp_path, monkeypatch):
+    root = scraper_home(tmp_path, monkeypatch, {"social-scraper": STOP})
+    collectors.fire("social-scraper", root, dt.datetime(2026, 10, 9, 16, 30), lambda *a, **k: 0 / 0)
+    assert not (root / collectors.collector_tasks.start_path("social-scraper")).exists()
+
+
 def test_run_once_streams_the_command_and_returns_its_code(tmp_path, monkeypatch, capsys):
     root = scraper_home(tmp_path, monkeypatch)
     assert collectors.run_once("social-scraper", root, FakeSchtasks(), lambda argv, cwd: 5) == 5

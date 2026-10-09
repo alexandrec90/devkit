@@ -291,6 +291,20 @@ def test_a_fire_with_no_moment_given_stamps_its_own(tmp_path):
     assert before <= stamped <= dt.datetime.now(dt.UTC)
 
 
+def test_started_at_reads_a_recorded_start_as_local_time_and_nothing_else(tmp_path):
+    marker = tmp_path / tasks.start_path("social-scraper")
+    assert marker.name == "collector-social-scraper.started"
+    assert tasks.started_at(marker) is None, "no run recorded"
+    naive = dt.datetime(2026, 10, 9, 16, 30)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(naive.astimezone().isoformat() + "\n", encoding="utf-8")
+    assert tasks.started_at(marker) == naive
+    marker.write_text("2026-10-09T16:30:00\n", encoding="utf-8")
+    assert tasks.started_at(marker) == naive, "a naive stamp is already local"
+    marker.write_text("not a time\n", encoding="utf-8")
+    assert tasks.started_at(marker) is None
+
+
 def test_a_naive_fire_time_is_this_machines_local_time():
     naive = dt.datetime(2026, 10, 7, 17, 30)
     expected = naive.astimezone(dt.UTC).isoformat(timespec="seconds")
