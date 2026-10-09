@@ -668,7 +668,7 @@ def test_a_wedged_engine_is_not_restarted_under_a_scheduled_run(tmp_path, instan
     assert collectors.HOLD_SINCE not in collectors.restart_record(restarts)
 
 
-def test_a_held_restart_is_no_failure_until_it_outlasts_a_run(tmp_path, instant):
+def test_a_held_restart_is_no_failure(tmp_path, instant):
     """84ad65d7: 2026-10-09 19:15 UTC Docker's VM froze under a scrape; the pass held the
     restart and failed, and by the next pass the engine was back on its own."""
     restarts = tmp_path / "restarts.json"
@@ -680,19 +680,38 @@ def test_a_held_restart_is_no_failure_until_it_outlasts_a_run(tmp_path, instant)
 
     report = collectors.Report()
     collectors.maintain([target(tmp_path)], docker, report, {})
-    assert report.failures == 0, "a second pass inside the limit still waits"
+    assert report.failures == 0, "a second pass inside the hold still waits"
     assert collectors.restart_record(restarts)[collectors.HOLD_SINCE] == since
-
-    old = collectors._clock() - collectors.HOLD_LIMIT - 1
-    collectors.write_file(restarts, json.dumps({collectors.HOLD_SINCE: old}))
-    report = collectors.Report()
-    collectors.maintain([target(tmp_path)], docker, report, {})
-    assert report.failures == 1
-    assert report.lines[-1] == (
-        "docker is not answering though Docker Desktop says it is running, "
-        "and its restart waits for a scheduled collector's run"
-    )
     assert ("restart",) not in docker.calls
+
+
+@pytest.mark.parametrize("revives", [True, False], ids=["comes-back", "stays-wedged"])
+def test_a_wedge_held_for_a_pass_is_restarted_under_the_run(tmp_path, instant, revives):
+    """0c428d0e: 2026-10-09 the engine wedged under the 20:30 UTC scrape and the pass held
+    its restart for the run, which blocked on its db until its `FIRE_TIMEOUT`; the next
+    fire was running by then, so no pass ever found nothing in flight to restart under."""
+    assert collectors.BUSY_HOLD < 15 * 60, "the second pass to find the wedge restarts it"
+    assert collectors.BUSY_HOLD < collectors.HOLD_LIMIT
+    restarts = tmp_path / "restarts.json"
+    old = collectors._clock() - collectors.BUSY_HOLD - 1
+    collectors.write_file(restarts, json.dumps({collectors.HOLD_SINCE: old}))
+    docker, report = Wedged(restarts, revives=revives), collectors.Report()
+    docker.holds = lambda: ["social-scraper"]
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert ("restart",) in docker.calls
+    assert report.lines[0] == (
+        "restarting Docker Desktop under social-scraper's scheduled run: its engine has "
+        f"not answered for {collectors.BUSY_HOLD // 60} min, so the run is not being served either"
+    )
+    record = collectors.restart_record(restarts)
+    assert collectors.HOLD_SINCE not in record and collectors.last_restart(restarts) is not None
+    if revives:
+        assert report.failures == 0 and ("up", "ibkr_trader", "app") in docker.calls
+    else:
+        assert report.lines[-1] == (
+            "docker is not answering though Docker Desktop says it is running, "
+            "and a restart did not bring its engine back"
+        )
 
 
 def test_an_engine_that_answers_again_ends_the_hold(tmp_path, instant):
