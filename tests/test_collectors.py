@@ -38,6 +38,7 @@ class FakeDocker:
         self.health_answer = health
         self.built_at = built
         self.desktop = False
+        self.update = False
         self.restarts = None
         self.holds = None
         self.restart_answer = (True, "")
@@ -46,6 +47,9 @@ class FakeDocker:
     def desktop_running(self):
         self.calls.append(("desktop",))
         return self.desktop
+
+    def updating(self):
+        return self.update
 
     def restart_desktop(self):
         self.calls.append(("restart",))
@@ -744,6 +748,45 @@ def test_scheduled_in_flight_names_only_a_running_task_this_machine_runs(tmp_pat
     assert collectors.scheduled_in_flight([stopped], Running()) == []
 
 
+@pytest.mark.parametrize("desktop", [True, False], ids=["app-up", "app-closed"])
+def test_an_engine_down_under_a_docker_desktop_update_is_held_not_failed(
+    tmp_path, instant, desktop
+):
+    """3012d246: 2026-10-09 Docker Desktop installed 4.94.0 from 19:55 to 20:28 UTC, 10
+    minutes after this pass's restart, and the 20:02 and 20:15 passes failed "a restart
+    did not bring its engine back". The engine was down for the installer, not wedged."""
+    restarts = tmp_path / "restarts.json"
+    collectors.write_file(restarts, json.dumps({"started_at": collectors._clock() - 17 * 60}))
+    docker, report = Wedged(restarts, revives=False), collectors.Report()
+    docker.update, docker.desktop = True, desktop
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 0
+    assert "installing an update" in report.lines[0] and "(held 0 min)" in report.lines[0]
+    assert ("restart",) not in docker.calls and ("desktop",) not in docker.calls
+    assert collectors.HOLD_SINCE in collectors.restart_record(restarts)
+
+
+def test_an_update_that_outlasts_the_hold_limit_fails_with_a_stable_cause(tmp_path, instant):
+    restarts = tmp_path / "restarts.json"
+    old = collectors._clock() - collectors.HOLD_LIMIT - 1
+    collectors.write_file(restarts, json.dumps({collectors.HOLD_SINCE: old}))
+    docker, report = Wedged(restarts, revives=False), collectors.Report()
+    docker.update = True
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 1 and ("restart",) not in docker.calls
+    assert report.lines[-1] == ("docker is not answering while Docker Desktop installs an update")
+
+
+def test_the_engine_answering_after_an_update_ends_its_hold(tmp_path, instant):
+    restarts = tmp_path / "restarts.json"
+    docker = Wedged(restarts, revives=False)
+    docker.update = True
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    docker.update, docker.containers = False, []
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    assert collectors.HOLD_SINCE not in collectors.restart_record(restarts)
+
+
 def test_a_restart_is_not_repeated_within_the_hour(tmp_path, instant):
     restarts = tmp_path / "restarts.json"
     collectors.write_file(restarts, json.dumps({"started_at": collectors._clock() - 60}))
@@ -874,6 +917,34 @@ def test_a_status_that_failed_is_answered_by_desktops_process(
 )
 def test_desktop_status_reads_the_object_wherever_it_sits(text, status):
     assert collectors.desktop_status(text) == status
+
+
+INSTALLER = '"Docker Desktop Installer.exe","5120","RDP-Tcp#9","1","61,000 K"'
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [((0, f"{DESKTOP_UP}\n{INSTALLER}"), True), ((0, DESKTOP_UP), False), ((1, INSTALLER), False)],
+)
+def test_docker_reads_an_update_off_the_process_listing(monkeypatch, answer, expected):
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    docker = collectors.Docker()
+    asked: list[tuple] = []
+
+    def run(argv, timeout, cwd=None):
+        asked.append(tuple(argv))
+        return answer
+
+    docker.run = run
+    assert docker.updating() is expected
+    assert asked == [collectors.collector_tasks.UPDATE_LISTING]
+
+
+def test_off_windows_docker_is_never_updating(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "posix")
+    docker = collectors.Docker()
+    docker.run = lambda argv, timeout, cwd=None: pytest.fail(f"asked {argv}")
+    assert docker.updating() is False
 
 
 def test_off_windows_a_failed_status_is_not_running(monkeypatch):
