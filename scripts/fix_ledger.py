@@ -116,8 +116,10 @@ def problem_key(decision: fix_plan.Decision) -> str:
     A fixer that pushed and left the same tests red produced a new sha, so a new
     `decision_key`, and used to read as a fresh failure; under this key it is the
     same problem again, which is exactly the loop to stop.
+
+    A `COMMIT` keeps its fourth field (`_problem_part`).
     """
-    keys = sorted(_drop_commit(failure_key(f)) for f in decision.failures)
+    keys = sorted(_problem_part(failure_key(f)) for f in decision.failures)
     if len(keys) == 1:
         return f"{keys[0]}:{decision.action}"
     digest = hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
@@ -130,12 +132,23 @@ def _drop_commit(key: str) -> str:
     return ":".join(parts[:3] + parts[4:]) if len(parts) >= 5 else key
 
 
+def _problem_part(key: str) -> str:
+    """A failure key as a problem: less its commit, except a refused intent's.
+
+    A `COMMIT`'s fourth field is the intent's digest, which a fixer's edits never move:
+    it is which change this is, not where it stood. Dropped, every refusal one hook
+    gives a project read as one problem, and an intent nobody had sent a session at was
+    escalated as exhausted by sessions sent at other intents days earlier.
+    """
+    return key if key_kind(key) == fix_plan.COMMIT else _drop_commit(key)
+
+
 def problem_of(key: str, entry: object) -> str:
     """The problem an entry was recorded under; derived from a single-failure key for
     an entry written before `record` kept it, and "" for a group, which cannot be."""
     if isinstance(entry, dict) and entry.get("problem"):
         return str(entry["problem"])
-    return _drop_commit(key) if len(key.split(":")) == 6 else ""
+    return _problem_part(key) if len(key.split(":")) == 6 else ""
 
 
 # --- the file -------------------------------------------------------------------------

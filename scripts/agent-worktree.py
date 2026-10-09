@@ -57,6 +57,8 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as futures
+import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -94,6 +96,10 @@ SCAN_NAMES = {"trees": "worktree-trees", "bases": "worktree-bases"}
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
+
+# Seconds one `gh pr list` may take when `create` names a taken branch's PR. A lookup
+# that hangs costs the cut nothing but the PR number.
+GH_TIMEOUT = 20
 
 
 def trees_for(project_dir: Path) -> list[aw.Tree]:
@@ -151,6 +157,51 @@ def known_branches(git) -> set[str]:
     done = git("for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin")
     names = {line.strip() for line in (done.stdout or "").splitlines() if line.strip()}
     return {name.removeprefix("origin/") for name in names}
+
+
+def same_task(plain: str, branch: str, existing: set[str]) -> list[str]:
+    """The taken names `tb.branch_name` moved past from `plain` to `branch`, oldest first.
+
+    `agent/x-1008-2` exists because `agent/x-1008` did: the same slug, cut the same day,
+    which is most often the same task. Empty when `branch` is the plain name.
+    """
+    if plain == branch:
+        return []
+    taken = [name for name in existing if re.fullmatch(rf"{re.escape(plain)}(?:-\d+)?", name)]
+    return sorted((name for name in taken if name != branch), key=lambda name: (len(name), name))
+
+
+def prior_work(source: Path, names: list[str], runner) -> list[str]:
+    """One line per taken name, naming its PR when `gh` knows one.
+
+    A devkit ledger sweep cut `data-lake:agent/archive-read-retry-1008-2` at 21:28 while
+    #55 from `...-1008` -- the same fix -- was open; #55 merged twelve minutes later, and
+    the sweep's PR opened as a duplicate and was closed. The suffix was the one sign, and
+    nothing said it out loud.
+    """
+    lines = []
+    for name in names:
+        pr = ""
+        try:
+            listing = ["gh", "pr", "list", "--head", name, "--state", "all", "--limit", "1"]
+            done = runner(
+                [*listing, "--json", "number,state,url"],
+                cwd=source,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=GH_TIMEOUT,
+            )
+            found = json.loads(done.stdout or "[]") if done.returncode == 0 else []
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            found = []
+        if found and isinstance(found[0], dict):
+            pr = f" -- PR #{found[0].get('number')} ({found[0].get('state')}) {found[0].get('url')}"
+        lines.append(
+            f"agent-worktree: {name} was taken{pr}; if it carries this task, "
+            "the work is there, not in this tree"
+        )
+    return lines
 
 
 def recent_bases(project_dir: Path) -> list[tuple[str, str]]:
@@ -239,7 +290,9 @@ def create(
         print(f"agent-worktree: origin has no branch '{ref}'", file=sys.stderr)
         return EXIT_USAGE
     existing = known_branches(git)
-    branch = tb.branch_name(tb.slugify(slug or project), existing)
+    stem = tb.slugify(slug or project)
+    branch = tb.branch_name(stem, existing)
+    taken = same_task(tb.branch_name(stem, set()), branch, existing)
     name = branch.partition("/")[2]
     path = aw.default_root(source) / name
     # `--quiet`: git's checkout progress was most of what this printed (80a224ea).
@@ -257,7 +310,11 @@ def create(
     # the `.venv` alone, so a frontend tree is provisioned for its `node_modules` too.
     if tree_provision.needs_provision(path):
         tree_provision.provision(path, runner)
-    return agent_tabs.open_agent(launch, path, branch, runner)
+    opened = agent_tabs.open_agent(launch, path, branch, runner)
+    # Last, so a caller reading the tail of the output still sees it.
+    for line in prior_work(source, taken, runner):
+        print(line)
+    return opened
 
 
 def remove_one(project: str, source: Path, tree: aw.Tree, forced: bool, runner) -> int:

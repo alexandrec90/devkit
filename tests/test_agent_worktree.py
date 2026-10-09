@@ -272,6 +272,56 @@ def test_a_new_worktree_is_cut_no_track_off_origin_after_a_fetch(workspace, monk
     assert opened["branch"] == add[5]
 
 
+def test_the_names_a_cut_moved_past_are_the_same_slug_the_same_day():
+    existing = {"main", "agent/x-1008", "agent/x-1008-2", "agent/x-1007", "agent/xy-1008"}
+    assert agent_worktree.same_task("agent/x-1008", "agent/x-1008-3", existing) == [
+        "agent/x-1008",
+        "agent/x-1008-2",
+    ]
+    assert agent_worktree.same_task("agent/y-1008", "agent/y-1008", existing) == []
+
+
+def test_a_cut_past_a_taken_name_says_whose_pr_holds_it(workspace, monkeypatch, capsys):
+    """10-08: a devkit ledger sweep cut data-lake's `archive-read-retry-1008-2` while #55
+    from `archive-read-retry-1008` carried the same fix; #55 merged, and the sweep's PR was
+    a duplicate, closed unread. The `-2` was the only sign, and nothing said it."""
+    plain = agent_worktree.tb.branch_name("voicemail", set())
+    refs = f"main\norigin/{plain}\n"
+    git = agent_worktree.sweep.git_for(Path("."))
+
+    def with_taken(*args):
+        if args[:1] == ("for-each-ref",):
+            return subprocess.CompletedProcess(list(args), 0, stdout=refs, stderr="")
+        return git(*args)
+
+    monkeypatch.setattr(agent_worktree.sweep, "git_for", lambda _path: with_taken)
+    monkeypatch.setattr(agent_worktree.agent_tabs, "open_agent", lambda *a, **k: 0)
+    pr = '[{"number": 55, "state": "OPEN", "url": "https://github.com/o/r/pull/55"}]'
+
+    def run(argv, **kwargs):
+        out = pr if argv[:3] == ["gh", "pr", "list"] else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    assert agent_worktree.create("devkit", workspace, "voicemail", "main", NONE, run) == 0
+    said = capsys.readouterr().out.splitlines()
+    assert said[0].startswith(f"{plain}-2 off origin/main")
+    assert said[-1] == (
+        f"agent-worktree: {plain} was taken -- PR #55 (OPEN) https://github.com/o/r/pull/55; "
+        "if it carries this task, the work is there, not in this tree"
+    )
+
+
+def test_a_taken_name_gh_cannot_answer_for_is_still_named(tmp_path):
+    def broken(argv, **kwargs):
+        raise OSError("gh is not installed")
+
+    assert agent_worktree.prior_work(tmp_path, ["agent/x-1008"], broken) == [
+        "agent-worktree: agent/x-1008 was taken; if it carries this task, "
+        "the work is there, not in this tree"
+    ]
+    assert agent_worktree.prior_work(tmp_path, [], broken) == []
+
+
 def test_the_model_pick_reaches_the_tab_and_no_pick_reaches_it_as_nothing(workspace, monkeypatch):
     """`create` carries the pair and interprets neither, which is the whole seam.
 
