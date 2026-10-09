@@ -203,6 +203,33 @@ def test_attempts_count_every_commit_of_one_problem(tmp_path):
     assert fix_ledger.attempts(unrelated, ledger) == 0
 
 
+def test_a_refused_intent_is_its_trees_problem_not_its_projects(tmp_path):
+    """A refused COMMIT is keyed by its branch (`target`), so every refusal one hook
+    gives a project is not one problem: social-scraper's intent of 10-08 was escalated
+    as "2 fixer session(s) left it red and unchanged" on the strength of two sessions
+    sent at other intents, in other trees, on 10-03 and 10-05 -- and none at it. The
+    same holds for an entry whose problem is derived from its key."""
+    path = tmp_path / "dispatch.json"
+    refused = ("commit stage refused at fixers: fixers refused: Detect secrets....Failed",)
+
+    def intent(tree: str) -> fix_plan.Decision:
+        fields = {"kind": fix_plan.COMMIT, "number": 0, "head": tree, "sha": f"{tree}-digest"}
+        return fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(**fields, signature=refused),))
+
+    for tree in ("worktree-a", "worktree-b"):
+        earlier = intent(tree)
+        fix_ledger.record(
+            path, fix_ledger.decision_key(earlier), "n", NOW, fix_ledger.problem_key(earlier)
+        )
+    ledger = fix_ledger.read_ledger(path)
+    new = intent("worktree-c")
+    assert fix_ledger.attempts(new, ledger) == 0
+    assert fix_ledger.attempts(earlier, ledger) == 1, "each intent still counts its own"
+    unrecorded = {k: {"when": v["when"], "sent": v["sent"]} for k, v in ledger.items()}
+    assert fix_ledger.attempts(new, unrecorded) == 0, "nor when derived from the key"
+    assert fix_ledger.problem_of(fix_ledger.decision_key(new), {}) == fix_ledger.problem_key(new)
+
+
 def test_a_blocked_report_stands_after_the_sha_moves(tmp_path):
     """The blocker a fixer named does not go away because somebody pushed."""
     path = tmp_path / "dispatch.json"

@@ -1391,6 +1391,24 @@ def test_the_same_test_run_three_times_with_no_edit_between_is_a_rerun():
     assert classes([call("git status", str(n)) for n in range(4)]) == [], "reading is not a rerun"
 
 
+def test_three_different_runs_behind_one_long_cd_are_not_a_rerun():
+    """10-08, fix-harness-ledger-1008-4: a targeted pytest, the runner's `--help` and the
+    runner bare were filed as one run three times. The key was cut to `SNIPPET`, and a
+    POSIX `cd /c/.../worktrees/<tree>;` -- a spelling `normalize` does not fold -- filled
+    it before the command began."""
+    cd = "cd /c/Users/alexa/vs-code/devkit/.claude/worktrees/fix-harness-ledger-1008-4; "
+    rows = [
+        call(
+            f'{cd}.venv/Scripts/python -m pytest -q tests/test_devkit_project.py -k "history"', "1"
+        ),
+        call(f"{cd}.venv/Scripts/python scripts/run-tests.py --help | head -12", "2"),
+        call(f"{cd}.venv/Scripts/python scripts/run-tests.py > /c/tmp/devkit-tests.log 2>&1", "3"),
+    ]
+    assert "rerun-unchanged" not in classes(rows)
+    same = f"{cd}.venv/Scripts/python scripts/run-tests.py > /c/tmp/devkit-tests.log 2>&1"
+    assert "rerun-unchanged" in classes([call(same, str(n)) for n in range(3)])
+
+
 def test_a_rerun_after_changing_the_environment_is_not_a_rerun():
     """eda7aed7: the carameli session started its db between the first and second run and
     brought compose up before the third. Each run read something new; the friction was the

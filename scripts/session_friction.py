@@ -779,7 +779,9 @@ class _Session:
             self.note("handed-back", "a dispatched session ended on a decision for nobody", said)
 
     def _rerun(self, event: Event) -> None:
-        key = normalize(event.command.split("|", 1)[0])[:SNIPPET]
+        # The whole run, not `SNIPPET` of it: a long `cd` into the tree filled the cut, and
+        # three different runs behind it were filed as one run three times.
+        key = same_command(event.command.split("|", 1)[0])
         self.unchanged[key] = self.unchanged.get(key, 0) + 1
         if self.unchanged[key] == REPEATS:
             self.note(
