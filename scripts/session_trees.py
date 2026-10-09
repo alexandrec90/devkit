@@ -48,7 +48,9 @@ reach it, so the scheduled reap failed on every tree with a stack while Docker D
 was stopped and the ledger sent a fixer after each run (3dfd297d, five times; one fix
 lived only in an uncommitted tree and never shipped). The tree waits whole, as `reconcile`
 makes a box wait (`worktree.docker_engine_down`); the signs are
-`box_teardown.DAEMON_DOWN_SIGNS`.
+`box_teardown.DAEMON_DOWN_SIGNS`. A wedged engine behind a running Desktop is the same
+case in words no sign names, so a failure the signs miss asks the engine itself
+(`ENGINE_PROBE`) before it is called the stack's.
 
 Run by `reap-stale.py`, the scheduled pass for what agent sessions leave behind.
 Tested in `tests/test_session_trees.py`.
@@ -91,9 +93,17 @@ QUIET_HOURS = 12
 # whole rather than removed: its stack's containers and volumes would outlive it with
 # nothing left to name them, so no later pass could tear them down.
 ENGINE_DOWN = (
-    "kept -- Docker's engine is not running, so its stack cannot be torn down; "
+    "kept -- Docker's engine is not answering, so its stack cannot be torn down; "
     "the next pass with the engine up reaps it, stack and all"
 )
+
+# What `down_stack` asks the engine when `compose down` failed in words that name no
+# unreachable engine: the cheapest question about every container rather than one. A
+# wedged engine fails in spellings no list of signs keeps up with -- a 500 on the
+# container listing at 2026-10-09 17:00, under a restart collectors.py held for a live
+# scrape (41383e56) -- so a failure is read as the engine's when the engine cannot
+# answer this either.
+ENGINE_PROBE = ["docker", "ps", "-q"]
 
 # Each way a removal here fails: a marker its artifact line carries, and the kind
 # `reap-stale.cause_line` files it under on the ledger. The line names the tree and the
@@ -225,9 +235,10 @@ def verdict(
 def down_stack(tree: Tree, checkout: Path, run: Run) -> str:
     """Tear down the tree's own compose project. `""` when done or there is none.
 
-    `ENGINE_DOWN` when Docker's engine could not be reached, before the tree is touched,
-    so a kept tree is kept whole. A name equal to the checkout's is the static checkout's
-    stack and is never downed.
+    `ENGINE_DOWN` when Docker's engine could not be reached -- its error says so, or it
+    cannot answer `ENGINE_PROBE` either -- before the tree is touched, so a kept tree is
+    kept whole. A name equal to the checkout's is the static checkout's stack and is
+    never downed.
     """
     name = compose_name(tree.path)
     if not name or name == checkout.name:
@@ -235,7 +246,8 @@ def down_stack(tree: Tree, checkout: Path, run: Run) -> str:
     down = run(["docker", "compose", "-p", name, "down", "-v"])
     if down.returncode == 0:
         return ""
-    if box_teardown.engine_unreachable(f"{down.stderr or ''}\n{down.stdout or ''}"):
+    said = f"{down.stderr or ''}\n{down.stdout or ''}"
+    if box_teardown.engine_unreachable(said) or run(ENGINE_PROBE).returncode != 0:
         return ENGINE_DOWN
     return f"compose down -p {name} failed: {(down.stderr or '').strip()[-200:]}"
 

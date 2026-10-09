@@ -1046,7 +1046,8 @@ def fire(
 ) -> int:
     """`fire <name>`: what a scheduled collector's task runs. Exits with the command's code.
 
-    Writes `logs/collector-<name>.log` and never `ARTIFACT`, which belongs to the pass. A
+    Writes `logs/collector-<name>.log` and never `ARTIFACT`, which belongs to the pass, and
+    records a run's start before its command runs (`collector_tasks.start_path`). A
     task left behind on a machine no longer assigned `run` -- the pass that deletes it has
     not come round yet -- does nothing and says so, rather than running a second writer.
     """
@@ -1059,6 +1060,8 @@ def fire(
         code, lines = 0, ["not assigned `run` on this machine -- nothing run"]
     else:
         checkout = sweep.default_workspace(base).parent / collector.project
+        start = now.astimezone().isoformat(timespec="seconds")
+        write_file(base / collector_tasks.start_path(name), start + "\n")
         code, lines = collector_tasks.fire(
             collector, checkout, spawner or collector_tasks.spawn, fired=now
         )

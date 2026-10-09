@@ -342,8 +342,13 @@ ENGINE_STOPPED = (
 )
 
 
-def _stacked_checkout(tmp_path, down: subprocess.CompletedProcess[str]):
-    """A merged tree with a stack of its own, whose `compose down` answers `down`."""
+def _stacked_checkout(
+    tmp_path,
+    down: subprocess.CompletedProcess[str],
+    probe: subprocess.CompletedProcess[str] | None = None,
+):
+    """A merged tree with a stack of its own, whose `compose down` answers `down` and
+    whose engine answers `st.ENGINE_PROBE` with `probe` -- by default, it answers."""
     checkout, listed, gh, calls = _checkout(tmp_path)
     one = tree(tmp_path)
     one.path.mkdir(parents=True)
@@ -351,6 +356,8 @@ def _stacked_checkout(tmp_path, down: subprocess.CompletedProcess[str]):
     (one.path / ".env").write_text(env, "utf-8")
 
     def run(argv):
+        if argv == st.ENGINE_PROBE:
+            return probe or done()
         return down if argv[0] == "docker" else listed(argv)
 
     return checkout, one, run, gh, calls
@@ -376,6 +383,51 @@ def test_any_other_compose_down_failure_is_still_a_failure(tmp_path):
     assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 1
     assert len(said) == 1 and "could not reap: compose down -p" in said[0]
     assert "volume is in use" in said[0]
+
+
+# The tail of what `compose down` said at 2026-10-09 17:00 (41383e56), while collectors.py
+# held a restart of a wedged engine for a live scrape: a 500 on the container listing,
+# in no spelling `box_teardown.DAEMON_DOWN_SIGNS` names.
+ENGINE_WEDGED = (
+    "request returned 500 Internal Server Error for API route and version http://%2F%2F.%2F"
+    "pipe%2FdockerDesktopLinuxEngine/v1.51/containers/json?all=1&filters=%7B%22label%22%3A"
+    "%7B%22com.docker.compose.oneoff%3DFalse%22%3Atrue%2C%22com.docker.compose.project%3D"
+    "carameli-fix-pr-gate-0929%22%3Atrue%7D%7D, check if the server supports the requested "
+    "API version"
+)
+
+
+def test_an_engine_that_cannot_list_containers_keeps_the_tree_whatever_compose_said(tmp_path):
+    """The engine is asked, not only read: a wedged one fails in spellings no list of
+    signs keeps up with, and 41383e56 failed the scheduled reap on one of them."""
+    checkout, one, run, gh, calls = _stacked_checkout(
+        tmp_path, done(1, err=ENGINE_WEDGED), probe=done(1, err=ENGINE_WEDGED)
+    )
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert said == [f"session tree carameli:fix-nightly-0919: {st.ENGINE_DOWN}"]
+    assert one.path.is_dir()
+    assert not any("remove" in argv for argv in calls)
+
+
+def test_an_engine_that_lists_containers_makes_the_same_words_a_failure(tmp_path):
+    checkout, _one, run, gh, _calls = _stacked_checkout(tmp_path, done(1, err=ENGINE_WEDGED))
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 1
+    assert "could not reap: compose down -p" in said[0]
+
+
+def test_the_engine_is_asked_only_after_compose_down_failed_in_unknown_words(tmp_path):
+    asked: list[list[str]] = []
+    for name, down, expected in [
+        ("downed", done(), ""),
+        ("stopped", done(1, err=ENGINE_STOPPED), st.ENGINE_DOWN),
+    ]:
+        checkout, one, run, _gh, _calls = _stacked_checkout(tmp_path / name, down)
+        assert st.down_stack(one, checkout, lambda a, run=run: asked.append(a) or run(a)) == (
+            expected
+        )
+    assert asked and st.ENGINE_PROBE not in asked
 
 
 def test_down_stack_answers_before_the_tree_is_touched(tmp_path):

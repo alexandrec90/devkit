@@ -384,6 +384,8 @@ def test_each_way_a_session_tree_fails_files_its_own_kind(tmp_path, monkeypatch)
         return st.Tree(path, f"agent/{name}", "abc", False)
 
     def run(argv):
+        if argv == st.ENGINE_PROBE:  # the engine answers: the failure is the stack's
+            return subprocess.CompletedProcess(argv, 0, "", "")
         if argv[0] == "docker":
             return subprocess.CompletedProcess(argv, 1, "", "volume is in use")
         if "remove" in argv:
