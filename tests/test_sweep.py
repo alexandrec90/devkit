@@ -2280,6 +2280,19 @@ def test_a_bounded_run_returns_what_a_finished_command_said():
     assert (done.returncode, done.stdout.strip()) == (0, "hi")
 
 
+@pytest.mark.parametrize("timeout", [None, 30])
+def test_a_bounded_run_reads_git_s_utf8_whatever_the_locale(monkeypatch, timeout):
+    """caff6e06: git and gh write UTF-8, and `text=True` decoded it with the locale's
+    codec -- cp1252 on Windows outside UTF-8 mode, which a scheduled job and an
+    interactive session both run in. `canonical_history` read the em dash in a committed
+    task's detail as mojibake, so the publish took devkit's own change for a live edit.
+    A byte no codec maps is replaced, not raised from inside `communicate`."""
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    child = "import sys; sys.stdout.buffer.write('a\N{EM DASH}b'.encode() + bytes([255]))"
+    done = sweep.run_bounded([sys.executable, "-c", child], timeout)
+    assert (done.returncode, done.stdout) == (0, "a\N{EM DASH}b\N{REPLACEMENT CHARACTER}")
+
+
 def test_git_for_inherits_the_environment_unless_a_push_hands_it_one(tmp_path):
     """`env=` is how the fix pass's clean-merge push skips the pre-push gate; without it
     git runs in the process's own environment, as every other caller expects."""
