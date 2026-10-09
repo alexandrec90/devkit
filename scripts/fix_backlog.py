@@ -16,6 +16,7 @@ Tested in `tests/test_fix_backlog.py`.
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import shutil
 import sys
@@ -31,6 +32,11 @@ import gate_evidence
 import harness_triage as triage
 import sweep
 import task_branch as tb
+
+# `log-wrap.py`'s kept copy says when it was written in its header (`artifact_body`).
+WHEN_PREFIX = "# when:"
+WHEN_LINES = 8
+WHEN_SLACK = _dt.timedelta(minutes=5)
 
 
 def ledger_failure(
@@ -98,6 +104,34 @@ def artifact_path(item: triage.Item, devkit_dir: Path) -> Path | None:
     return path if path.is_file() else None
 
 
+def later_failure(source: Path, stamp: str) -> str | None:
+    """The `# when:` of `source` when it is not the failure filed at `stamp`, else None.
+
+    96d2638e / e711daa0: a row older than `log-wrap.py`'s per-failure copies names the
+    job's `.failed.log`, which the job's next failure overwrites, and five groups were
+    each handed the newest one labelled as their own. `log-wrap` stamps the file in local
+    time just before it files the row in UTC, so the two agree to within `WHEN_SLACK`. A
+    file with no stamp, or a row whose stamp does not parse, is not judged.
+    """
+    try:
+        with source.open(encoding="utf-8", errors="replace") as f:
+            head = [next(f, "") for _ in range(WHEN_LINES)]
+        filed = _dt.datetime.fromisoformat(stamp)
+    except (OSError, ValueError):
+        return None
+    for line in head:
+        if line.startswith(WHEN_PREFIX):
+            written = line[len(WHEN_PREFIX) :].strip()
+            try:
+                local = _dt.datetime.strptime(written, "%Y-%m-%d %H:%M:%S").astimezone()
+            except ValueError:
+                return None
+            if filed.tzinfo is None:
+                filed = filed.replace(tzinfo=_dt.UTC)
+            return None if abs(local - filed) <= WHEN_SLACK else written
+    return None
+
+
 def copy_artifact(item: triage.Item, devkit_dir: Path, where: Path) -> str:
     """Copy `item`'s artifact into the evidence slot `where`; the line saying so, or "".
 
@@ -110,6 +144,11 @@ def copy_artifact(item: triage.Item, devkit_dir: Path, where: Path) -> str:
     source = artifact_path(item, devkit_dir)
     if source is None:
         return ""
+    if (written := later_failure(source, item.stamp)) is not None:
+        return (
+            f"[{item.id}] {source} not copied: it holds the failure of {written}, not this "
+            "group's -- its cause/said lines are the evidence"
+        )
     name = f"{item.id}-{source.name}"
     try:
         shutil.copyfile(source, where / name)

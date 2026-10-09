@@ -74,7 +74,22 @@ def failure_key(failure: fix_plan.Failure) -> str:
     # A nightly is keyed at its base's tip when that is known: a re-run of an old red
     # run is made once per tip, and made again once the tip moves.
     at = failure.tip or failure.sha or failure.run_id or "?"
-    return f"{failure.kind}:{failure.project}:{failure.number}:{at}:{digest[:KEY_DIGEST]}"
+    return f"{failure.kind}:{failure.project}:{target(failure)}:{at}:{digest[:KEY_DIGEST]}"
+
+
+def target(failure: fix_plan.Failure) -> str:
+    """The key's third field, which says *what* is red: a PR's number, or for a refused
+    commit -- which has none -- its branch. git refuses a `:` in a ref name, so a branch
+    cannot shift the fields after it.
+
+    Every refused commit used to be `0`, so one project's refusals sharing a hook's
+    line were one problem: social-scraper's happy-drifting-sprout was refused by
+    detect-secrets on 2026-10-08, and was filed fixers-exhausted with no fixer ever sent
+    at it, its `ATTEMPTS` spent on 10-03 and 10-05 at other trees' refusals (787d0750).
+    """
+    if failure.kind == fix_plan.COMMIT and failure.head:
+        return failure.head
+    return str(failure.number)
 
 
 def key_kind(key: str) -> str:

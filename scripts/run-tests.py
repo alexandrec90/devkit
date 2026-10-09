@@ -80,6 +80,11 @@ PYTEST_NO_TESTS_COLLECTED = 5
 # fix-pass.py, ran its targeted tests green, and needed a second fixer for
 # test_scheduled_jobs (54bb72df). About twenty seconds together; a listed file that is
 # gone is dropped, and `tests/test_run_tests.py` fails the list when one is.
+#
+# The two ratchets over every module are named down to the one test that holds each
+# baseline, since their files hold minutes of unit tests besides. #581 went red on a
+# `.devkit-untested.txt` line its own tests had made stale, which no run short of the
+# push gate reported (1c4eaf1b).
 CONTRACT_TESTS = (
     "tests/test_test_contract.py",
     "tests/test_scheduled_jobs.py",
@@ -90,8 +95,15 @@ CONTRACT_TESTS = (
     "tests/test_worktree_tiers_single_source.py",
     "tests/test_dispatch_coherence.py",
     "tests/test_gate_parity.py",
+    "scripts/hooks/tests/test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
+    "scripts/hooks/tests/test_structure_check.py::test_nothing_is_new_or_worse_than_the_baseline",
     "scripts/hooks/tests/test_repo_contract.py",
 )
+
+
+def target_file(target: str) -> str:
+    """The file a pytest target names: itself, or a node id's part before `::`."""
+    return target.split("::", 1)[0]
 
 
 def filter_output(raw: str) -> str:
@@ -316,8 +328,13 @@ def _reading_tests(posix: str, root: Path) -> list[str]:
 
 
 def with_contracts(tests: list[str], root: Path = REPO_ROOT) -> list[str]:
-    """`tests` followed by every `CONTRACT_TESTS` file `root` holds that it lacks."""
-    extra = [t for t in CONTRACT_TESTS if t not in tests and (root / t).is_file()]
+    """`tests` followed by every `CONTRACT_TESTS` target whose file `root` holds and which
+    `tests` does not already run, whole or by that node id."""
+    extra = [
+        t
+        for t in CONTRACT_TESTS
+        if t not in tests and target_file(t) not in tests and (root / target_file(t)).is_file()
+    ]
     return [*tests, *extra]
 
 

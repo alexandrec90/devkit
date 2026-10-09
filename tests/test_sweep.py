@@ -1471,6 +1471,76 @@ def test_a_failing_step_stops_the_rest():
     assert ("branch", "-d", "gone") not in git.calls
 
 
+class RacedGit(FakeGit):
+    """Fails each step in `raced` once, as git does when another process moved the ref."""
+
+    def __init__(self, raced: str, error: str):
+        super().__init__()
+        self.raced, self.error, self.done = raced, error, False
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        if not self.done and self.raced in " ".join(args):
+            self.done = True
+            return subprocess.CompletedProcess(["git", *args], 128, "", self.error)
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+
+def test_a_step_that_lost_a_race_for_a_ref_is_run_once_more():
+    """85ef9bc3: VS Code's own `git pull` fast-forwarded ibkr_trader in the middle of
+    reconcile's merge, and reconcile said the state needed a human. Git writes nothing
+    when it cannot take the lock, so the step is run again."""
+    error = (
+        "fatal: update_ref failed for ref 'HEAD': cannot lock ref 'HEAD': is at "
+        "25a9da439efd573c14b1c75e795fc5f8c7912d4b but expected ceca15e8b8dcd14d76475964382c747545f92fbe"
+    )
+    paused: list[float] = []
+    git = RacedGit("merge", error)
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=paused.append)
+    assert result.ok
+    assert git.calls.count(("merge", "--ff-only", "origin/main")) == 2
+    assert paused == [sweep.REF_RACE_PAUSE]
+    lock = RacedGit("checkout", "fatal: Unable to create 'C:/x/.git/index.lock': File exists.")
+    assert sweep.apply_plan("proj", Path("."), PLAN, git=lock, pause=paused.append).ok
+
+
+def test_any_other_refusal_is_not_retried():
+    paused: list[float] = []
+    git = FakeGit(fail_on="merge")
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=paused.append)
+    assert not result.ok and paused == []
+    assert git.calls.count(("merge", "--ff-only", "origin/main")) == 1
+
+
+def test_run_step_reads_a_race_off_stdout_too_and_passes_a_success_straight_through():
+    paused: list[float] = []
+    calls: list[tuple[str, ...]] = []
+
+    def raced_on_stdout(*args: str):
+        calls.append(args)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(["git", *args], 1, "error: cannot lock ref", "")
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+    assert sweep.run_step(raced_on_stdout, ("fetch",), paused.append).returncode == 0
+    assert calls == [("fetch",), ("fetch",)] and paused == [sweep.REF_RACE_PAUSE]
+    clean = FakeGit()
+    assert sweep.run_step(clean, ("status",), paused.append).returncode == 0
+    assert clean.calls == [("status",)] and len(paused) == 1, "a success is not rerun"
+
+
+def test_a_race_lost_twice_still_fails():
+    class Always(FakeGit):
+        def __call__(self, *args: str):
+            self.calls.append(args)
+            return subprocess.CompletedProcess(["git", *args], 128, "", "cannot lock ref 'HEAD'")
+
+    git = Always()
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=lambda _s: None)
+    assert not result.ok and "cannot lock ref" in result.error
+    assert git.calls == [("checkout", "main")] * 2
+
+
 class FakeGh:
     """A `gh(*args)` stand-in. `existing` is the URL `pr view` reports, "" for none."""
 
@@ -2175,9 +2245,52 @@ def test_a_bounded_run_ends_a_grandchild_holding_its_pipes():
     assert done.returncode == sweep.TIMED_OUT and "timed out after 2s" in done.stderr
 
 
+def test_until_ends_a_call_at_its_deadline_whatever_the_call_allows():
+    """2e2e7804: a fix-pass step made `gh` calls each bounded at 600 s, and the step ran
+    past the watchdog's stop. Inside `until`, the deadline ends the call -- a local git
+    call with no timeout of its own included -- and past it nothing is started."""
+    hang = [sys.executable, "-c", "import time; time.sleep(60)"]
+    started = time.monotonic()
+    with sweep.until(time.monotonic() + 1):
+        done = sweep.run_bounded(hang, sweep.GH_TIMEOUT)
+    with sweep.until(time.monotonic() + 1):
+        unbounded = sweep.run_bounded(hang, None)
+    assert time.monotonic() - started < 45
+    assert done.returncode == unbounded.returncode == sweep.TIMED_OUT
+    with sweep.until(time.monotonic() - 1):
+        late = sweep.run_bounded(["no-such-program-devkit"], None)
+    assert late.returncode == sweep.TIMED_OUT and "not started" in late.stderr
+
+
+def test_until_keeps_the_earlier_deadline_and_restores_the_outer_one():
+    assert sweep._until is None
+    with sweep.until(100.0):
+        with sweep.until(200.0):
+            assert sweep._until == 100.0
+        with sweep.until(50.0):
+            assert sweep._until == 50.0
+        with sweep.until(None):
+            assert sweep._until == 100.0
+        assert sweep._until == 100.0
+    assert sweep._until is None
+
+
 def test_a_bounded_run_returns_what_a_finished_command_said():
     done = sweep.run_bounded([sys.executable, "-c", "print('hi')"], 30)
     assert (done.returncode, done.stdout.strip()) == (0, "hi")
+
+
+@pytest.mark.parametrize("timeout", [None, 30])
+def test_a_bounded_run_reads_git_s_utf8_whatever_the_locale(monkeypatch, timeout):
+    """caff6e06: git and gh write UTF-8, and `text=True` decoded it with the locale's
+    codec -- cp1252 on Windows outside UTF-8 mode, which a scheduled job and an
+    interactive session both run in. `canonical_history` read the em dash in a committed
+    task's detail as mojibake, so the publish took devkit's own change for a live edit.
+    A byte no codec maps is replaced, not raised from inside `communicate`."""
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    child = "import sys; sys.stdout.buffer.write('a\N{EM DASH}b'.encode() + bytes([255]))"
+    done = sweep.run_bounded([sys.executable, "-c", child], timeout)
+    assert (done.returncode, done.stdout) == (0, "a\N{EM DASH}b\N{REPLACEMENT CHARACTER}")
 
 
 def test_git_for_inherits_the_environment_unless_a_push_hands_it_one(tmp_path):

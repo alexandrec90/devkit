@@ -486,6 +486,7 @@ def _settled(
         # re-reported by every pass -- ten from before the pass set intents aside.
         set_aside(intent.tree, SHIPPED_FILE)
         return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
+    refresh_base(intent.tree, base, runner)
     if not porcelain.strip() and not mid_merge and commits_ahead(intent.tree, base, runner) == 0:
         return _empty(intent, when, "nothing changed or committed: no PR to open; set aside")
     if lands_nothing(intent.tree, base, runner):
@@ -739,6 +740,21 @@ def retired_at(tree: Path, branch: str, gh_for=sweep.gh_for) -> str:
         return ""
     times = [str(r.get("mergedAt")) for r in rows if isinstance(r, dict) and r.get("mergedAt")]
     return max(times) if times else ""
+
+
+def refresh_base(tree: Path, base: str, runner: Runner) -> None:
+    """`origin/<base>` fetched, so `commits_ahead` and `lands_nothing` read where the base
+    is now. A fetch that fails leaves the ref as it was, and they answer from that.
+
+    Nothing else fetched it. data-lake's archive-read-retry tree pushed its last commit
+    by hand and #55 merged it at 21:40 UTC; the 21:50 pass read the tree's `origin/main`
+    from before that merge, counted two commits ahead, and `gh pr create` refused the
+    branch -- "No commits between main and agent/archive-read-retry-1008" (07c1172a).
+    """
+    runner(
+        ["git", "fetch", "--quiet", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"],
+        cwd=tree,
+    )
 
 
 def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:

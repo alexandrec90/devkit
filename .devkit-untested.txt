@@ -142,5 +142,4 @@ scripts/worktree.py::pr_head_branch
 scripts/worktree.py::recovered_slot
 scripts/worktree.py::render_preview
 scripts/worktree.py::render_reap
-scripts/worktree.py::run_steps
 scripts/worktree.py::seed_env

@@ -38,8 +38,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -186,23 +188,55 @@ def run_pass(argv: list[str], timeout: _dt.timedelta = TIMEOUT) -> tuple[int | N
     The pass runs in UTF-8 mode: dozens of its runners use `text=True` with no encoding,
     and on a cp1252 console a child's `”` killed their reader thread and lost output.
     It is told `timeout` too, so it can finish inside it rather than be stopped.
+
+    Its output goes to a temporary file, and the wait is on the pass, never on an
+    end-of-file: `subprocess.run(timeout=)` ends the child alone on Windows and then reads
+    its pipes with no bound, and a `git commit` hook or a `claude --bg` launch the pass
+    started holds them for as long as it runs. fd5af1b1: no pass recorded anything from
+    05:39 to 09:37 local on 2026-10-08, and the 09:30 fire was skipped with this run
+    still going -- `ship_intent._run_bounded`'s cause (#580), here in the watchdog.
     """
     window = str(int(timeout.total_seconds()))
-    try:
-        done = subprocess.run(
+    with tempfile.TemporaryFile() as spool:
+        process = subprocess.Popen(
             [console_python(), str(PASS), *argv],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            stdout=spool,
+            stderr=subprocess.STDOUT,
             env={**os.environ, "PYTHONUTF8": "1", WINDOW_ENV: window},
-            check=False,
-            timeout=timeout.total_seconds(),
             creationflags=NO_WINDOW,
+            start_new_session=sys.platform != "win32",
         )
-    except subprocess.TimeoutExpired as exc:
-        return None, _text(exc.stdout) + _text(exc.stderr)
-    return done.returncode, (done.stdout or "") + (done.stderr or "")
+        try:
+            code: int | None = process.wait(timeout=timeout.total_seconds())
+        except subprocess.TimeoutExpired:
+            end_tree(process)
+            code = None
+        spool.seek(0)
+        output = spool.read().decode("utf-8", "replace").replace("\r\n", "\n")
+    return code, output
+
+
+def end_tree(process: subprocess.Popen) -> None:
+    """End `process` and everything under it that is still attached, then reap it by its
+    exit. A copy of `ship_intent._end_tree`, since this file imports nothing the pass does."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                check=False,
+                timeout=60,
+                creationflags=NO_WINDOW,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def run_current(argv: list[str], mode: str, notes: list[str]) -> tuple[int | None, str]:
@@ -223,13 +257,6 @@ def run_current(argv: list[str], mode: str, notes: list[str]) -> tuple[int | Non
     ok, what = self_update(REPO_ROOT)
     notes.append(f"{moved} self-update {what}; {'ran it again' if ok else 'not rerun'}")
     return run_pass(argv, left) if ok else (code, output)
-
-
-def _text(stream: str | bytes | None) -> str:
-    """A timed-out child's partial output, which `subprocess` may hand back as bytes."""
-    if isinstance(stream, bytes):
-        return stream.decode("utf-8", "replace")
-    return stream or ""
 
 
 THREAD_TRACE = re.compile(

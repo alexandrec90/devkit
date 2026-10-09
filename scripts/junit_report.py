@@ -53,6 +53,9 @@ READABLE = "failures.txt"
 BODY_LINES = 40
 TAG = re.compile(r"<[^>]+>")
 MESSAGE = re.compile(r'<(?:failure|error)\b[^>]*\bmessage="([^"]*)"')
+# pytest's short-summary line, as a `.log` keeps it: `FAILED <id> - <message>`.
+SUMMARY_FAILED = re.compile(r"^(?:FAILED|ERROR) (\S+::\S+)(.*)$")
+ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def readable(text: str) -> list[str]:
@@ -75,15 +78,45 @@ def readable(text: str) -> list[str]:
     return blocks
 
 
+def logged_failures(dest: Path, named: set[str]) -> list[str]:
+    """A block per pytest `FAILED <id>` summary line in a `.log` under `dest` that no junit
+    report named, pointing at the log that holds its traceback.
+
+    f2b938ee: only the vendored suite writes junit; the main suite's failures reach the
+    gate as `run-tests.py`'s `test-failures.log`. `READABLE` listed the vendored-tier two
+    of PR #576's four and left out the two the prompt sent the fixer for.
+    """
+    blocks = []
+    for log in sorted(dest.rglob("*.log")):
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            found = SUMMARY_FAILED.match(ANSI.sub("", line).strip())
+            if found is None or found.group(1) in named:
+                continue
+            named.add(found.group(1))
+            rest = found.group(2).strip().removeprefix("- ")
+            message = [f"  {rest}"] if rest else []
+            where = log.relative_to(dest).as_posix()
+            blocks.append(
+                "\n".join([f"FAILED {found.group(1)}", *message, f"  (traceback in {where})"])
+            )
+    return blocks
+
+
 def write_readable(dest: Path) -> Path | None:
-    """Write every junit report's failures under `dest` to `dest/READABLE`; its path, or
-    None when no report names a failure."""
+    """Write every failure under `dest` to `dest/READABLE` -- each junit report's, then
+    each one only a `.log` names (`logged_failures`); its path, or None when none does."""
     blocks = []
     for report in sorted(dest.rglob("*.xml")):
         try:
             blocks += readable(report.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             continue
+    named = {block.splitlines()[0].removeprefix("FAILED ") for block in blocks}
+    blocks += logged_failures(dest, named)
     if not blocks:
         return None
     path = dest / READABLE

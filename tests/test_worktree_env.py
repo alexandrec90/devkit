@@ -488,6 +488,12 @@ def test_a_sync_that_hangs_or_cannot_start_is_named_not_waited_for(tmp_path):
     hang = subprocess.TimeoutExpired(cmd="uv", timeout=1)
     line = wt_env.provision(tree, checkout, runner=_Run(raising=hang), environ={}, uv="uv")
     assert "did not finish" in line and "by hand" in line
+    assert "last said" not in line, "nothing said, nothing quoted"
+    waited = subprocess.TimeoutExpired(
+        cmd="uv", timeout=1, stderr="Resolved 31 packages\nWaiting to acquire lock for `cache`\n"
+    )
+    line = wt_env.provision(tree, checkout, runner=_Run(raising=waited), environ={}, uv="uv")
+    assert "(it last said: Waiting to acquire lock for `cache`)" in line, line
     gone = _Run(raising=FileNotFoundError("uv"))
     assert "could not run" in wt_env.provision(tree, checkout, runner=gone, environ={}, uv="uv")
 
@@ -547,14 +553,26 @@ def test_a_long_command_says_it_is_still_running_and_keeps_its_output():
 
 
 def test_a_command_past_its_timeout_is_killed_and_raises_as_run_does():
-    with pytest.raises(subprocess.TimeoutExpired):
+    """88de458c: and with what it had said by then, which the provision line quotes."""
+    said = (
+        "import sys, time; print('waiting on a lock', file=sys.stderr, flush=True); time.sleep(30)"
+    )
+    with pytest.raises(subprocess.TimeoutExpired) as stopped:
         wt_env.run_reporting(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
+            [sys.executable, "-c", said],
             capture_output=True,
-            timeout=0.5,
+            text=True,
+            timeout=2,
             interval=0.1,
             say=lambda _line: None,
         )
+    assert wt_env.last_said(stopped.value.stderr, stopped.value.output) == "waiting on a lock"
+
+
+def test_last_said_is_the_last_line_of_the_first_stream_with_any():
+    assert wt_env.last_said(None, b"a\nb\n\n") == "b"
+    assert wt_env.last_said("x\ny", "z") == "y"
+    assert wt_env.last_said(None, "") == ""
 
 
 def test_a_failed_command_under_check_raises_as_run_does():

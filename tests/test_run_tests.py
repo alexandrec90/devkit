@@ -508,7 +508,7 @@ def test_the_contract_tests_run_with_every_change(artifact, monkeypatch, tmp_pat
     """54bb72df: #467 added an import to fix-pass.py, ran the tests its files named, and
     went red on test_scheduled_jobs, which reads every module and is named by none."""
     changed(monkeypatch, tmp_path, "README.md", "scripts/untested.py")
-    for rel in run_tests.CONTRACT_TESTS:
+    for rel in map(run_tests.target_file, run_tests.CONTRACT_TESTS):
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text("", encoding="utf-8")
     seen = stub_pytest(monkeypatch, 0)
@@ -570,9 +570,35 @@ def test_explicit_targets_stay_one_run_with_their_options(artifact, monkeypatch)
 
 
 def test_every_contract_test_listed_exists():
-    """A renamed contract test would drop out of every default run without a word."""
-    missing = [t for t in run_tests.CONTRACT_TESTS if not (REPO_ROOT / t).is_file()]
-    assert missing == []
+    """A renamed contract test would drop out of every default run without a word -- and so
+    would a renamed test a node id names, which pytest reports only as nothing collected."""
+    files = [run_tests.target_file(t) for t in run_tests.CONTRACT_TESTS]
+    assert [f for f in files if not (REPO_ROOT / f).is_file()] == []
+    for target in run_tests.CONTRACT_TESTS:
+        path, _, name = target.partition("::")
+        if name:
+            assert f"def {name}(" in (REPO_ROOT / path).read_text(encoding="utf-8"), target
+
+
+def test_the_baseline_ratchets_run_with_every_change():
+    """1c4eaf1b: #581 went red on a `.devkit-untested.txt` line its own tests had made
+    stale, and nothing a session runs short of the push gate said so."""
+    named = {run_tests.target_file(t): t for t in run_tests.CONTRACT_TESTS}
+    for ratchet in ("test_untested_symbols.py", "test_structure_check.py"):
+        assert "::" in named[f"scripts/hooks/tests/{ratchet}"], "the baseline test, not the file"
+
+
+def test_a_contract_node_id_is_added_unless_its_file_already_runs(tmp_path):
+    node = (
+        "scripts/hooks/tests/test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test"
+    )
+    assert run_tests.target_file(node) == "scripts/hooks/tests/test_untested_symbols.py"
+    assert run_tests.target_file("tests/test_a.py") == "tests/test_a.py"
+    (tmp_path / "scripts/hooks/tests").mkdir(parents=True)
+    (tmp_path / run_tests.target_file(node)).write_text("", encoding="utf-8")
+    assert node in run_tests.with_contracts(["tests/test_a.py"], tmp_path)
+    whole = run_tests.with_contracts([run_tests.target_file(node)], tmp_path)
+    assert node not in whole, "the whole file runs it already"
 
 
 def test_with_contracts_keeps_the_named_tests_first_and_adds_each_once(tmp_path):

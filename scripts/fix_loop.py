@@ -487,7 +487,15 @@ def collector_findings(
     """A finding per collector row (`collectors.tray_rows`) that is not OK, against the
     collector's own project, citing `collectors.py`'s log, which holds the health output.
     Bar a failing health verdict taken from code older than its group's fix
-    (`_verdict_predates_fix`). `health` is the verdicts the rows were drawn from."""
+    (`_verdict_predates_fix`), and bar a silent engine (`collectors.NOT_ANSWERING`).
+    `health` is the verdicts the rows were drawn from.
+
+    A silent engine is the machine's, not a project's, and `collectors.py maintain` --
+    which revives a wedged one (`revive_engine`) -- fails on it under `log-wrap.py
+    --always`, filing it once with its own account. Filed here as well, it was a group per
+    project beside that one: 5cfe1e8a and df8dd4c0 were read off the tray at 20:11 and
+    20:19 on 2026-10-08, the first before the checkout moved onto the revive, the second
+    during the very restart that brought the engine back at 20:15."""
     if rows is None:
         rows = collectors.tray_rows(ctx.devkit_dir)
         if health is None:
@@ -496,7 +504,7 @@ def collector_findings(
     items = triage.load(ctx.devkit_dir) if health else []
     found: list[Finding] = []
     for name, level, detail in rows:
-        if level == collectors.OK:
+        if level == collectors.OK or detail == collectors.NOT_ANSWERING:
             continue
         project = name.removeprefix(collectors.ROW_PREFIX)
         state = _COLLECTOR_PARTICULARS.split(detail, maxsplit=1)[0]

@@ -48,6 +48,7 @@ import argparse
 import contextlib
 import datetime as _dt
 import json
+import os
 import re
 import subprocess
 import sys
@@ -122,9 +123,16 @@ ENGINE_POLL = 15
 # `RESTART_EVERY`, recorded in `RESTARTED`, so a restart that does not help is not
 # repeated every pass.
 DESKTOP_TIMEOUT = 30
+DESKTOP_IMAGE = "Docker Desktop.exe"
 RESTART_TIMEOUT = 600
 RESTART_EVERY = 3600
 RESTARTED = Path("logs/collectors.engine-restart.json")
+# How long an engine that did not answer the pass's first question is asked again before
+# it is called wedged. 2026-10-08 22:15 UTC: one `docker ps` that did not answer on a
+# loaded machine -- the engine served the scrape's compose call before it and its own
+# event streams after -- restarted Docker Desktop, and the restart shut down
+# social-scraper's db under a scrape mid-run (6c504c34).
+WEDGE_CONFIRM = 180
 
 # The tray's three levels, spelled as `tray_state` spells them. Not imported from there:
 # `tray_state` imports this module, and `test_collectors.py` pins the two to each other.
@@ -132,6 +140,8 @@ OK, WARN, FAIL = "ok", "warn", "fail"
 ROW_PREFIX = "collector: "
 # A row's state when the project's own verdict is the failing part.
 HEALTH_FAILING = "health check failing"
+# A `run` row's state when the engine itself is silent: the machine's, not the project's.
+NOT_ANSWERING = "docker is not answering"
 # The line a health command may print naming its failing jobs, as ibkr_trader's does:
 # `unhealthy: social, reddit`. The row carries them into the state, so each job's failure
 # is its own group: without them, `social` missing boto3 read as `reddit`'s fixed failure
@@ -222,14 +232,34 @@ def parse_created(text: str) -> float | None:
     return when.timestamp() if when.tzinfo else None
 
 
+def desktop_status(text: str) -> str | None:
+    """The `Status` `docker desktop status --format json` printed, or None when it printed
+    none. The JSON object is read wherever it sits: `spawn` merges stderr in, so a warning
+    the CLI writes beside it must not turn "running" into an unreadable answer."""
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        said = json.loads(text[start : end + 1]) if 0 <= start < end else None
+    except ValueError:
+        return None
+    status = said.get("Status") if isinstance(said, dict) else None
+    return status if isinstance(status, str) else None
+
+
 class Docker:
     """Everything that touches the engine: one captured, window-less spawn per call.
     `restarts` is where `revive_engine` records a restart of Docker Desktop; None, as
-    for the tray, makes none."""
+    for the tray, makes none. `holds` names the runs a restart would cut short now
+    (`scheduled_in_flight`); None holds it for nothing."""
 
-    def __init__(self, ps_timeout: int = PS_TIMEOUT, restarts: Path | None = None) -> None:
+    def __init__(
+        self,
+        ps_timeout: int = PS_TIMEOUT,
+        restarts: Path | None = None,
+        holds: Callable[[], Sequence[str]] | None = None,
+    ) -> None:
         self.ps_timeout = ps_timeout
         self.restarts = restarts
+        self.holds = holds
 
     def run(self, argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[int, str]:
         return spawn(argv, timeout, cwd)
@@ -276,13 +306,26 @@ class Docker:
         return code == 0, out
 
     def desktop_running(self) -> bool:
-        """Whether Docker Desktop itself says it is running, whatever its engine says."""
+        """Whether Docker Desktop is running, whatever its engine says: its own status when
+        it gives a readable one, else whether its process is up (`desktop_process`).
+
+        A status that failed is not one saying "stopped": on 2026-10-08 the 21:31 and 21:46
+        passes read Desktop as quit -- "start it" -- and stood the revive down, while the
+        Desktop the 20:15 revive had started was up the whole time and its engine wedged.
+        """
         code, out = self.run(["docker", "desktop", "status", "--format", "json"], DESKTOP_TIMEOUT)
-        try:
-            said = json.loads(out) if code == 0 else None
-        except ValueError:
+        said = desktop_status(out) if code == 0 else None
+        if said is not None:
+            return said == "running"
+        return self.desktop_process()
+
+    def desktop_process(self) -> bool:
+        """Whether `DESKTOP_IMAGE` is running on this machine; never off Windows."""
+        if os.name != "nt":
             return False
-        return isinstance(said, dict) and said.get("Status") == "running"
+        argv = ["tasklist", "/FI", f"IMAGENAME eq {DESKTOP_IMAGE}", "/FO", "CSV", "/NH"]
+        code, out = self.run(argv, DESKTOP_TIMEOUT)
+        return code == 0 and f'"{DESKTOP_IMAGE.lower()}"' in out.lower()
 
     def restart_desktop(self) -> tuple[bool, str]:
         # Docker's own restart, not `docker-maint.py restart-engine`: that one taskkills
@@ -331,6 +374,8 @@ class Git:
 class Report:
     lines: list[str] = field(default_factory=list)
     failures: int = 0
+    # The first `fail` line, which `render` repeats last as the run's `error:` line.
+    cause: str = ""
 
     def say(self, line: str) -> None:
         self.lines.append(line)
@@ -338,6 +383,7 @@ class Report:
     def fail(self, line: str) -> None:
         self.lines.append(line)
         self.failures += 1
+        self.cause = self.cause or line
 
 
 @dataclass(frozen=True)
@@ -407,15 +453,22 @@ def redeploy(
     target: Target, box: Container, docker: Docker, git: Git, report: Report, last: dict
 ) -> dict:
     """Rebuild `box` onto the checkout's HEAD when its code is older and HEAD is merged
-    code. Returns what to record: `code_at`, `held` when a redeploy was owed and refused,
-    and `deployed` when this pass redeployed (and so must skip the health check)."""
+    code -- the newest HEAD among the checkout and those it `builds_from`, each of which
+    must be merged code. Returns what to record: `code_at`, `held` when a redeploy was
+    owed and refused, and `deployed` when this pass redeployed (and so must skip the
+    health check)."""
     name, service = target.collector.project, target.collector.service
     known = code_at(box, docker, last)
-    head = git.head(target.checkout) if known is not None else None
-    if known is None or head is None or head[1] <= known:
-        return {CODE_AT: known} if known is not None else {}
-    sha, committed = head
-    held = git.held(target.checkout)
+    if known is None:
+        return {}
+    heads = source_heads(target, git)
+    newest = max(heads, key=lambda pair: pair[1][1], default=None)
+    if newest is None or newest[1][1] <= known:
+        return {CODE_AT: known}
+    where, (sha, committed) = newest
+    sha = sha if where == target.checkout else f"{where.name}@{sha}"
+    # Every checkout the image copies is baked into it, so each must be merged code.
+    held = next((_held_in(target, w, why) for w, _head in heads if (why := git.held(w))), "")
     if held:
         report.say(
             f"{name}: `{service}` runs code older than {sha} and was not redeployed -- {held}"
@@ -430,6 +483,18 @@ def redeploy(
         return {CODE_AT: known}
     report.say(f"{name}: redeployed `{service}` onto {sha} -- its code was older")
     return {CODE_AT: committed, "deployed": True}
+
+
+def source_heads(target: Target, git: Git) -> list[tuple[Path, tuple[str, float]]]:
+    """`(checkout, its HEAD)` for the target's checkout and each it `builds_from`, leaving
+    out any git cannot read."""
+    roots = [target.checkout, *(target.checkout.parent / s for s in target.collector.builds_from)]
+    return [(root, head) for root in roots if (head := git.head(root)) is not None]
+
+
+def _held_in(target: Target, where: Path, why: str) -> str:
+    """`Git.held`'s answer for `where`, naming it when it is a checkout built from."""
+    return why if where == target.checkout else f"{where.name}: {why}"
 
 
 def keep_running(
@@ -532,6 +597,17 @@ def maintain_scheduled(
             collector_tasks.keep_removed(collector_tasks.task_name(target.collector), run, report)
 
 
+def scheduled_in_flight(chosen: Sequence[Target], run: collector_tasks.Runner) -> list[str]:
+    """The scheduled collectors this machine runs whose task is running right now."""
+    return [
+        t.collector.project
+        for t in chosen
+        if t.collector.scheduled
+        and t.mode == config.RUN
+        and collector_tasks.running(collector_tasks.task_name(t.collector), run)
+    ]
+
+
 def wait_for_engine(
     docker: Docker,
     awake: float | None,
@@ -569,17 +645,26 @@ def last_restart(path: Path) -> float | None:
 
 
 def revive_engine(
-    docker: Docker, report: Report, restarts: Path, clock: float
+    docker: Docker, report: Report, restarts: Path, clock: float, busy: Sequence[str] = ()
 ) -> tuple[list[Container] | None, str]:
     """`(containers, why not)` for an engine `wait_for_engine` has already given up on.
 
     Only a *wedged* engine is restarted: Docker Desktop says `running` and its engine
-    does not answer. A Desktop that is not running was most likely quit by a person, and
+    does not answer for `WEDGE_CONFIRM` more seconds -- one that answers in that time was
+    slow, not wedged. A Desktop that is not running was most likely quit by a person, and
     a timer does not start it behind their back; the answer then says so. A restart is
     made once per `RESTART_EVERY`; `clock` is now, as a POSIX time.
+
+    Nor is it restarted while a scheduled collector's run is in flight (`busy`, from
+    `scheduled_in_flight`): its services outlive a silent engine API, and the restart is
+    what would stop them under it (6c504c34). The next pass restarts it.
     """
     if not docker.desktop_running():
         return None, "docker is not answering and Docker Desktop is not running -- start it"
+    containers = wait_for_engine(docker, ENGINE_STARTUP - WEDGE_CONFIRM)
+    if containers is not None:
+        report.say("docker was slow to answer, not wedged -- it answered when asked again")
+        return containers, ""
     wedged = "docker is not answering though Docker Desktop says it is running"
     last = last_restart(restarts)
     if last is not None and 0 <= clock - last < RESTART_EVERY:
@@ -588,6 +673,12 @@ def revive_engine(
             f"not again within {RESTART_EVERY // 60} minutes of that"
         )
         return None, f"{wedged}, and a restart did not bring its engine back"
+    if busy:
+        report.say(
+            f"not restarting Docker Desktop under {', '.join(busy)}'s scheduled run: "
+            f"the restart would stop the services it is using"
+        )
+        return None, f"{wedged}, and its restart waits for a scheduled collector's run"
     write_file(restarts, json.dumps({STARTED_AT: clock}) + "\n")
     ok, out = docker.restart_desktop()
     containers = docker.ps() if ok else None
@@ -609,14 +700,16 @@ def maintain(
     """One pass over the assigned *container* collectors, recording health verdicts into
     `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker. `awake`
     is how long the machine has been up, which `wait_for_engine` gives Docker to start;
-    an engine silent past that is `revive_engine`'s where `docker.restarts` is set."""
+    an engine silent past that is `revive_engine`'s where `docker.restarts` is set, held
+    for whatever `docker.holds` names."""
     if not chosen:
         return
     containers = wait_for_engine(docker, awake)
     running = any(t.mode == config.RUN for t in chosen)
     why = "docker is not answering -- is Docker Desktop running?"
     if containers is None and running and docker.restarts is not None:
-        containers, why = revive_engine(docker, report, docker.restarts, _clock())
+        busy = docker.holds() if docker.holds else ()
+        containers, why = revive_engine(docker, report, docker.restarts, _clock(), busy)
     if containers is None:
         if running:
             report.fail(why)
@@ -702,9 +795,14 @@ def status(
         report.say(f"{collector.project}: assigned `{mode}` -- `{collector.service}` {state}")
 
 
-def render(lines: Sequence[str], failures: int, when: _dt.datetime) -> str:
+def render(lines: Sequence[str], failures: int, when: _dt.datetime, cause: str = "") -> str:
+    """The artifact: a head with the failure count, the lines, and a failed run's `cause`
+    last as an `error:` line. `log-wrap.py` files a failed run's cause from that line, and
+    with none it took the run's last line: f783d741 filed `sports_betting: healthy` as the
+    cause of a failure some other line had named."""
     head = f"# collectors {when.isoformat(timespec='seconds')} -- {failures} failure(s)"
-    return "\n".join([head, *lines, ""])
+    tail = [f"error: {cause}"] if failures and cause else []
+    return "\n".join([head, *lines, *tail, ""])
 
 
 def write_file(path: Path, text: str) -> None:
@@ -727,7 +825,7 @@ def row(
             return WARN, "running here, but this machine is set to stop it"
         return OK, "off on this machine (by choice)"
     if containers is None:
-        return FAIL, "docker is not answering"
+        return FAIL, NOT_ANSWERING
     box = find(containers, target.checkout, target.collector.service)
     if box is None or not box.running:
         return down_row(box, busy)
@@ -996,7 +1094,7 @@ def main(
 
     def finish() -> int:
         """Write the artifact; 2 when anything in it failed, a typo included."""
-        text = render(report.lines, report.failures, now)
+        text = render(report.lines, report.failures, now, report.cause)
         write_file(base / ARTIFACT, text)
         print(text, end="")
         return 2 if report.failures else 0
@@ -1011,7 +1109,9 @@ def main(
             return finish()
         assignment = acted_on
     chosen = targets(collectors, assignment, sweep.default_workspace(base).parent)
-    engine = docker or Docker(restarts=base / RESTARTED)
+    engine = docker or Docker(
+        restarts=base / RESTARTED, holds=lambda: scheduled_in_flight(chosen, run)
+    )
     if args.mode == "status":
         status(collectors, chosen, engine, report, base, run)
         return finish()

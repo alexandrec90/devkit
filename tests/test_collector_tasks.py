@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -302,18 +303,100 @@ def test_the_exit_code_is_the_commands_own(tmp_path):
     assert code == 3 and "x blocked" in lines
 
 
+NO_IMAGE = (1, "Error response from daemon: no such image")
+ENGINE_UP = (0, "28.4.0\n")
+SILENT = (1, "error during connect: open //./pipe/dockerDesktopLinuxEngine")
+
+
+class Clock:
+    """A monotonic clock that `sleep` advances, so a wait costs the test nothing."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def instant(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(tasks, "_time", SimpleNamespace(monotonic=clock, sleep=clock.sleep))
+    return clock
+
+
 def test_a_need_that_will_not_start_skips_the_command_and_fails(tmp_path):
-    spawn = FakeSpawn((1, "error during connect: docker not running"))
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
-    assert code == 1 and len(spawn.calls) == 1
+    assert code == 1 and len(spawn.calls) == 2, "asked the engine once, and not again"
+    assert spawn.calls[1][0] == ["docker", "info", "--format", "{{.ServerVersion}}"]
     assert any("could not start db" in line for line in lines)
-    assert "error during connect: docker not running" in lines
+    assert "Error response from daemon: no such image" in lines
 
 
 def test_a_need_that_failed_ends_on_an_error_line_naming_only_the_kind(tmp_path):
-    spawn = FakeSpawn((1, "error during connect: docker not running"))
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
     _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
     assert lines[-1] == "error: docker compose up failed for db"
+
+
+def test_a_fire_landing_in_an_engine_restart_waits_and_then_runs(tmp_path, instant):
+    """74c2ccd2: a fire inside the collectors pass's Docker Desktop restart failed at once
+    on "docker compose up failed for db", the cause that came back through fourteen
+    resolutions. The engine answering a minute later is a late fire, not a lost one."""
+    spawn = FakeSpawn(SILENT, SILENT, SILENT, SILENT, ENGINE_UP, (0, ""), (0, "reddit: 40"))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "reddit: 40" in lines and "started: db" in lines
+    assert instant.slept == [tasks.ENGINE_POLL] * 3
+    up = ["docker", "compose", "up", "-d", "--wait", "db"]
+    assert [call[0] for call in spawn.calls].count(up) == 2, "tried again once it answered"
+
+
+def test_an_engine_silent_through_the_wait_is_the_cause(tmp_path, instant):
+    probes = 1 + tasks.ENGINE_WAIT // tasks.ENGINE_POLL
+    spawn = FakeSpawn(SILENT, *[SILENT] * probes)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and len(spawn.calls) == 1 + probes, "no second start, no command"
+    assert sum(instant.slept) == tasks.ENGINE_WAIT
+    assert lines[-1] == "error: the Docker engine did not answer"
+    assert log_wrap.failure_cause("\n".join(lines)) == "error: the Docker engine did not answer"
+
+
+def test_start_needs_says_what_the_engine_answered_and_only_when_it_asked(tmp_path, instant):
+    up = ["docker", "compose", "up", "-d", "--wait", "db"]
+    assert tasks.start_needs(("db",), tmp_path, FakeSpawn((0, "ok"))) == (0, "ok", None)
+    timed_out = tasks.start_needs(("db",), tmp_path, FakeSpawn(TIMED_OUT))
+    assert timed_out[2] is None, "a timeout's probe is `needs_failed`'s, with the services"
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
+    assert tasks.start_needs(("db",), tmp_path, spawn) == (*NO_IMAGE, ENGINE_UP)
+    assert spawn.calls[0] == (up, tmp_path.name, tasks.NEEDS_TIMEOUT)
+    assert instant.slept == []
+
+
+def test_probe_asks_docker_info_within_its_bound(tmp_path):
+    spawn = FakeSpawn(ENGINE_UP)
+    assert tasks.probe(tmp_path, spawn) == ENGINE_UP
+    assert spawn.calls == [
+        (["docker", "info", "--format", "{{.ServerVersion}}"], tmp_path.name, tasks.PROBE)
+    ]
+
+
+def test_await_engine_stops_asking_once_it_answers(tmp_path, instant):
+    spawn = FakeSpawn(SILENT, ENGINE_UP)
+    assert tasks.await_engine(tmp_path, spawn) == ENGINE_UP
+    assert instant.slept == [tasks.ENGINE_POLL] * 2 and len(spawn.calls) == 2
+
+
+def test_a_second_start_that_fails_is_probed_afresh(tmp_path, instant):
+    spawn = FakeSpawn(SILENT, SILENT, ENGINE_UP, NO_IMAGE, ENGINE_UP)
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert lines[-1] == "error: docker compose up failed for db"
+    assert len(spawn.calls) == 5
 
 
 TIMED_OUT = (tasks.TIMED_OUT, "\ntimed out after 600s; ended it and its children")
@@ -352,7 +435,7 @@ def test_a_need_that_timed_out_with_the_engine_silent_blames_the_engine(tmp_path
     [
         ([TIMED_OUT, (1, "")], "error: the Docker engine did not answer"),
         ([TIMED_OUT, (0, "28"), (0, "")], "error: db did not come up healthy within the"),
-        ([(1, "Error response from daemon: no such image")], "error: docker compose up failed"),
+        ([NO_IMAGE, ENGINE_UP], "error: docker compose up failed"),
     ],
 )
 def test_the_wrapper_files_the_needs_kind_as_the_cause(tmp_path, answers, cause):
@@ -364,7 +447,7 @@ def test_the_wrapper_files_the_needs_kind_as_the_cause(tmp_path, answers, cause)
 
 def test_needs_failed_keeps_the_compose_tail_before_its_verdict(tmp_path):
     out = "\n".join(f"compose {n}" for n in range(60))
-    lines = tasks.needs_failed(("db", "cache"), tmp_path, 1, out, FakeSpawn())
+    lines = tasks.needs_failed(("db", "cache"), tmp_path, 1, out, FakeSpawn(ENGINE_UP))
     assert lines[0] == "could not start db, cache (exit 1), so the command was not run"
     assert "compose 19" not in lines and "compose 20" in lines and "compose 59" in lines
     assert lines[-1] == "error: docker compose up failed for db, cache"

@@ -322,6 +322,12 @@ def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
     section = rule.split("## Waiting", 1)[1].split("\n## ", 1)[0]
     assert "run_in_background" in section and "`until` loop" in section
     assert all(f"`{tool}`" in section for tool in sf.WAIT_TOOLS)
+    # fae93f39, the seventh: a subagent armed `Monitor` and then waited in a foreground
+    # `until` loop anyway, since a subagent that ends its turn has returned -- the notice
+    # the rule promised never reaches it. The rule names the one shape that works there.
+    flat = " ".join(section.split())
+    assert "A subagent gets no notice before it returns" in flat
+    assert "in the foreground instead" in flat
 
 
 def test_a_module_the_tree_itself_holds_is_a_code_defect_not_the_environment(tmp_path):
@@ -1565,6 +1571,67 @@ def test_a_scratch_program_reaching_for_a_package_its_tree_never_imports_is_not_
     [row] = sf.detect(events)
     assert sf.reached_past_the_tree(row, [roguelike])
     assert not sf.reached_past_the_tree(("poll", row[1], row[2]), [roguelike]), "its class only"
+
+
+def _bash_spelling(path: Path) -> str:
+    """`C:\\x\\y` as Git Bash spells it, `/c/x/y`."""
+    text = path.as_posix()
+    return f"/{text[0].lower()}{text[2:]}" if text[1:2] == ":" else text
+
+
+def test_a_scratch_program_under_another_checkouts_venv_is_not_friction(tmp_path):
+    """721497ef: a data-lake session read R2 sizes with ibkr_trader's interpreter -- the
+    exact call's shape -- and ibkr_trader's static checkout carrying no `archive` extra was
+    filed as the environment. data-lake imports boto3, so the import excuse did not hold;
+    but the interpreter was another project's, which nothing provisions for this tree."""
+    said = (
+        'Exit code 1\nTraceback (most recent call last):\n  File "<string>", line 2, in '
+        "<module>\nModuleNotFoundError: No module named 'boto3'"
+    )
+    tree = _git_tree(tmp_path / "data-lake", {"src/store.py": "import boto3\n"})
+    other = tmp_path / "ibkr_trader"
+    program = "-I -c \"\nimport boto3,re\nprint(boto3.client('s3'))\n\""
+
+    def judged(command: str) -> list[str]:
+        rows = [call(command, "1"), result(said, "1")]
+        events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+        return [row[0] for row in sf.judged(events, str(tree), tmp_path)]
+
+    assert judged(f"cd {_bash_spelling(other)} && .venv/Scripts/python.exe {program}") == []
+    assert judged(f'cd "{other}" && .venv/Scripts/python.exe {program}') == []
+    assert judged(f"& {other}\\.venv\\Scripts\\python.exe {program}") == []
+    assert judged(f".venv/Scripts/python.exe {program}") == ["environment"], "its own"
+    assert judged(f"cd {_bash_spelling(tree)} && .venv/Scripts/python.exe {program}") == [
+        "environment"
+    ], "its own, by its full path"
+    assert judged(f"cd {_bash_spelling(other)} && python scripts/x.py") == ["environment"], (
+        "only a throwaway program is excused"
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "home"),
+    [
+        ("cd /c/ws/ibkr_trader && .venv/Scripts/python.exe -c 'x'", "/c/ws/ibkr_trader"),
+        (r"C:\ws\social-scraper\.venv\Scripts\python.exe -I x.py", r"C:\ws\social-scraper"),
+        ("cd /c/ws && ibkr_trader/.venv/bin/python -c 'x'", "/c/ws/ibkr_trader"),
+        (".venv/Scripts/python.exe -c 'x'", ""),
+        ("cd scripts && ../.venv/Scripts/python.exe -c 'x'", ""),
+        ("python -c 'x'", ""),
+    ],
+)
+def test_interpreter_home_is_the_checkout_whose_venv_runs(command, home):
+    assert sf.interpreter_home(command) == home
+
+
+def test_a_checkout_is_compared_however_it_is_spelled():
+    roots = [Path(r"C:\ws\data-lake")]
+    assert not sf.foreign_environment("cd /c/ws/data-lake && .venv/bin/python -c 'x'", roots)
+    assert not sf.foreign_environment(r"C:\WS\Data-Lake\.venv\Scripts\python.exe x", roots)
+    assert sf.foreign_environment("cd /c/ws/data-lake-2 && .venv/bin/python -c 'x'", roots)
+    assert not sf.foreign_environment("cd /c/ws/other && .venv/bin/python -c 'x'", []), (
+        "no tree to compare with: it stands"
+    )
 
 
 def test_a_missing_package_the_tree_imports_or_its_own_program_needs_stays_filed(tmp_path):

@@ -966,17 +966,64 @@ def imported_by_tree(name: str, roots: Iterable[Path], runner=sweep.run_windowle
     return True
 
 
+# A `.venv`'s interpreter named in a call, and the checkout before it ("" when relative).
+VENV_INTERPRETER = re.compile(r"(?P<home>[^\s\"';&|]*?)\.venv[\\/](?:Scripts|bin)[\\/]python", re.I)
+# Git Bash's spelling of a drive: `/c/Users/...` is `C:/Users/...`.
+BASH_DRIVE = re.compile(r"^/([a-z])(?=/|$)")
+
+
+def _comparable(path: str | Path) -> str:
+    """`path` spelled one way: forward slashes, no trailing one, a drive as `c:`, any case."""
+    text = str(path).replace("\\", "/").rstrip("/").lower()
+    return BASH_DRIVE.sub(r"\1:", text)
+
+
+def interpreter_home(command: str) -> str:
+    """The checkout whose `.venv` interpreter `command` runs, as an absolute path; "" when
+    it runs none, or one relative to the session's own directory."""
+    found = VENV_INTERPRETER.search(command)
+    if not found:
+        return ""
+    home = found["home"].strip("\"'").rstrip("\\/")
+    if home and ABSOLUTE_PATH.match(home):
+        return home
+    beside = [m["dir"].strip().strip("\"'") for m in CD_INTO.finditer(command[: found.start()])]
+    if not beside or not ABSOLUTE_PATH.match(beside[-1]):
+        return ""
+    base = beside[-1].rstrip("\\/")
+    return f"{base}/{home}" if home else base
+
+
+def foreign_environment(command: str, roots: list[Path]) -> bool:
+    """`command` runs the `.venv` of a checkout outside every one of `roots`: another
+    project's environment, which nothing provisions for this session's tree."""
+    home = interpreter_home(command)
+    if not home or not roots:
+        return False
+    where = _comparable(home)
+    return not any(
+        where == (root := _comparable(path)) or where.startswith(f"{root}/") for path in roots
+    )
+
+
 def reached_past_the_tree(row: tuple[str, str, Event], roots: list[Path]) -> bool:
     """`row` is a package the session's own throwaway program imported that no code of its
     tree does: nothing the harness provisions was missing, so no change to it prevents
-    this (e1aaca09, a roguelike session's `from PIL import Image` in its scratchpad)."""
+    this (e1aaca09, a roguelike session's `from PIL import Image` in its scratchpad).
+
+    So is one its throwaway program ran under another checkout's `.venv`: 721497ef, a
+    data-lake session reading R2 sizes with ibkr_trader's interpreter, whose static
+    checkout carries no `archive` extra. The tree's own environment was never asked."""
     cls, what, event = row
     named = MISSING_MODULE.search(what)
     return (
         cls == "environment"
         and named is not None
         and ad_hoc_program(event.command)
-        and not imported_by_tree(named.group(1).split(".")[0], roots)
+        and (
+            foreign_environment(event.command, roots)
+            or not imported_by_tree(named.group(1).split(".")[0], roots)
+        )
     )
 
 
