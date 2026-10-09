@@ -42,6 +42,7 @@ class FakeDocker:
         self.restarts = None
         self.holds = None
         self.restart_answer = (True, "")
+        self.reset_answer = (True, "")
         self.calls: list[tuple] = []
 
     def desktop_running(self):
@@ -54,6 +55,10 @@ class FakeDocker:
     def restart_desktop(self):
         self.calls.append(("restart",))
         return self.restart_answer
+
+    def reset_vm(self):
+        self.calls.append(("reset",))
+        return self.reset_answer
 
     def built(self, container):
         self.calls.append(("built", container.id))
@@ -589,18 +594,25 @@ def instant(monkeypatch):
 
 
 class Wedged(FakeDocker):
-    """Docker Desktop says `running`, and its engine answers only once restarted."""
+    """Docker Desktop says `running`, and its engine answers only once restarted -- or,
+    where `revives` is False, only once its VM is reset too, where `resets` is True."""
 
-    def __init__(self, restarts, revives=True):
+    def __init__(self, restarts, revives=True, resets=False):
         super().__init__(None)
         self.desktop = True
         self.restarts = restarts
         self.revives = revives
+        self.resets = resets
 
     def restart_desktop(self):
         if self.revives:
             self.containers = []
         return super().restart_desktop()
+
+    def reset_vm(self):
+        if self.resets:
+            self.containers = []
+        return super().reset_vm()
 
 
 def test_a_wedged_engine_is_restarted_once_and_the_pass_then_acts(tmp_path, instant):
@@ -837,6 +849,103 @@ def test_a_restart_that_does_not_help_fails_with_a_stable_cause(tmp_path, instan
     )
     assert "timed out waiting" in report.lines[0]
     assert collectors.last_restart(restarts) is not None, "a failed restart still counts"
+
+
+def test_a_restart_that_leaves_the_engine_silent_resets_its_vm(tmp_path, instant):
+    """d0651b43, 4034a9e2: 2026-10-09 21:45 UTC `docker desktop restart` could not shut
+    down a frozen VM ("init failed to shutdown the VM"), started the engine on it again,
+    and every pass for the next hour failed "a restart did not bring its engine back"."""
+    restarts = tmp_path / "restarts.json"
+    docker, report = Wedged(restarts, revives=False, resets=True), collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 0
+    assert docker.calls.index(("restart",)) < docker.calls.index(("reset",))
+    assert ("up", "ibkr_trader", "app") in docker.calls
+    assert "WSL VM was reset" in report.lines[1]
+    assert collectors.last_restart(restarts) is not None
+
+
+@pytest.mark.parametrize("answer", [(True, ""), (False, "timed out after 630s")])
+def test_a_vm_reset_that_does_not_help_fails_with_the_stable_cause(tmp_path, instant, answer):
+    restarts = tmp_path / "restarts.json"
+    docker, report = Wedged(restarts, revives=False), collectors.Report()
+    docker.reset_answer = answer
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 1 and ("reset",) in docker.calls
+    assert "reset Docker's WSL VM, and its engine still did not answer" in report.lines[1]
+    assert report.lines[-1] == (
+        "docker is not answering though Docker Desktop says it is running, "
+        "and a restart did not bring its engine back"
+    )
+    docker.calls.clear()
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    assert ("reset",) not in docker.calls, "nor is the reset repeated within the hour"
+
+
+def test_revive_vm_asks_the_engine_only_after_a_start_that_succeeded(tmp_path, instant):
+    docker, report = Wedged(tmp_path / "r.json", revives=False, resets=True), collectors.Report()
+    assert collectors.revive_vm(docker, report) == []
+    docker.containers, docker.calls = None, []
+    docker.reset_answer = (False, "error: timed out\n")
+    assert collectors.revive_vm(docker, report) is None
+    assert docker.calls == [("reset",)], "a failed start is not waited on"
+    assert report.lines[-1].endswith("error: timed out")
+
+
+@pytest.mark.parametrize(
+    ("listed", "names"),
+    [
+        (
+            "d\x00o\x00c\x00k\x00e\x00r\x00-\x00d\x00e\x00s\x00k\x00t\x00o\x00p\x00\r\x00\n\x00",
+            ["docker-desktop"],
+        ),
+        ("docker-desktop\r\nUbuntu\r\n\r\n", ["docker-desktop", "Ubuntu"]),
+        ("", []),
+    ],
+)
+def test_running_distros_reads_wsls_utf16_listing(listed, names):
+    assert collectors.running_distros(listed) == names
+
+
+@pytest.mark.parametrize(
+    ("running", "argv"),
+    [
+        (["docker-desktop"], ["wsl", "--shutdown"]),
+        (["docker-desktop", "docker-desktop-data"], ["wsl", "--shutdown"]),
+        ([], ["wsl", "--shutdown"]),
+        (["docker-desktop", "Ubuntu"], ["wsl", "--terminate", "docker-desktop"]),
+    ],
+)
+def test_the_vm_is_shut_down_only_when_no_other_distro_is_running(running, argv):
+    assert collectors.wsl_stop(running) == argv
+
+
+def test_reset_vm_stops_desktop_then_its_vm_then_starts_it(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    docker = collectors.Docker()
+    asked: list[list[str]] = []
+
+    def run(argv, timeout, cwd=None):
+        asked.append(list(argv))
+        if argv[:2] == ["wsl", "--list"]:
+            return 0, "docker-desktop\r\nUbuntu\r\n"
+        return (0, "Docker Desktop is running") if "start" in argv else (0, "")
+
+    docker.run = run
+    assert docker.reset_vm() == (True, "Docker Desktop is running")
+    assert [argv[:3] for argv in asked] == [
+        ["docker", "desktop", "stop"],
+        ["wsl", "--list", "--running"],
+        ["wsl", "--terminate", "docker-desktop"],
+        ["docker", "desktop", "start"],
+    ]
+
+
+def test_off_windows_there_is_no_vm_to_reset(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "posix")
+    docker = collectors.Docker()
+    docker.run = lambda argv, timeout, cwd=None: pytest.fail(f"asked {argv}")
+    assert docker.reset_vm()[0] is False
 
 
 def test_a_docker_desktop_someone_quit_is_not_started_behind_their_back(tmp_path):

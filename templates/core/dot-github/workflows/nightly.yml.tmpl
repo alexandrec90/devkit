@@ -42,9 +42,10 @@ jobs:
     name: Full suite
     runs-on: ubuntu-latest
 {{#postgres}}
+    # ECR Public, not Docker Hub: see the same block in pr-gate.yml.
     services:
       db:
-        image: postgres:18
+        image: public.ecr.aws/docker/library/postgres:18
         env:
           POSTGRES_USER: {{ db_user }}
           POSTGRES_PASSWORD: {{ db_password }} # pragma: allowlist secret
@@ -58,7 +59,7 @@ jobs:
           --health-retries 5
 {{#redis}}
       redis:
-        image: redis:7
+        image: public.ecr.aws/docker/library/redis:7
         ports:
           - 6379:6379
         options: >-

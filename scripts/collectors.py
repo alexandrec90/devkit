@@ -127,6 +127,17 @@ DESKTOP_IMAGE = "Docker Desktop.exe"
 RESTART_TIMEOUT = 600
 RESTART_EVERY = 3600
 RESTARTED = Path("logs/collectors.engine-restart.json")
+# What a restart that left the engine silent goes on to do (`reset_vm`): stop Docker
+# Desktop, stop the WSL VM its engine runs in, start Desktop again. Docker's restart asks
+# the VM to shut itself down, and a VM wedged hard enough cannot: 2026-10-09 21:45 UTC the
+# restart logged "init failed to shutdown the VM: ... context deadline exceeded", started
+# the engine on the same frozen VM, and `wsl -d docker-desktop` still did not answer half
+# an hour later (d0651b43, 4034a9e2). `wsl --shutdown` stops every distro on the machine,
+# so it is used only when every running one is Docker's own (`DOCKER_DISTRO` and its
+# `-data` sibling); otherwise only Docker's is terminated.
+DOCKER_DISTRO = "docker-desktop"
+WSL_TIMEOUT = 120
+DESKTOP_STOP_TIMEOUT = 120
 # How long an engine that did not answer the pass's first question is asked again before
 # it is called wedged. 2026-10-08 22:15 UTC: one `docker ps` that did not answer on a
 # loaded machine -- the engine served the scrape's compose call before it and its own
@@ -360,6 +371,36 @@ class Docker:
             RESTART_TIMEOUT + DESKTOP_TIMEOUT,
         )
         return code == 0, out
+
+    def reset_vm(self) -> tuple[bool, str]:
+        """Stop Docker Desktop, stop the WSL VM under it, and start Desktop again
+        (`DOCKER_DISTRO`); `(started, what each step said)`. Never off Windows."""
+        if os.name != "nt":
+            return False, "no WSL VM to reset off Windows"
+        said = []
+        stop = ["docker", "desktop", "stop", "--force", "--timeout", str(DESKTOP_STOP_TIMEOUT)]
+        said.append(self.run(stop, DESKTOP_STOP_TIMEOUT + DESKTOP_TIMEOUT)[1])
+        _, listed = self.run(["wsl", "--list", "--running", "--quiet"], WSL_TIMEOUT)
+        said.append(self.run(wsl_stop(running_distros(listed)), WSL_TIMEOUT)[1])
+        code, out = self.run(
+            ["docker", "desktop", "start", "--timeout", str(RESTART_TIMEOUT)],
+            RESTART_TIMEOUT + DESKTOP_TIMEOUT,
+        )
+        return code == 0, "\n".join(line for line in (*said, out) if line.strip())
+
+
+def running_distros(text: str) -> list[str]:
+    """The distro names `wsl --list --running --quiet` printed. `wsl.exe` writes UTF-16,
+    which `spawn`'s UTF-8 decoding leaves as the name with a NUL after every letter."""
+    return [line.strip() for line in text.replace("\x00", "").splitlines() if line.strip()]
+
+
+def wsl_stop(running: Sequence[str]) -> list[str]:
+    """The `wsl` call that stops Docker's VM: `--shutdown` when every running distro is
+    Docker's own, so nobody's shell goes with it; else `--terminate` of Docker's alone."""
+    if all(name.lower().startswith(DOCKER_DISTRO) for name in running):
+        return ["wsl", "--shutdown"]
+    return ["wsl", "--terminate", DOCKER_DISTRO]
 
 
 class Git:
@@ -700,6 +741,22 @@ def held(report: Report, restarts: Path, clock: float, why: str, cause: str) -> 
     return None, "" if minutes * 60 < HOLD_LIMIT else cause
 
 
+def revive_vm(docker: Docker, report: Report) -> list[Container] | None:
+    """The containers once `Docker.reset_vm` has the engine answering, or None. The step
+    after a `docker desktop restart` that left the engine silent: the VM under it was too
+    wedged to shut itself down (`DOCKER_DISTRO`). The engine is asked for `WEDGE_CONFIRM`
+    after the start, since a cold one re-mounts its disk before it answers."""
+    ok, out = docker.reset_vm()
+    containers = wait_for_engine(docker, ENGINE_STARTUP - WEDGE_CONFIRM) if ok else None
+    if containers is None:
+        report.say(
+            f"reset Docker's WSL VM, and its engine still did not answer: {first_line(out) or 'no output'}"
+        )
+    else:
+        report.say("the restart left the engine silent, so its WSL VM was reset as well")
+    return containers
+
+
 def revive_engine(
     docker: Docker, report: Report, restarts: Path, clock: float, busy: Sequence[str] = ()
 ) -> tuple[list[Container] | None, str]:
@@ -722,6 +779,9 @@ def revive_engine(
     is down by design until the installer starts the new app, a restart would cut the
     install short, and the installer may have closed the app it reads as quit. That is
     held, asked first, and fails nothing until it has lasted `HOLD_LIMIT` (3012d246).
+
+    A restart that leaves the engine silent goes on to reset the VM under it
+    (`revive_vm`), in the same pass and under the same `RESTART_EVERY` record.
     """
     if docker.updating():
         why = (
@@ -759,6 +819,8 @@ def revive_engine(
     containers = docker.ps() if ok else None
     if containers is None:
         report.say(f"`docker desktop restart`: {first_line(out) or 'no output'}")
+        containers = revive_vm(docker, report)
+    if containers is None:
         return None, f"{wedged}, and a restart did not bring its engine back"
     report.say("the docker engine was wedged behind a running Docker Desktop -- restarted it")
     return containers, ""
