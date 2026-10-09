@@ -90,6 +90,7 @@ These event names reach it, and they want different treatment:
 | `codex-translation-gap` | a hook's answer did not survive Codex's schema — a member refused or stripped | the `detail=` field: it names the members |
 | `fix-pass-finding` | something the fix pass could not turn green: a step that raised, a push that failed, a dead fixer, a wait past a day | the `evidence=` field: a traceback file, a transcript, a tree |
 | `session-friction` | turns a session lost to the harness, read out of its transcript or its `logs/friction.md` | the `evidence=` field: `transcript#L<line>`, read with `python scripts/session_transcripts.py "<evidence>"` |
+| `scheduled-job-failed` | an unattended job exited non-zero (`log-wrap.py --always`) | the `command=` field: it says whose code ran. `collectors.py fire <project>` is that project's scrape, so a cause in its export or the store behind it is fixed in that project, not here |
 | `workspace-failure` | a daily `workspace-status.py` finding that says something is broken: a toolchain gap, drifted branch policy, a retired hook still wired, a refused workspace publish | the `said=` field (the line as printed, when it differs from `message=`); re-run `python scripts/workspace-status.py` to see if it still holds |
 
 A `fix-pass-finding` whose detail starts `fixers-exhausted`, `blind-evidence` or

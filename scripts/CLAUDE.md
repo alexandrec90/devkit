@@ -216,8 +216,10 @@ a hook that misbehaves under one routinely behaves under the other — while **`
 deliberately is not**, since one defect hit on two machines is one defect. The fix pass
 (`fix-pass.py`) sends the open backlog to its devkit session with everything else
 harness-shaped, and the `/triage-harness` skill is the same sweep run by hand; both are
-devkit-only on purpose: every defect on this ledger is a defect in devkit, whatever
-project the session that hit it was scoped to.
+devkit-only on purpose: devkit is what reads this ledger, whatever project the session
+that hit a row was scoped to. That does not make every cause devkit's -- a
+`scheduled-job-failed` row from `collectors.py fire <project>` ran that project's code
+(e0301529) -- so `fix_prompts.LEDGER_STEPS` sends the sweep to find the cause first.
 
 **The ledger is also the fix pass's own sink** (`fix_findings.py`): every outcome it cannot
 turn green -- a step that raised, a fixer that died or gave up, transcript friction, a

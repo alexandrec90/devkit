@@ -100,6 +100,11 @@ LEDGER_STEPS = (
     "once the fix is in your intent; the pass reopens a group whose branch never merges. "
     "Work the groups this prompt names: one filed after this session started is the next "
     "session's, however the log reads when you look again. "
+    "A group is on this ledger because the harness saw it fail, which does not put its "
+    "cause in devkit: a scheduled job that ran a project's own code -- collectors.py fire "
+    "PROJECT runs that project's scrape -- fails on that project or on the machine under "
+    "it as often as on the harness, so find where the cause is before fixing, and fix "
+    "it in that tree. "
     "A fixers-exhausted, blind-evidence or fixer-blocked group is a problem fixers could "
     "not move: fix what in the harness failed them, and fix the problem itself in the "
     "tree its evidence names, leaving an intent there too. Cut any tree this work needs "
@@ -351,11 +356,20 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
     projects = sorted({f.project for f in ordered})
     rows = "; ".join(f"{f.project} {name_of(f)} -- {describe(f)}" for f in ordered)
     urls = ", ".join(f"{f.project} {name_of(f)} {f.url}".rstrip() + _held(f) for f in ordered)
+    # A gate's failure is devkit's when it was routed here; a ledger group says only
+    # where the harness saw something fail (e0301529), and `LEDGER_STEPS` says so.
+    vendored = any(f.kind != LEDGER for f in ordered)
     return _framed(
         f"The harness is red in {len(projects)} checkout(s) ({', '.join(projects)}): "
-        f"{rows}. The fix belongs here in devkit, once -- in the vendored file, the "
-        "test, or the template that generates the project-owned file it names -- not in "
-        f"each consumer. Each failure's gate logs are under {EVIDENCE_DIR}/ in this "
+        f"{rows}."
+        + (
+            " The fix belongs here in devkit, once -- in the vendored file, the "
+            "test, or the template that generates the project-owned file it names -- not in "
+            "each consumer."
+            if vendored
+            else ""
+        )
+        + f" Each failure's gate logs are under {EVIDENCE_DIR}/ in this "
         "worktree, one directory per failure that uploaded any; for the rest, read the "
         "run at its URL."
         + "".join(_ledger_log(f) + LEDGER_STEPS for f in ordered if f.kind == LEDGER)

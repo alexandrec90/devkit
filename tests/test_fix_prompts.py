@@ -412,6 +412,23 @@ def test_the_upstream_prompt_sends_the_session_at_the_ledger_only_when_the_backl
     assert "resolve-like" not in without
 
 
+def test_a_ledger_group_is_not_told_its_fix_is_in_devkit():
+    """e0301529: a sweep sent at a scheduled-job-failed group was told the fix belongs
+    here in devkit, once. The job was collectors.py firing social-scraper's scrape, and
+    the cause was that project's export against a storage PC left off: the fix was
+    social-scraper's. A ledger group names where the harness saw a failure, not where
+    its cause is, so the sentence is the vendored failures' alone."""
+    backlog = red_main(
+        kind=fix_plan.LEDGER, workflow="harness ledger", signature=("scheduled-job-failed [a]",)
+    )
+    alone = fix_prompts.upstream_prompt((backlog,), "agent/fix")
+    assert "belongs here in devkit" not in alone
+    assert "find where the cause is before fixing" in alone
+    assert "collectors.py fire" in fix_prompts.LEDGER_STEPS
+    beside = fix_prompts.upstream_prompt((backlog, failure()), "agent/fix")
+    assert "belongs here in devkit" in beside and "not in each consumer" in beside
+
+
 def test_the_upstream_prompt_names_the_triage_log_at_the_path_it_is_placed():
     """ "in that directory's harness-triage.log" read as `logs/gate/`, which holds one
     directory per failure: both ledger sessions of the second supervised run opened the
