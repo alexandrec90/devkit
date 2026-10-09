@@ -373,6 +373,15 @@ ACTIONS: dict[str, Action] = {
     "backtest-oos": Action(
         "scripts/backtest-task.py", "Backtest: OOS (Honest Per-Fold)", ("oos",), projects=IBKR
     ),
+    # One script again, split the other way: the four read-only views are one task and a
+    # picker, the view riding in as a trailing argument, while the strategy lab is its own
+    # action because it re-simulates for minutes and asks two more questions.
+    "report": Action(
+        "scripts/report-task.py", "Report: Open Model & Strategy Views", projects=IBKR
+    ),
+    "strategy-lab": Action(
+        "scripts/report-task.py", "Report: Run Strategy Lab", ("lab",), projects=IBKR
+    ),
     # --- scoped to social-scraper ---
     #
     # Signing in once in a visible browser, so the platform's persistent profile under

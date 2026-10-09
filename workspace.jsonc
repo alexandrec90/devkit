@@ -1081,6 +1081,60 @@
 				},
 				"problemMatcher": []
 			},
+			// One task and a view picker rather than four tasks: the views differ only in
+			// which report `scripts/report-task.py` renders. The lab is the separate one
+			// because it costs minutes of simulation and asks two more questions.
+			{
+				"label": "Report: Open Model & Strategy Views",
+				"detail": "Open the chosen results view in each selected IBKR Trader checkout: backtest leaderboard and charts, factor tear sheet, MLflow model browser, or a terminal summary. Every view but MLflow needs the `db` container up; MLflow runs until you close the terminal.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"report",
+					"${input:reportView}"
+				],
+				"icon": {
+					"id": "pie-chart",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Report: Run Strategy Lab",
+				"detail": "Re-simulate the strategy line-up over since-2010, 5y, 3y and 1y windows in each selected IBKR Trader checkout, then open reports/lab-report.html. Takes minutes; needs the `db` container up and only reads from it.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"strategy-lab",
+					"--universe",
+					"${input:labUniverse}",
+					"--account",
+					"${input:btAccount}"
+				],
+				"icon": {
+					"id": "beaker",
+					"color": "terminal.ansiBrightYellow"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
 			// --- scoped: social-scraper -------------------------------------------
 			// One checkout, so `--project` is spelled out rather than asked.
 			{
@@ -1967,9 +2021,9 @@
 				"default": "ml_lt_ridge"
 			},
 			{
-				// Shared by both Backtest tasks — the account is the one input the OOS
-				// run still takes, since which account you evaluate does not affect
-				// whether two OOS runs are comparable.
+				// Shared by both Backtest tasks and the strategy lab — the account is the
+				// one input the OOS run still takes, since which account you evaluate
+				// does not affect whether two OOS runs are comparable.
 				"id": "btAccount",
 				"type": "pickString",
 				"description": "Registered account to simulate",
@@ -2015,6 +2069,50 @@
 				"type": "promptString",
 				"description": "OOS dataset window end",
 				"default": "2026-07-01"
+			},
+			{
+				"id": "reportView",
+				"type": "pickString",
+				"description": "Which results view to open",
+				"options": [
+					{
+						"label": "Backtest results — leaderboard + equity/drawdown charts",
+						"value": "results"
+					},
+					{
+						"label": "Factor tear sheet — latest OOS run (Alphalens)",
+						"value": "factor"
+					},
+					{
+						"label": "Model experiments — MLflow browser, runs until you close the terminal",
+						"value": "models"
+					},
+					{
+						"label": "Terminal summary — leaderboard, latest model, forward shadow",
+						"value": "summary"
+					}
+				],
+				"default": "results"
+			},
+			{
+				"id": "labUniverse",
+				"type": "pickString",
+				"description": "Universe for the strategy lab",
+				"options": [
+					{
+						"label": "sp500 — S&P 500 point-in-time + broad ETFs, survivorship-free",
+						"value": "sp500"
+					},
+					{
+						"label": "tickers-etfs.txt — ETF floor; today's names, survivor-biased",
+						"value": "tickers-etfs.txt"
+					},
+					{
+						"label": "tickers.txt — stocks + ETFs; today's names, survivor-biased",
+						"value": "tickers.txt"
+					}
+				],
+				"default": "sp500"
 			},
 			{
 				"id": "newProjectName",
