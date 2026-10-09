@@ -145,6 +145,31 @@ def test_a_resolution_carried_to_a_new_branch_covers_from_when_it_was_first_made
     assert [row for row, _, _ in outcome.covered] == [triage.item_id(waiting)]
 
 
+def test_a_run_begun_before_the_merge_is_covered_though_filed_after_it(tmp_path):
+    """1fad5675: social-scraper #68 merged at 04:04Z, four minutes into a scrape that failed
+    on the old code at 04:13Z. Filed after the merge, it read as the fix not holding, and
+    the pass sent a session to re-prove it. Its `started=` says which code it ran."""
+    first = finding(10)
+    head = triage.item_id(first)
+    spanning = f"{finding(1)}\tstarted={at(3.5)}"
+    later = f"{finding(1 / 2)}\tstarted={at(2)}"
+    lines = items(first, resolution("agent/x", days_ago=8 / 24, ref=head), spanning, later)
+    merge = fix_verify.Pr(fix_verify.LANDED, at(3), "https://github.com/o/s/pull/68")
+    [(row, note, _)] = fix_verify.verify(lines, lambda *_: [merge], tmp_path / "v", NOW).covered
+    assert row == triage.item_id(spanning), "a run begun after the merge is a recurrence"
+    assert "after this row's run began" in note
+
+
+def test_an_unreadable_start_falls_back_to_when_the_row_was_filed(tmp_path):
+    first = finding(10)
+    garbled = f"{finding(1)}\tstarted=not a time"
+    lines = items(first, resolution("agent/x", days_ago=8 / 24, ref=triage.item_id(first)))
+    lines += items(garbled)
+    merge = fix_verify.Pr(fix_verify.LANDED, at(3))
+    assert fix_verify.ran_from(lines[-1]) == _dt.datetime.fromisoformat(at(1))
+    assert fix_verify.verify(lines, lambda *_: [merge], tmp_path / "v", NOW).covered == []
+
+
 def test_nothing_is_covered_without_a_readable_merge_time_or_by_another_group(tmp_path):
     first, waiting = finding(10), finding(5)
     other = finding(5, detail="something else entirely")

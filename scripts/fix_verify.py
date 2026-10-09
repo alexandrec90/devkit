@@ -172,23 +172,35 @@ def named_by(resolution: Resolution, prs: list[Pr]) -> Pr | None:
 def covered(
     items: list[triage.Item], resolution: Resolution, merge: Pr
 ) -> list[tuple[str, str, str]]:
-    """`(row id, note, pr)` for each open row of `resolution`'s group filed between the
-    resolution and `merge` -- see `Outcome.covered`. A row filed after the merge is a
-    real recurrence and stays open; so does every row when either time is unreadable."""
+    """`(row id, note, pr)` for each open row of `resolution`'s group filed after the
+    resolution whose run began before `merge` -- see `Outcome.covered`. A row whose run
+    began after the merge is a real recurrence and stays open; so does every row when
+    either time is unreadable. A row with no readable `started=` (`ran_from`) began
+    when it was filed, as far as anything can tell."""
     head = {item.id: item for item in items}.get(resolution.ref)
     start, end = _moment(resolution.stamp), _moment(merge.merged_at)
     if head is None or start is None or end is None:
         return []
     note = (
         f"filed while the fix for [{resolution.ref}] ({resolution.pr}) was in flight; "
-        f"it merged at {merge.merged_at}, after this row"
+        f"it merged at {merge.merged_at}, after this row's run began"
     )
     found = []
     for item in triage.open_items(items):
-        when = _moment(item.stamp)
-        if item.signature == head.signature and when is not None and start < when < end:
+        when, began = _moment(item.stamp), ran_from(item)
+        if item.signature != head.signature or when is None or began is None:
+            continue
+        if start < when and began < end:
             found.append((item.id, note, merge.url or resolution.pr))
     return found
+
+
+def ran_from(item: triage.Item) -> _dt.datetime | None:
+    """When the run a row reports began: its `started=` (`log-wrap.record_failure`), else
+    its stamp. A scheduled job ran the code on disk when it started, so a run spanning a
+    merge failed on the code before it -- 1fad5675, a scrape begun four minutes before
+    social-scraper #68 merged and filed nine minutes after."""
+    return _moment(item.fields.get("started", "")) or _moment(item.stamp)
 
 
 def verify(
