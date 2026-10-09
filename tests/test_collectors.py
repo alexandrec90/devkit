@@ -656,16 +656,65 @@ def test_a_wedged_engine_is_not_restarted_under_a_scheduled_run(tmp_path, instan
     docker.holds = in_flight
     collectors.maintain([target(tmp_path)], docker, report, {})
     assert ("restart",) not in docker.calls
+    assert "social-scraper's scheduled run" in report.lines[0]
+    assert collectors.last_restart(restarts) is None, "a held restart is not a restart"
+    docker.holds = list
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    assert ("restart",) in docker.calls
+    assert collectors.HOLD_SINCE not in collectors.restart_record(restarts)
+
+
+def test_a_held_restart_is_no_failure_until_it_outlasts_a_run(tmp_path, instant):
+    """84ad65d7: 2026-10-09 19:15 UTC Docker's VM froze under a scrape; the pass held the
+    restart and failed, and by the next pass the engine was back on its own."""
+    restarts = tmp_path / "restarts.json"
+    docker, report = Wedged(restarts, revives=False), collectors.Report()
+    docker.holds = lambda: ["social-scraper"]
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 0 and "(held 0 min)" in report.lines[0]
+    since = collectors.restart_record(restarts)[collectors.HOLD_SINCE]
+
+    report = collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 0, "a second pass inside the limit still waits"
+    assert collectors.restart_record(restarts)[collectors.HOLD_SINCE] == since
+
+    old = collectors._clock() - collectors.HOLD_LIMIT - 1
+    collectors.write_file(restarts, json.dumps({collectors.HOLD_SINCE: old}))
+    report = collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
     assert report.failures == 1
     assert report.lines[-1] == (
         "docker is not answering though Docker Desktop says it is running, "
         "and its restart waits for a scheduled collector's run"
     )
-    assert "social-scraper's scheduled run" in report.lines[0]
-    assert not restarts.exists(), "a held restart is not a restart"
-    docker.holds = list
+    assert ("restart",) not in docker.calls
+
+
+def test_an_engine_that_answers_again_ends_the_hold(tmp_path, instant):
+    restarts = tmp_path / "restarts.json"
+    collectors.write_file(restarts, json.dumps({"started_at": 5.0, collectors.HOLD_SINCE: 9.0}))
+    docker = FakeDocker([])
+    docker.restarts = restarts
     collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
-    assert ("restart",) in docker.calls
+    assert collectors.restart_record(restarts) == {"started_at": 5.0}
+
+
+def test_release_hold_leaves_a_record_with_no_hold_alone(tmp_path):
+    restarts = tmp_path / "restarts.json"
+    collectors.release_hold(restarts)
+    assert not restarts.exists()
+    collectors.write_file(restarts, '{"started_at": 5.0}')
+    before = restarts.stat().st_mtime_ns
+    collectors.release_hold(restarts)
+    assert restarts.stat().st_mtime_ns == before
+
+
+def test_a_hold_stamped_in_the_future_starts_again_now(tmp_path):
+    restarts = tmp_path / "restarts.json"
+    collectors.write_file(restarts, json.dumps({collectors.HOLD_SINCE: 2000.0}))
+    assert collectors.hold_restart(restarts, 1000.0) == 1000.0
+    assert collectors.hold_restart(restarts, 1500.0) == 1000.0
 
 
 def test_the_scheduled_pass_holds_a_restart_for_a_running_scrape(tmp_path, monkeypatch, instant):
@@ -679,7 +728,7 @@ def test_the_scheduled_pass_holds_a_restart_for_a_running_scrape(tmp_path, monke
         return docker
 
     monkeypatch.setattr(collectors, "Docker", make)
-    assert collectors.main(["maintain"], run=Running()) == 2
+    assert collectors.main(["maintain"], run=Running()) == 0, "a young hold fails nothing"
     assert built[0].holds() == ["social-scraper"]
     assert ("restart",) not in built[0].calls
 
