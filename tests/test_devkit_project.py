@@ -491,6 +491,10 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # Born scoped, by capability: only social-scraper has a browser profile to sign
         # in to, and its `scripts/login.py` is the CLI contract.
         "scraper-login",
+        # Born scoped, by capability: only ibkr_trader has backtest runs, an MLflow store
+        # and a strategy line-up to report on. `scripts/report-task.py` is the contract.
+        "report",
+        "strategy-lab",
     }
 
 
@@ -547,6 +551,70 @@ def test_the_two_backtest_actions_share_a_script_and_differ_by_subcommand():
     assert ACTIONS["backtest"].script == ACTIONS["backtest-oos"].script
     assert ACTIONS["backtest"].args == ("run",)
     assert ACTIONS["backtest-oos"].args == ("oos",)
+
+
+def test_the_report_pair_shares_a_script_and_only_the_lab_fixes_a_subcommand():
+    """The views are one action because the picked view rides in as the trailing argument;
+    the lab is a second action because its cost and its two extra questions are what a
+    picker cannot carry back."""
+    assert ACTIONS["report"].script == ACTIONS["strategy-lab"].script == "scripts/report-task.py"
+    assert ACTIONS["report"].args == ()
+    assert ACTIONS["strategy-lab"].args == ("lab",)
+    for key in ("report", "strategy-lab"):
+        assert ACTIONS[key].projects == IBKR
+        assert ACTIONS[key].owner == devkit_project.PROJECT
+        assert key not in expected_actions("devkit")
+
+
+@pytest.mark.parametrize("view", ["results", "factor", "models", "summary"])
+def test_every_report_view_reaches_the_script_as_its_subcommand(tmp_path, canonical, view):
+    """Each picker value is a subcommand of `report-task.py`, passed through untouched."""
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    assert view in _picker_values(inputs["reportView"])
+
+    checkout = tmp_path / "ibkr_trader"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "report-task.py").write_text("", encoding="utf-8")
+    argv = plan_command(ACTIONS["report"], checkout, [view])
+    assert argv[-3:] == ["python", "scripts/report-task.py", view]
+
+
+def test_the_report_view_picker_offers_exactly_the_scripts_views(canonical):
+    """A row the script has no subcommand for fails in a terminal after the checkout
+    question; a view the script grew and the picker lacks is unreachable by click."""
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    assert _picker_values(inputs["reportView"]) == {"results", "factor", "models", "summary"}
+
+
+def test_the_strategy_lab_carries_both_of_its_required_flags(tmp_path, canonical):
+    """`report-task.py lab` requires `--universe` and `--account`, so the task must spell
+    both, each from a picker that always yields a real token."""
+    task = next(t for t in canonical["tasks"] if t["label"] == "Report: Run Strategy Lab")
+    args = [str(a) for a in task["args"]]
+    assert args[args.index("strategy-lab") + 1 :] == [
+        "--universe",
+        "${input:labUniverse}",
+        "--account",
+        "${input:btAccount}",
+    ]
+    inputs = {spec["id"]: spec for spec in canonical["inputs"]}
+    universes = _picker_values(inputs["labUniverse"])
+    assert universes == {"sp500", "tickers-etfs.txt", "tickers.txt"}
+    assert "" not in _picker_values(inputs["btAccount"])
+
+    checkout = tmp_path / "ibkr_trader"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "report-task.py").write_text("", encoding="utf-8")
+    tail = ["--universe", "sp500", "--account", "tfsa"]
+    argv = plan_command(ACTIONS["strategy-lab"], checkout, tail)
+    assert argv[-7:] == ["python", "scripts/report-task.py", "lab", *tail]
+
+
+def test_the_report_actions_name_their_missing_script(tmp_path):
+    """An ibkr_trader checkout that predates the script is a conformance failure by name."""
+    for key, extra in (("report", ["results"]), ("strategy-lab", [])):
+        with pytest.raises(ProjectError, match=r"scripts/report-task\.py"):
+            plan_command(ACTIONS[key], tmp_path, extra)
 
 
 def test_the_host_preview_pair_is_one_script_told_apart_by_a_flag():
