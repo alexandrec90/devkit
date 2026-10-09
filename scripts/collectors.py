@@ -334,6 +334,14 @@ class Docker:
         code, out = self.run(argv, DESKTOP_TIMEOUT)
         return code == 0 and f'"{DESKTOP_IMAGE.lower()}"' in out.lower()
 
+    def updating(self) -> bool:
+        """Whether Docker Desktop is installing an update of itself
+        (`collector_tasks.updater_listed`); never off Windows."""
+        if os.name != "nt":
+            return False
+        code, out = self.run(collector_tasks.UPDATE_LISTING, DESKTOP_TIMEOUT)
+        return code == 0 and collector_tasks.updater_listed(out)
+
     def restart_desktop(self) -> tuple[bool, str]:
         # Docker's own restart, not `docker-maint.py restart-engine`: that one taskkills
         # the service and runs `wsl --shutdown`, which a timer must not do to every WSL
@@ -675,6 +683,14 @@ def release_hold(path: Path) -> None:
         write_file(path, json.dumps(record) + "\n")
 
 
+def held(report: Report, restarts: Path, clock: float, why: str, cause: str) -> tuple[None, str]:
+    """`revive_engine`'s answer for a restart it is holding: `why`, with how long it has
+    been held, and no failure until that is `HOLD_LIMIT` -- then `cause`."""
+    minutes = int((clock - hold_restart(restarts, clock)) // 60)
+    report.say(f"{why} (held {minutes} min)")
+    return None, "" if minutes * 60 < HOLD_LIMIT else cause
+
+
 def revive_engine(
     docker: Docker, report: Report, restarts: Path, clock: float, busy: Sequence[str] = ()
 ) -> tuple[list[Container] | None, str]:
@@ -690,7 +706,19 @@ def revive_engine(
     `scheduled_in_flight`): its services outlive a silent engine API, and the restart is
     what would stop them under it (6c504c34). The next pass restarts it. That wait is no
     failure -- `(None, "")` -- until it has lasted `HOLD_LIMIT` (84ad65d7).
+
+    Nor while Docker Desktop installs an update of itself (`Docker.updating`): its engine
+    is down by design until the installer starts the new app, a restart would cut the
+    install short, and the installer may have closed the app it reads as quit. That is
+    held the same way, asked first (3012d246).
     """
+    if docker.updating():
+        why = (
+            "Docker Desktop is installing an update, and its engine is down until it is "
+            "done -- not restarting it under the installer"
+        )
+        cause = f"{NOT_ANSWERING} while Docker Desktop installs an update"
+        return held(report, restarts, clock, why, cause)
     if not docker.desktop_running():
         return None, "docker is not answering and Docker Desktop is not running -- start it"
     containers = wait_for_engine(docker, ENGINE_STARTUP - WEDGE_CONFIRM)
@@ -706,14 +734,12 @@ def revive_engine(
         )
         return None, f"{wedged}, and a restart did not bring its engine back"
     if busy:
-        held = int((clock - hold_restart(restarts, clock)) // 60)
-        report.say(
+        why = (
             f"not restarting Docker Desktop under {', '.join(busy)}'s scheduled run: "
-            f"the restart would stop the services it is using (held {held} min)"
+            "the restart would stop the services it is using"
         )
-        if held * 60 < HOLD_LIMIT:
-            return None, ""
-        return None, f"{wedged}, and its restart waits for a scheduled collector's run"
+        cause = f"{wedged}, and its restart waits for a scheduled collector's run"
+        return held(report, restarts, clock, why, cause)
     write_file(restarts, json.dumps({STARTED_AT: clock}) + "\n")
     ok, out = docker.restart_desktop()
     containers = docker.ps() if ok else None

@@ -238,13 +238,29 @@ def test_the_schtasks_runner_is_captured_and_a_spawn_failure_is_a_code(monkeypat
 # --- one fire -----------------------------------------------------------------------
 
 
+NO_UPDATER = '"Docker Desktop.exe","10072","RDP-Tcp#9","1","13,220 K"'
+UPDATER = (
+    f"{NO_UPDATER}\n"
+    '"Docker Desktop Updater-238679 (241994).exe","4410","RDP-Tcp#9","1","9,100 K"\n'
+    '"Docker Desktop Installer.exe","5120","RDP-Tcp#9","1","61,000 K"'
+)
+
+
 class FakeSpawn:
-    def __init__(self, *answers):
+    """Answers in order; the process listing `desktop_updating` asks for answers
+    `listing` and is kept out of `calls`, so a test counting docker calls is unchanged."""
+
+    def __init__(self, *answers, listing=(0, NO_UPDATER)):
         self.answers = list(answers)
+        self.listing = listing
+        self.listed = 0
         self.calls: list[tuple] = []
         self.envs: list = []
 
     def __call__(self, argv, cwd, timeout, env=None):
+        if list(argv) == list(tasks.UPDATE_LISTING):
+            self.listed += 1
+            return self.listing
         self.calls.append((list(argv), Path(cwd).name, timeout))
         self.envs.append(env)
         return self.answers.pop(0)
@@ -365,6 +381,66 @@ def test_an_engine_silent_through_the_wait_is_the_cause(tmp_path, instant):
     assert sum(instant.slept) == tasks.ENGINE_WAIT
     assert lines[-1] == "error: the Docker engine did not answer"
     assert log_wrap.failure_cause("\n".join(lines)) == "error: the Docker engine did not answer"
+
+
+def test_a_fire_landing_in_a_docker_desktop_update_skips_its_run(tmp_path, monkeypatch):
+    """38b0ffb4: 2026-10-09 the 20:02 UTC fire's `compose up --wait db` ran its whole
+    `NEEDS_TIMEOUT` while Docker Desktop installed 4.94.0 (19:55-20:28), and the fire
+    failed "the Docker engine did not answer". An update is Docker's maintenance: the run
+    is skipped, and the next fire runs on the new engine."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(TIMED_OUT, (tasks.TIMED_OUT, "timed out after 30s"), listing=(0, UPDATER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and spawn.listed == 1
+    assert len(spawn.calls) == 2, "the start and one probe: the command is never run"
+    assert "Docker Desktop is installing an update" in lines[-1]
+    assert not any(line.startswith("error:") for line in lines)
+
+
+def test_a_silent_engine_with_no_update_running_still_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(TIMED_OUT, (tasks.TIMED_OUT, "timed out after 30s"))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == tasks.TIMED_OUT and spawn.listed == 1
+    assert lines[-1] == "error: the Docker engine did not answer"
+
+
+def test_an_update_is_not_asked_about_while_the_engine_answers(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP, listing=(0, UPDATER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and spawn.listed == 0
+    assert lines[-1] == "error: docker compose up failed for db"
+
+
+@pytest.mark.parametrize(
+    ("listing", "expected"),
+    [
+        ((0, UPDATER), True),
+        ((0, '"Docker Desktop Installer.exe","5120","Console","1","61,000 K"'), True),
+        ((0, NO_UPDATER), False),
+        ((0, "INFO: No tasks are running which match the specified criteria."), False),
+        ((0, ""), False),
+        ((1, UPDATER), False),
+    ],
+)
+def test_desktop_updating_reads_the_updater_or_installer_off_the_listing(
+    tmp_path, monkeypatch, listing, expected
+):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    assert tasks.desktop_updating(tmp_path, FakeSpawn(listing=listing)) is expected
+
+
+def test_updater_listed_matches_image_names_not_the_rest_of_the_row():
+    assert tasks.updater_listed(UPDATER)
+    assert not tasks.updater_listed(NO_UPDATER)
+    assert not tasks.updater_listed('"python.exe","1","Docker Desktop Installer.exe","1","1 K"')
+
+
+def test_desktop_updating_is_never_asked_off_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "posix")
+    spawn = FakeSpawn(listing=(0, UPDATER))
+    assert tasks.desktop_updating(tmp_path, spawn) is False and spawn.listed == 0
 
 
 def test_start_needs_says_what_the_engine_answered_and_only_when_it_asked(tmp_path, instant):

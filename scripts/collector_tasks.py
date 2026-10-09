@@ -67,6 +67,15 @@ PROBE = 30
 # the cause that recurred through fourteen resolutions of other things (74c2ccd2).
 ENGINE_WAIT = 360
 ENGINE_POLL = 15
+# Docker Desktop installing an update of itself: its updater (`Docker Desktop
+# Updater-<from> (<to>).exe`) runs `Docker Desktop Installer.exe` and waits for it, and
+# the engine is down until the installer starts the new app. 2026-10-09: the backend the
+# collectors pass's 19:45 UTC restart relaunched found 4.94.0 and installed it from 19:55
+# to 20:28; the scrape fired into it and failed on a silent engine (38b0ffb4), and the
+# pass read the half hour as a restart that had not helped (3012d246). Lowercased
+# prefixes, matched against `UPDATE_LISTING`'s image names.
+UPDATER_IMAGES = ("docker desktop installer", "docker desktop updater")
+UPDATE_LISTING = ("tasklist", "/FI", "IMAGENAME eq Docker Desktop*", "/FO", "CSV", "/NH")
 # How long the output of a child already killed at its timeout is waited for.
 REAP_TIMEOUT = 30
 # `spawn`'s code for a child it ended at its timeout, as `timeout(1)` reports one.
@@ -335,6 +344,20 @@ def probe(checkout: Path, run: Spawner) -> tuple[int, str]:
     return run(["docker", "info", "--format", "{{.ServerVersion}}"], checkout, PROBE)
 
 
+def updater_listed(listing: str) -> bool:
+    """Whether a `tasklist /FO CSV` listing names Docker Desktop's updater or installer."""
+    rows = csv.reader(io.StringIO(listing))
+    return any(row and row[0].strip().lower().startswith(UPDATER_IMAGES) for row in rows)
+
+
+def desktop_updating(checkout: Path, run: Spawner) -> bool:
+    """Whether Docker Desktop is installing an update of itself; never off Windows."""
+    if os.name != "nt":
+        return False
+    code, out = run(list(UPDATE_LISTING), checkout, PROBE)
+    return code == 0 and updater_listed(out)
+
+
 def await_engine(checkout: Path, run: Spawner) -> tuple[int, str]:
     """`probe`, asked every `ENGINE_POLL` seconds until it answers or `ENGINE_WAIT` has
     passed; its last answer."""
@@ -426,6 +449,11 @@ def fire(
 
     The command is told when the scheduler fired (`FIRED_AT`) -- `fired`, now when None
     -- which is taken before the `needs` come up, since they are part of the cycle.
+
+    A `needs` that cannot start because Docker Desktop is installing an update
+    (`desktop_updating`) skips this run, exit 0: the update is Docker's maintenance, the
+    next fire runs on the new engine, and `collectors.revive_engine` fails an update that
+    outlasts its `HOLD_LIMIT`.
     """
     stamp = fired_env(fired or _dt.datetime.now(_dt.UTC))
     lines = [f"command: {' '.join(collector.command)}", f"cwd: {checkout}"]
@@ -434,6 +462,14 @@ def fire(
     if collector.needs:
         code, out, engine = start_needs(collector.needs, checkout, run)
         if code != 0:
+            engine = engine or probe(checkout, run)
+            if engine[0] != 0 and desktop_updating(checkout, run):
+                names = ", ".join(collector.needs)
+                return 0, [
+                    *lines,
+                    f"Docker Desktop is installing an update, so {names} cannot start: "
+                    "this run is skipped, and the next fire runs on the updated engine",
+                ]
             failed = needs_failed(collector.needs, checkout, code, out, run, engine)
             return code, [*lines, *failed]
         lines.append(f"started: {', '.join(collector.needs)}")
