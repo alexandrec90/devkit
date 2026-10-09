@@ -74,10 +74,12 @@ class Collector:
       before each fire. The command's exit code is the verdict, so 0 has to cover "ran
       and deliberately did nothing".
 
-    `settle` is how many minutes after this job starts or redeploys a container its
-    `health` is not run (`collectors.settling`): until each job inside has fired on the
-    new code, the verdict is the old code's. Set it to the longest interval of a job
-    whose failure would otherwise outlive the fix that cured it.
+    `settle` is how many minutes after a container starts -- this job starting or
+    redeploying it, or the engine restarting it -- its `health` is not run
+    (`collectors.settling`): until each job inside has fired on the new code, or caught
+    up on the runs a stopped engine cost it, the verdict is about the time it was down.
+    Set it to the longest interval of a job whose failure would otherwise outlive the fix
+    or the restart that cured it.
 
     `builds_from` (`buildsFrom`) names the sibling checkouts a container's image copies in
     beside its own -- ibkr_trader's `COPY data-lake` -- so a merge there redeploys it as

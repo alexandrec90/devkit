@@ -32,11 +32,14 @@ def box(service="app", state="running", workdir="C:/ws/ibkr_trader", cid="c1", s
 
 
 class FakeDocker:
-    def __init__(self, containers=None, up_ok=True, health=(0, "all good"), built=None):
+    def __init__(
+        self, containers=None, up_ok=True, health=(0, "all good"), built=None, started=None
+    ):
         self.containers = containers
         self.up_ok = up_ok
         self.health_answer = health
         self.built_at = built
+        self.started_at = started
         self.desktop = False
         self.update = False
         self.restarts = None
@@ -58,6 +61,10 @@ class FakeDocker:
     def built(self, container):
         self.calls.append(("built", container.id))
         return self.built_at
+
+    def started(self, container):
+        self.calls.append(("started", container.id))
+        return self.started_at
 
     def deploy(self, checkout, service):
         self.calls.append(("deploy", Path(checkout).name, service))
@@ -278,6 +285,73 @@ def test_a_settle_of_zero_judges_the_pass_after_the_start(tmp_path, monkeypatch)
         t, [ours(tmp_path)], docker, collectors.Report(), last, FakeGit()
     )
     assert record is not None and record["ok"] is True
+
+
+def test_a_container_the_engine_restarted_is_not_judged_until_it_has_settled(tmp_path, monkeypatch):
+    """3517acbe: Docker Desktop came back from a three-hour wedge and started ibkr_trader's
+    `app` itself; the pass three minutes later judged `social` stale by the runs the wedge
+    had cost, before its catch-up run could finish. This job had started nothing."""
+    docker = FakeDocker(
+        [ours(tmp_path)], health=(1, "unhealthy: social"), built=1000.0, started=10_000.0
+    )
+    report = collectors.Report()
+    at(monkeypatch, 10_000.0 + 3 * 60)
+    record = collectors.keep_running(
+        target(tmp_path), [ours(tmp_path)], docker, report, {collectors.CODE_AT: 2000.0}, FakeGit()
+    )
+    assert not any(call[0] == "health" for call in docker.calls)
+    assert record == {collectors.CODE_AT: 2000.0, collectors.STARTED_AT: 10_000.0}
+    assert any("health check deferred" in line and "3 min ago" in line for line in report.lines)
+
+
+def test_a_container_the_engine_started_long_ago_is_judged(tmp_path, monkeypatch):
+    docker = FakeDocker(
+        [ours(tmp_path)], health=(1, "unhealthy: social"), built=1000.0, started=10_000.0
+    )
+    at(monkeypatch, 10_000.0 + config.DEFAULT_SETTLE * 60)
+    last = {collectors.CODE_AT: 2000.0}
+    record = collectors.keep_running(
+        target(tmp_path), [ours(tmp_path)], docker, collectors.Report(), last, FakeGit()
+    )
+    assert record is not None and record["ok"] is False and record["unhealthy"] == ["social"]
+    assert collectors.STARTED_AT not in record
+
+
+@pytest.mark.parametrize(
+    ("recorded", "engine", "expected"),
+    [
+        (None, None, None),
+        (10_000.0, None, 10_000.0),
+        (None, 9_000.0, 9_000.0),
+        (10_000.0, 12_000.0, 12_000.0),
+        (12_000.0, 10_000.0, 12_000.0),
+        ("garbage", 9_000.0, 9_000.0),
+    ],
+)
+def test_the_last_start_is_the_later_of_ours_and_the_engines(recorded, engine, expected):
+    assert collectors.last_start(recorded, engine) == expected
+
+
+def test_started_reads_the_engines_start_time(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, "2026-10-09T22:24:01.123456789Z\n", "")
+
+    monkeypatch.setattr(collectors.subprocess, "run", fake_run)
+    when = collectors.Docker().started(box(cid="abc"))
+    assert seen["argv"] == ["docker", "inspect", "--format", "{{.State.StartedAt}}", "abc"]
+    assert when == dt.datetime(2026, 10, 9, 22, 24, 1, tzinfo=dt.UTC).timestamp()
+
+
+def test_started_is_none_when_the_engine_cannot_say(monkeypatch):
+    monkeypatch.setattr(
+        collectors.subprocess,
+        "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "", "Error: No such object"),
+    )
+    assert collectors.Docker().started(box()) is None
 
 
 @pytest.mark.parametrize(

@@ -108,8 +108,8 @@ HEALTH_TIMEOUT = 120
 INSPECT_TIMEOUT = 30
 GIT_TIMEOUT = 30
 # The longest one container target can hold a pass: every spawn `keep_running` makes, at
-# its timeout -- two image inspects, three git calls, the build and the health check.
-TARGET_BOUND = 2 * INSPECT_TIMEOUT + 3 * GIT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
+# its timeout -- three inspects, three git calls, the build and the health check.
+TARGET_BOUND = 3 * INSPECT_TIMEOUT + 3 * GIT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
 # How long after the machine boots or wakes a silent engine is Docker Desktop still
 # starting rather than down (`wait_for_engine`), and how often it is asked meanwhile.
 # Measured start on this workstation: about three minutes from boot to running containers.
@@ -312,6 +312,16 @@ class Docker:
             INSPECT_TIMEOUT,
         )
         return parse_created(created) if code == 0 else None
+
+    def started(self, container: Container) -> float | None:
+        """When `container` last started, whoever started it -- this job, or the engine
+        bringing an `unless-stopped` container back after a restart -- or None when the
+        engine cannot say."""
+        code, out = self.run(
+            ["docker", "inspect", "--format", "{{.State.StartedAt}}", container.id],
+            INSPECT_TIMEOUT,
+        )
+        return parse_created(out) if code == 0 else None
 
     def deploy(self, checkout: Path, service: str) -> tuple[bool, str]:
         # Builds first and recreates only once the build succeeded, so a build that fails
@@ -531,8 +541,8 @@ def keep_running(
 ) -> dict | None:
     """Start the collector if it is down, redeploy it if it is behind its checkout.
     Returns a health record, or None when there is nothing to record this pass. `last`
-    is the project's previous record. A container this job started or redeployed is not
-    judged until it has settled (`settling`)."""
+    is the project's previous record. A container this job or the engine (re)started is
+    not judged until it has settled (`settling`, `last_start`)."""
     name, service = target.collector.project, target.collector.service
     clock = _clock()
     if not (target.checkout / ".git").exists():
@@ -558,8 +568,8 @@ def keep_running(
         return {**code, STARTED_AT: clock}
     if not target.collector.health:
         return code or None
-    started = last.get(STARTED_AT)
-    if isinstance(started, (int, float)) and settling(started, clock, target.collector.settle):
+    started = last_start(last.get(STARTED_AT), docker.started(box))
+    if started is not None and settling(started, clock, target.collector.settle):
         report.say(
             f"{name}: health check deferred -- `{service}` was (re)started "
             f"{int((clock - started) // 60)} min ago, inside its {target.collector.settle}-minute "
@@ -567,6 +577,20 @@ def keep_running(
         )
         return {**code, STARTED_AT: started}
     return {**check_health(target, box, docker, report), **code}
+
+
+def last_start(recorded: object, engine: float | None) -> float | None:
+    """The later of the start this job recorded and the one the engine reports, or None.
+
+    The engine's counts because this job is not the only thing that starts a container:
+    after a Docker Desktop restart -- `revive_engine`'s, or the VM coming back from a
+    freeze -- the engine starts every `unless-stopped` one itself. 2026-10-09 22:24 UTC:
+    ibkr_trader's `app` came back that way after a three-hour wedge, and the pass three
+    minutes later judged `social` stale by the runs the wedge had cost (3517acbe), before
+    its catch-up run could finish.
+    """
+    times = [t for t in (recorded, engine) if isinstance(t, (int, float))]
+    return max(times) if times else None
 
 
 def _clock() -> float:
