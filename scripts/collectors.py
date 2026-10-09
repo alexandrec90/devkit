@@ -133,6 +133,13 @@ RESTARTED = Path("logs/collectors.engine-restart.json")
 # event streams after -- restarted Docker Desktop, and the restart shut down
 # social-scraper's db under a scrape mid-run (6c504c34).
 WEDGE_CONFIRM = 180
+# How long a restart may wait for scheduled collectors' runs (`revive_engine`'s `busy`)
+# before the pass fails on it. A run ends within `FIRE_TIMEOUT`, so a hold older than that
+# is more than one run's. 2026-10-09 19:15 UTC: Docker's VM froze for 27 minutes under a
+# scrape, the pass held the restart and failed, and the engine was back by the next pass
+# on its own (84ad65d7). A wait the next pass resolves is not a failure of this one.
+HOLD_LIMIT = collector_tasks.FIRE_TIMEOUT
+HOLD_SINCE = "hold_since"
 
 # The tray's three levels, spelled as `tray_state` spells them. Not imported from there:
 # `tray_state` imports this module, and `test_collectors.py` pins the two to each other.
@@ -634,14 +641,38 @@ def wait_for_engine(
     return containers
 
 
-def last_restart(path: Path) -> float | None:
-    """When `revive_engine` last restarted Docker Desktop, or None when it has not."""
+def restart_record(path: Path) -> dict:
+    """`revive_engine`'s record: when it last restarted (`STARTED_AT`) and since when a
+    restart has been held (`HOLD_SINCE`). {} when there is none or it is unreadable."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
-    when = raw.get(STARTED_AT) if isinstance(raw, dict) else None
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def last_restart(path: Path) -> float | None:
+    """When `revive_engine` last restarted Docker Desktop, or None when it has not."""
+    when = restart_record(path).get(STARTED_AT)
     return when if isinstance(when, (int, float)) else None
+
+
+def hold_restart(path: Path, clock: float) -> float:
+    """Since when a restart has been held, recording `clock` as the start of a new hold."""
+    record = restart_record(path)
+    since = record.get(HOLD_SINCE)
+    if isinstance(since, (int, float)) and since <= clock:
+        return since
+    write_file(path, json.dumps({**record, HOLD_SINCE: clock}) + "\n")
+    return clock
+
+
+def release_hold(path: Path) -> None:
+    """End a held restart: the engine answered, so there is nothing left to restart."""
+    record = restart_record(path)
+    if HOLD_SINCE in record:
+        record.pop(HOLD_SINCE)
+        write_file(path, json.dumps(record) + "\n")
 
 
 def revive_engine(
@@ -657,7 +688,8 @@ def revive_engine(
 
     Nor is it restarted while a scheduled collector's run is in flight (`busy`, from
     `scheduled_in_flight`): its services outlive a silent engine API, and the restart is
-    what would stop them under it (6c504c34). The next pass restarts it.
+    what would stop them under it (6c504c34). The next pass restarts it. That wait is no
+    failure -- `(None, "")` -- until it has lasted `HOLD_LIMIT` (84ad65d7).
     """
     if not docker.desktop_running():
         return None, "docker is not answering and Docker Desktop is not running -- start it"
@@ -674,10 +706,13 @@ def revive_engine(
         )
         return None, f"{wedged}, and a restart did not bring its engine back"
     if busy:
+        held = int((clock - hold_restart(restarts, clock)) // 60)
         report.say(
             f"not restarting Docker Desktop under {', '.join(busy)}'s scheduled run: "
-            f"the restart would stop the services it is using"
+            f"the restart would stop the services it is using (held {held} min)"
         )
+        if held * 60 < HOLD_LIMIT:
+            return None, ""
         return None, f"{wedged}, and its restart waits for a scheduled collector's run"
     write_file(restarts, json.dumps({STARTED_AT: clock}) + "\n")
     ok, out = docker.restart_desktop()
@@ -701,7 +736,7 @@ def maintain(
     `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker. `awake`
     is how long the machine has been up, which `wait_for_engine` gives Docker to start;
     an engine silent past that is `revive_engine`'s where `docker.restarts` is set, held
-    for whatever `docker.holds` names."""
+    for whatever `docker.holds` names. A held restart fails nothing until `HOLD_LIMIT`."""
     if not chosen:
         return
     containers = wait_for_engine(docker, awake)
@@ -711,11 +746,13 @@ def maintain(
         busy = docker.holds() if docker.holds else ()
         containers, why = revive_engine(docker, report, docker.restarts, _clock(), busy)
     if containers is None:
-        if running:
-            report.fail(why)
-        else:
+        if not running:
             report.say("docker is not answering, so nothing here can be running")
+        elif why:
+            report.fail(why)
         return
+    if docker.restarts is not None:
+        release_hold(docker.restarts)
     for target in chosen:
         if target.mode == config.RUN:
             last = health.get(target.collector.project, {})
