@@ -1546,6 +1546,19 @@ def test_canonical_history_is_each_committed_copy_newest_first(workspace_pair):
     assert len(list(devkit_project.canonical_history(live, depth=1))) == 1
 
 
+def test_canonical_history_reads_a_committed_copy_intact_outside_utf8_mode(
+    workspace_pair, monkeypatch
+):
+    """caff6e06: in a process outside UTF-8 mode on Windows, git's output was decoded as
+    cp1252, so every task detail with an em dash read back as mojibake and no committed
+    copy ever matched the live file -- the publish below refused on an unmodified HEAD."""
+    canonical, live = workspace_pair
+    _commit_canonical(canonical)
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    (newest,) = devkit_project.canonical_history(live, depth=1)
+    assert newest == devkit_jsonc_loads(live.read_text(encoding="utf-8"))
+
+
 def test_a_publish_goes_through_once_the_live_edit_is_merged_and_devkit_moved_on(workspace_pair):
     """The end state e6579536 needed: the hand-added settings merged into devkit's copy,
     a task devkit changed since, a stale stamp -- and the publish delivers the task."""

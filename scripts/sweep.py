@@ -261,19 +261,23 @@ def run_bounded(
     then reads its pipes to the end, unbounded, on Windows -- and `git fetch`'s
     `git-remote-https`, or the `gh` a wrapper started, still holds them. The bound would
     stop the clock and leave the wait.
+
+    Decoded as UTF-8, which is what git and gh write, never with the locale's codec:
+    outside UTF-8 mode on Windows that is cp1252, and `canonical_history` read every
+    em dash in a committed task as mojibake (caff6e06).
     """
     timeout = _within_until(timeout)
     if timeout is not None and timeout <= 0:
         said = "not started: past the caller's deadline"
         return subprocess.CompletedProcess(argv, TIMED_OUT, "", said)
+    kwargs = {"encoding": "utf-8", "errors": "replace", **kwargs}
     if timeout is None:
-        return run_windowless(argv, capture_output=True, text=True, check=False, **kwargs)
+        return run_windowless(argv, capture_output=True, check=False, **kwargs)
     process = subprocess.Popen(
         argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
         creationflags=NO_WINDOW,
         start_new_session=sys.platform != "win32",
         **kwargs,
