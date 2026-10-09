@@ -133,13 +133,22 @@ RESTARTED = Path("logs/collectors.engine-restart.json")
 # event streams after -- restarted Docker Desktop, and the restart shut down
 # social-scraper's db under a scrape mid-run (6c504c34).
 WEDGE_CONFIRM = 180
-# How long a restart may wait for scheduled collectors' runs (`revive_engine`'s `busy`)
-# before the pass fails on it. A run ends within `FIRE_TIMEOUT`, so a hold older than that
-# is more than one run's. 2026-10-09 19:15 UTC: Docker's VM froze for 27 minutes under a
-# scrape, the pass held the restart and failed, and the engine was back by the next pass
-# on its own (84ad65d7). A wait the next pass resolves is not a failure of this one.
+# How long a restart may wait for Docker Desktop's own update (`Docker.updating`) before
+# the pass fails on it: one run's `FIRE_TIMEOUT`. 2026-10-09 19:15 UTC: Docker's VM froze
+# for 27 minutes under a scrape, the pass held the restart and failed, and the engine was
+# back by the next pass on its own (84ad65d7). A wait the next pass resolves is not a
+# failure of this one.
 HOLD_LIMIT = collector_tasks.FIRE_TIMEOUT
 HOLD_SINCE = "hold_since"
+# How long a wedged engine is left alone for scheduled collectors' runs
+# (`revive_engine`'s `busy`) before it is restarted under them anyway: less than one
+# pass's interval, so the second pass to find it wedged restarts it. A run's services
+# live in the engine's VM, and one silent for a whole pass is not serving them either.
+# 2026-10-09 20:45 UTC: the engine wedged under the 20:30 scrape, the pass held the
+# restart for it, the scrape blocked on its db until its `FIRE_TIMEOUT`, and the next
+# fire was already running when the hold could have ended -- fires every 30 minutes and
+# passes every 15 left no pass that found nothing in flight (0c428d0e).
+BUSY_HOLD = 10 * 60
 
 # The tray's three levels, spelled as `tray_state` spells them. Not imported from there:
 # `tray_state` imports this module, and `test_collectors.py` pins the two to each other.
@@ -703,14 +712,16 @@ def revive_engine(
     made once per `RESTART_EVERY`; `clock` is now, as a POSIX time.
 
     Nor is it restarted while a scheduled collector's run is in flight (`busy`, from
-    `scheduled_in_flight`): its services outlive a silent engine API, and the restart is
-    what would stop them under it (6c504c34). The next pass restarts it. That wait is no
-    failure -- `(None, "")` -- until it has lasted `HOLD_LIMIT` (84ad65d7).
+    `scheduled_in_flight`) and the wedge is new: its services may outlive a silent engine
+    API, and the restart is what would stop them under it (6c504c34). That wait is no
+    failure -- `(None, "")`. A wedge held for `BUSY_HOLD` is restarted under the run: it
+    is starving the run too, and waiting for a run to end is waiting forever when the
+    next one has started by then (0c428d0e).
 
     Nor while Docker Desktop installs an update of itself (`Docker.updating`): its engine
     is down by design until the installer starts the new app, a restart would cut the
     install short, and the installer may have closed the app it reads as quit. That is
-    held the same way, asked first (3012d246).
+    held, asked first, and fails nothing until it has lasted `HOLD_LIMIT` (3012d246).
     """
     if docker.updating():
         why = (
@@ -734,12 +745,15 @@ def revive_engine(
         )
         return None, f"{wedged}, and a restart did not bring its engine back"
     if busy:
-        why = (
-            f"not restarting Docker Desktop under {', '.join(busy)}'s scheduled run: "
-            "the restart would stop the services it is using"
+        runs = f"{', '.join(busy)}'s scheduled run"
+        silent = clock - hold_restart(restarts, clock)
+        if silent < BUSY_HOLD:
+            why = f"not restarting Docker Desktop under {runs}: the restart would stop the services it is using"
+            return held(report, restarts, clock, why, "")
+        report.say(
+            f"restarting Docker Desktop under {runs}: its engine has not answered for "
+            f"{int(silent // 60)} min, so the run is not being served either"
         )
-        cause = f"{wedged}, and its restart waits for a scheduled collector's run"
-        return held(report, restarts, clock, why, cause)
     write_file(restarts, json.dumps({STARTED_AT: clock}) + "\n")
     ok, out = docker.restart_desktop()
     containers = docker.ps() if ok else None
@@ -762,7 +776,7 @@ def maintain(
     `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker. `awake`
     is how long the machine has been up, which `wait_for_engine` gives Docker to start;
     an engine silent past that is `revive_engine`'s where `docker.restarts` is set, held
-    for whatever `docker.holds` names. A held restart fails nothing until `HOLD_LIMIT`."""
+    for whatever `docker.holds` names for up to `BUSY_HOLD`. A held restart fails nothing until `HOLD_LIMIT`."""
     if not chosen:
         return
     containers = wait_for_engine(docker, awake)
