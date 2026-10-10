@@ -63,6 +63,28 @@ def test_claude_codes_isolation_guard_is_not_filed_on_devkits_ledger():
         assert classes([call("git -C .. status", "1"), result(refusal, "1")]) == []
 
 
+REJECTED = (
+    "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if "
+    "it was a file edit, the new_string was NOT written to the file)."
+)
+
+
+def test_a_rejection_the_person_takes_back_is_not_filed():
+    """2d09d89e: a rejected `sync-codex-context.py`, then "sorry, please resume", and the
+    session re-ran it as it was. A rejection that stands is still filed."""
+    command = "python scripts/sync-codex-context.py 2>&1 | tail -5; git status --short"
+    rejected = [user("fix the ship skill"), call(command, "1"), result(REJECTED, "1")]
+    interrupted = user("[Request interrupted by user for tool use]")
+    for words in ("sorry, please resume", "Continue", "oops -- go ahead"):
+        assert classes([*rejected, interrupted, user(words)]) == [], words
+    assert classes([*rejected, interrupted, user("no, don't regenerate the mirror")]) == [
+        "user-rejected"
+    ]
+    assert classes(rejected) == ["user-rejected"], "nothing said after it: it stands"
+    later = [*rejected, user("leave that alone"), call("ls", "2"), user("sorry, carry on")]
+    assert classes(later) == ["user-rejected"], "only the next words can take it back"
+
+
 def test_the_bash_tools_own_shell_missing_its_coreutils_is_not_filed():
     """8bdaf003, c4642d3f, e35c772a: one social-scraper session's Bash started with no
     PATH -- `ls`, `cat`, `git`, `head`, `wc` all missing, the exact output -- and was filed

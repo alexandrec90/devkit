@@ -345,6 +345,16 @@ FRUSTRATION = re.compile(
     re.I,
 )
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# A person taking back the tool call they just rejected: their next words tell the session
+# to carry on. 2d09d89e: "sorry, please resume" after a rejected `sync-codex-context.py`,
+# which the session re-ran as it was -- a slip of the person's key, not the harness.
+# Claude Code's own "[Request interrupted by user ...]" line between the two is not words.
+RESUMED = re.compile(
+    r"^\W*(?:(?:sorry|oops|my bad|whoops|mistake)\b|(?:please\s+)?"
+    r"(?:resume|continue|go (?:ahead|on)|proceed|carry on|keep going)\b)",
+    re.I,
+)
+INTERRUPTED = "[Request interrupted by user"
 # A dispatched session's last words handing a choice to someone who is not there. The
 # ledger sweep ended "the last group needs your decision" with its pick marked
 # "(Recommended)" -- a recommendation is the decision, so this is always a lost session.
@@ -704,6 +714,9 @@ class _Session:
     targeted_runner: bool = False  # its `RUNNER` runs the tests for what changed, bare
     # (line, `declared_text`) of each call that declared dependencies.
     declared: list[tuple[int, str]] = field(default_factory=list)
+    # (what, call id) of a `user-rejected` row the person has not spoken since: `user`
+    # retracts it when their next words take the rejection back (`RESUMED`).
+    rejected: tuple[str, str] | None = None
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -719,6 +732,10 @@ class _Session:
             self.at.get(noted.line, set()).discard(cls)
 
     def user(self, event: Event) -> None:
+        if self.rejected and not event.text.lstrip().startswith(INTERRUPTED):
+            if RESUMED.search(event.text):
+                self.retract("user-rejected", *self.rejected)
+            self.rejected = None
         if self.spoken == 0:
             self.dispatched = DISPATCHED in event.text
         if any(name in WHOLE_SUITE_SKILLS for name in INVOKED_SKILL.findall(event.text)):
@@ -814,6 +831,8 @@ class _Session:
             if cls == "environment":
                 cls, what = _result_class(environment_text(command, event.text), command)
             self.note(cls, what, event)
+            if cls == "user-rejected" and what:
+                self.rejected = (what, event.call_id)
         # A test run failing again is the work of fixing it, not a wasted retry.
         if command and not runs_tests(command):
             self.failures.setdefault(same_command(command), []).append(event)

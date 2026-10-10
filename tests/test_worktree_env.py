@@ -498,6 +498,71 @@ def test_a_sync_that_hangs_or_cannot_start_is_named_not_waited_for(tmp_path):
     assert "could not run" in wt_env.provision(tree, checkout, runner=gone, environ={}, uv="uv")
 
 
+def test_the_sync_runs_at_a_log_level_where_uv_names_the_lock_it_waits_on(tmp_path, monkeypatch):
+    """4cbc6b0e: a sync killed at 600 s twice "last said: Resolved 26 packages", because
+    uv waits on a held lock without a word at its default level -- the quote the last fix
+    added could never name the lock it was added to name."""
+    checkout, tree = _provisionable(tmp_path)
+    monkeypatch.delenv(wt_env.UV_LOG_VAR, raising=False)
+    run = _Run()
+    wt_env.provision(tree, checkout, runner=run, environ={}, uv="uv")
+    assert run.calls[0][1]["env"][wt_env.UV_LOG_VAR] == "info"
+    assert wt_env.uv_env({"RUST_LOG": "debug", "X": "1"}) == {"RUST_LOG": "debug", "X": "1"}
+
+
+def test_a_plain_install_command_keeps_the_inherited_environment(tmp_path, monkeypatch):
+    checkout, tree = _provisionable(tmp_path)
+    monkeypatch.setattr(
+        wt_env, "manifest_python", lambda _here: ("python scripts/bootstrap.py", "")
+    )
+    run = _Run()
+    wt_env.provision(tree, checkout, runner=run, environ={}, uv="uv")
+    assert run.calls and run.calls[0][1]["env"] is None
+
+
+def _hold_lock(handle) -> None:
+    """Take the exclusive lock uv takes on a file: `LockFileEx` on Windows, `flock` elsewhere."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_uv_at_info_names_a_held_venv_lock(tmp_path):
+    """The premise, against the real uv the gate and this machine both run: silent at its
+    default level while a lock is held, and naming that lock at `info`."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "probe"\nversion = "0"\nrequires-python = ">=3.12"\n', encoding="utf-8"
+    )
+    argv = ["uv", "sync", "--offline", "--no-python-downloads"]
+    assert subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False).returncode == 0
+    env = {k: v for k, v in os.environ.items() if k.upper() not in {"RUST_LOG", "UV_LOCK_TIMEOUT"}}
+    with (tmp_path / ".venv" / ".lock").open("r+b") as held:
+        _hold_lock(held)
+        quiet = subprocess.run(
+            argv,
+            cwd=tmp_path,
+            env={**env, "UV_LOCK_TIMEOUT": "2"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        named = subprocess.run(
+            argv,
+            cwd=tmp_path,
+            env=wt_env.uv_env({**env, "UV_LOCK_TIMEOUT": "2"}),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert "lock" not in quiet.stderr.lower()
+    assert "Waiting to acquire exclusive lock for `.venv`" in named.stderr
+
+
 def test_the_opt_out_runs_nothing(tmp_path):
     checkout, tree = _provisionable(tmp_path)
     run = _Run()

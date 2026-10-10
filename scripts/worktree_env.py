@@ -344,6 +344,13 @@ UV_SYNC = ("uv", "sync", "--all-extras", "--all-groups")
 # the checkout-has-a-venv condition is what keeps this on the warm path. The timeout is
 # for the day the network is gone, so `git worktree add` still returns.
 PROVISION_TIMEOUT = 600
+# uv waits on a held lock in silence -- up to `UV_LOCK_TIMEOUT` (300 s) on `.venv\.lock`,
+# then goes on with a warning it does not print either -- so two such waits are this
+# whole bound with nothing said past "Resolved 26 packages", which is what a sync killed
+# here said twice (4cbc6b0e). At `info` uv names each lock it waits on and nothing more:
+# on 0.12.9 a fresh sync of this repo printed no extra line. So the quoted last line
+# says which lock, and so whose process held it.
+UV_LOG_VAR, UV_LOG_LEVEL = "RUST_LOG", "info"
 SKIP_PROVISION_VAR = "DEVKIT_SKIP_WORKTREE_PROVISION"
 # The worktree's own vendored copy of the manifest reader -- this hook is installed
 # machine-wide with no repo of its own, so the project's `[python]` table is read through
@@ -707,6 +714,7 @@ def provision(
             errors="replace",
             timeout=PROVISION_TIMEOUT,
             check=False,
+            env=None if tool.install_command else uv_env(os.environ),
         )
     except subprocess.TimeoutExpired as stopped:
         said = last_said(stopped.stderr, stopped.output)
@@ -723,6 +731,12 @@ def provision(
     elapsed = time.monotonic() - started
     mark_provisioned(here, True)
     return f"devkit: {VENV_DIR} provisioned by `{spelled}` in {elapsed:.0f}s (this worktree's own)"
+
+
+def uv_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """`environ` with uv's log level at `UV_LOG_LEVEL`, unless one is already set: a person
+    who set `RUST_LOG` meant theirs."""
+    return {UV_LOG_VAR: UV_LOG_LEVEL, **environ}
 
 
 def last_said(*streams: str | bytes | None) -> str:
