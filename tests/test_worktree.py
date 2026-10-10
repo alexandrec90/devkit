@@ -3988,16 +3988,20 @@ def test_agent_sessions_is_what_claude_agents_lists(monkeypatch):
     assert REAL_AGENT_SESSIONS() == rows and asked == [worktree.sweep.run_windowless]
 
 
-def test_settle_reap_asks_for_the_sessions_only_to_apply_a_reap_it_may_make(tmp_path):
+def test_settle_reap_asks_for_the_sessions_only_to_apply_a_reap_it_may_make(tmp_path, monkeypatch):
     def never() -> list[dict]:
         raise AssertionError("asked claude agents")
 
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {"demo--x-0806": box("demo--x-0806")})
     refused = worktree.ReapPlan(box="demo--x-0806", refusal="dirty")
     assert worktree.settle_reap(refused, tmp_path, never, apply=True) == (
         worktree.HOLD,
         False,
         ["[warn] reap refused: dirty"],
     )
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {})
+    action, ok, _ = worktree.settle_reap(refused, tmp_path, never, apply=True)
+    assert (action, ok) == (worktree.REAP, True), "a refusal of a box since reaped elsewhere"
     plan = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "demo--x-0806"))
     assert worktree.settle_reap(plan, tmp_path, never, apply=False) == (worktree.REAP, True, [])
 
@@ -4047,6 +4051,7 @@ def test_reap_decided_settles_the_plan_and_fails_a_plan_it_cannot_make(tmp_path,
         raise worktree.WorktreeError("no such box")
 
     monkeypatch.setattr(worktree, "plan_reap", refuse)
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {"demo--x-0806": box("demo--x-0806")})
     assert worktree.reap_decided(
         "demo--x-0806",
         tmp_path,
@@ -4055,6 +4060,81 @@ def test_reap_decided_settles_the_plan_and_fails_a_plan_it_cannot_make(tmp_path,
         keep_stack=False,
         fetch=False,
     ) == (worktree.REAP, False, ["[warn] no such box"])
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {})
+    action, ok, _ = worktree.reap_decided(
+        "demo--x-0806",
+        tmp_path,
+        worktree.PullRequest(),
+        lambda doomed: pytest.fail("settled a plan never made"),
+        keep_stack=False,
+        fetch=False,
+    )
+    assert (action, ok) == (worktree.REAP, True), "the box another reaper destroyed meanwhile"
+
+
+def test_a_failed_reap_of_a_box_another_reaper_destroyed_is_a_reap(tmp_path, monkeypatch):
+    """3f2e8171: another reaper was removing social-scraper's adoption box while the
+    scheduled pass inspected it, so the pass read a half-removed tree as "cannot resolve
+    origin/HEAD", refused, and reddened -- over a box that was gone seconds later."""
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {})
+    refused = (worktree.HOLD, False, ["[warn] reap refused: blocked"])
+    action, ok, notes = worktree.unless_reaped_elsewhere(tmp_path, "demo--x-0806", refused)
+    assert (action, ok) == (worktree.REAP, True)
+    assert notes == [
+        "already reaped by another process while this pass read it; this pass's own "
+        "attempt said: [warn] reap refused: blocked"
+    ]
+
+
+def test_a_failed_reap_of_a_box_still_standing_stays_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {"demo--x-0806": box("demo--x-0806")})
+    refused = (worktree.HOLD, False, ["[warn] reap refused: blocked"])
+    assert worktree.unless_reaped_elsewhere(tmp_path, "demo--x-0806", refused) == refused
+
+
+def test_a_reap_that_did_not_fail_is_not_asked_about(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: pytest.fail("asked of a success"))
+    done = (worktree.REAP, True, ["lease released"])
+    assert worktree.unless_reaped_elsewhere(tmp_path, "demo--x-0806", done) == done
+
+
+def test_reaped_elsewhere_waits_for_the_reaper_holding_the_box(tmp_path, monkeypatch):
+    """The answer is read once the other reaper lets go: until then the tree is half
+    removed, and a box mid-teardown still has its directory."""
+    held_while_asked: list[bool] = []
+    lock = worktree.boxes_root(tmp_path) / worktree.reap_lock_name("demo--x-0806")
+    monkeypatch.setattr(
+        worktree, "live_boxes", lambda root: held_while_asked.append(lock.is_dir()) or {}
+    )
+    assert worktree.reaped_elsewhere(tmp_path, "demo--x-0806")
+    assert held_while_asked == [True], "read under the box's reap lock"
+    assert not lock.exists()
+
+
+def test_reap_lock_is_one_directory_per_box_beside_the_boxes(tmp_path):
+    lock = worktree.boxes_root(tmp_path) / worktree.reap_lock_name("demo--x-0806")
+    with worktree.reap_lock(tmp_path, "demo--x-0806") as held:
+        assert held and lock.is_dir()
+        with worktree.reap_lock(tmp_path, "demo--y-0806") as other:
+            assert other, "another box's reap is not held up by this one"
+        with worktree.reap_lock(tmp_path, "demo--x-0806", wait=0.1) as again:
+            assert not again, "a second reaper of the same box waits, then says it did not get it"
+    assert not lock.exists()
+
+
+def test_apply_reap_holds_the_box_reap_lock_for_the_teardown(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    worktree.write_leases(workspace.parent, {"demo--x-0806": box("demo--x-0806", project="demo")})
+    worktree.box_path(workspace.parent, "demo--x-0806").mkdir()
+    lock = worktree.boxes_root(workspace.parent) / worktree.reap_lock_name("demo--x-0806")
+    held: list[bool] = []
+    monkeypatch.setattr(
+        worktree, "run_steps", lambda *a, **k: held.append(lock.is_dir()) or ([], "", "")
+    )
+    ok, _ = worktree.apply_reap(worktree.ReapPlan(box="demo--x-0806", project="demo"), workspace)
+    assert ok and held == [True]
+    assert not lock.exists()
 
 
 def test_reap_vacated_asks_the_engine_only_about_a_box_with_a_stack(tmp_path, monkeypatch):
