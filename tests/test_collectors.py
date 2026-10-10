@@ -46,7 +46,25 @@ class FakeDocker:
         self.holds = None
         self.restart_answer = (True, "")
         self.reset_answer = (True, "")
+        # The memory half: no limit answered for, no VM size, nothing said of a silent VM
+        # -- which checks nothing, so a test about something else fails on nothing here.
+        self.limits_answer: dict[str, int] | None = {}
+        self.vm = None
+        self.evidence = ""
+        # Kept out of `calls`, which other tests compare whole.
+        self.memory_asks: list[tuple] = []
         self.calls: list[tuple] = []
+
+    def limits(self, ids):
+        self.memory_asks.append(("limits", tuple(ids)))
+        return self.limits_answer
+
+    def vm_memory(self):
+        return self.vm
+
+    def memory_evidence(self, since):
+        self.memory_asks.append(("evidence", since))
+        return self.evidence
 
     def desktop_running(self):
         self.calls.append(("desktop",))
@@ -1096,6 +1114,151 @@ def test_no_restart_record_means_no_restart(tmp_path):
     collectors.maintain([target(tmp_path)], docker, report, {})
     assert docker.calls == [("ps",)] and report.failures == 1
     assert collectors.Docker().restarts is None
+
+
+# --- memory: the VM's budget, and a silent VM that ran out ---------------------------
+
+
+def test_a_silent_engine_whose_vm_ran_out_of_memory_fails_as_that_before_the_restart(
+    tmp_path, instant
+):
+    """2026-10-09: the VM ran out of memory, froze its engine, and booted eight times; the
+    pass restarted it each time and named nothing else. The restart still happens -- it
+    is what brings the collectors back -- but the cause the ledger files is memory."""
+    docker, report = Wedged(tmp_path / "r.json"), collectors.Report()
+    docker.evidence = "the VM holds 3.8 GiB of its 4.0 GiB cap"
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.cause == collectors.SHORT_OF_MEMORY
+    said = report.lines.index("  the VM holds 3.8 GiB of its 4.0 GiB cap")
+    assert said < report.lines.index(collectors.SHORT_OF_MEMORY)
+    assert ("restart",) in docker.calls
+
+
+def test_a_silent_engine_with_nothing_said_of_memory_fails_nothing_for_it(tmp_path, instant):
+    docker, report = Wedged(tmp_path / "r.json"), collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert collectors.SHORT_OF_MEMORY not in report.lines
+    assert [ask[0] for ask in docker.memory_asks] == ["evidence"]
+
+
+def test_memory_evidence_is_read_only_by_the_pass_that_may_restart(tmp_path):
+    """The tray's `Docker` carries no restart record and has nothing to file."""
+    docker = Wedged(None)
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    assert docker.memory_asks == []
+
+
+def test_a_kept_up_container_without_a_memory_limit_fails_the_pass(tmp_path):
+    """The unbounded container is what ran the VM out: one with a limit is OOM-killed
+    alone and its restart policy brings it back."""
+    docker, report = (
+        FakeDocker([ours(tmp_path, cid="c1"), ours(tmp_path, service="db", cid="c2")]),
+        collectors.Report(),
+    )
+    docker.limits_answer = {"c1" + "0" * 62: 0, "c2" + "0" * 62: 768 * 2**20}
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 1
+    assert report.cause.startswith("ibkr_trader: `app` has no memory limit")
+    assert docker.memory_asks == [("limits", ("c1", "c2"))]
+
+
+def test_limits_that_do_not_fit_the_vm_fail_the_pass_with_the_numbers_beside(tmp_path):
+    docker, report = (
+        FakeDocker([ours(tmp_path, cid="c1"), ours(tmp_path, service="db", cid="c2")]),
+        collectors.Report(),
+    )
+    docker.limits_answer = {"c1": 3 * 2**30, "c2": 2**30}
+    docker.vm = 4 * 2**30
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 1 and "do not fit Docker's VM" in report.cause
+    assert any("limits total 4.0 GiB" in line for line in report.lines)
+
+
+def test_limits_that_fit_fail_nothing(tmp_path):
+    docker, report = FakeDocker([ours(tmp_path, cid="c1")]), collectors.Report()
+    docker.limits_answer, docker.vm = {"c1": 1536 * 2**20}, 4 * 2**30
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 0
+
+
+def test_only_the_containers_of_a_collector_this_machine_runs_are_judged(tmp_path):
+    """A box's stack, carameli parked in the next directory, a stopped container: none
+    of them is kept up by this pass, so none is its business."""
+    foreign = box(workdir=str(tmp_path / "carameli"), cid="f1")
+    stopped = ours(tmp_path, service="db", state="exited", cid="s1")
+    docker = FakeDocker([ours(tmp_path, cid="c1"), foreign, stopped])
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    assert docker.memory_asks == [("limits", ("c1",))]
+
+
+def test_kept_up_pairs_each_running_container_with_its_collectors_project(tmp_path):
+    app, db = ours(tmp_path, cid="c1"), ours(tmp_path, service="db", cid="c2")
+    other = box(workdir=str(tmp_path / "carameli"), cid="f1")
+    assert collectors.kept_up([target(tmp_path)], [app, db, other]) == [
+        ("ibkr_trader", app),
+        ("ibkr_trader", db),
+    ]
+
+
+def test_check_memory_with_nothing_kept_up_asks_nothing(tmp_path):
+    docker, report = FakeDocker([]), collectors.Report()
+    collectors.check_memory([target(tmp_path)], [], docker, report)
+    assert docker.memory_asks == [] and report.lines == []
+
+
+def test_a_stopped_collector_is_not_budgeted(tmp_path):
+    docker = FakeDocker([ours(tmp_path, cid="c1")])
+    collectors.maintain([target(tmp_path, mode=STOP)], docker, collectors.Report(), {})
+    assert docker.memory_asks == []
+
+
+def test_limits_the_engine_would_not_say_are_said_not_failed(tmp_path):
+    docker, report = FakeDocker([ours(tmp_path, cid="c1")]), collectors.Report()
+    docker.limits_answer = None
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 0
+    assert any("budget is unchecked" in line for line in report.lines)
+
+
+def test_the_real_docker_asks_the_engine_for_limits_and_the_vm_size(monkeypatch):
+    asked = []
+
+    def fake_run(argv, **kwargs):
+        asked.append(argv)
+        out = "c1full\t536870912\n" if argv[1] == "inspect" else "4109926400\n"
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    monkeypatch.setattr(collectors.subprocess, "run", fake_run)
+    docker = collectors.Docker()
+    assert docker.limits(["c1"]) == {"c1full": 512 * 2**20}
+    assert docker.vm_memory() == 4109926400
+    assert asked[0][:3] == ["docker", "inspect", "--format"] and asked[0][-1] == "c1"
+
+
+def test_a_silent_vm_is_read_from_windows_alone(tmp_path):
+    """Nothing here may ask the engine: this runs exactly when it does not answer."""
+    asked = []
+
+    def run(argv):
+        asked.append(argv)
+        return 0, '"vmmem","11480","Services","0","3,937,576 K"\n'
+
+    (tmp_path / ".wslconfig").write_text("[wsl2]\nmemory=4GB\n", encoding="utf-8")
+    said = collectors.docker_memory.read_silent_vm(run, tmp_path, tmp_path / ".wslconfig", 0.0)
+    assert said == "the VM holds 3.8 GiB of its 4.0 GiB cap"
+    assert [argv[0] for argv in asked] == ["tasklist"]
+
+
+def test_no_wslconfig_and_no_vm_process_say_nothing(tmp_path):
+    said = collectors.docker_memory.read_silent_vm(
+        lambda argv: (1, ""), tmp_path, tmp_path / ".wslconfig", 0.0
+    )
+    assert said == ""
+
+
+def test_off_windows_a_silent_vm_has_nothing_to_say(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "posix")
+    assert collectors.Docker().memory_evidence(0.0) == ""
 
 
 def test_the_scheduled_pass_records_its_restarts_beside_its_artifact(tmp_path, monkeypatch):

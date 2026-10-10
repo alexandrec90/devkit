@@ -60,6 +60,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collector_tasks
 import collectors_config as config
+import docker_memory
 import machine_clock
 import sweep
 
@@ -175,6 +176,13 @@ ROW_PREFIX = "collector: "
 HEALTH_FAILING = "health check failing"
 # A `run` row's state when the engine itself is silent: the machine's, not the project's.
 NOT_ANSWERING = "docker is not answering"
+# The failure a silent engine gets when Windows says its VM ran out of memory
+# (`docker_memory.silent_vm_evidence`), filed before any restart: a restart brings the
+# engine back into the same squeeze, and on 2026-10-09 eight of them named nothing else.
+SHORT_OF_MEMORY = (
+    "docker's engine went silent with its VM out of memory -- a container this machine "
+    "keeps up needs a lower memory limit, or this machine needs fewer collectors"
+)
 # The line a health command may print naming its failing jobs, as ibkr_trader's does:
 # `unhealthy: social, reddit`. The row carries them into the state, so each job's failure
 # is its own group: without them, `social` missing boto3 read as `reddit`'s fixed failure
@@ -403,6 +411,31 @@ class Docker:
             RESTART_TIMEOUT + DESKTOP_TIMEOUT,
         )
         return code == 0, "\n".join(line for line in (*said, out) if line.strip())
+
+    def limits(self, ids: Sequence[str]) -> dict[str, int] | None:
+        """Each of `ids`' memory limit in bytes, 0 for none, keyed by full id; None when
+        the engine cannot say."""
+        argv = ["docker", "inspect", "--format", docker_memory.INSPECT_FORMAT, *ids]
+        code, out = self.run(argv, INSPECT_TIMEOUT)
+        return docker_memory.parse_limits(out) if code == 0 else None
+
+    def vm_memory(self) -> int | None:
+        """The memory of the VM the engine runs in, in bytes; None when it cannot say."""
+        code, out = self.run(["docker", "info", "--format", "{{.MemTotal}}"], INSPECT_TIMEOUT)
+        return docker_memory.capacity(out) if code == 0 else None
+
+    def memory_evidence(self, since: float) -> str:
+        """What Windows says about a silent engine's VM having run out of memory since
+        `since` (`docker_memory.silent_vm_evidence`), "" for nothing; never off Windows.
+        Asks the engine nothing, since this is read exactly when it does not answer."""
+        if os.name != "nt":
+            return ""
+        return docker_memory.read_silent_vm(
+            lambda argv: self.run(argv, DESKTOP_TIMEOUT),
+            docker_memory.log_dir(),
+            Path.home() / ".wslconfig",
+            since,
+        )
 
 
 def running_distros(text: str) -> list[str]:
@@ -878,6 +911,44 @@ def revive_engine(
     return containers, ""
 
 
+def kept_up(
+    chosen: Sequence[Target], containers: Sequence[Container]
+) -> list[tuple[str, Container]]:
+    """`(project, container)` for every running container this machine keeps up: one
+    whose compose working directory is the checkout of a collector it runs -- the
+    collector's own service and whatever it brings up beside it, such as its db."""
+    runs = [t for t in chosen if t.mode == config.RUN]
+    return [
+        (t.collector.project, c)
+        for c in containers
+        if c.running
+        for t in runs
+        if same_dir(c.workdir, t.checkout)
+    ]
+
+
+def check_memory(
+    chosen: Sequence[Target], containers: Sequence[Container], docker: Docker, report: Report
+) -> None:
+    """Fail the pass for every container kept up without a memory limit, and for limits
+    that together do not fit the VM (`docker_memory.budget`). A limit the engine would
+    not say is said, not failed: the pass cannot tell it from a fine one."""
+    mine = kept_up(chosen, containers)
+    if not mine:
+        return
+    limits = docker.limits([c.id for _, c in mine])
+    if limits is None:
+        report.say("memory limits could not be read -- the VM's budget is unchecked this pass")
+        return
+    capped = [
+        (f"{project}: `{c.service}`", docker_memory.limit_of(c.id, limits)) for project, c in mine
+    ]
+    for problem in docker_memory.budget(capped, docker.vm_memory()):
+        if problem.detail:
+            report.say(f"  {problem.detail}")
+        report.fail(problem.line)
+
+
 def maintain(
     chosen: Sequence[Target],
     docker: Docker,
@@ -890,13 +961,21 @@ def maintain(
     `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker. `awake`
     is how long the machine has been up, which `wait_for_engine` gives Docker to start;
     an engine silent past that is `revive_engine`'s where `docker.restarts` is set, held
-    for whatever `docker.holds` names for up to `BUSY_HOLD`. A held restart fails nothing until `HOLD_LIMIT`."""
+    for whatever `docker.holds` names for up to `BUSY_HOLD`. A held restart fails nothing until `HOLD_LIMIT`.
+
+    Memory is checked on both sides (`docker_memory`): a silent engine whose VM Windows
+    says ran out fails as `SHORT_OF_MEMORY` before it is restarted, and an answering one
+    has the limits of what it keeps up checked (`check_memory`)."""
     if not chosen:
         return
     containers = wait_for_engine(docker, awake)
     running = any(t.mode == config.RUN for t in chosen)
     why = "docker is not answering -- is Docker Desktop running?"
     if containers is None and running and docker.restarts is not None:
+        short = docker.memory_evidence(_clock() - docker_memory.OOM_LOOKBACK)
+        if short:
+            report.say(f"  {short}")
+            report.fail(SHORT_OF_MEMORY)
         busy = docker.holds() if docker.holds else ()
         containers, why = revive_engine(docker, report, docker.restarts, _clock(), busy)
     if containers is None:
@@ -907,6 +986,7 @@ def maintain(
         return
     if docker.restarts is not None:
         release_hold(docker.restarts)
+    check_memory(chosen, containers, docker, report)
     for target in chosen:
         if target.mode == config.RUN:
             last = health.get(target.collector.project, {})
