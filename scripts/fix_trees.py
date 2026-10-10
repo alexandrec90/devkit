@@ -23,6 +23,7 @@ from pathlib import Path
 
 import agent_worktrees as aw
 import fix_reports
+import ship_intent
 import stray_worktree as stray
 import sweep
 import tree_provision
@@ -254,15 +255,23 @@ def cut_fresh_tree(
 ) -> tuple[Path | None, str]:
     """Cut a default-tier worktree on a new `branch` off `origin/<base>`.
 
-    The branch is renamed with a counter when the checkout already has one of that
-    name: two clicks on two different nightlies of one project on one day want two
-    branches, and git would otherwise refuse the second with the first's name.
+    The branch is renamed with a counter when the checkout or origin already has one in
+    its family: two clicks on two different nightlies of one project on one day want two
+    branches, and git would otherwise refuse the second with the first's name. Origin
+    counts because the reaper deletes a merged tree's local branch and leaves origin's,
+    so a local-only probe cut #589's merged head a second time (fix-harness-ledger-1009).
     """
     git = sweep.git_for(project_dir)
     runner(["git", "-C", str(project_dir), "fetch", "--quiet", "origin"], check=False)
-    name, counter = branch, 2
-    while git("rev-parse", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0:
-        name, counter = f"{branch}-{counter}", counter + 1
+    listed = git(
+        "for-each-ref",
+        "--format=%(refname:short)",
+        f"refs/heads/{branch}*",
+        f"refs/remotes/origin/{branch}*",
+    )
+    branches = {ref.removeprefix("origin/") for ref in (listed.stdout or "").split()}
+    family = ship_intent.next_free_name(branch, branches)
+    name = branch if family == f"{branch}-2" and branch not in branches else family
     root = aw.default_root(project_dir)
     taken = [entry.name for entry in root.iterdir()] if root.is_dir() else []
     path = root / aw.tree_name(name, taken)

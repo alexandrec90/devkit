@@ -411,7 +411,7 @@ def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ct
     (path / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
     closed, _ = close(ctx)
     assert closed.busy == {} and closed.harness_busy == "", "idle: finished, holds nothing"
-    listed = [{"kind": "background", "status": "busy", "cwd": str(path)}]
+    listed = [{"kind": "background", "state": "working", "cwd": str(path)}]
     monkeypatch.setattr(fix_loop, "working_dirs", lambda: fix_loop.bg_sessions.working(listed))
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
@@ -419,7 +419,7 @@ def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ct
 
 
 def test_the_session_listing_is_read_from_claude_agents(monkeypatch):
-    rows = '[{"kind": "background", "status": "busy", "cwd": "C:\\\\ws\\\\t"}]'
+    rows = '[{"kind": "background", "state": "working", "cwd": "C:\\\\ws\\\\t"}]'
     seen = []
 
     def runner(argv, **_kwargs):

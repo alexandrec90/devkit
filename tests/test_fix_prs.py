@@ -674,17 +674,20 @@ def test_an_upstream_fix_with_no_test_id_is_named_for_the_workflow():
 
 
 def fresh_with(monkeypatch, tmp_path, taken: tuple[str, ...] = ()):
+    """`cut_fresh_tree` over a checkout whose refs in the branch's family are `taken`,
+    each spelled as `for-each-ref --format=%(refname:short)` prints it."""
     checkout = tmp_path / "carameli"
     (checkout / ".claude" / "worktrees").mkdir(parents=True, exist_ok=True)
+    stem = "agent/fix-nightly-0918"
+    refs = ("for-each-ref", "--format=%(refname:short)")
+    patterns = (f"refs/heads/{stem}*", f"refs/remotes/origin/{stem}*")
     monkeypatch.setattr(
         fix_prs.sweep,
         "git_for",
-        lambda _path: fake_git(
-            {("rev-parse", "--verify", "--quiet", f"refs/heads/{name}"): (0, "") for name in taken}
-        ),
+        lambda _path: fake_git({(*refs, *patterns): (0, "".join(f"{n}\n" for n in taken))}),
     )
     run = FakeRun()
-    return fix_trees.cut_fresh_tree(checkout, "agent/fix-nightly-0918", "main", run), run
+    return fix_trees.cut_fresh_tree(checkout, stem, "main", run), run
 
 
 def test_a_fresh_branch_is_cut_off_the_default_branch_after_a_fetch(monkeypatch, tmp_path):
@@ -703,6 +706,28 @@ def test_a_branch_the_checkout_already_has_gets_a_counter(monkeypatch, tmp_path)
     )
     assert branch == "agent/fix-nightly-0918-3"
     assert path.name == "fix-nightly-0918-3"
+
+
+def test_a_name_only_origin_still_holds_is_not_cut_again(monkeypatch, tmp_path):
+    """The reaper deletes a merged tree's local branch and leaves origin's. Probing only
+    `refs/heads` cut `agent/fix-harness-ledger-1009` a second time, the head of #589,
+    merged that morning: its fixer worked a whole session on a retired name the commit
+    then had to carry off it."""
+    (_path, branch), _run = fresh_with(
+        monkeypatch, tmp_path, taken=("origin/agent/fix-nightly-0918", "agent/fix-nightly-0918-2")
+    )
+    assert branch == "agent/fix-nightly-0918-3"
+
+
+def test_a_gap_in_the_family_is_not_refilled(monkeypatch, tmp_path):
+    """A missing `-N` below the highest is usually a merged branch whose refs were
+    deleted, which the branch policy still refuses: count on from the top."""
+    (_path, branch), _run = fresh_with(
+        monkeypatch,
+        tmp_path,
+        taken=("origin/agent/fix-nightly-0918-2", "origin/agent/fix-nightly-0918-8"),
+    )
+    assert branch == "agent/fix-nightly-0918-9"
 
 
 def test_a_git_refusal_on_a_fresh_branch_names_the_branch(monkeypatch, tmp_path):
