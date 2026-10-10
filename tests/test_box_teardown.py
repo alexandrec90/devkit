@@ -477,8 +477,8 @@ def test_vacate_stops_an_idle_background_session_in_the_box_and_waits_for_it():
     run, seen = claude_stop()
     waited: list[float] = []
     sessions = [
-        {"kind": "background", "state": "done", "cwd": BOX, "id": "2b4a8c0e"},
-        {"kind": "background", "state": "done", "cwd": BOX + "-2", "id": "sibling"},
+        {"kind": "background", "state": "done", "cwd": BOX, "id": "2b4a8c0e", "pid": 1},
+        {"kind": "background", "state": "done", "cwd": BOX + "-2", "id": "sibling", "pid": 2},
     ]
     occupants, notes = box_teardown.vacate(Path(BOX), sessions, run, waited.append)
     assert occupants == [] and seen == [["claude", "stop", "2b4a8c0e"]]
@@ -489,10 +489,10 @@ def test_vacate_stops_an_idle_background_session_in_the_box_and_waits_for_it():
 def test_vacate_stops_nothing_while_a_session_is_working_or_a_person_is_in_the_box():
     run, seen = claude_stop()
     for occupant in (
-        {"kind": "background", "state": "working", "cwd": BOX + "\\app", "id": "b2"},
+        {"kind": "background", "state": "working", "cwd": BOX + "\\app", "id": "b2", "pid": 2},
         {"kind": "interactive", "status": "idle", "cwd": BOX.lower().replace("\\", "/")},
     ):
-        idle = {"kind": "background", "state": "done", "cwd": BOX, "id": "a1"}
+        idle = {"kind": "background", "state": "done", "cwd": BOX, "id": "a1", "pid": 1}
         occupants, notes = box_teardown.vacate(Path(BOX), [idle, occupant], run, pytest_fail)
         assert len(occupants) == 1 and notes == []
     assert seen == []
@@ -500,9 +500,20 @@ def test_vacate_stops_nothing_while_a_session_is_working_or_a_person_is_in_the_b
 
 def test_a_session_that_would_not_stop_is_an_occupant():
     run, _seen = claude_stop(answer=1)
-    session = {"kind": "background", "state": "blocked", "cwd": BOX, "id": "a1"}
+    session = {"kind": "background", "state": "blocked", "cwd": BOX, "id": "a1", "pid": 1}
     occupants, notes = box_teardown.vacate(Path(BOX), [session], run, pytest_fail)
     assert occupants == ["background session a1 (blocked)"] and notes == []
+
+
+def test_a_listed_session_with_no_process_neither_holds_the_box_nor_is_stopped():
+    """d95eb347: c476bac3 stayed listed with no `pid` after its process went, and
+    `claude stop` could not confirm stopping it. Read as an occupant, it would hold its
+    box forever; asked to stop, it refuses. It stands in nothing, so it is neither."""
+    run, seen = claude_stop(answer=1)
+    for state in ("blocked", "working"):
+        gone = {"kind": "background", "state": state, "cwd": BOX, "id": "c476bac3"}
+        assert box_teardown.vacate(Path(BOX), [gone], run, pytest_fail) == ([], [])
+    assert seen == []
 
 
 def test_an_empty_box_is_vacated_without_a_word():

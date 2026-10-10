@@ -3935,7 +3935,7 @@ def test_reconcile_waits_for_a_session_still_working_in_a_merged_box(workspace, 
         workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
     )
     path = str(root / worktree.BOXES_DIR_NAME / "demo--done-0806")
-    live = {"kind": "background", "state": "working", "cwd": path, "id": "2b4a8c0e"}
+    live = {"kind": "background", "state": "working", "cwd": path, "id": "2b4a8c0e", "pid": 1}
     monkeypatch.setattr(worktree, "agent_sessions", lambda: [live])
     monkeypatch.setattr(
         worktree, "run_steps", lambda *a, **k: pytest.fail("reaped under a live session")
@@ -3958,7 +3958,7 @@ def test_reconcile_stops_a_finished_fixer_idling_in_the_box_then_reaps_it(worksp
         workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
     )
     path = str(root / worktree.BOXES_DIR_NAME / "demo--done-0806").replace("/", "\\")
-    idle = {"kind": "background", "state": "done", "cwd": path, "id": "2b4a8c0e"}
+    idle = {"kind": "background", "state": "done", "cwd": path, "id": "2b4a8c0e", "pid": 1}
     elsewhere = {"kind": "interactive", "status": "busy", "cwd": str(root / "demo"), "id": None}
     monkeypatch.setattr(worktree, "agent_sessions", lambda: [idle, elsewhere])
     stopped: list[str] = []
