@@ -119,7 +119,7 @@ def watched(tmp_path, monkeypatch):
     monkeypatch.setattr(
         watchdog, "git", lambda root, *a: subprocess.CompletedProcess(a, 0, "abc123\n", "")
     )
-    monkeypatch.setattr(watchdog, "run_pass", lambda argv: seen["outcome"])
+    monkeypatch.setattr(watchdog, "run_pass", lambda argv, timeout: seen["outcome"])
 
     def update(root):
         seen["updates"] += 1
@@ -368,9 +368,9 @@ def test_a_rescue_intent_is_shipped_by_the_watchdog_while_the_pass_cannot(tmp_pa
     monkeypatch.setattr(watchdog, "git", git)
     made = []
     monkeypatch.setattr(
-        watchdog.subprocess,
-        "run",
-        lambda argv, **k: made.append(argv) or subprocess.CompletedProcess(argv, 0),
+        watchdog,
+        "bounded",
+        lambda argv, cwd: made.append(argv) or subprocess.CompletedProcess(argv, 0),
     )
     assert watchdog.ship_rescues(tmp_path) == ["agent/fix-pass-rescue-0926-1200: shipped"]
     assert steps == ["rev-parse", "add", "commit", "push"]
@@ -493,9 +493,9 @@ def test_every_git_call_asks_github_s_credentials_up_front(tmp_path, monkeypatch
 
     argvs = []
     monkeypatch.setattr(
-        watchdog.subprocess,
-        "run",
-        lambda argv, **kw: argvs.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
+        watchdog,
+        "bounded",
+        lambda argv, cwd: argvs.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
     )
     watchdog.git(tmp_path, "fetch", "--quiet", "origin", "main")
     assert argvs == [
@@ -509,6 +509,48 @@ def test_every_git_call_asks_github_s_credentials_up_front(tmp_path, monkeypatch
             "main",
         ]
     ]
+
+
+def test_a_call_whose_child_holds_its_output_ends_at_its_bound(tmp_path):
+    """ebf74c37: the 20:30 fire spent 41 minutes in its own git calls before its pass
+    started, and the 21:00 fire was skipped. A `git fetch` hands its pipes to
+    `git-remote-https`; here a grandchild holds the output for 30 s, and the call comes
+    back at its bound, saying so, with what was said before it."""
+    holder = "import time; time.sleep(30)"
+    script = (
+        "import subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', {holder!r}])\n"
+        "print('fetching', flush=True)\n"
+        f"exec({holder!r})\n"
+    )
+    started = time.monotonic()
+    done = watchdog.bounded([sys.executable, "-c", script], tmp_path, timeout=2)
+    assert time.monotonic() - started < 20, "waited on the grandchild's pipe"
+    assert done.returncode == watchdog.TIMED_OUT
+    assert done.stdout.strip() == "fetching"
+    assert done.stderr == "timed out after 2s; ended it and its children"
+
+
+def test_a_bounded_call_keeps_its_exit_and_both_streams(tmp_path):
+    script = "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"
+    done = watchdog.bounded([sys.executable, "-c", script], tmp_path)
+    assert (done.returncode, done.stdout, done.stderr) == (3, "out\n", "err\n")
+
+
+def test_the_pass_is_given_what_self_update_left_of_the_fire(watched, monkeypatch):
+    """The 25 minutes are the fire's, not the pass's: a self-update that took ten of them
+    leaves fifteen, so a slow fetch cannot carry the run past the next fire. The pass
+    always gets `MIN_RERUN`."""
+    timeouts: list = []
+    monkeypatch.setattr(
+        watchdog, "run_pass", lambda argv, timeout: timeouts.append(timeout) or (0, "")
+    )
+    began = time.monotonic() - 10 * 60
+    watchdog.run_current([], "dispatch", [], began)
+    assert watchdog.TIMEOUT - _dt.timedelta(minutes=11) < timeouts[0]
+    assert timeouts[0] <= watchdog.TIMEOUT - _dt.timedelta(minutes=10)
+    watchdog.run_current([], "dispatch", [], time.monotonic() - 60 * 60)
+    assert timeouts[1] == watchdog.MIN_RERUN
 
 
 def test_a_fetch_that_says_nothing_is_named_by_its_exit(tmp_path, monkeypatch):

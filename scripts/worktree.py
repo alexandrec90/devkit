@@ -3369,6 +3369,27 @@ def remove_images(tags: Sequence[str]) -> tuple[bool, str]:
     return True, f"removed the image(s) built by the box, some never built: {', '.join(tags)}"
 
 
+def compose(
+    path: Path, project_name: str, args: Sequence[str], timeout: float, **kwargs
+) -> subprocess.CompletedProcess[str]:
+    """`docker compose -p <project_name> <args>` in `path`, ended **with its whole process
+    tree** at `timeout` (`sweep.run_bounded`), which raises `subprocess.TimeoutExpired`
+    as the `subprocess.run` it replaces did.
+
+    `docker compose` is a CLI plugin: `docker.exe` runs `docker-compose.exe` as a child
+    that holds the same pipes. `subprocess.run(timeout=)` kills `docker.exe` alone on
+    Windows and then reads those pipes with no bound, so a compose call on a wedged
+    engine waited for the engine, not for its timeout: 2026-10-09 the reconcile in flight
+    since 20:15 reaped its first compose box only once the engine came back at 21:11, and
+    every fire behind it was skipped (bd12e216).
+    """
+    argv = ["docker", "compose", "-p", project_name, *args]
+    completed = sweep.run_bounded(argv, timeout, cwd=str(path), **kwargs)
+    if completed.returncode == sweep.TIMED_OUT:
+        raise subprocess.TimeoutExpired(argv, timeout, completed.stdout, completed.stderr)
+    return completed
+
+
 def compose_config(
     path: Path, project_name: str, timeout: float = 120.0
 ) -> Mapping[str, object] | None:
@@ -3381,15 +3402,8 @@ def compose_config(
     docker actually gave.
     """
     try:
-        completed = subprocess.run(
-            ["docker", "compose", "-p", project_name, "config", "--format", "json"],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            creationflags=sweep.NO_WINDOW,
-            env=build_env(),
+        completed = compose(
+            path, project_name, ["config", "--format", "json"], timeout, env=build_env()
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -3433,16 +3447,7 @@ def compose_tail(path: Path, project_name: str, timeout: float = 20.0) -> str:
     job is to make a wait more informative must never be the thing that ends it.
     """
     try:
-        completed = subprocess.run(
-            ["docker", "compose", "-p", project_name, "logs", "--tail", "1"],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            creationflags=sweep.NO_WINDOW,
-            env=build_env(),
-        )
+        completed = compose(path, project_name, ["logs", "--tail", "1"], timeout, env=build_env())
     except (OSError, subprocess.SubprocessError):
         return ""
     if completed.returncode != 0:
@@ -3497,16 +3502,7 @@ def compose_up(
     )
     for step in plan:
         try:
-            completed = subprocess.run(
-                ["docker", "compose", "-p", project_name, *step],
-                cwd=str(path),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-                creationflags=sweep.NO_WINDOW,
-                env=build_env(),
-            )
+            completed = compose(path, project_name, step, timeout, env=build_env())
         except FileNotFoundError:
             return False, "docker is not on PATH — the stack was not started"
         except subprocess.TimeoutExpired:
@@ -3549,15 +3545,7 @@ def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
     to a seeded `COMPOSE_PROJECT_NAME` from the source checkout's `.env`.
     """
     try:
-        completed = subprocess.run(
-            ["docker", "compose", "-p", project_name, "down", "-v", "--remove-orphans"],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-            creationflags=sweep.NO_WINDOW,
-        )
+        completed = compose(path, project_name, ["down", "-v", "--remove-orphans"], 300)
     except FileNotFoundError:
         return False, "docker is not on PATH — the stack was left running"
     except subprocess.TimeoutExpired:

@@ -5179,7 +5179,7 @@ def test_compose_up_for_a_ui_box_scopes_to_its_services_with_no_deps(monkeypatch
     -- onto the donor's ports, because that is what this box's `.env` holds."""
     seen = []
     monkeypatch.setattr(
-        worktree.subprocess, "run", lambda argv, **k: seen.append(argv) or _completed()
+        worktree.sweep, "run_bounded", lambda argv, timeout, **k: seen.append(argv) or _completed()
     )
 
     # `compose_up` probes `compose config` first; a stub that answers nothing sends it
@@ -5216,9 +5216,9 @@ def test_compose_up_disables_bake_so_two_services_can_share_one_image_tag(monkey
     """
     seen = {}
     monkeypatch.setattr(
-        worktree.subprocess,
-        "run",
-        lambda argv, **k: seen.update(env=k.get("env")) or _completed(),
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, timeout, **k: seen.update(env=k.get("env")) or _completed(),
     )
     monkeypatch.setenv("PATH", "/sentinel-path")
     ok, _ = worktree.compose_up(Path("x"), "c--y")
@@ -5484,9 +5484,9 @@ def test_compose_config_reads_the_resolved_stack_and_swallows_every_failure(monk
     by `compose_up`, with the message docker actually gave.
     """
     monkeypatch.setattr(
-        worktree.subprocess,
-        "run",
-        lambda argv, **k: _completed(stdout='{"services": {"app": {}}}'),
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, timeout, **k: _completed(stdout='{"services": {"app": {}}}'),
     )
     assert worktree.compose_config(Path("x"), "c--y") == {"services": {"app": {}}}
 
@@ -5494,15 +5494,17 @@ def test_compose_config_reads_the_resolved_stack_and_swallows_every_failure(monk
         _completed(returncode=1, stderr="no configuration file provided"),
         _completed(stdout="not json at all"),
         _completed(stdout="[1, 2, 3]"),
+        _completed(returncode=worktree.sweep.TIMED_OUT, stderr="timed out after 120s"),
     ):
-        monkeypatch.setattr(worktree.subprocess, "run", lambda argv, a=answer, **k: a)
+        monkeypatch.setattr(worktree.sweep, "run_bounded", lambda argv, t, a=answer, **k: a)
         assert worktree.compose_config(Path("x"), "c--y") is None
 
-    for boom in (FileNotFoundError("docker"), worktree.subprocess.TimeoutExpired("docker", 1)):
-        monkeypatch.setattr(
-            worktree.subprocess, "run", lambda argv, e=boom, **k: (_ for _ in ()).throw(e)
-        )
-        assert worktree.compose_config(Path("x"), "c--y") is None
+    monkeypatch.setattr(
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, t, **k: (_ for _ in ()).throw(FileNotFoundError("docker")),
+    )
+    assert worktree.compose_config(Path("x"), "c--y") is None
 
 
 def test_compose_tail_sorts_what_the_stack_said_so_churn_is_not_progress(monkeypatch):
@@ -5524,11 +5526,11 @@ def test_compose_tail_sorts_what_the_stack_said_so_churn_is_not_progress(monkeyp
         ]
     )
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv, timeout, **kwargs):
         seen.append(argv)
         return _completed(stdout=next(answers))
 
-    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    monkeypatch.setattr(worktree.sweep, "run_bounded", fake_run)
     first = worktree.compose_tail(Path("x"), "c--preview-x")
     assert first == "db-1 | ready to accept connections\nfrontend-1 | vite ready"
     # Reordered *and* repadded, which is the second half of the same measurement: docker
@@ -5547,24 +5549,79 @@ def test_compose_tail_is_never_the_thing_that_ends_a_wait(monkeypatch):
     returned a plausible-looking error string -- would abandon a preview that was fine.
     That is the bug this function was added to fix, in a new place.
     """
-    for answer in (_completed(returncode=1, stderr="no such project"), _completed(stdout="  \n")):
-        monkeypatch.setattr(worktree.subprocess, "run", lambda argv, a=answer, **k: a)
+    for answer in (
+        _completed(returncode=1, stderr="no such project"),
+        _completed(stdout="  \n"),
+        _completed(returncode=worktree.sweep.TIMED_OUT, stdout="db-1 | half a line"),
+    ):
+        monkeypatch.setattr(worktree.sweep, "run_bounded", lambda argv, t, a=answer, **k: a)
         assert worktree.compose_tail(Path("x"), "c--y") == ""
 
-    for boom in (FileNotFoundError("docker"), worktree.subprocess.TimeoutExpired("docker", 1)):
-        monkeypatch.setattr(
-            worktree.subprocess, "run", lambda argv, e=boom, **k: (_ for _ in ()).throw(e)
-        )
-        assert worktree.compose_tail(Path("x"), "c--y") == ""
+    monkeypatch.setattr(
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, t, **k: (_ for _ in ()).throw(FileNotFoundError("docker")),
+    )
+    assert worktree.compose_tail(Path("x"), "c--y") == ""
+
+
+def test_a_compose_down_on_a_wedged_engine_ends_at_its_bound(monkeypatch):
+    """bd12e216: `subprocess.run(timeout=)` killed `docker.exe` and then read the pipes
+    its compose plugin still held, so the reconcile's reap waited for the engine. The
+    tree-ending runner's timeout is the bound, and the reap is told so."""
+    seen = []
+
+    def wedged(argv, timeout, **kwargs):
+        seen.append((argv, timeout, kwargs.get("cwd")))
+        return _completed(worktree.sweep.TIMED_OUT, stderr="timed out after 300s")
+
+    monkeypatch.setattr(worktree.sweep, "run_bounded", wedged)
+    ok, message = worktree.compose_down(Path("box"), "c--x")
+    assert not ok and "timed out after 300s" in message
+    argv = ["docker", "compose", "-p", "c--x", "down", "-v", "--remove-orphans"]
+    assert seen == [(argv, 300, "box")]
+
+
+def test_compose_raises_the_timeout_the_runner_ended_on_and_passes_the_rest(monkeypatch):
+    """`compose` keeps `subprocess.run`'s contract for its callers: a timeout raises,
+    with what was said before it; any other exit is returned as it came."""
+    answers = [
+        _completed(worktree.sweep.TIMED_OUT, stdout="half", stderr="timed out after 9s"),
+        _completed(1, stderr="no such service"),
+    ]
+    seen = []
+
+    def run(argv, timeout, **kwargs):
+        seen.append((argv, timeout, kwargs))
+        return answers.pop(0)
+
+    monkeypatch.setattr(worktree.sweep, "run_bounded", run)
+    with pytest.raises(subprocess.TimeoutExpired) as ended:
+        worktree.compose(Path("box"), "c--x", ["ps"], 9, env={"A": "1"})
+    assert ended.value.timeout == 9 and ended.value.output == "half"
+    assert seen[0] == (
+        ["docker", "compose", "-p", "c--x", "ps"],
+        9,
+        {"cwd": "box", "env": {"A": "1"}},
+    )
+    assert worktree.compose(Path("box"), "c--x", ["up"], 9).returncode == 1
+
+
+def test_every_docker_compose_call_goes_through_the_tree_ending_runner():
+    """A `docker compose` spelled anywhere but `compose` would be a `subprocess.run`
+    again, and its timeout would stop the clock but not the wait."""
+    source = Path(worktree.__file__).read_text(encoding="utf-8")
+    assert source.count('"docker", "compose"') == 1
+    assert 'argv = ["docker", "compose", "-p", project_name, *args]' in source
 
 
 def test_compose_tail_truncates_a_line_that_would_take_the_terminal(monkeypatch):
     """It is printed inline on a progress tick. One container logging a stack trace or a
     minified bundle would wrap the report into unreadability every fifteen seconds."""
     monkeypatch.setattr(
-        worktree.subprocess,
-        "run",
-        lambda argv, **k: _completed(stdout="x" * 4000 + "\n" + "y" * 4000 + "\n"),
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, timeout, **k: _completed(stdout="x" * 4000 + "\n" + "y" * 4000 + "\n"),
     )
     assert worktree.compose_tail(Path("x"), "c--y") == "x" * 120 + "\n" + "y" * 120
 
@@ -5574,13 +5631,13 @@ def test_compose_up_builds_by_name_then_starts_without_build(monkeypatch):
     plan again, so its absence is the assertion that matters."""
     seen = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv, timeout, **kwargs):
         seen.append(argv)
         if "config" in argv:
             return _completed(stdout=json.dumps(_SHARED_TAG_CONFIG))
         return _completed()
 
-    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    monkeypatch.setattr(worktree.sweep, "run_bounded", fake_run)
     ok, message = worktree.compose_up(Path("x"), "c--preview-x")
     assert ok
     build, up = (argv for argv in seen if "config" not in argv)
@@ -5595,13 +5652,13 @@ def test_a_failed_build_is_reported_and_the_up_never_runs(monkeypatch):
     would run the *previous* images and report a preview of the wrong code."""
     seen = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv, timeout, **kwargs):
         seen.append(argv)
         if "config" in argv:
             return _completed(stdout=json.dumps(_SHARED_TAG_CONFIG))
         return _completed(returncode=1, stderr="target app: failed to solve")
 
-    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    monkeypatch.setattr(worktree.sweep, "run_bounded", fake_run)
     ok, message = worktree.compose_up(Path("x"), "c--preview-x")
     assert not ok
     assert "failed to solve" in message
@@ -5632,7 +5689,9 @@ def test_compose_up_names_a_dead_engine_instead_of_blaming_the_stack(monkeypatch
         "find the file specified."
     )
     monkeypatch.setattr(
-        worktree.subprocess, "run", lambda argv, **k: _completed(returncode=1, stderr=stderr)
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, timeout, **k: _completed(returncode=1, stderr=stderr),
     )
     ok, message = worktree.compose_up(Path("x"), "c--y")
     assert not ok

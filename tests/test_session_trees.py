@@ -375,6 +375,31 @@ def test_a_stopped_docker_engine_keeps_the_tree_and_is_not_a_failure(tmp_path):
     assert not any("remove" in argv for argv in calls)
 
 
+def test_the_default_runner_ends_a_wedged_compose_at_its_bound(monkeypatch):
+    """bd12e216: a `compose down` on a wedged engine outlived `subprocess.run`'s timeout
+    in the compose plugin that held its pipes. `_run` ends the whole tree instead, and a
+    timeout reads as the failure it is; a missing docker is one too, never a raise."""
+    seen = []
+
+    def wedged(argv, timeout, **kwargs):
+        seen.append((argv, timeout))
+        return subprocess.CompletedProcess(argv, st.sweep.TIMED_OUT, "", "timed out after 300s")
+
+    monkeypatch.setattr(st.sweep, "run_bounded", wedged)
+    result = st._run(("docker", "compose", "-p", "x", "down"))
+    assert (result.returncode, result.stderr) == (1, "timed out after 300s")
+    assert seen == [(["docker", "compose", "-p", "x", "down"], 300)]
+
+    monkeypatch.setattr(st.sweep, "run_bounded", lambda *a, **k: done(0, out="ok"))
+    assert st._run(("git", "status")).stdout == "ok"
+
+    def missing(*_a, **_k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(st.sweep, "run_bounded", missing)
+    assert st._run(("docker", "info")).returncode == 1
+
+
 def test_any_other_compose_down_failure_is_still_a_failure(tmp_path):
     checkout, _one, run, gh, _calls = _stacked_checkout(
         tmp_path, done(1, err="Error response from daemon: volume is in use")

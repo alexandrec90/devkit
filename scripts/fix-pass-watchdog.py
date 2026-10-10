@@ -83,15 +83,45 @@ REPORTED = (0, 1, STALE)
 GITHUB_AUTH = ("-c", "http.https://github.com/.proactiveAuth=basic")
 
 
+# Seconds any one `git` or `gh` call of the watchdog's own may take before it is ended with
+# its whole tree (`bounded`); its returncode is then `TIMED_OUT`, `timeout(1)`'s spelling.
+# Unbounded, the 20:30 fire of 2026-10-09 spent 41 minutes in its own git calls before its
+# pass started at 21:11, and the 21:00 fire was skipped behind it (ebf74c37).
+CALL_TIMEOUT = 120
+TIMED_OUT = 124
+
+
+def bounded(
+    argv: list[str], cwd: Path, timeout: float = CALL_TIMEOUT
+) -> subprocess.CompletedProcess[str]:
+    """`argv` run in `cwd`, its output decoded as UTF-8, ended with every process under
+    it past `timeout` seconds. The output goes to temporary files and the wait is on the
+    process, for `run_pass`'s reason: `git fetch`'s `git-remote-https` and a credential
+    helper hold a pipe after `subprocess.run(timeout=)` has killed `git` alone."""
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            creationflags=NO_WINDOW,
+            start_new_session=sys.platform != "win32",
+        )
+        try:
+            code = process.wait(timeout=timeout)
+            ended = ""
+        except subprocess.TimeoutExpired:
+            end_tree(process)
+            code, ended = TIMED_OUT, f"\ntimed out after {timeout:g}s; ended it and its children"
+        out.seek(0)
+        err.seek(0)
+        said = [f.read().decode("utf-8", "replace").replace("\r\n", "\n") for f in (out, err)]
+    return subprocess.CompletedProcess(argv, code, said[0], (said[1] + ended).lstrip("\n"))
+
+
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *GITHUB_AUTH, *args],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-        creationflags=NO_WINDOW,
-    )
+    return bounded(["git", *GITHUB_AUTH, *args], root)
 
 
 def mode_of(argv: list[str], workspace: Path) -> str:
@@ -239,14 +269,19 @@ def end_tree(process: subprocess.Popen) -> None:
         pass
 
 
-def run_current(argv: list[str], mode: str, notes: list[str]) -> tuple[int | None, str]:
+def run_current(
+    argv: list[str], mode: str, notes: list[str], started: float | None = None
+) -> tuple[int | None, str]:
     """Run the pass, and once more on the new code when it exits `STALE`.
 
-    Only inside what is left of this fire's budget, so two passes still never overlap:
-    short of `MIN_RERUN`, the first run's record stands and the next fire routes it.
+    Only inside what is left of this fire's budget, counted from `started` (the fire's
+    own `time.monotonic()`, now when None) so self-update's minutes are in it too and two
+    passes still never overlap: the pass gets at least `MIN_RERUN`, and short of that for
+    a rerun, the first run's record stands and the next fire routes it.
     """
-    started = time.monotonic()
-    code, output = run_pass(argv)
+    started = time.monotonic() if started is None else started
+    spent = _dt.timedelta(seconds=time.monotonic() - started)
+    code, output = run_pass(argv, max(TIMEOUT - spent, MIN_RERUN))
     if code != STALE or mode == "off":
         return code, output
     left = TIMEOUT - _dt.timedelta(seconds=time.monotonic() - started)
@@ -446,10 +481,7 @@ def ship_rescues(root: Path) -> list[str]:
                 "--label",
                 AUTOMERGE_LABEL,
             ]
-            made = subprocess.run(
-                pr, cwd=tree, capture_output=True, text=True, check=False, creationflags=NO_WINDOW
-            )
-            failed = "" if made.returncode == 0 else "gh pr create"
+            failed = "" if bounded(pr, tree).returncode == 0 else "gh pr create"
         if not failed:
             intent.replace(intent.with_name("ship-intent.shipped.md"))
         shipped.append(f"{branch}: {'shipped' if not failed else 'FAILED at ' + failed}")
@@ -460,6 +492,7 @@ def ship_rescues(root: Path) -> list[str]:
 
 
 def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
+    began = time.monotonic()
     now = now or _dt.datetime.now(_dt.UTC)
     workspace = workspace_of(argv)
     mode = mode_of(argv, workspace) if workspace else "off"
@@ -476,7 +509,7 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
             file_once(
                 state, signature("pass-stale", what, head), "pass-stale", what, str(REPO_ROOT), now
             )
-    code, output = run_current(argv, mode, notes)
+    code, output = run_current(argv, mode, notes, began)
     print(output, end="")  # pythonw.exe runs this job with sys.stdout None
     kind, detail = judge(code, output)
     if kind:

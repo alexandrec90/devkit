@@ -74,6 +74,9 @@ CLAUDE_CODE_GUARD = re.compile(
     re.I,
 )
 
+# A Markdown list item, the shape a friction file's entries take when it marks them.
+LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s")
+
 # A dispatched session with no transcript this long after its stamp never started; one
 # whose transcript has been quiet this long, with nothing left behind, has ended. Both
 # well past a permission prompt a person might still answer in a tab.
@@ -280,7 +283,10 @@ class Tree:
 
 def _entries(path: Path) -> tuple[str, ...]:
     """A friction file's entries, one per line: headings and blanks dropped, list
-    markers stripped; empty when there is no file.
+    markers stripped; empty when there is no file. In a file that lists its entries
+    (`LIST_ITEM`), a line that is not an item is a label or a wrapped tail, never an
+    entry: b25fcfe9 was `supervise-fix-pass`, the bare line over two bulleted reports,
+    filed as a third.
 
     Whole, never cut to `REASON_LIMIT`: a line ends with what fixed it and the
     `fixed on this branch` that settles it (`fixed_here`), so a cut dropped exactly that
@@ -290,8 +296,11 @@ def _entries(path: Path) -> tuple[str, ...]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ()
-    kept = (line.strip() for line in text.splitlines())
-    lines = (line.lstrip("-*0123456789. ").strip() for line in kept if not line.startswith("#"))
+    kept = [line.strip() for line in text.splitlines()]
+    kept = [line for line in kept if line and not line.startswith("#")]
+    if any(LIST_ITEM.match(line) for line in kept):
+        kept = [line for line in kept if LIST_ITEM.match(line)]
+    lines = (line.lstrip("-*+0123456789.) ").strip() for line in kept)
     return tuple(line for line in lines if line)
 
 

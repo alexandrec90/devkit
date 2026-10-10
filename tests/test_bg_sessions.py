@@ -98,6 +98,22 @@ def test_only_an_idle_background_session_is_stoppable():
     assert [r["id"] for r in ROWS if bg_sessions.stoppable(r)] == ["a1", "d4"]
 
 
+def test_a_listed_session_with_no_process_is_never_stopped():
+    """d95eb347: `claude stop c476bac3` refused twice with "couldn't confirm c476bac3 was
+    stopped", read as a session holding memory. Its row, as `claude agents --json` gave
+    it on 2026-10-09, has no `pid` and no `status`: no process to stop, and so none
+    holding memory. The pass never asks."""
+    row = {
+        "id": "c476bac3",
+        "cwd": "C:\\Users\\alexa\\vs-code\\devkit\\.claude\\worktrees\\fix-pass-rescue-1008-1730",
+        "kind": "background",
+        "name": "devkit/fix-pass-rescue-1008-1730",
+        "state": "blocked",
+    }
+    assert not bg_sessions.stoppable(row)
+    assert bg_sessions.finished_in([row], [row["cwd"]]) == []
+
+
 def test_stop_is_false_where_claude_refuses_or_is_missing():
     def refuses(argv, **_kwargs):
         return subprocess.CompletedProcess(argv, 1, "", "no such session")

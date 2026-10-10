@@ -132,7 +132,6 @@ scripts/worktree-guard.py::route_to_own_box
 scripts/worktree-guard.py::tool_input
 scripts/worktree.py::Reconciliation
 scripts/worktree.py::branch_is_merged
-scripts/worktree.py::compose_down
 scripts/worktree.py::has_stack
 scripts/worktree.py::inspect_box
 scripts/worktree.py::lease_file

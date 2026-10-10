@@ -360,6 +360,11 @@ def instant(monkeypatch):
     return clock
 
 
+# The probe after a failed start and every probe of `await_engine`, none answering.
+PROBE_TIMED_OUT = (tasks.TIMED_OUT, "timed out after 30s")
+SILENT_THROUGH_WAIT = [PROBE_TIMED_OUT, *[SILENT] * (tasks.ENGINE_WAIT // tasks.ENGINE_POLL)]
+
+
 def test_a_need_that_will_not_start_skips_the_command_and_fails(tmp_path):
     spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
@@ -397,26 +402,54 @@ def test_an_engine_silent_through_the_wait_is_the_cause(tmp_path, instant):
     assert log_wrap.failure_cause("\n".join(lines)) == "error: the Docker engine did not answer"
 
 
-def test_a_fire_landing_in_a_docker_desktop_update_skips_its_run(tmp_path, monkeypatch):
+def test_a_fire_landing_in_a_docker_desktop_update_skips_its_run(tmp_path, monkeypatch, instant):
     """38b0ffb4: 2026-10-09 the 20:02 UTC fire's `compose up --wait db` ran its whole
     `NEEDS_TIMEOUT` while Docker Desktop installed 4.94.0 (19:55-20:28), and the fire
     failed "the Docker engine did not answer". An update is Docker's maintenance: the run
     is skipped, and the next fire runs on the new engine."""
     monkeypatch.setattr(tasks.os, "name", "nt")
-    spawn = FakeSpawn(TIMED_OUT, (tasks.TIMED_OUT, "timed out after 30s"), listing=(0, UPDATER))
+    spawn = FakeSpawn(TIMED_OUT, *SILENT_THROUGH_WAIT, listing=(0, UPDATER))
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
     assert code == 0 and spawn.listed == 1
-    assert len(spawn.calls) == 2, "the start and one probe: the command is never run"
+    assert len(spawn.calls) == 1 + len(SILENT_THROUGH_WAIT), "no second start, no command"
     assert "Docker Desktop is installing an update" in lines[-1]
     assert not any(line.startswith("error:") for line in lines)
 
 
-def test_a_silent_engine_with_no_update_running_still_fails(tmp_path, monkeypatch):
+def test_a_silent_engine_with_no_update_running_still_fails(tmp_path, monkeypatch, instant):
     monkeypatch.setattr(tasks.os, "name", "nt")
-    spawn = FakeSpawn(TIMED_OUT, (tasks.TIMED_OUT, "timed out after 30s"))
+    spawn = FakeSpawn(TIMED_OUT, *SILENT_THROUGH_WAIT)
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
     assert code == tasks.TIMED_OUT and spawn.listed == 1
     assert lines[-1] == "error: the Docker engine did not answer"
+
+
+def test_a_start_that_timed_out_on_an_engine_being_revived_waits_and_then_runs(tmp_path, instant):
+    """37e9acee: 2026-10-09 the collectors pass reset Docker's VM under the 21:00 fire,
+    whose `up --wait db` hung its whole `NEEDS_TIMEOUT` and gave up two minutes before the
+    engine answered. A timed-out start on a silent engine waits for it like a fast one."""
+    spawn = FakeSpawn(TIMED_OUT, PROBE_TIMED_OUT, SILENT, ENGINE_UP, (0, ""), (0, "reddit: 40"))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "reddit: 40" in lines and "started: db" in lines
+    up = ["docker", "compose", "up", "-d", "--wait", "db"]
+    assert [call[0] for call in spawn.calls].count(up) == 2, "tried again once it answered"
+
+
+def test_the_command_is_bounded_by_what_the_start_left_of_the_fire(tmp_path, instant):
+    """A start that waited out a restart must not push the command past the task's
+    `TIME_LIMIT`, where the scheduler kills it without the wrapper recording why."""
+
+    class Slow(FakeSpawn):
+        def __call__(self, argv, cwd, timeout, env=None):
+            answer = super().__call__(argv, cwd, timeout, env)
+            instant.now += timeout if answer[0] == tasks.TIMED_OUT else 1
+            return answer
+
+    spawn = Slow(TIMED_OUT, PROBE_TIMED_OUT, ENGINE_UP, (0, ""), (0, "ok"))
+    tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    spent = instant.now - 1  # all but the command's own second
+    assert spent > tasks.NEEDS_TIMEOUT, "the start did run out its timeout"
+    assert spawn.calls[-1][2] == tasks.FIRE_TIMEOUT - int(spent)
 
 
 def test_an_update_is_not_asked_about_while_the_engine_answers(tmp_path, monkeypatch):
@@ -460,8 +493,8 @@ def test_desktop_updating_is_never_asked_off_windows(tmp_path, monkeypatch):
 def test_start_needs_says_what_the_engine_answered_and_only_when_it_asked(tmp_path, instant):
     up = ["docker", "compose", "up", "-d", "--wait", "db"]
     assert tasks.start_needs(("db",), tmp_path, FakeSpawn((0, "ok"))) == (0, "ok", None)
-    timed_out = tasks.start_needs(("db",), tmp_path, FakeSpawn(TIMED_OUT))
-    assert timed_out[2] is None, "a timeout's probe is `needs_failed`'s, with the services"
+    timed_out = tasks.start_needs(("db",), tmp_path, FakeSpawn(TIMED_OUT, ENGINE_UP))
+    assert timed_out == (*TIMED_OUT, ENGINE_UP), "an answering engine is not waited for"
     spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
     assert tasks.start_needs(("db",), tmp_path, spawn) == (*NO_IMAGE, ENGINE_UP)
     assert spawn.calls[0] == (up, tmp_path.name, tasks.NEEDS_TIMEOUT)
@@ -512,10 +545,10 @@ def test_a_need_that_timed_out_with_the_engine_answering_says_the_service_stalle
     assert lines[-1] == "error: db did not come up healthy within the compose timeout"
 
 
-def test_a_need_that_timed_out_with_the_engine_silent_blames_the_engine(tmp_path):
-    spawn = FakeSpawn(TIMED_OUT, (tasks.TIMED_OUT, "\ntimed out after 30s"))
+def test_a_need_that_timed_out_with_the_engine_silent_blames_the_engine(tmp_path, instant):
+    spawn = FakeSpawn(TIMED_OUT, *SILENT_THROUGH_WAIT[:-1], PROBE_TIMED_OUT)
     _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
-    assert len(spawn.calls) == 2, "compose ps would only hang the same way"
+    assert len(spawn.calls) == 1 + len(SILENT_THROUGH_WAIT), "compose ps would only hang"
     assert any("did not answer either (exit 124)" in line for line in lines), lines
     assert lines[-1] == "error: the Docker engine did not answer"
 
@@ -523,12 +556,12 @@ def test_a_need_that_timed_out_with_the_engine_silent_blames_the_engine(tmp_path
 @pytest.mark.parametrize(
     ("answers", "cause"),
     [
-        ([TIMED_OUT, (1, "")], "error: the Docker engine did not answer"),
+        ([TIMED_OUT, *SILENT_THROUGH_WAIT], "error: the Docker engine did not answer"),
         ([TIMED_OUT, (0, "28"), (0, "")], "error: db did not come up healthy within the"),
         ([NO_IMAGE, ENGINE_UP], "error: docker compose up failed"),
     ],
 )
-def test_the_wrapper_files_the_needs_kind_as_the_cause(tmp_path, answers, cause):
+def test_the_wrapper_files_the_needs_kind_as_the_cause(tmp_path, answers, cause, instant):
     """What `log-wrap.py` reads off the fire's output is the line `needs_failed` ends on."""
     _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), FakeSpawn(*answers))
     found = log_wrap.failure_cause("\n".join(lines))

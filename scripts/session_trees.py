@@ -366,17 +366,17 @@ def sweep_husks(
 
 
 def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """`argv` bounded with its whole tree (`sweep.run_bounded`): a `docker compose` here
+    runs the compose plugin as a child holding the pipes, which `subprocess.run(timeout=)`
+    would wait on past its timeout for as long as the engine is wedged
+    (`worktree.compose`). A timeout or a missing program is an exit 1 saying so."""
     try:
-        return subprocess.run(
-            list(argv),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=300,
-            creationflags=sweep.NO_WINDOW,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        done = sweep.run_bounded(list(argv), 300)
+    except OSError as exc:
         return subprocess.CompletedProcess(list(argv), 1, "", str(exc))
+    if done.returncode == sweep.TIMED_OUT:
+        return subprocess.CompletedProcess(list(argv), 1, done.stdout, done.stderr)
+    return done
 
 
 def sweep_checkout(

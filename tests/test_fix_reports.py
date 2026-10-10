@@ -430,6 +430,35 @@ def test_friction_lines_drop_markup_and_blanks_and_filing_away_reads_them_once(t
     fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)  # nothing there: no error
 
 
+def test_a_label_over_listed_entries_is_not_an_entry(tmp_path):
+    """b25fcfe9: the file opened on `supervise-fix-pass`, the bare name of what the session
+    was doing, over two bulleted reports, and the label was filed as a third report. In
+    a file that lists its entries, only the items are entries; a wrapped tail goes too."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        "supervise-fix-pass\n"
+        "- `claude stop c476bac3` refused twice\n"
+        "  with a wrapped tail\n"
+        "1) the rehearsal was not run\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "`claude stop c476bac3` refused twice",
+        "the rehearsal was not run",
+    )
+
+
+def test_a_file_of_plain_lines_is_one_entry_per_line(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        "the evidence dir was empty\n\nno .venv in the tree\n", encoding="utf-8"
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "the evidence dir was empty",
+        "no .venv in the tree",
+    )
+
+
 def test_a_line_the_tree_already_had_filed_is_not_read_again(tmp_path):
     """a174d816: the session wrote its friction file whole after the pass had filed the
     first copy away, so the same line came back, was filed a second time, and reopened a
