@@ -96,26 +96,24 @@ def test_all_keeps_the_object_form_s_knobs():
     assert rc_config.parse_config(text).spawn == "worktree"
 
 
-def test_all_leaves_out_a_project_on_hold_without_reporting_it():
-    """Subtracted in the parse, so `selected` has no refusal to report on every fire for
-    a name nobody wrote down."""
+def test_all_still_serves_a_project_on_hold():
+    """The phone matches the machine's workspace, always. Subtracting `devkit.onHold`
+    here once left three of seven checkouts unreachable from the phone with nothing in
+    the artifact saying why -- a hold pauses adoption and box reporting, not this."""
     text = held_text(rc_config.ALL_PROJECTS, ("devkit", "carameli"), ["carameli"])
     config = rc_config.parse_config(text)
-    assert config.projects == ("devkit",)
-    assert rc_config.selected(config, ["devkit", "carameli"], frozenset({"carameli"})) == (
-        ["devkit"],
-        [],
-    )
+    assert config.projects == ("devkit", "carameli")
+    assert rc_config.selected(config, ["devkit", "carameli"]) == (["devkit", "carameli"], [])
 
 
 def test_all_in_a_workspace_with_no_folders_serves_nothing():
     assert rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS, ())).projects == ()
 
 
-def test_an_explicit_list_still_names_a_held_project_so_it_is_refused_out_loud():
-    """The list form is unchanged: a name someone typed is reported when refused."""
+def test_an_explicit_list_serves_a_held_project_it_names():
     text = held_text(["devkit", "carameli"], ("devkit", "carameli"), ["carameli"])
-    assert rc_config.parse_config(text).projects == ("devkit", "carameli")
+    config = rc_config.parse_config(text)
+    assert rc_config.selected(config, ["devkit", "carameli"]) == (["devkit", "carameli"], [])
 
 
 def test_non_string_project_names_are_dropped_not_stringified():
@@ -185,22 +183,14 @@ def test_the_daily_update_is_timed_after_the_pass_that_owns_the_agent_clis():
 def test_a_name_that_is_not_a_checkout_is_reported_not_skipped_silently():
     """A typo that served nothing would look exactly like a working machine with nothing
     to do, which is the one answer this job must never give wrongly."""
-    serve, notes = rc_config.selected(rc_config.Config(("devkit", "typo")), ["devkit"], frozenset())
+    serve, notes = rc_config.selected(rc_config.Config(("devkit", "typo")), ["devkit"])
     assert serve == ["devkit"]
     assert len(notes) == 1 and "typo" in notes[0]
 
 
-def test_a_project_on_hold_gets_no_server():
+def test_everything_known_is_served_with_nothing_to_report():
     serve, notes = rc_config.selected(
-        rc_config.Config(("devkit",)), ["devkit"], frozenset({"devkit"})
-    )
-    assert serve == []
-    assert "on hold" in notes[0]
-
-
-def test_everything_known_and_running_is_served_with_nothing_to_report():
-    serve, notes = rc_config.selected(
-        rc_config.Config(("devkit", "carameli")), ["devkit", "carameli"], frozenset()
+        rc_config.Config(("devkit", "carameli")), ["devkit", "carameli"]
     )
     assert serve == ["devkit", "carameli"]
     assert notes == []

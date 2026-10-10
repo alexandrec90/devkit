@@ -232,7 +232,7 @@ def build_plan(workspace: Path, root: Path, report: Pass) -> Plan | None:
     if not config.projects:
         report.say(f"nothing to serve -- no `{rc_config.RC_SETTING}` in {workspace.name}")
         return None
-    names, notes = rc_config.selected(config, sweep.parse_workspace(text), sweep.on_hold(text))
+    names, notes = rc_config.selected(config, sweep.parse_workspace(text))
     for note in notes:
         report.fail(note)
     if not names:
