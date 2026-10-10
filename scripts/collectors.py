@@ -138,6 +138,12 @@ RESTARTED = Path("logs/collectors.engine-restart.json")
 DOCKER_DISTRO = "docker-desktop"
 WSL_TIMEOUT = 120
 DESKTOP_STOP_TIMEOUT = 120
+# Recorded in `RESTARTED` as `VM_RESET_AT`, so a VM is reset once per restart: a pass
+# inside a restart's `RESTART_EVERY` that finds the engine silent still resets the VM
+# when nothing has since that restart. 2026-10-09 22:45 UTC a pass from a checkout that
+# predated `reset_vm` restarted the wedged engine; the 23:15 pass ran the new code, but
+# the hour hold failed it without the reset (a70fa348), and so would the 23:45 pass.
+VM_RESET_AT = "vm_reset_at"
 # How long an engine that did not answer the pass's first question is asked again before
 # it is called wedged. 2026-10-08 22:15 UTC: one `docker ps` that did not answer on a
 # loaded machine -- the engine served the scrape's compose call before it and its own
@@ -781,6 +787,21 @@ def revive_vm(docker: Docker, report: Report) -> list[Container] | None:
     return containers
 
 
+def vm_reset_since(path: Path, restarted: float) -> bool:
+    """Whether `revive_vm` has run since the restart made at `restarted`."""
+    when = restart_record(path).get(VM_RESET_AT)
+    return isinstance(when, (int, float)) and when >= restarted
+
+
+def revive_vm_once(
+    docker: Docker, report: Report, restarts: Path, clock: float
+) -> list[Container] | None:
+    """`revive_vm`, recorded as `VM_RESET_AT` first, so a reset that does not help is not
+    repeated before the next restart."""
+    write_file(restarts, json.dumps({**restart_record(restarts), VM_RESET_AT: clock}) + "\n")
+    return revive_vm(docker, report)
+
+
 def revive_engine(
     docker: Docker, report: Report, restarts: Path, clock: float, busy: Sequence[str] = ()
 ) -> tuple[list[Container] | None, str]:
@@ -805,7 +826,10 @@ def revive_engine(
     held, asked first, and fails nothing until it has lasted `HOLD_LIMIT` (3012d246).
 
     A restart that leaves the engine silent goes on to reset the VM under it
-    (`revive_vm`), in the same pass and under the same `RESTART_EVERY` record.
+    (`revive_vm`), in the same pass and under the same `RESTART_EVERY` record. A pass
+    inside that hour that finds it silent again resets the VM if nothing has since the
+    restart (`VM_RESET_AT`): a restart that came back and wedged again, or one made by
+    code without the reset, is not left to fail every pass until the hour is up.
     """
     if docker.updating():
         why = (
@@ -827,6 +851,10 @@ def revive_engine(
             f"Docker Desktop was restarted {int((clock - last) // 60)} min ago; "
             f"not again within {RESTART_EVERY // 60} minutes of that"
         )
+        if not vm_reset_since(restarts, last):
+            containers = revive_vm_once(docker, report, restarts, clock)
+            if containers is not None:
+                return containers, ""
         return None, f"{wedged}, and a restart did not bring its engine back"
     if busy:
         runs = f"{', '.join(busy)}'s scheduled run"
@@ -843,7 +871,7 @@ def revive_engine(
     containers = docker.ps() if ok else None
     if containers is None:
         report.say(f"`docker desktop restart`: {first_line(out) or 'no output'}")
-        containers = revive_vm(docker, report)
+        containers = revive_vm_once(docker, report, restarts, clock)
     if containers is None:
         return None, f"{wedged}, and a restart did not bring its engine back"
     report.say("the docker engine was wedged behind a running Docker Desktop -- restarted it")

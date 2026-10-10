@@ -899,6 +899,53 @@ def test_a_restart_is_not_repeated_within_the_hour(tmp_path, instant):
     collectors.maintain([target(tmp_path)], docker, report, {})
     assert ("restart",) not in docker.calls
     assert report.failures == 1 and "restart did not bring" in report.lines[-1]
+    assert docker.calls.count(("reset",)) == 1, "the VM is reset once since that restart"
+    docker.calls.clear()
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    assert ("restart",) not in docker.calls and ("reset",) not in docker.calls
+
+
+def test_a_pass_inside_the_hour_resets_the_vm_a_restart_left_wedged(tmp_path, instant):
+    """a70fa348: 2026-10-09 22:45 UTC a pass from a checkout without `reset_vm` restarted
+    the wedged engine to no effect; the 23:15 pass had the reset, and the hour hold failed
+    it without running it. The 23:45 pass would have failed the same way."""
+    restarts = tmp_path / "restarts.json"
+    collectors.write_file(restarts, json.dumps({"started_at": collectors._clock() - 30 * 60}))
+    docker, report = Wedged(restarts, revives=False, resets=True), collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 0
+    assert ("restart",) not in docker.calls and ("reset",) in docker.calls
+    assert ("up", "ibkr_trader", "app") in docker.calls
+    assert any("WSL VM was reset" in line for line in report.lines)
+
+
+def test_a_vm_reset_since_the_restart_is_not_repeated(tmp_path, instant):
+    restarts = tmp_path / "restarts.json"
+    now = collectors._clock()
+    record = {collectors.STARTED_AT: now - 30 * 60, collectors.VM_RESET_AT: now - 29 * 60}
+    collectors.write_file(restarts, json.dumps(record))
+    docker, report = Wedged(restarts, revives=False, resets=True), collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 1 and ("reset",) not in docker.calls
+
+
+def test_revive_vm_once_records_the_reset_beside_the_restart_before_it_runs(tmp_path, instant):
+    restarts = tmp_path / "restarts.json"
+    collectors.write_file(restarts, json.dumps({collectors.STARTED_AT: 1000.0}))
+    docker = Wedged(restarts, revives=False)
+    docker.reset_answer = (False, "error: timed out\n")
+    assert collectors.revive_vm_once(docker, collectors.Report(), restarts, 1500.0) is None
+    record = collectors.restart_record(restarts)
+    assert record == {collectors.STARTED_AT: 1000.0, collectors.VM_RESET_AT: 1500.0}
+    assert collectors.vm_reset_since(restarts, 1000.0), "a reset that failed still counts"
+
+
+def test_a_vm_reset_before_the_last_restart_does_not_count(tmp_path):
+    path = tmp_path / "r.json"
+    collectors.write_file(path, json.dumps({"started_at": 2000.0, "vm_reset_at": 1000.0}))
+    assert not collectors.vm_reset_since(path, 2000.0)
+    assert collectors.vm_reset_since(path, 500.0)
+    assert not collectors.vm_reset_since(tmp_path / "missing.json", 0.0)
 
 
 def test_a_restart_older_than_the_hour_is_tried_again(tmp_path, instant):
