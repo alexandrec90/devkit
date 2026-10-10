@@ -10,18 +10,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import bg_sessions
 
+# As `claude agents --json` (2.1.296) prints them: an interactive row carries `status`
+# and a background row only `state` -- the fixture once gave background rows both.
 ROWS = [
     {
         "id": "a1",
         "kind": "background",
-        "status": "idle",
         "state": "done",
         "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x",
     },
     {
         "id": "b2",
         "kind": "background",
-        "status": "busy",
         "state": "working",
         "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x",
     },
@@ -34,11 +34,21 @@ ROWS = [
     {
         "id": "d4",
         "kind": "background",
-        "status": "idle",
         "state": "blocked",
         "cwd": "C:\\ws\\carameli\\.claude\\worktrees\\y",
     },
 ]
+
+
+def test_a_background_row_s_state_is_read_as_its_status():
+    """c476bac3 sat `blocked` for a day in a finished rescue tree, holding the memory the
+    pass then held a devkit fixer for: background rows carry no `status`, so nothing read
+    as idle and nothing was ever stopped. An unknown state is busy -- never stopped and
+    never raced on a guess."""
+    assert [bg_sessions.status(row) for row in ROWS] == ["idle", "busy", "idle", "idle"]
+    assert bg_sessions.status({"kind": "background", "state": "compacting"}) == "busy"
+    assert bg_sessions.status({"kind": "background", "status": "idle", "state": "x"}) == "idle"
+    assert bg_sessions.status({"kind": "background"}) == ""
 
 
 def runner_for(rows, stops: list, listing_code: int = 0):
@@ -58,6 +68,8 @@ def test_a_tree_is_working_while_any_session_in_it_is_busy_whatever_its_kind():
     assert bg_sessions.busy_in(dirs, Path("C:/ws/carameli"))
     assert not bg_sessions.busy_in(dirs, "C:/ws/carameli/.claude/worktrees/y")
     assert bg_sessions.working([]) == frozenset()
+    background = bg_sessions.working(ROWS, kinds=("background",))
+    assert bg_sessions.busy_in(background, "C:/ws/devkit/.claude/worktrees/x"), "b2 is working"
 
 
 def test_only_idle_background_sessions_in_finished_trees_are_stopped():

@@ -1251,9 +1251,10 @@ every night — so the other half of it runs where the answer is different by co
 agents it is **about to** resume in the gap before the tabs open. Only those agents, only
 while none of them is running, and `--no-update` opts out.
 
-The prune runs `--idle-only`, so it declines whenever containers are up; reclaiming the
-VHDX needs `wsl --shutdown`, and stopping a running stack at 04:00 for disk is not a
-trade to make unattended.
+The prune runs `--idle-only`: it always clears images and build cache inside the VM,
+but declines to compact while containers are up; reclaiming the VHDX needs
+`wsl --shutdown`, and stopping a running stack at 04:00 for disk is not a trade to make
+unattended.
 
 The stop-idle pass is the other half of that trade. `restart: unless-stopped`
 resurrects on every boot whatever was left running, so a stack someone brought up once

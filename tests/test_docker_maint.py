@@ -217,21 +217,31 @@ def test_an_unreachable_engine_is_not_reported_as_idle(monkeypatch, kwargs):
     assert docker_maint.running_containers() == -1
 
 
-def test_idle_only_does_nothing_while_containers_are_up(monkeypatch, capsys):
+@pytest.mark.parametrize("elevated", [True, False])
+def test_idle_only_prunes_inside_the_vm_but_never_stops_docker_while_containers_are_up(
+    monkeypatch, tmp_path, capsys, elevated
+):
     """The scheduled case, on a machine with disk to spare. Stopping twelve containers
-    at 4am to reclaim disk nobody needs is not a trade anything should make unattended.
+    at 4am to reclaim disk nobody needs is not a trade anything should make unattended
+    -- but only the compaction stops them. The image and build-cache prunes run against
+    a live engine and stop nothing.
 
-    `free_gb` is stubbed rather than left to read the real volume: the skip is now
+    The guard used to skip both halves, and on a machine whose collectors run around
+    the clock that meant every night: on 2026-10-09 the log read `SKIPPED -- 5
+    containers up` while 19 GB of build cache sat reclaimable inside the VM.
+
+    `free_gb` is stubbed rather than left to read the real volume: the compaction is
     conditional on free space, so a developer whose own disk happened to be under the
     floor would watch this assert the opposite of what it is named for."""
+    log = _pruner(monkeypatch, tmp_path)
     monkeypatch.setattr(docker_maint, "running_containers", lambda: 12)
     monkeypatch.setattr(docker_maint, "free_gb", lambda *_a, **_kw: 400.0)
-    monkeypatch.setattr(
-        docker_maint, "docker_info_ok", lambda *_a, **_kw: pytest.fail("touched the engine")
-    )
-    assert docker_maint.generic_prune(idle_only=True) == 0
+    assert docker_maint.generic_prune(idle_only=True, elevated=lambda: elevated) == 0
     printed = capsys.readouterr().out
-    assert "SKIPPED" in printed and "12 containers up" in printed
+    assert "docker image prune -af" in log and "docker builder prune -af" in log
+    assert "STOP" not in log and not any("Optimize-VHD" in line for line in log)
+    assert "NOT COMPACTED" in printed and "PRUNE COMPLETE" not in printed
+    assert "12 containers up" in printed
 
 
 def test_idle_only_compacts_anyway_when_the_disk_is_under_the_floor(monkeypatch, capsys):
@@ -258,9 +268,9 @@ def test_idle_only_skips_when_the_engine_cannot_be_asked(monkeypatch, capsys):
     assert "could not be asked" in capsys.readouterr().out
 
 
-def test_a_skipped_prune_is_a_success_not_a_failure(monkeypatch):
+def test_a_declined_compaction_is_a_success_not_a_failure(monkeypatch, tmp_path):
     """It reports 0 so a scheduled run that correctly declines does not look broken.
-    "Nothing to do right now" is the expected outcome most nights.
+    "Nothing to compact right now" is the expected outcome most nights.
 
     `free_gb` is stubbed, and that is a fix rather than boilerplate: this test used to
     stub only the container count, so `prune_verdict` read the **host's** free disk and
@@ -268,13 +278,12 @@ def test_a_skipped_prune_is_a_success_not_a_failure(monkeypatch):
     2026-08-21 it dropped below and the test went on to `sc start` the Docker service and
     wait 90 seconds for a real engine. A unit test that reaches the machine passes for a
     reason that has nothing to do with the code, which is the same as not covering it.
-    The `pytest.fail` tripwire below is the neighbouring test's, for the same reason."""
+    The `pytest.fail` tripwire below is the guard on the half that would reach it."""
+    _pruner(monkeypatch, tmp_path)
     monkeypatch.setattr(docker_maint, "running_containers", lambda: 3)
     monkeypatch.setattr(docker_maint, "free_gb", lambda *_a, **_kw: 200.0)
-    monkeypatch.setattr(
-        docker_maint, "docker_info_ok", lambda *_a, **_kw: pytest.fail("touched the engine")
-    )
-    assert docker_maint.generic_prune(idle_only=True) == 0
+    monkeypatch.setattr(docker_maint, "stop_docker", lambda: pytest.fail("stopped docker"))
+    assert docker_maint.generic_prune(idle_only=True, elevated=lambda: True) == 0
 
 
 def test_an_interactive_prune_never_consults_the_guard(monkeypatch):

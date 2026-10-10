@@ -249,8 +249,9 @@ def test_settle_holds_a_session_that_left_its_intent_while_it_is_still_busy(tmp_
 
 def test_live_dirs_are_the_busy_sessions_claude_agents_lists(monkeypatch):
     rows = [
-        {"cwd": r"C:\ws\devkit\.claude\worktrees\a", "status": "busy"},
-        {"cwd": r"C:\ws\devkit\.claude\worktrees\b", "status": "idle"},
+        {"cwd": r"C:\ws\devkit\.claude\worktrees\a", "kind": "background", "state": "working"},
+        {"cwd": r"C:\ws\devkit\.claude\worktrees\b", "kind": "background", "state": "done"},
+        {"cwd": r"C:\ws\devkit\.claude\worktrees\c", "kind": "interactive", "status": "idle"},
     ]
     monkeypatch.setattr(supervise.bg_sessions, "listed", lambda _runner: rows)
     assert supervise.live_dirs() == frozenset({"c:/ws/devkit/.claude/worktrees/a"})

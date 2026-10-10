@@ -27,8 +27,8 @@ spelling had none of:
   `logs/scheduled-docker-prune.log`, capped and overwritten per run.
 - `<WorkingDirectory>` on the task, so `logs/` resolves to this checkout rather than to
   `system32` -- a scheduled task's default cwd.
-- `--idle-only`, so the unattended run *declines* when containers are up instead of
-  stopping them at 04:00 for disk. `generic_prune`'s docstring already called this "the
+- `--idle-only`, so the unattended run *declines to compact* when containers are up
+  instead of stopping them at 04:00 for disk (it still prunes inside the VM). `generic_prune`'s docstring already called this "the
   scheduled caller's" spelling; the registered task did not pass it. That alone is the
   likeliest source of the exit 1, since the non-idle path starts Docker and fails when
   the engine does not come back.

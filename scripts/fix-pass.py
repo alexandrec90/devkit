@@ -602,7 +602,8 @@ def run(
         workspace, ctx, journal, failures, green, backlog
     )
 
-    # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current.
+    # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current,
+    # and the next fire routes a click's.
     go, held, moved = step("current", fix_send.hold_if_moved, go, held, ctx, default=(go, held, ""))
     items = fix_loop.triage.load(devkit_dir)
     # Run past the deadline too, holding each session it would launch out loud: a pass
@@ -638,7 +639,18 @@ def run(
         late=late_lines(journal),
     )
     publish(account, now)
-    return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
+    return exit_code(moved, worst, failed_steps)
+
+
+def exit_code(
+    moved: str, worst: int, failed_steps: bool, env: Mapping[str, str] = os.environ
+) -> int:
+    """`EXIT_STALE` when the code moved and a watchdog (`WINDOW_ENV`) is there to rerun
+    it, else the pass's ordinary code. A click has no one to rerun it: its held lines are
+    the report, and a 75 there was filed by `log-wrap` as the task failing (50dfb707)."""
+    if moved and WINDOW_ENV in env:
+        return fix_send.EXIT_STALE
+    return max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
 
 
 def publish(account: fix_cycle.Account, now: _dt.datetime, root: Path | None = None) -> Path:

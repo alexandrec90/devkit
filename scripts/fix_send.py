@@ -45,7 +45,8 @@ Journal = fix_findings.Journal
 EXIT_OK = 0
 EXIT_FAILED = 1
 # EX_TEMPFAIL: the pass's own code moved under it, so it sent no one. The watchdog
-# fast-forwards and runs it again; any other caller simply runs it again.
+# fast-forwards and runs it again; no other caller does, so only it is told
+# (`fix-pass.exit_code`).
 EXIT_STALE = 75
 
 # The commit each checkout's code was loaded from, pinned by `pin_loaded` as a pass
