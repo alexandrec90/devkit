@@ -279,15 +279,18 @@ def reap(
     if removed.returncode == 0:
         return ""
     said = (removed.stderr or "").strip()[-200:]
-    if box_teardown.delete_refused(said) and not tree.path.exists():
-        run(["git", "-C", str(checkout), "worktree", "prune"])
-        return ""
-    if not (tree.path.is_dir() and box_teardown.fallback_applies(tree.path, said)):
+    finished = box_teardown.finish_refused_removal(
+        tree.path,
+        said,
+        lambda: run(["git", "-C", str(checkout), "worktree", "prune"]),
+        remove or box_teardown.force_remove_box,
+    )
+    if finished is None:
         return f"git worktree remove refused: {said}"
-    error, _notes = (remove or box_teardown.force_remove_box)(tree.path)
-    run(["git", "-C", str(checkout), "worktree", "prune"])
     return (
-        f"git worktree remove refused ({said}), and finishing it failed: {error}" if error else ""
+        f"git worktree remove refused ({said}), and finishing it failed: {finished}"
+        if finished
+        else ""
     )
 
 

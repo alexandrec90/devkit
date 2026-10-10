@@ -1777,6 +1777,25 @@ def run_step(git: Git, step: tuple[str, ...], pause: Callable[[float], None] = t
     return completed
 
 
+# The steps that reap a branch. The other half of losing a race: a box reaper deleted the
+# branch between `inspect` and the step, so the step finds nothing to act on.
+BRANCH_REAP_STEPS = (("branch", "-d"), ("branch", "--unset-upstream"))
+
+
+def branch_already_gone(git: Git, step: tuple[str, ...]) -> bool:
+    """Whether `step` reaps a branch git now says does not exist.
+
+    Asked of git rather than read off the error: `--unset-upstream` on a missing branch
+    says "has no upstream information", the same words as on a branch that is there.
+    3f2e8171: a box reaper deleted social-scraper's adoption branch mid-pass, and the
+    sync's `branch -d` failed the scheduled reconcile over a branch already gone.
+    """
+    return (
+        step[:2] in BRANCH_REAP_STEPS
+        and git("rev-parse", "--verify", "--quiet", f"refs/heads/{step[2]}").returncode != 0
+    )
+
+
 def apply_plan(
     name: str,
     path: Path,
@@ -1792,7 +1811,8 @@ def apply_plan(
     off it), so continuing past a failure is how a safe plan turns unsafe. The PR
     is the last thing of all, for the same reason: a PR opened on a branch whose
     push failed points at a ref the remote does not have. A step that lost a race for a
-    ref is run once more (`run_step`) before it counts as failed.
+    ref is run once more (`run_step`) before it counts as failed, and one that reaps a
+    branch another process already deleted (`branch_already_gone`) counts as done.
     """
     result = Applied(name=name, plan=plan)
     if plan.refusal:
@@ -1801,6 +1821,9 @@ def apply_plan(
     for step in plan.steps:
         completed = run_step(git, step, pause)
         rendered = "git " + " ".join(step)
+        if completed.returncode != 0 and branch_already_gone(git, step):
+            result.ran.append(f"{rendered} -- the branch was already deleted")
+            continue
         if completed.returncode != 0:
             result.failed = rendered
             result.error = (completed.stderr or completed.stdout or "").strip()

@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -452,3 +453,28 @@ def fallback_applies(path: Path, error: str) -> bool:
 def delete_refused(error: str) -> bool:
     """Whether `error` is the filesystem refusing a delete, in a spelling seen before."""
     return any(said in error for said in _DELETE_FAILED_SAYS)
+
+
+def finish_refused_removal(
+    path: Path,
+    said: str,
+    prune: Callable[[], object],
+    remove: Callable[[Path], tuple[str, list[str]]] | None = None,
+) -> str | None:
+    """Finish a `git worktree remove` of `path` that failed saying `said`.
+
+    `None` when the refusal is git's own and must stand (`fallback_applies`); otherwise
+    `""` once the tree is gone, or why finishing it failed. Git drops the worktree's record
+    even when deleting its files fails, so a refusal left alone is a directory and a branch
+    that no later `remove` can name. A directory already gone -- delete-pending when git
+    asked -- needs only the record pruned (ad9e1a06). `prune` is `git worktree prune` in
+    the tree's checkout; `remove` defaults to `force_remove_box`.
+    """
+    if delete_refused(said) and not path.exists():
+        prune()
+        return ""
+    if not (path.is_dir() and fallback_applies(path, said)):
+        return None
+    error, _notes = (remove or force_remove_box)(path)
+    prune()
+    return error

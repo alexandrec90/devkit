@@ -1529,6 +1529,76 @@ def test_run_step_reads_a_race_off_stdout_too_and_passes_a_success_straight_thro
     assert clean.calls == [("status",)] and len(paused) == 1, "a success is not rerun"
 
 
+class ReapedGit(FakeGit):
+    """Every branch named in `gone` was deleted by another process after the plan was read."""
+
+    def __init__(self, gone: set[str]):
+        super().__init__()
+        self.gone = gone
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        if args[:3] == ("rev-parse", "--verify", "--quiet") and args[3][len("refs/heads/") :] in (
+            self.gone
+        ):
+            return subprocess.CompletedProcess(["git", *args], 1, "", "")
+        if args[:2] == ("branch", "-d") and args[2] in self.gone:
+            return subprocess.CompletedProcess(
+                ["git", *args], 1, "", f"error: branch '{args[2]}' not found"
+            )
+        if args[:2] == ("branch", "--unset-upstream") and args[2] in self.gone:
+            return subprocess.CompletedProcess(
+                ["git", *args], 128, "", f"fatal: branch '{args[2]}' has no upstream information"
+            )
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+
+def test_a_branch_another_process_already_deleted_is_a_reap_done_not_a_failure():
+    """3f2e8171: a box reaper deleted `agent/auto/devkit-upgrade-v0-11-56-1009` between
+    reconcile's inspection of social-scraper and its `branch -d`, and the pass reported
+    "git refused, the state needs a human" over a branch that was exactly as gone as the
+    plan wanted it. The steps after it still run."""
+    plan = sweep.Plan(
+        steps=(
+            ("branch", "--unset-upstream", "agent/a"),
+            ("branch", "-d", "agent/a"),
+            ("branch", "-d", "agent/b"),
+        ),
+        anchor="",
+    )
+    git = ReapedGit({"agent/a"})
+    result = sweep.apply_plan("proj", Path("."), plan, git=git, pause=lambda _: None)
+    assert result.ok, result.error
+    assert ("branch", "-d", "agent/b") in git.calls
+    assert result.ran == [
+        "git branch --unset-upstream agent/a -- the branch was already deleted",
+        "git branch -d agent/a -- the branch was already deleted",
+        "git branch -d agent/b",
+    ]
+
+
+def test_a_branch_delete_refused_while_the_branch_still_exists_still_fails():
+    """Only a branch git confirms is gone is carried past: `not fully merged` on a branch
+    that is still there is the refusal `-d` exists to make."""
+    git = FakeGit(fail_on="branch -d")
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=lambda _: None)
+    assert not result.ok
+    assert result.failed == "git branch -d gone"
+    assert ("rev-parse", "--verify", "--quiet", "refs/heads/gone") in git.calls
+
+
+def test_branch_already_gone_asks_only_about_branch_reap_steps():
+    git = ReapedGit({"agent/a"})
+    assert sweep.branch_already_gone(git, ("branch", "-d", "agent/a"))
+    assert not sweep.branch_already_gone(git, ("branch", "-d", "agent/b"))
+    assert not sweep.branch_already_gone(git, ("checkout", "agent/a"))
+    assert not sweep.branch_already_gone(git, ("merge", "--ff-only", "origin/main"))
+    assert git.calls == [
+        ("rev-parse", "--verify", "--quiet", "refs/heads/agent/a"),
+        ("rev-parse", "--verify", "--quiet", "refs/heads/agent/b"),
+    ]
+
+
 def test_a_race_lost_twice_still_fails():
     class Always(FakeGit):
         def __call__(self, *args: str):

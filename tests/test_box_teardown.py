@@ -513,3 +513,42 @@ def test_an_empty_box_is_vacated_without_a_word():
 
 def pytest_fail(_seconds: float) -> None:
     raise AssertionError("waited with nothing stopped")
+
+
+def test_finish_refused_removal_leaves_gits_own_refusal_standing(tmp_path):
+    (tmp_path / ".git").write_text("gitdir: x\n", encoding="utf-8")
+    pruned: list[None] = []
+    said = "fatal: contains modified or untracked files, use --force to delete it"
+    finished = box_teardown.finish_refused_removal(
+        tmp_path, said, lambda: pruned.append(None), lambda path: pytest_fail(0)
+    )
+    assert finished is None and pruned == []
+
+
+def test_finish_refused_removal_prunes_a_tree_already_gone(tmp_path):
+    pruned: list[None] = []
+    gone = tmp_path / "tree"
+    said = f"error: failed to delete '{gone}': Invalid argument"
+    finished = box_teardown.finish_refused_removal(gone, said, lambda: pruned.append(None))
+    assert finished == "" and pruned == [None]
+
+
+def test_finish_refused_removal_deletes_a_husk_and_names_a_delete_that_fails(tmp_path):
+    husk = tmp_path / "tree"
+    husk.mkdir()
+    pruned: list[None] = []
+    removed: list[Path] = []
+
+    def remove(path: Path) -> tuple[str, list[str]]:
+        removed.append(path)
+        return "", []
+
+    said = "error: failed to delete: Invalid argument"
+    assert (
+        box_teardown.finish_refused_removal(husk, said, lambda: pruned.append(None), remove) == ""
+    )
+    assert removed == [husk] and pruned == [None]
+    denied = box_teardown.finish_refused_removal(
+        husk, said, lambda: None, lambda path: ("Access is denied", [])
+    )
+    assert denied == "Access is denied"

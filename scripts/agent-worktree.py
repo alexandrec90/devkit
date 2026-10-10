@@ -67,6 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_models
 import agent_tabs
 import agent_worktrees as aw
+import box_teardown
 import devkit_project
 import fix_reports
 import picker_rows
@@ -333,9 +334,18 @@ def remove_one(project: str, source: Path, tree: aw.Tree, forced: bool, runner) 
     argv = ["git", "-C", str(source), "worktree", "remove", tree.path]
     if verdict == aw.FORCE:
         argv.insert(-1, "--force")
-    if runner(argv, check=False).returncode != 0:
-        print(f"  {project}: git refused to remove {tree.name}", file=sys.stderr)
-        return EXIT_FAILED
+    removed = runner(argv, capture_output=True, text=True, check=False)
+    if removed.returncode != 0:
+        # Git drops the record even when the filesystem refused a file, so a refusal left
+        # here is a directory and a branch no later `remove` can name.
+        said = (removed.stderr or "").strip()[-200:]
+        prune = ["git", "-C", str(source), "worktree", "prune"]
+        error = box_teardown.finish_refused_removal(
+            Path(tree.path), said, lambda: runner(prune, check=False)
+        )
+        if error is None or error:
+            print(f"  {project}: could not remove {tree.name}: {error or said}", file=sys.stderr)
+            return EXIT_FAILED
     print(f"  removed {tree.name}")
     if tree.branch:
         gone = runner(

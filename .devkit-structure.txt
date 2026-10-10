@@ -54,7 +54,6 @@ complexity::scripts/worktree-guard.py::redirect_targets = 21
 complexity::scripts/worktree-guard.py::shell_write_targets = 29
 complexity::scripts/worktree-guard.py::switch_targets = 20
 complexity::scripts/worktree.py::apply_new = 16
-complexity::scripts/worktree.py::apply_reap = 17
 complexity::scripts/worktree.py::main = 46
 complexity::scripts/worktree.py::plan_preview = 16
 complexity::scripts/worktree.py::reap_plan = 26

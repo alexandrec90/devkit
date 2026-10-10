@@ -142,6 +142,13 @@ SPAWN_LOCK_PREFIX = "spawn-"
 SPAWN_LOCK_WAIT = 45.0
 SPAWN_LOCK_STALE = 120.0
 
+# Held by `apply_reap` for one box's whole teardown, so a second reaper reads the box
+# after the first is done rather than a tree half removed (3f2e8171). `stale` outlasts a
+# slow `compose down` plus image removal; past `wait` the waiter proceeds as before.
+REAP_LOCK_PREFIX = "reap-"
+REAP_LOCK_WAIT = 300.0
+REAP_LOCK_STALE = 900.0
+
 # Separates the project from the branch topic in a box name. Two hyphens rather than
 # one because project names already contain hyphens (`apt-finder`) and the box name is
 # parsed back apart by `list`. Spelled in `sweep` for the same reason as BOXES_DIR_NAME:
@@ -2758,6 +2765,20 @@ def spawn_lock(
         yield held
 
 
+def reap_lock_name(box: str) -> str:
+    """The lock directory one box's teardown holds. A box name is already path-safe."""
+    return f"{REAP_LOCK_PREFIX}{box}.lock"
+
+
+@contextlib.contextmanager
+def reap_lock(
+    workspace_root: Path, box: str, wait: float = REAP_LOCK_WAIT, stale: float = REAP_LOCK_STALE
+):
+    """Serialise the reapers of one box -- `reconcile`, `reap`, an adoption's cleanup."""
+    with _dir_lock(boxes_root(workspace_root) / reap_lock_name(box), wait, stale) as held:
+        yield held
+
+
 def git_refusal(git: sweep.Git) -> str:
     """`; git refuses the checkout: <why>` when git will not read it at all, else "".
 
@@ -4900,23 +4921,38 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
     teardown gives: the box is destroyed and the slot is reclaimed regardless, and a
     leaked image costs disk rather than work. It does count toward `stack_ok`, because
     "the stack needs a look" is exactly what it means.
+
+    **The whole teardown holds the box's `reap_lock`**, so a second reaper of the same
+    box waits it out (`reaped_elsewhere`) instead of reading the tree half removed.
     """
+    with reap_lock(workspace.parent, plan.box):
+        return _teardown(plan, workspace)
+
+
+def _down_stack(plan: ReapPlan, notes: list[str]) -> bool:
+    """Down the box's stack and delete the images it built, noting each; whether both
+    went cleanly. The image order is `apply_reap`'s docstring's."""
+    images = box_image_tags(compose_config(Path(plan.path), plan.box), plan.box)
+    stack_ok, message = compose_down(Path(plan.path), plan.box)
+    notes.append(f"{'' if stack_ok else '[warn] '}{message}")
+    if not stack_ok:
+        notes.append(
+            f"the box was still removed, but its containers and volumes may survive "
+            f"as project {plan.box} — check `docker compose ls` and prune by hand"
+        )
+        return False
+    if not images:
+        return True
+    images_ok, image_note = remove_images(images)
+    notes.append(f"{'' if images_ok else '[warn] '}{image_note}")
+    return images_ok
+
+
+def _teardown(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
+    """`apply_reap`'s body, run under the box's reap lock."""
     root = workspace.parent
     notes: list[str] = []
-    stack_ok = True
-    if plan.stack_down:
-        images = box_image_tags(compose_config(Path(plan.path), plan.box), plan.box)
-        stack_ok, message = compose_down(Path(plan.path), plan.box)
-        notes.append(f"{'' if stack_ok else '[warn] '}{message}")
-        if not stack_ok:
-            notes.append(
-                f"the box was still removed, but its containers and volumes may survive "
-                f"as project {plan.box} — check `docker compose ls` and prune by hand"
-            )
-        if stack_ok and images:
-            images_ok, image_note = remove_images(images)
-            notes.append(f"{'' if images_ok else '[warn] '}{image_note}")
-            stack_ok = stack_ok and images_ok
+    stack_ok = _down_stack(plan, notes) if plan.stack_down else True
 
     source = root / plan.project
     ran, failed, error = run_steps(source, plan.steps)
@@ -5140,12 +5176,43 @@ def reap_decided(
     fetch: bool,
 ) -> tuple[str, bool, list[str]]:
     """Plan the reap `reconcile` decided on for `box` and `settle` it: `(action, ok,
-    notes)`. A plan that cannot be made is a failed reap, never a skipped one."""
+    notes)`. A plan that cannot be made is a failed reap, never a skipped one -- unless
+    another reaper destroyed the box meanwhile (`unless_reaped_elsewhere`)."""
     try:
         doomed = plan_reap(box, workspace, keep_stack=keep_stack, fetch=fetch, pr=pr)
     except WorktreeError as exc:
-        return REAP, False, [f"[warn] {exc}"]
+        return unless_reaped_elsewhere(workspace.parent, box, (REAP, False, [f"[warn] {exc}"]))
     return settle(doomed)
+
+
+def reaped_elsewhere(workspace_root: Path, box: str) -> bool:
+    """Whether `box` is gone, read once any reaper tearing it down has let go of it."""
+    with reap_lock(workspace_root, box):
+        return box not in live_boxes(workspace_root)
+
+
+def unless_reaped_elsewhere(
+    workspace_root: Path, box: str, outcome: tuple[str, bool, list[str]]
+) -> tuple[str, bool, list[str]]:
+    """`outcome`, unless it is a failed reap of a box another process has since destroyed.
+
+    3f2e8171: a second reaper was removing social-scraper's adoption box while the
+    scheduled pass inspected it, so the pass read the half-removed tree as "cannot
+    resolve origin/HEAD", refused, and reddened over a box gone seconds later. The box
+    being gone is the outcome a reap wants, whoever got there first.
+    """
+    _action, ok, notes = outcome
+    if ok or not reaped_elsewhere(workspace_root, box):
+        return outcome
+    said = "; ".join(notes) or "nothing"
+    return (
+        REAP,
+        True,
+        [
+            "already reaped by another process while this pass read it; this pass's own "
+            f"attempt said: {said}"
+        ],
+    )
 
 
 def settle_reap(
@@ -5164,8 +5231,10 @@ def settle_reap(
     """
     if doomed.refusal:
         # `reconcile_action` already cleared this box, so a refusal here is the two
-        # classifiers disagreeing — report it, never force past it.
-        return HOLD, False, [f"[warn] reap refused: {doomed.refusal}"]
+        # classifiers disagreeing — report it, never force past it. Or a second reaper
+        # was mid-teardown and this one read the half-removed tree.
+        refused = (HOLD, False, [f"[warn] reap refused: {doomed.refusal}"])
+        return unless_reaped_elsewhere(workspace.parent, doomed.box, refused)
     if not apply:
         return REAP, True, []
     return reap_vacated(doomed, workspace, sessions(), engine_down)

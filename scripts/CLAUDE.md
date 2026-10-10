@@ -135,6 +135,10 @@ state a checkout can only reach by surviving the work done in it. A box cut fres
   `origin/<default>` commits (`head_tree_landed`), and the merged PR's `headRefOid`. Every
   unknown reads as *not landed*, and all of it is refused while the box is dirty: a landed
   tree says where the committed work is and nothing about the edits on top of it.
+- **Every reaper destroys a box through `apply_reap`, which holds that box's
+  `reap_lock`.** Reapers run concurrently (`reconcile`, `reap`, an adoption's cleanup), and
+  one reading a box another is tearing down sees a half-removed tree; `reconcile` waits on
+  the lock and reads a box gone by then as reaped (`unless_reaped_elsewhere`, 3f2e8171).
 - **Only a reaper passes `-v` to `compose down`,** scoped with `-p` to the tree's own
   project so it cannot widen to the source project: `reap` for a box, and
   `session_trees.py` for a merged `.claude/worktrees` tree, which refuses a name equal to

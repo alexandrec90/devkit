@@ -506,6 +506,45 @@ def test_a_clean_worktree_is_removed_without_force():
     ]
 
 
+class RefusingRun(FakeRun):
+    """`git worktree remove` fails with `said`; every other call succeeds."""
+
+    def __init__(self, said: str):
+        super().__init__()
+        self.said = said
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append([str(a) for a in argv])
+        code = 1 if [str(a) for a in argv[3:5]] == ["worktree", "remove"] else 0
+        return subprocess.CompletedProcess(argv, code, stdout="", stderr=self.said if code else "")
+
+
+def test_a_removal_the_filesystem_refused_partway_is_finished_and_the_branch_reaped(tmp_path):
+    """2026-10-10: Windows refused one file of a fresh `.venv` (`Invalid argument`). Git
+    had already dropped the worktree's record, so the next `remove` said "no worktree
+    called", and the directory and its branch were left for nobody to find."""
+    husk = tmp_path / "topic"
+    (husk / ".venv").mkdir(parents=True)
+    (husk / ".venv" / "pyvenv.cfg").write_text("home = x\n", encoding="utf-8")
+    run = RefusingRun(f"error: failed to delete '{husk}': Invalid argument")
+    code = agent_worktree.remove_one("devkit", tmp_path, tree(path=str(husk)), False, run)
+    assert code == 0
+    assert not husk.exists()
+    verbs = [call[:2] for call in run.git_args()]
+    assert verbs == [["worktree", "remove"], ["worktree", "prune"], ["branch", "-d"]]
+
+
+def test_a_dirty_tree_git_refuses_is_never_finished_by_hand(tmp_path):
+    kept = tmp_path / "topic"
+    kept.mkdir()
+    (kept / ".git").write_text("gitdir: x\n", encoding="utf-8")
+    run = RefusingRun("fatal: 'topic' contains modified or untracked files, use --force")
+    code = agent_worktree.remove_one("devkit", tmp_path, tree(path=str(kept)), False, run)
+    assert code == 1
+    assert kept.is_dir()
+    assert [call[:2] for call in run.git_args()] == [["worktree", "remove"]]
+
+
 def test_a_detached_worktree_leaves_no_branch_to_delete():
     run = FakeRun()
     agent_worktree.remove_one("devkit", Path("C:/ws/devkit"), tree(branch=""), False, run)
