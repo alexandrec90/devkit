@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import sys
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_findings
+import fix_verify
 import harness_triage as triage
 import sweep
 
@@ -244,6 +246,35 @@ def test_a_finding_that_names_a_branch_is_filed_settled_against_it(tmp_path):
     assert settled.fields["pr"] == "agent/y-0926"
     assert "went on to ship agent/y-0926" in settled.fields["note"]
     assert "settles_with" not in dict(complaint.fields()), "not a ledger field"
+
+
+def test_a_settled_finding_is_held_to_merges_since_its_work_not_since_its_filing(tmp_path):
+    """f0308756: the pass filed 1008-2's "fixed on this branch" line five minutes after
+    that branch's #578 merged. Resolved as of the filing, the merge read as an older PR
+    from a reused name (`fix_verify.relevant`), and the group was reopened two days on."""
+    now = _dt.datetime.now(_dt.UTC)
+    worked = (now - _dt.timedelta(hours=6)).isoformat(timespec="seconds")
+    merged = fix_verify.Pr("MERGED", (now - _dt.timedelta(minutes=5)).isoformat(), "u/578")
+    line = finding(kind="reported", detail="flaky", settles_with="agent/x-1008", since=worked)
+    fix_findings.record_all([line], [], tmp_path)
+    items = triage.load(tmp_path)
+    [settled] = [i for i in items if i.event == triage.RESOLVED_EVENT]
+    assert triage.resolved_at(settled) == worked
+    later = now + fix_verify.UNLANDED_AFTER + _dt.timedelta(hours=1)
+    outcome = fix_verify.verify(items, lambda where, what: [merged], tmp_path / "c.json", later)
+    assert outcome.reopen == [], "the merge after the work is the fix"
+    unstated = finding(kind="reported", detail="other", settles_with="agent/x-1008")
+    fix_findings.record_all([unstated], [], tmp_path)
+    assert triage.RESOLVED_FIELD not in triage.load(tmp_path)[-1].fields, "no since, none"
+
+
+def test_stamp_of_is_a_ledger_stamp_or_nothing():
+    assert fix_findings.stamp_of("2026-10-08T13:55:19Z") == "2026-10-08T13:55:19+00:00"
+    assert fix_findings.stamp_of("2026-10-08T13:55:19.512+02:00") == "2026-10-08T11:55:19+00:00"
+    assert fix_findings.stamp_of("2026-10-08T13:55:19") == "2026-10-08T13:55:19+00:00"
+    assert fix_findings.stamp_of("yesterday") == fix_findings.stamp_of("") == ""
+    assert fix_findings.stamp_of(None) == ""
+    assert fix_findings.stamp_of(1_000_000_000.0) == "2001-09-09T01:46:40+00:00", "an mtime"
 
 
 def test_settle_resolves_only_an_open_row_a_branch_names(tmp_path):

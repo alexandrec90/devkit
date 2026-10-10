@@ -151,6 +151,18 @@ def test_a_line_its_session_fixed_on_this_branch_is_filed_settled_by_that_branch
     assert still_open.detail == "reported: no .venv", "only what nobody fixed stays open"
 
 
+def test_a_settled_line_is_settled_as_of_when_its_session_wrote_it(ctx, monkeypatch):
+    """f0308756: filed after the tree's PR had merged, the line's resolution discounted
+    that merge as older than itself and was reopened. The file's mtime is when the
+    session said it fixed it, which the PR shipping that fix follows."""
+    path = tree(ctx, monkeypatch, friction="- x; fixed on this branch\n- no .venv\n")
+    os.utime(path / fix_reports.FRICTION_FILE, (1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: True)
+    _, journal = close(ctx)
+    since = {f.detail: f.since for f in journal.findings if f.kind == "reported"}
+    assert since == {"x; fixed on this branch": "2001-09-09T01:46:40+00:00", "no .venv": ""}
+
+
 def test_a_long_line_keeps_the_fixed_on_this_branch_it_ends_with(ctx, monkeypatch):
     """2d0bc76f: a 460-character line ended "..., fixed on this branch", the friction reader
     cut every line to 400 before anything asked, and the group was filed open against a

@@ -42,7 +42,7 @@ import re
 import sys
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -193,23 +193,31 @@ def _file_friction(
     # Where the lines will be once filed away below: naming the file about to be renamed
     # gave every friction row a dead path.
     kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
+    settled = _settlement(tree) if out else {}
     for line in tree.friction:
-        evidence = str(tree.path / kept)
+        reported = Finding(
+            "reported",
+            tree.project,
+            line,
+            evidence=str(tree.path / kept),
+            event=fix_findings.FRICTION,
+        )
         # A line its session fixed here is settled by this branch, not a new job for a
         # fixer -- once the fix is on the branch, which the words alone do not show.
-        settles = tree.branch if out and fix_reports.fixed_here(line) else ""
-        journal.add(
-            Finding(
-                "reported",
-                tree.project,
-                line,
-                evidence=evidence,
-                event=fix_findings.FRICTION,
-                settles_with=settles,
-            )
-        )
+        journal.add(replace(reported, **settled) if fix_reports.fixed_here(line) else reported)
     if tree.friction and ctx.writes:
         fix_reports.file_away(tree.path, fix_reports.FRICTION_FILE)
+
+
+def _settlement(tree: fix_reports.Tree) -> dict[str, str]:
+    """What settles a "fixed on this branch" line of `tree`'s: its branch, as of when the
+    session wrote the file -- this filing can follow the PR's merge, which a resolution
+    dated by the filing would discount as a reused name's (f0308756)."""
+    try:
+        written = fix_findings.stamp_of((tree.path / fix_reports.FRICTION_FILE).stat().st_mtime)
+    except OSError:
+        written = ""
+    return {"settles_with": tree.branch, "since": written}
 
 
 def went_out(tree: Path, runner=ship_intent.run_quiet) -> bool:
