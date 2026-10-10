@@ -29,8 +29,9 @@ import sweep
 # names, or an object carrying the same list under `projects` plus the knobs below.
 RC_SETTING = "devkit.remoteControl"
 
-# Spelled in place of the list: every checkout in the workspace file that is not on hold,
-# read afresh on every fire. A list is a second copy of the `folders` registry, so a
+# Spelled in place of the list: every checkout in the workspace file, read afresh on every
+# fire. `devkit.onHold` is deliberately not subtracted: the phone matches the machine's
+# workspace, and a hold pauses adoption and box reporting, not reachability. A list is a second copy of the `folders` registry, so a
 # project plugged in later got no server until someone remembered to add it here too.
 # Read off the file the job is handed -- the live one is `machine_view`, so it is the
 # projects checked out on *this* machine, never one registered only on another PC.
@@ -162,10 +163,8 @@ def parse_config(text: str) -> Config:
         "devkit.remoteControl": ["devkit", "carameli"]
         "devkit.remoteControl": {"projects": ["devkit"], "idleMinutes": 30}
 
-    Either list may be `ALL_PROJECTS` instead, which expands to the workspace's folders
-    minus those on hold. On hold is subtracted *here* rather than left to `selected`:
-    there it is a refusal reported on every fire, which is right for a name someone
-    wrote down and noise for one nobody did.
+    Either list may be `ALL_PROJECTS` instead, which expands to every one of the
+    workspace's folders.
 
     Malformed input yields an empty `Config`, matching `sweep.parse_workspace` and
     `sweep.on_hold`: this job's failure mode for a broken workspace file is to serve
@@ -189,8 +188,7 @@ def parse_config(text: str) -> Config:
 
     names = raw.get("projects")
     if names == ALL_PROJECTS:
-        held = sweep.on_hold(text)
-        names = [name for name in sweep.parse_workspace(text) if name not in held]
+        names = sweep.parse_workspace(text)
     projects = (
         tuple(name for name in names if isinstance(name, str) and name)
         if isinstance(names, list)
@@ -211,26 +209,21 @@ def parse_config(text: str) -> Config:
     )
 
 
-def selected(
-    config: Config, known: Sequence[str], held: frozenset[str]
-) -> tuple[list[str], list[str]]:
+def selected(config: Config, known: Sequence[str]) -> tuple[list[str], list[str]]:
     """`(serve, notes)` -- the projects to serve, and a line for each one refused.
 
     A name that is not in the workspace is reported rather than passed over: the setting
     is hand-edited, and a typo that silently serves nothing looks exactly like a machine
     where the job is working.
 
-    A project on hold is refused for the reason `upgrade-project.py` refuses it -- a
-    paused project is one nothing should be in flight for, and a phone-reachable server
-    is an invitation to start something.
+    `devkit.onHold` refuses nothing here. It used to, and a held project vanished from
+    the phone with no line in the artifact; the phone matches the machine's workspace.
     """
     serve: list[str] = []
     notes: list[str] = []
     for name in config.projects:
         if name not in known:
             notes.append(f"{name}: not a checkout in the workspace file -- skipped")
-        elif name in held:
-            notes.append(f"{name}: on hold (workspace `{sweep.ON_HOLD_SETTING}`) -- skipped")
         else:
             serve.append(name)
     return serve, notes

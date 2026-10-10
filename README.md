@@ -1057,10 +1057,10 @@ file has to be merged back by hand before anything can publish again:
 "devkit.remoteControl": ["devkit", "carameli"]
 ```
 
-or `"all"` in place of the list, which serves every project in `folders` that is not on
-hold and re-reads them on every fire, so a project plugged in later gets a server with no
-edit here. That is every project *checked out on this machine*, because the live file is
-rendered per machine. Or, with the knobs:
+or `"all"` in place of the list, which serves every project in `folders` -- on hold or
+not -- and re-reads them on every fire, so a project plugged in later gets a server with
+no edit here. That is every project *checked out on this machine*, because the live file
+is rendered per machine. Or, with the knobs:
 
 ```jsonc
 "devkit.remoteControl": {
