@@ -34,9 +34,9 @@ Usage:  python docker-maint.py {up|down|stop-idle|restart-engine|fix|prune}
         [--generic] [args...]
         (run with cwd set to the workspace folder; --generic skips delegation)
 
-`prune --idle-only` is the unattended spelling: it normally does nothing while
-containers are running, because the half that actually returns disk to Windows needs
-`wsl --shutdown`. Its one exception is a disk already low enough that `worktree.py
+`prune --idle-only` is the unattended spelling: it always prunes inside the VM, but
+normally does not compact while containers are running, because the half that actually
+returns disk to Windows needs `wsl --shutdown`. Its one exception is a disk already low enough that `worktree.py
 reconcile` has started destroying boxes with open PRs, where waiting for an idle
 machine is the more expensive mistake -- `prune_verdict` owns that call. See
 `generic_prune`. `scripts/install-docker-prune.py` is what
@@ -539,20 +539,25 @@ def generic_prune(
     kills every running container and every other WSL distro with them.
 
     `idle_only` is that distinction made operable, and it exists for the scheduled
-    caller: it waits for a machine with nothing running rather than stopping containers
-    at 4am to reclaim disk. `prune_verdict` owns the one case where it stops waiting --
-    a disk low enough that the box tier has started destroying open-PR checkouts -- and
-    its docstring owns why that reverses the trade. Interactive callers leave the flag
-    off entirely: a human choosing this from the task list has already decided.
+    caller: it gates **only the compaction**, waiting for a machine with nothing running
+    rather than stopping containers at 4am to reclaim disk. The first half runs against
+    a live engine and stops nothing, so it runs regardless -- the gate used to cover
+    both, and on a machine whose collectors never stop it skipped every night while
+    19 GB of build cache sat reclaimable (2026-10-09). `prune_verdict` owns the one case
+    where the compaction stops waiting -- a disk low enough that the box tier has
+    started destroying open-PR checkouts -- and its docstring owns why that reverses
+    the trade. Interactive callers leave the flag off entirely: a human choosing this
+    from the task list has already decided.
     """
+    compact_ok = True
     if idle_only:
-        proceed, why = prune_verdict(running_containers(), free_gb())
-        if not proceed:
-            print(banner(f"SKIPPED -- {why}"))
-            print("  Compacting needs `wsl --shutdown`, which would stop them.")
-            print("  Run without --idle-only to prune and compact anyway.")
+        running = running_containers()
+        if running < 0:
+            # The prune itself needs the engine, so there is nothing safe to do at all.
+            print(banner("SKIPPED -- the engine could not be asked"))
             return 0
-        print(f"  Proceeding: {why}")
+        compact_ok, why = prune_verdict(running, free_gb())
+        print(f"  {'Proceeding' if compact_ok else 'Pruning only, not compacting'}: {why}")
     print(banner("Docker Prune + Compact VHDX (generic)"))
     if not docker_info_ok():
         print("  Docker is not responding; starting it first.")
@@ -579,6 +584,11 @@ def generic_prune(
     # stopping every container would buy nothing (`docker_vhdx` has the history).
     if not elevated():
         print(banner("PRUNED INSIDE THE VM -- NOT COMPACTED (not elevated)"))
+        return 0
+    if not compact_ok:
+        print(banner("PRUNED INSIDE THE VM -- NOT COMPACTED (containers are up)"))
+        print("  Compacting needs `wsl --shutdown`, which would stop them.")
+        print("  Run without --idle-only to compact anyway.")
         return 0
     compacted = docker_vhdx.compact(run, stop_docker)
     start_docker()
