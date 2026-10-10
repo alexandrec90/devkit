@@ -79,6 +79,10 @@ class Finding:
     # A branch whose merge settles it: the finding is filed already resolved against it,
     # and `fix_verify` reopens it if that branch never lands. Not a ledger field.
     settles_with: str = ""
+    # When the work that settles it was done (`stamp_of`), "" when unknown: the
+    # resolution is held to that branch's merges from then, not from the filing, which
+    # follows the ship and can follow the merge (f0308756). Not a ledger field.
+    since: str = ""
 
     @property
     def headline(self) -> str:
@@ -144,6 +148,11 @@ def settle(written: list[Finding], devkit_dir: Path) -> list[str]:
     it then shipped; a fixer's own friction line saying "fixed on this branch" is the same
     case (`fix_reports.fixed_here`). Resolved-pending-merge rather than dropped: `fix_verify` reopens the
     row if the branch never becomes a merged PR, so the ones nobody fixed come back.
+
+    Resolved as of `Finding.since` when known: the pass files a line after its tree
+    shipped, often after its PR merged, and `fix_verify.relevant` discounts a branch's
+    merge from before the resolution as a reused name's -- f0308756 was filed five
+    minutes after #578 merged its fix, and reopened two days on.
     """
     pending = [f for f in written if f.settles_with]
     if not pending:
@@ -155,8 +164,26 @@ def settle(written: list[Finding], devkit_dir: Path) -> list[str]:
         ids = [item.id for item in open_now if item.signature == sig]
         if ids:
             note = f"the session it concerns went on to ship {finding.settles_with}"
-            refs += triage.resolve(ids[:1], note, pr=finding.settles_with, root=devkit_dir)
+            refs += triage.resolve(
+                ids[:1], note, pr=finding.settles_with, root=devkit_dir, resolved=finding.since
+            )
     return refs
+
+
+def stamp_of(moment: object) -> str:
+    """A ledger stamp (UTC, to the second) for an ISO time or an epoch mtime; "" for
+    anything unreadable. A naive time is read as UTC, as `fix_verify` reads one."""
+    try:
+        if isinstance(moment, int | float):
+            when = _dt.datetime.fromtimestamp(moment, _dt.UTC)
+        elif isinstance(moment, str) and moment.strip():
+            when = _dt.datetime.fromisoformat(moment.strip())
+        else:
+            return ""
+    except (ValueError, OverflowError, OSError):
+        return ""
+    when = when if when.tzinfo else when.replace(tzinfo=_dt.UTC)
+    return when.astimezone(_dt.UTC).isoformat(timespec="seconds")
 
 
 # git's dubious-ownership refusal, by any of the lines it prints: the refusal, the owner,

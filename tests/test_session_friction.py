@@ -1804,6 +1804,19 @@ def test_a_complaint_carries_the_task_branch_its_session_shipped_on(tmp_path):
     assert asked == [cwd], "no complaint, no git call"
 
 
+def test_a_complaint_is_settled_as_of_when_it_was_said(tmp_path):
+    """f0308756: a row harvested after its session's PR merged was resolved as of the
+    harvest, so that merge read as older than the fix and the group was reopened."""
+    said = user("why did you run the whole suite again?", timestamp="2026-10-08T13:00:00.5Z")
+    chunk = st.Chunk(((1, user("fix it")), (2, said)), 0)
+    cwd = str(tmp_path / "carameli")
+    [found] = sf.session_findings(tmp_path / "s.jsonl", chunk, cwd, tmp_path, lambda c: "agent/y")
+    assert (found.settles_with, found.since) == ("agent/y", "2026-10-08T13:00:00+00:00")
+    bare = st.Chunk(((1, user("fix it")), (2, user("why did you run the whole suite again?"))), 0)
+    [unknown] = sf.session_findings(tmp_path / "s.jsonl", bare, cwd, tmp_path, lambda c: "x/y")
+    assert unknown.since == "", "no timestamp, the filing stands"
+
+
 @pytest.mark.parametrize(
     "code, out, branch",
     [(0, "agent/x-0926\n", "agent/x-0926"), (0, "main\n", ""), (0, "\n", ""), (128, "", "")],

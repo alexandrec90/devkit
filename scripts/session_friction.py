@@ -1130,6 +1130,9 @@ def session_findings(
     project = harness_events.project_name(Path(cwd))
     found = judged(st.events(path, chunk.rows), cwd, workspace_root)
     branch = branch_of(cwd) if any(cls in SETTLED_BY_THE_SESSION for cls, _, _ in found) else ""
+    # When each settled row was said: held to its branch's merges from then, since the
+    # harvest can follow the merge (f0308756).
+    said = {line: row.get("timestamp") for line, row in chunk.rows if isinstance(row, dict)}
     return [
         fix_findings.Finding(
             cls,
@@ -1140,6 +1143,9 @@ def session_findings(
             event=fix_findings.FRICTION,
             agent=agent,
             settles_with=branch if cls in SETTLED_BY_THE_SESSION else "",
+            since=fix_findings.stamp_of(said.get(event.line))
+            if branch and cls in SETTLED_BY_THE_SESSION
+            else "",
         )
         for cls, what, event in found
     ]
