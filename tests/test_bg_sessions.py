@@ -11,16 +11,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import bg_sessions
 
 # As `claude agents --json` (2.1.296) prints them: an interactive row carries `status`
-# and a background row only `state` -- the fixture once gave background rows both.
+# and a background row `state`, with a `pid` while its process lives.
 ROWS = [
     {
         "id": "a1",
+        "pid": 101,
         "kind": "background",
         "state": "done",
         "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x",
     },
     {
         "id": "b2",
+        "pid": 102,
         "kind": "background",
         "state": "working",
         "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x",
@@ -33,6 +35,7 @@ ROWS = [
     },
     {
         "id": "d4",
+        "pid": 104,
         "kind": "background",
         "state": "blocked",
         "cwd": "C:\\ws\\carameli\\.claude\\worktrees\\y",
@@ -108,6 +111,25 @@ def test_in_tree_is_every_session_in_the_tree_or_under_it_and_nothing_beside_it(
 
 def test_only_an_idle_background_session_is_stoppable():
     assert [r["id"] for r in ROWS if bg_sessions.stoppable(r)] == ["a1", "d4"]
+
+
+def test_a_listed_session_with_no_process_is_never_stopped():
+    """d95eb347: `claude stop c476bac3` refused twice with "couldn't confirm c476bac3 was
+    stopped", read as a session holding memory. Its row, as `claude agents --json` gave
+    it on 2026-10-09, has no `pid` and no `status`: no process to stop, and so none
+    holding memory. The pass never asks."""
+    row = {
+        "id": "c476bac3",
+        "cwd": "C:\\Users\\alexa\\vs-code\\devkit\\.claude\\worktrees\\fix-pass-rescue-1008-1730",
+        "kind": "background",
+        "name": "devkit/fix-pass-rescue-1008-1730",
+        "state": "blocked",
+    }
+    assert not bg_sessions.alive(row)
+    assert not bg_sessions.stoppable(row)
+    assert bg_sessions.finished_in([row], [row["cwd"]]) == []
+    assert bg_sessions.alive({**row, "pid": 6704}), "the same row while its process lives"
+    assert bg_sessions.alive({"kind": "interactive", "status": "idle"}), "a person's is"
 
 
 def test_stop_is_false_where_claude_refuses_or_is_missing():

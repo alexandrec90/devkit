@@ -47,9 +47,9 @@ def finished_in(rows: Iterable[dict], trees: Iterable[str]) -> list[dict]:
 
 
 # A background row's `state`s that mean nothing is in flight. `claude agents --json`
-# gives an interactive row `status` (`idle`/`busy`) and a background row only `state`, so
-# reading `status` alone saw no background session idle, or busy, ever: c476bac3 sat
-# `blocked` a day in a finished tree, holding memory a devkit fixer was then held for.
+# gives an interactive row `status` (`idle`/`busy`); a background row always carries
+# `state`, and `status` and `pid` only while its process lives (`alive`), so reading
+# `status` alone saw no 2.1.296 background row idle, or busy, ever.
 IDLE_STATES = frozenset({"idle", "done", "blocked"})
 
 
@@ -63,9 +63,17 @@ def status(row: dict) -> str:
     return "idle" if str(row["state"]) in IDLE_STATES else "busy"
 
 
+def alive(row: dict) -> bool:
+    """Whether a process stands behind `row`. `claude agents --json` keeps listing a
+    background session whose process has gone, with no `pid` (c476bac3, 2026-10-09):
+    it holds no memory and no directory, and `claude stop` cannot confirm stopping it."""
+    return row.get("kind") != "background" or "pid" in row
+
+
 def stoppable(row: dict) -> bool:
-    """Whether the pass may stop this session: a background one with nothing in flight."""
-    return row.get("kind") == "background" and status(row) == "idle"
+    """Whether the pass may stop this session: a live background one with nothing in
+    flight. One with no process is never asked (d95eb347): there is nothing to stop."""
+    return row.get("kind") == "background" and alive(row) and status(row) == "idle"
 
 
 def in_tree(rows: Iterable[dict], tree: object) -> list[dict]:

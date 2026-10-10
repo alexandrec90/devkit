@@ -384,6 +384,7 @@ DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/fix-prs.py": "scripts/ship_intent.py",
     "scripts/gate_evidence.py": "scripts/sweep.py",
     "scripts/broken_pr_menu.py": "scripts/sweep.py",
+    "scripts/session_trees.py": "scripts/sweep.py",
 }
 
 SPAWN_ATTRS = frozenset({"run", "Popen", "call", "check_call", "check_output"})

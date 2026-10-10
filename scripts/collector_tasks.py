@@ -60,7 +60,7 @@ SCHTASKS_TIMEOUT = 60
 # The re-ask after a `compose up` failed (`needs_failed`): an engine that answers at
 # all answers `docker info` in seconds.
 PROBE = 30
-# How long a fire whose `compose up` failed fast on a silent engine waits for it, and how
+# How long a fire whose `compose up` failed or timed out on a silent engine waits for it, and how
 # often it asks, before trying once more (`start_needs`). The collectors pass restarts a
 # wedged Docker Desktop (`collectors.revive_engine`), which took four to five minutes on
 # 2026-10-08; a fire landing inside one failed at once, "docker compose up failed for db",
@@ -397,14 +397,17 @@ def start_needs(
 ) -> tuple[int, str, tuple[int, str] | None]:
     """`compose up --wait` of `needs`: `(exit code, output, the engine's last answer)`.
 
-    A fast failure is asked whether the engine answers. A silent one is waited for
+    A failed start is asked whether the engine answers. A silent one is waited for
     (`await_engine`) and the start tried once more once it answers: a fire landing in a
-    Docker Desktop restart is a fire minutes late, not one lost. The engine's answer is
-    None where nobody asked -- a start that went through or timed out.
+    Docker Desktop restart is a fire minutes late, not one lost. That holds for a start
+    that timed out as much as for one that failed fast: 2026-10-09 the 21:00 fire's
+    `up --wait db` hung its whole `NEEDS_TIMEOUT` on an engine the collectors pass was
+    resetting, which answered two minutes after the fire gave up (37e9acee). The engine's
+    answer is None where nobody asked -- a start that went through.
     """
     up = ["docker", "compose", "up", "-d", "--wait", *needs]
     code, out = run(up, checkout, NEEDS_TIMEOUT)
-    if code in (0, TIMED_OUT):
+    if code == 0:
         return code, out, None
     engine = probe(checkout, run)
     if engine[0] == 0:
@@ -469,7 +472,9 @@ def fire(
     """Run the collector once. `(exit code, log lines)`; the code is the command's own.
 
     The command is told when the scheduler fired (`FIRED_AT`) -- `fired`, now when None
-    -- which is taken before the `needs` come up, since they are part of the cycle.
+    -- which is taken before the `needs` come up, since they are part of the cycle. The
+    command's bound is what is left of `FIRE_TIMEOUT` once they are up, so a start that
+    waited out an engine restart still ends inside the task's `TIME_LIMIT`.
 
     A `needs` that cannot start because Docker Desktop is installing an update
     (`desktop_updating`) skips this run, exit 0: the update is Docker's maintenance, the
@@ -477,6 +482,7 @@ def fire(
     outlasts its `HOLD_LIMIT`.
     """
     stamp = fired_env(fired or _dt.datetime.now(_dt.UTC))
+    began = _time.monotonic()
     lines = [f"command: {' '.join(collector.command)}", f"cwd: {checkout}"]
     if not (checkout / ".git").exists():
         return 2, [*lines, f"no checkout at {checkout} -- nothing to run"]
@@ -494,7 +500,8 @@ def fire(
             failed = needs_failed(collector.needs, checkout, code, out, run, engine)
             return code, [*lines, *failed]
         lines.append(f"started: {', '.join(collector.needs)}")
-    code, out = run(resolve(collector.command), checkout, FIRE_TIMEOUT, stamp)
+    left = FIRE_TIMEOUT - int(_time.monotonic() - began)
+    code, out = run(resolve(collector.command), checkout, left, stamp)
     output = out.splitlines()
     if len(output) > LOG_LINES:
         output = [f"... {len(output) - LOG_LINES} earlier lines dropped", *output[-LOG_LINES:]]

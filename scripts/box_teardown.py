@@ -172,9 +172,10 @@ def vacate(
     An idle background session is the pass's own finished fixer: it is stopped, which
     keeps its conversation (`claude attach` reopens it). Anything else -- a session still
     working, a person's interactive one -- is an occupant, and the box is left whole for
-    it: `occupants` names each, and nothing is stopped while one remains.
+    it: `occupants` names each, and nothing is stopped while one remains. A listed
+    session with no process (`bg_sessions.alive`) stands nowhere and is neither.
     """
-    inside = bg_sessions.in_tree(sessions, path)
+    inside = [row for row in bg_sessions.in_tree(sessions, path) if bg_sessions.alive(row)]
     occupants = [_describe(row) for row in inside if not bg_sessions.stoppable(row)]
     if occupants:
         return occupants, []
