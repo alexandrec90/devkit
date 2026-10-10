@@ -190,7 +190,8 @@ def vacate(
 
 
 def _describe(row: dict) -> str:
-    return f"{row.get('kind', '?')} session {row.get('id') or '?'} ({row.get('status', '?')})"
+    said = row.get("status") or row.get("state") or "?"
+    return f"{row.get('kind', '?')} session {row.get('id') or '?'} ({said})"
 
 
 def _make_deletable(target: str) -> None:

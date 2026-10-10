@@ -87,7 +87,7 @@ def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path)
         "ship_one",
         lambda i, p, b: shipped.append(i.branch) or ship_intent.Outcome(i, "shipped", "u"),
     )
-    listed = [{"kind": "background", "status": "busy", "cwd": str(busy)}]
+    listed = [{"kind": "background", "state": "working", "cwd": str(busy)}]
     listed.append({"kind": "interactive", "status": "busy", "cwd": str(tmp_path / "idle")})
     monkeypatch.setattr(fix_pass.fix_loop.bg_sessions, "listed", lambda runner: listed)
     monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", FIXERS_WORKING)
@@ -513,9 +513,10 @@ def test_a_failed_installer_is_filed_for_the_devkit_session(world, monkeypatch, 
     assert len(journal.findings) == 1
 
 
-def test_a_pass_whose_code_moved_under_it_sends_no_one_and_asks_to_be_rerun(world):
+def test_a_pass_whose_code_moved_under_it_sends_no_one_and_asks_to_be_rerun(world, monkeypatch):
     """carameli #395 went to a devkit session because #407, which reroutes it, merged
     21s after the watchdog fast-forwarded the checkout: the pass routed with old code."""
+    monkeypatch.setenv(fix_pass.WINDOW_ENV, "1500")
     world["failures"] = [failure()]
     world["moved"] = "be69035aa..6276e81bb"
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 75
@@ -523,6 +524,19 @@ def test_a_pass_whose_code_moved_under_it_sends_no_one_and_asks_to_be_rerun(worl
     assert "held     carameli #412 -- devkit's scripts/ moved be69035aa..6276e81bb" in artifact(
         world
     )
+
+
+def test_a_moved_pass_asks_for_a_rerun_only_of_the_watchdog_that_reruns_it():
+    """50dfb707: a click on *Agent: Fix What Is Red* merged devkit's own release PR, held
+    every decision as moved, and exited 75 -- which `log-wrap` filed as the task failing,
+    with a cause that only pointed at the record. Only the watchdog reruns on it; to any
+    other caller the held lines are the report, and a step that failed still says so."""
+    watched = {fix_pass.WINDOW_ENV: "1500"}
+    assert fix_pass.exit_code("a..b", 0, failed_steps=False, env=watched) == 75
+    assert fix_pass.exit_code("a..b", 0, failed_steps=False, env={}) == 0
+    assert fix_pass.exit_code("a..b", 0, failed_steps=True, env={}) == 1
+    assert fix_pass.exit_code("", 0, failed_steps=False, env=watched) == 0
+    assert fix_pass.exit_code("", 2, failed_steps=True, env={}) == 2
 
 
 def test_plan_mode_never_asks_whether_the_code_moved(world, monkeypatch):

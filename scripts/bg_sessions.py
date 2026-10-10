@@ -46,9 +46,26 @@ def finished_in(rows: Iterable[dict], trees: Iterable[str]) -> list[dict]:
     return [row for row in rows if stoppable(row) and _key(str(row.get("cwd", ""))) in wanted]
 
 
+# A background row's `state`s that mean nothing is in flight. `claude agents --json`
+# gives an interactive row `status` (`idle`/`busy`) and a background row only `state`, so
+# reading `status` alone saw no background session idle, or busy, ever: c476bac3 sat
+# `blocked` a day in a finished tree, holding memory a devkit fixer was then held for.
+IDLE_STATES = frozenset({"idle", "done", "blocked"})
+
+
+def status(row: dict) -> str:
+    """`idle` or `busy` for `row`, from its `status` or else its `state`; "" when it has
+    neither. A state not in `IDLE_STATES` is busy: never stopped, never raced."""
+    if "status" in row:
+        return str(row["status"])
+    if "state" not in row:
+        return ""
+    return "idle" if str(row["state"]) in IDLE_STATES else "busy"
+
+
 def stoppable(row: dict) -> bool:
     """Whether the pass may stop this session: a background one with nothing in flight."""
-    return row.get("kind") == "background" and row.get("status") == "idle"
+    return row.get("kind") == "background" and status(row) == "idle"
 
 
 def in_tree(rows: Iterable[dict], tree: object) -> list[dict]:
@@ -71,7 +88,7 @@ def working(rows: Iterable[dict], kinds: tuple[str, ...] = ()) -> frozenset[str]
     return frozenset(
         _key(str(row.get("cwd", "")))
         for row in rows
-        if row.get("status") == "busy" and (not kinds or row.get("kind") in kinds)
+        if status(row) == "busy" and (not kinds or row.get("kind") in kinds)
     )
 
 
