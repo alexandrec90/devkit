@@ -795,6 +795,25 @@ def test_the_streamed_spawn_is_window_less_and_hands_down_real_streams(monkeypat
     assert seen["creationflags"] == tasks.NO_WINDOW and seen["stdout"] is handle
 
 
+def test_inherited_streams_names_only_streams_with_a_file_descriptor(monkeypatch, tmp_path):
+    """None under `pythonw.exe` and a capture object under pytest both mean nothing to
+    hand down; a real file is handed down under its own key."""
+
+    class Captured:
+        def fileno(self):
+            raise OSError("not a real descriptor")
+
+    handle = (tmp_path / "out.txt").open("w", encoding="utf-8")
+    try:
+        monkeypatch.setattr(tasks.sys, "stdout", handle)
+        monkeypatch.setattr(tasks.sys, "stderr", Captured())
+        assert tasks.inherited_streams() == {"stdout": handle}
+        monkeypatch.setattr(tasks.sys, "stdout", None)
+        assert tasks.inherited_streams() == {}
+    finally:
+        handle.close()
+
+
 def test_the_streamed_spawn_reports_a_missing_program_as_127(tmp_path):
     assert tasks.stream(["definitely-not-a-program-here"], tmp_path) == 127
 
