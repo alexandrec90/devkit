@@ -655,6 +655,98 @@ def test_the_backlog_is_persisted_as_an_artifact(tmp_path):
     assert written.read_text(encoding="utf-8") == "body\n"
 
 
+# --- groups a dispatched session holds -----------------------------------------
+
+
+def _handed(root, name: str, text: str):
+    """A dispatched tree under `root` holding `text` as the backlog the pass handed it."""
+    tree = root / ".claude" / "worktrees" / name
+    slot = tree / "logs" / "gate" / "devkit-ledger-main"
+    slot.mkdir(parents=True)
+    (slot / triage.ARTIFACT.name).write_text(text, encoding="utf-8")
+    return tree
+
+
+def test_handed_ids_reads_every_head_and_every_recurrence_off_a_rendered_backlog():
+    a = _line("agent-report", stamp=_STAMPS[0], message="same")
+    b = _line("agent-report", stamp=_STAMPS[1], message="same")
+    c = _line("session-friction", stamp=_STAMPS[0], detail="other")
+    text = triage.render(triage.open_items(triage.read_items("\n".join([a, b, c]))))
+    assert triage.handed_ids(text) == {triage.item_id(a), triage.item_id(b), triage.item_id(c)}
+    assert triage.handed_ids("  detail mentions [abcd1234] in passing\n") == set()
+
+
+def test_a_group_a_live_session_was_sent_at_is_in_hand_and_says_where(tmp_path):
+    """a6c2b36e: a supervisor read the backlog fourteen minutes after the pass sent
+    1010-7 at 62606423, saw it open, and fixed it a second time on another branch."""
+    a = _line("session-friction", stamp=_STAMPS[0], detail="poll noise")
+    b = _line("session-friction", stamp=_STAMPS[1], detail="poll noise")
+    other = _line("session-friction", stamp=_STAMPS[0], detail="not handed")
+    first = triage.render(triage.open_items(triage.read_items(a)))
+    busy = _handed(tmp_path, "fix-harness-ledger-1010-7", first)
+    gone = _handed(
+        tmp_path,
+        "fix-harness-ledger-1010-6",
+        triage.render(triage.open_items(triage.read_items(other))),
+    )
+    held = triage.held_groups(tmp_path, live=lambda tree: tree == busy, own=tmp_path / "x")
+    assert held == {triage.item_id(a): busy}, "a quiet tree holds nothing"
+    assert gone not in held.values()
+    # A later recurrence still reads as the group the session was sent at.
+    text = triage.render(triage.open_items(triage.read_items(f"{a}\n{b}\n{other}")), held=held)
+    blocks = text.split("\n\n")
+    assert f"IN HAND at {busy}" in next(blk for blk in blocks if "poll noise" in blk)
+    assert "IN HAND" not in next(blk for blk in blocks if "not handed" in blk)
+
+
+def test_head_lines_names_the_group_its_newest_row_and_every_id():
+    a = _line("agent-report", stamp=_STAMPS[0], message="same", cwd="C:/tree")
+    b = _line("agent-report", stamp=_STAMPS[1], message="same", cwd="C:/tree")
+    bucket = triage.open_items(triage.read_items(f"{a}\n{b}"))
+    lines = triage.head_lines("agent-report  [claude]  carameli", bucket)
+    assert lines[0] == (
+        f"=== agent-report  [claude]  carameli  [{bucket[0].id}] (x2, since {_STAMPS[0]}) ==="
+    )
+    assert "  cwd    C:/tree" in lines
+    assert lines[-1] == f"  ids    {bucket[0].id} {bucket[1].id}"
+    alone = triage.open_items(triage.read_items(_line("agent-report", message="one")))
+    assert triage.head_lines("t", alone)[-1] == "  detail one", "one row lists no ids"
+
+
+def test_the_tree_asking_never_reads_its_own_groups_as_another_sessions(tmp_path):
+    a = _line("session-friction", detail="mine")
+    tree = _handed(tmp_path, "me", triage.render(triage.open_items(triage.read_items(a))))
+    assert triage.held_groups(tmp_path, live=lambda _tree: True, own=tree) == {}
+    assert triage.held_groups(tmp_path / "nowhere", live=lambda _tree: True) == {}
+
+
+def test_the_cli_marks_a_group_in_hand(tmp_path, monkeypatch, capsys):
+    a = _line("session-friction", detail="poll noise")
+    monkeypatch.setenv("DEVKIT_DIR", str(_ledger(tmp_path, a)))
+    monkeypatch.setattr(triage, "REPO_ROOT", tmp_path / "asker")
+    busy = _handed(tmp_path, "busy", triage.render(triage.open_items(triage.read_items(a))))
+    monkeypatch.setattr(triage, "at_work", lambda _now: lambda tree: tree == busy)
+    assert triage.main([]) == 0
+    assert f"IN HAND at {busy}" in capsys.readouterr().out
+    assert "IN HAND" in (tmp_path / "asker" / triage.ARTIFACT).read_text(encoding="utf-8")
+
+
+def test_at_work_is_the_pass_s_own_live_transcript_test(tmp_path, monkeypatch):
+    seen = []
+
+    def active(tree, now):
+        seen.append((tree, now))
+        return tree if tree.name == "live" else None
+
+    import fix_reports
+
+    monkeypatch.setattr(fix_reports, "active_transcript", active)
+    now = datetime(2026, 10, 11, tzinfo=UTC)
+    live = triage.at_work(now)
+    assert live(tmp_path / "live") is True and live(tmp_path / "quiet") is False
+    assert seen[0] == (tmp_path / "live", now)
+
+
 # --- the CLI ------------------------------------------------------------------
 
 

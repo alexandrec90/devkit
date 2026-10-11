@@ -81,7 +81,9 @@ The script exits 1 when any iteration broke the contract. For every `VIOLATION`:
    are written: `python scripts/harness_triage.py --resolve-like <id> --note "<what fixed
    it>" --pr <this tree's branch>`. The pass sends nothing at a group resolved onto an
    unmerged branch; left open, it sends the next devkit fixer at work this tree already
-   holds, and that fixer spends its turns reading your diff (2523011c).
+   holds, and that fixer spends its turns reading your diff (2523011c). The other
+   direction holds too: a group marked `IN HAND` is one the pass already sent a live
+   session at, so leave it to that session (a6c2b36e).
 3. Only when the fix needs something outside the repository (a credential, admin
    rights, a paid service), file it: `python scripts/hooks/report-harness-defect.py`,
    with each file that shows it as `--evidence <path>#L<lines>` rather than inside

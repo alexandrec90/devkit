@@ -166,7 +166,8 @@ it not* — then fix that, and test it. A group marked `RECURRED` in the triage 
 retired before by a fix that did not hold: its last note is what not to repeat. One
 marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, so the
 pass sends no session at it, and the pass retires the rows filed while it waited against
-that PR once it merges; only a row filed after the merge reads `RECURRED`. A
+that PR once it merges; only a row filed after the merge reads `RECURRED`. One marked
+`IN HAND at <tree>` has a session the pass sent at it still at work there: leave it. A
 `REOPENED <id>` line is a resolution `scripts/fix_verify.py` undid, most often because
 its `--pr` named a branch that never became a PR. A merged PR whose text names the group
 id settles it before that (`fix_verify.named_by`), so a reopened group has no such PR:

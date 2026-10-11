@@ -2901,7 +2901,12 @@ def run_provision(
             return False, notes
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-            notes.append(f"FAILED provision: {step.label} failed: {detail[-1] if detail else ''}")
+            # npm ends on "A complete log ... can be found in", so the last line alone
+            # dropped the ERESOLVE that says whose failure it is (`tree_provision`).
+            said = worktree_env.unresolvable(completed.stderr, completed.stdout)
+            notes.append(
+                f"FAILED provision: {step.label} failed: {said or (detail[-1] if detail else '')}"
+            )
             return False, notes
         notes.append(f"provisioned: {step.label}")
     worktree_env.mark_provisioned(path, True)

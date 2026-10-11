@@ -454,6 +454,40 @@ def test_a_successful_command_that_made_no_venv_is_not_marked(tmp_path):
     assert not (tree / ".venv").exists()
 
 
+ERESOLVE_TAIL = (
+    "npm error code ERESOLVE\n"
+    "npm error ERESOLVE unable to resolve dependency tree\n"
+    "npm error For a full report see:\n"
+    "npm error C:\\npm-cache\\_logs\\2026-10-11T02_35_18_014Z-eresolve-report.txt\n"
+    "npm error A complete log of this run can be found in: C:\\npm-cache\\_logs\\x-debug-0.log\n"
+)
+
+
+def test_a_tree_whose_own_dependencies_do_not_resolve_leaves_no_harness_friction(tmp_path):
+    """05cedf4b/e155cd23: carameli's test-env branch asked for vitest ^5 beside
+    @vitest/ui ^4, and npm's ERESOLVE became two devkit ledger groups though the PR's own
+    gate failed on that install and its fixer had already fixed it. The manifest is the
+    project's, so the line says so and the friction file is left alone."""
+    checkout, tree = _provisionable(tmp_path)
+    line = wt_env.provision(
+        tree, checkout, runner=_Run(1, stderr=ERESOLVE_TAIL), environ={}, uv="uv"
+    )
+    assert "own dependencies do not resolve" in line
+    assert "npm error code ERESOLVE" in line
+    assert not (tree / wt_env.FRICTION_FILE).exists()
+    assert not (tree / wt_env.PROVISIONED).exists(), "the next update still retries"
+
+
+def test_unresolvable_names_each_resolvers_conflict_and_nothing_else():
+    assert wt_env.unresolvable(ERESOLVE_TAIL) == "npm error code ERESOLVE"
+    assert wt_env.unresolvable(
+        "", "x\n  \N{MULTIPLICATION SIGN} No solution found when resolving dependencies:\n"
+    )
+    assert wt_env.unresolvable(b"ERROR: ResolutionImpossible: for help visit\n")
+    assert wt_env.unresolvable(None, "npm error A complete log ... eresolve-report.txt")
+    assert wt_env.unresolvable("error: no index\n", "npm error code ENOTFOUND", None) == ""
+
+
 def test_a_failure_or_a_gap_is_left_as_the_trees_friction_for_the_pass_to_file(tmp_path):
     """The hook's only report was a line inside `git worktree add`, which `claude
     --worktree` swallows -- so a tree came up with no `.venv` and nothing anywhere said

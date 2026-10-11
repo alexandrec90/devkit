@@ -726,6 +726,12 @@ def provision(
     except (OSError, subprocess.SubprocessError) as exc:
         return _trouble(here, f"devkit: could not run `{spelled}` ({exc}); run it here by hand")
     if done.returncode != 0:
+        conflict = unresolvable(done.stderr, done.stdout)
+        if conflict:
+            return (
+                f"devkit: `{spelled}` failed: this tree's own dependencies do not resolve "
+                f"({conflict}) -- fix the project's manifest, then run it here again"
+            )
         tail = " | ".join((done.stderr or "").strip().splitlines()[-3:])
         return _trouble(here, f"devkit: `{spelled}` failed ({tail}); run it here by hand")
     elapsed = time.monotonic() - started
@@ -751,6 +757,28 @@ def last_said(*streams: str | bytes | None) -> str:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if lines:
             return lines[-1][:200]
+    return ""
+
+
+# How a package manager says the project's own dependency declarations cannot be met:
+# npm's peer conflict (and the `eresolve-report.txt` it names), uv's and pip's resolvers.
+UNRESOLVABLE = re.compile(r"ERESOLVE|No solution found when resolving|ResolutionImpossible", re.I)
+
+
+def unresolvable(*streams: str | bytes | None) -> str:
+    """The first line of `streams` saying the tree's own dependencies do not resolve, or "".
+
+    Such a failure is the project's, not the harness's: carameli's test-env branch
+    asked for vitest ^5 beside @vitest/ui ^4, npm refused it with ERESOLVE, and the two
+    friction lines that left became a devkit ledger group (05cedf4b, e155cd23) though
+    the PR's own gate failed on the same install and its fixer had already fixed it.
+    So a provisioner says it and leaves no friction line for the pass to file.
+    """
+    for stream in streams:
+        text = stream.decode("utf-8", "replace") if isinstance(stream, bytes) else stream or ""
+        for line in text.splitlines():
+            if UNRESOLVABLE.search(line):
+                return line.strip()[:200]
     return ""
 
 
