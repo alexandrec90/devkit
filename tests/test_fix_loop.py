@@ -6,6 +6,7 @@ import dataclasses
 import datetime as _dt
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,12 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(fix_loop.session_friction, "harvest", lambda *a, **k: [])
     # The machine's own Task Scheduler, which `close` would otherwise read and file.
     monkeypatch.setattr(fix_loop.schedule_health, "query", lambda *a, **k: [])
+    # Nor has it any task asked about by name.
+    monkeypatch.setattr(
+        fix_loop.collector_tasks,
+        "run_argv",
+        lambda argv: subprocess.CompletedProcess(argv, 1, "", "ERROR: no such task"),
+    )
     # And its collectors: this machine's assignment, and a `docker ps` to judge it by.
     monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda *a, **k: {})
     monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda *a, **k: [])
@@ -152,6 +159,26 @@ def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
     for finding in reported:
         assert Path(finding.evidence).is_file(), finding.evidence
         assert finding.detail in Path(finding.evidence).read_text(encoding="utf-8")
+
+
+def test_a_reports_evidence_outlives_the_tree_it_was_written_in(ctx, monkeypatch):
+    """5233840a: two friction groups cited `<box>/logs/friction.filed.md`, and the box was
+    reaped once its PR merged, so the fixer sent at them found no evidence at all. The
+    copy kept beside the ledger is what the row names; a blocked report's likewise."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        blocked="needs a database the box cannot start\n",
+        friction="- the prompt named logs/gate/ and it was empty\n",
+        transcript_age=_dt.timedelta(hours=3),
+    )
+    _, journal = close(ctx)
+    shutil.rmtree(path)  # reaped
+    by_kind = {f.kind: f for f in journal.findings}
+    for kind, said in (("reported", "logs/gate/"), ("fixer-blocked", "needs a database")):
+        evidence = Path(by_kind[kind].evidence)
+        assert evidence.is_relative_to(ctx.devkit_dir), evidence
+        assert said in evidence.read_text(encoding="utf-8"), kind
 
 
 def test_a_line_its_session_fixed_on_this_branch_is_filed_settled_by_that_branch(ctx, monkeypatch):
@@ -1045,6 +1072,23 @@ def test_unscheduled_names_only_the_tasks_the_scheduler_did_not_list(ctx):
     tasks = {"a": "logs/collector-a.log", "b": "logs/collector-b.log"}
     assert [f.project for f in fix_loop.unscheduled(ctx, tasks, frozenset({"a"}))] == ["b"]
     assert fix_loop.unscheduled(ctx, tasks, frozenset(tasks)) == []
+
+
+def test_a_task_the_bulk_query_missed_but_the_scheduler_has_is_not_filed(ctx, monkeypatch):
+    """9f5249cb: social-scraper's task was registered and mid-run when the pass filed it
+    "not scheduled on this machine". `schedule_health.query` reads a failed or timed-out
+    `schtasks /Query /V` as no tasks at all, so absence from it is asked again by name."""
+    asked = []
+
+    def run(argv):
+        asked.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "<Task/>", "")
+
+    monkeypatch.setattr(fix_loop.collector_tasks, "run_argv", run)
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda root: tasks)
+    assert fix_loop.job_findings(ctx) == []  # the fixture's bulk query lists nothing
+    assert [argv[argv.index("/TN") + 1] for argv in asked] == ["social-scraper"]
 
 
 # Verbatim from the tray on 2026-10-03: ibkr_trader's reddit job 39 runs into failing on
