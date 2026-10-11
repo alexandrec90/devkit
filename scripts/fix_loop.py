@@ -167,7 +167,7 @@ def _one_tree(
                 tree.project,
                 f"{where}: {reason}",
                 key=problem,
-                evidence=str(tree.path),
+                evidence=_beside_ledger(ctx, tree, fix_reports.BLOCKED_FILE) or str(tree.path),
             )
         )
         closed.lines.append(f"{where} -- {reason}")
@@ -200,16 +200,14 @@ def _file_friction(
     if claims and tree.branch and not out and at_work:
         closed.lines.append(f"{where} -- friction held: its session is still at work on a fix")
         return
-    # Where the lines will be once filed away below: naming the file about to be renamed
-    # gave every friction row a dead path.
-    kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
+    evidence = _friction_evidence(ctx, tree)
     settled = _settlement(tree) if out else {}
     for line in tree.friction:
         reported = Finding(
             "reported",
             tree.project,
             line,
-            evidence=str(tree.path / kept),
+            evidence=evidence,
             event=fix_findings.FRICTION,
         )
         # A line its session fixed here is settled by this branch, not a new job for a
@@ -217,6 +215,33 @@ def _file_friction(
         journal.add(replace(reported, **settled) if fix_reports.fixed_here(line) else reported)
     if tree.friction and ctx.writes:
         fix_reports.file_away(tree.path, fix_reports.FRICTION_FILE)
+
+
+def _friction_evidence(ctx: Context, tree: fix_reports.Tree) -> str:
+    """What the tree's friction rows cite: the copy beside the ledger, else where the lines
+    will be once filed away -- naming the file about to be renamed gave every friction row
+    a dead path."""
+    kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
+    if not tree.friction:
+        return str(tree.path / kept)
+    return _beside_ledger(ctx, tree, fix_reports.FRICTION_FILE) or str(tree.path / kept)
+
+
+def _beside_ledger(ctx: Context, tree: fix_reports.Tree, report: Path) -> str:
+    """A copy of the tree's `report` kept beside the ledger (`fix_findings.evidence_file`);
+    "" in a plan, which writes nothing, and when the report cannot be read or copied.
+
+    The tree's own `logs/` goes when its box is reaped, which a merged PR's box is within
+    the hour: 9000925f and 20322597 cited `<box>/logs/friction.filed.md`, and the fixer
+    sent at them found nothing there (5233840a)."""
+    if not ctx.writes:
+        return ""
+    try:
+        text = (tree.path / report).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    header = f"# {report.as_posix()} from {tree.path} ({tree.branch or 'no branch'})\n\n"
+    return fix_findings.evidence_file(header + text, ctx.devkit_dir, report.stem)
 
 
 def _settlement(tree: fix_reports.Tree) -> dict[str, str]:
@@ -495,7 +520,12 @@ UNSCHEDULED = "not scheduled on this machine"
 
 
 def unscheduled(ctx: Context, tasks: dict[str, str], listed: frozenset[str]) -> list[Finding]:
-    """A finding per scheduled collector in `tasks` that the scheduler did not list."""
+    """A finding per scheduled collector in `tasks` that the scheduler did not list, nor
+    has when asked by name.
+
+    `schedule_health.query` answers [] for a bulk query that failed or ran past its
+    timeout, and absent from that, every collector read as unregistered: 9f5249cb filed
+    social-scraper while its task was registered and mid-scrape."""
     return [
         Finding(
             COLLECTOR_KIND,
@@ -504,7 +534,7 @@ def unscheduled(ctx: Context, tasks: dict[str, str], listed: frozenset[str]) -> 
             evidence=str(ctx.devkit_dir / collectors.ARTIFACT),
         )
         for name in sorted(tasks)
-        if name not in listed
+        if name not in listed and not collector_tasks.is_registered(name, collector_tasks.run_argv)
     ]
 
 
