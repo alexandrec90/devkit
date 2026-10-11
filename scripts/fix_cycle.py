@@ -426,10 +426,12 @@ class Account:
     verified: tuple[str, ...] = ()
     # What Dependabot is failing on that the pass sends no one at (`fix_dependabot`),
     # uncommitted drift on a default branch carried or left (`fix_drift`), and the
-    # scheduled-failure issues closed once their workflow went green (`fix_issues`).
+    # scheduled-failure issues closed once their workflow went green (`fix_issues`), and
+    # the dev databases brought to their merged head (`fix_migrate`).
     dependabot: tuple[str, ...] = ()
     drift: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
+    migrated: tuple[str, ...] = ()
     # What a pass past its send deadline left to the next one (`fix-pass.LATE`).
     late: tuple[str, ...] = ()
 
@@ -464,6 +466,7 @@ def render(account: Account) -> str:
         ("dependabot", account.dependabot),
         ("drift", account.drift),
         ("issue", account.issues),
+        ("migrate", account.migrated),
         ("late", account.late),
     ):
         lines += labelled(label, rows)
