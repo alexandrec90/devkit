@@ -619,7 +619,10 @@ each, run here.
    carried to its own branch, CI pin moved with it, for the next pass to ship. Any other
    drift on a default branch is reported in the record and never touched. A
    scheduled-failure issue whose workflow is green at the tip is closed as completed
-   (`scripts/fix_issues.py`) when the reporter's own close did not happen.
+   (`scripts/fix_issues.py`) when the reporter's own close did not happen. Each database
+   checkout's dev database is upgraded to its head (`scripts/fix_migrate.py`, through an
+   upgrade script each database project ships, whose contract that module states), but only on the default branch, with a clean
+   tree and HEAD already on origin, so nothing unmerged is ever applied.
 
 `--mode plan` writes the whole plan to `logs/fix-pass.log` and does nothing, which is
 what the scheduled job does while the switch says `plan`. What each dispatch looks like

@@ -29,7 +29,8 @@ which survives this file crashing). Two rules hold it together:
    merged change to what a job registers is live within a pass, not a day.
 8. **Upkeep** (`tend`): a default branch's uncommitted lockfile carried or restored
    (`fix_drift.py`), any other drift reported and left; tracker issues whose workflow is
-   green at the tip closed (`fix_issues.py`).
+   green at the tip closed (`fix_issues.py`); each dev database upgraded to its merged
+   head (`fix_migrate.py`).
 
 The pass keeps inside the watchdog's stop (`send_deadline`): past its deadline the ship
 under way is ended and held, no further step starts and no session is launched, and the
@@ -66,6 +67,7 @@ import fix_drift
 import fix_issues
 import fix_ledger
 import fix_loop
+import fix_migrate
 import fix_plan
 import fix_release
 import fix_red
@@ -453,20 +455,27 @@ def _file_failures(lines: list[str], kind: str, journal: Journal) -> None:
             fix_loop.fix_findings.file(journal, kind, line.split(" ", 1)[0], line)
 
 
-def tend(workspace: Path, ctx: fix_loop.Context, journal: Journal) -> tuple[list[str], list[str]]:
-    """The checkouts' own upkeep, after the send: `(drift lines, issue lines)`.
+def tend(
+    workspace: Path, ctx: fix_loop.Context, journal: Journal
+) -> tuple[list[str], list[str], list[str]]:
+    """The checkouts' own upkeep, after the send: `(drift, issue, migrate lines)`.
 
-    Uncommitted drift on a default branch (`fix_drift.tend`) and the tracker issues a
-    green tip has answered (`fix_issues.sweep_green`). Each step isolated, and a line
-    either says `FAILED` on is filed against its checkout, as a failed merge is.
+    Uncommitted drift on a default branch (`fix_drift.tend`), the tracker issues a green
+    tip has answered (`fix_issues.sweep_green`), and each dev database brought to its
+    merged head (`fix_migrate.tend`). Each step isolated, and a line any of them says
+    `FAILED` on is filed against its checkout, as a failed merge is.
     """
     drift = journal.step("drift", fix_drift.tend, workspace, ctx.projects, ctx.mode, default=[])
     issues = journal.step(
         "issues", fix_issues.sweep_green, workspace, ctx.projects, ctx.mode, default=[]
     )
+    migrated = journal.step(
+        "migrate", fix_migrate.tend, workspace, ctx.projects, ctx.mode, default=[]
+    )
     _file_failures(drift, "drift-failed", journal)
     _file_failures(issues, "issue-close-failed", journal)
-    return drift, issues
+    _file_failures(migrated, "migrate-failed", journal)
+    return drift, issues, migrated
 
 
 def decide(
@@ -613,7 +622,7 @@ def run(
     )
     if mode == fix_cycle.DISPATCH:
         step("installers", refresh_installers, workspace, journal, default=2)
-    drift, issues = tend(workspace, ctx, journal)
+    drift, issues, migrated = tend(workspace, ctx, journal)
     filed += fix_loop.record(ctx, journal)
     failed_steps = ship_failed or bool(journal.crashed)
     account = fix_cycle.Account(
@@ -636,6 +645,7 @@ def run(
         dependabot=tuple(unsent),
         drift=tuple(drift),
         issues=tuple(issues),
+        migrated=tuple(migrated),
         late=late_lines(journal),
     )
     publish(account, now)
