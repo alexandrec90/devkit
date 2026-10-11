@@ -890,25 +890,34 @@ def _pin(tree: Path, ref: str, name: str = "pr-gate.yml", text: str = PR_GATE) -
     (workflows / name).write_text(text.replace("{ref}", ref), encoding="utf-8")
 
 
-def test_the_pin_is_the_ref_the_trees_own_gate_checks_the_sibling_out_at(tmp_path):
+@pytest.mark.parametrize(
+    "module",
+    [wt_env, load_script("scripts/hooks/toolchain.py")],
+    ids=["worktree_env-cuts-the-sibling", "vendored-toolchain-re-checks-it"],
+)
+def test_the_pin_is_the_ref_the_trees_own_gate_checks_the_sibling_out_at(tmp_path, module):
+    """Both readers, held to one answer: the git hook cuts the sibling at the pin and is
+    installed alone, so it cannot import the vendored `toolchain.pinned_ref` every runner
+    re-checks the pin with (0db0d931, 941b7470)."""
+    pinned_ref = module.pinned_ref
     sha = "4305" * 10  # a full commit sha's shape, without the entropy detect-secrets flags
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == "", "no workflows: no pin"
+    assert pinned_ref(tmp_path, "data-lake") == "", "no workflows: no pin"
     _pin(tmp_path, f'"{sha}"')
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == sha, "quotes and a comment are not the ref"
-    assert wt_env.pinned_ref(tmp_path, "Data-Lake") == sha
-    assert wt_env.pinned_ref(tmp_path, "other") == "", "another repo's step is not its pin"
+    assert pinned_ref(tmp_path, "data-lake") == sha, "quotes and a comment are not the ref"
+    assert pinned_ref(tmp_path, "Data-Lake") == sha
+    assert pinned_ref(tmp_path, "other") == "", "another repo's step is not its pin"
     # The PR gate outranks a nightly that tracks the default branch on purpose.
     _pin(tmp_path, "main", name="nightly.yml")
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == sha
+    assert pinned_ref(tmp_path, "data-lake") == sha
     # A step with no `ref:`, or an expression, pins nothing.
     _pin(tmp_path, "${{ inputs.ref }}")
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == "main", "the nightly's, now the only one"
+    assert pinned_ref(tmp_path, "data-lake") == "main", "the nightly's, now the only one"
     unpinned = PR_GATE.replace(
         "          ref: {ref}  # the commit uv.lock was resolved against\n", ""
     )
     _pin(tmp_path, "x", text=unpinned)
     (tmp_path / ".github" / "workflows" / "nightly.yml").unlink()
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == ""
+    assert pinned_ref(tmp_path, "data-lake") == ""
 
 
 def test_a_sibling_is_cut_and_moved_at_the_ref_the_trees_gate_pins(tmp_path):

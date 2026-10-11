@@ -529,7 +529,8 @@ def pinned_ref(here: Path, name: str) -> str:
     authority a session is held to, so its pin is the ref; `pr-gate*` is read first, as
     a nightly may check the same repo out at its default branch on purpose. Matched by
     the repository's last segment, the name the path source climbs to. A ref that is a
-    workflow expression is no pin.
+    workflow expression is no pin. The vendored `toolchain.pinned_ref` is the same
+    reading, which every runner re-checks the shared tree with; a test holds the two equal.
     """
     try:
         files = sorted(
