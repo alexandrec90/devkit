@@ -182,6 +182,14 @@ def test_both_signals_are_said_together():
     assert "OOM kill" in said and "; the VM holds" in said
 
 
+def test_the_reclaim_runs_as_root_in_the_named_distro_and_drops_only_the_page_cache():
+    argv = memory.reclaim_argv("docker-desktop")
+    assert argv[:6] == ["wsl", "-d", "docker-desktop", "-u", "root", "-e"]
+    assert argv[-1] == memory.RECLAIM
+    assert "drop_caches" in memory.RECLAIM and "echo 1 > /proc/sys/vm/drop_caches" in memory.RECLAIM
+    assert memory.RECLAIM.index("drop_caches") < memory.RECLAIM.index("compact_memory")
+
+
 def test_the_log_directory_follows_localappdata(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert memory.log_dir() == tmp_path / "Docker/log/host"
