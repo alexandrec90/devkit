@@ -437,6 +437,14 @@ class Docker:
             since,
         )
 
+    def reclaim_cache(self) -> tuple[bool, str]:
+        """Drop the VM's file cache and compact what that freed (`docker_memory.RECLAIM`);
+        `(done, what wsl said)`. Nothing to do off Windows."""
+        if os.name != "nt":
+            return True, ""
+        code, out = self.run(docker_memory.reclaim_argv(DOCKER_DISTRO), WSL_TIMEOUT)
+        return code == 0, out.replace("\x00", "")
+
 
 def running_distros(text: str) -> list[str]:
     """The distro names `wsl --list --running --quiet` printed. `wsl.exe` writes UTF-16,
@@ -949,6 +957,14 @@ def check_memory(
         report.fail(problem.line)
 
 
+def reclaim_vm_memory(docker: Docker, report: Report) -> None:
+    """Hand the memory the VM holds only as file cache back to Windows. A drop that did
+    not run is said, not failed: the containers are no worse off for it."""
+    done, out = docker.reclaim_cache()
+    if not done:
+        report.say(f"the VM's file cache was not dropped: {first_line(out) or 'no output'}")
+
+
 def maintain(
     chosen: Sequence[Target],
     docker: Docker,
@@ -965,7 +981,9 @@ def maintain(
 
     Memory is checked on both sides (`docker_memory`): a silent engine whose VM Windows
     says ran out fails as `SHORT_OF_MEMORY` before it is restarted, and an answering one
-    has the limits of what it keeps up checked (`check_memory`)."""
+    has the limits of what it keeps up checked (`check_memory`). An answering engine's
+    VM also has its file cache dropped (`reclaim_vm_memory`), by the scheduled pass
+    alone -- the one that carries `docker.restarts`."""
     if not chosen:
         return
     containers = wait_for_engine(docker, awake)
@@ -986,6 +1004,7 @@ def maintain(
         return
     if docker.restarts is not None:
         release_hold(docker.restarts)
+        reclaim_vm_memory(docker, report)
     check_memory(chosen, containers, docker, report)
     for target in chosen:
         if target.mode == config.RUN:
