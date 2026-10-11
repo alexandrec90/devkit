@@ -150,7 +150,14 @@ def _one_tree(
         closed.trees[problem] = str(tree.path)
     # Judged before anything is filed away: a filed report is still the session's outcome.
     at_work = _judge_session(ctx, tree, where, journal, closed)
-    if reason := fix_reports.blocked_reason(tree.path):
+    if waits := fix_reports.waits_on(tree.path):
+        # Not a finding: no session can merge another PR. `fix_budget` holds the problem
+        # until that PR closes, then sends its next fixer.
+        closed.lines.append(f"{where} -- waits on {waits}")
+        if ctx.writes:
+            fix_ledger.mark_waiting(ctx.ledger_path, key, waits)
+            fix_reports.file_away(tree.path, fix_reports.BLOCKED_FILE)
+    elif reason := fix_reports.blocked_reason(tree.path):
         journal.add(
             Finding(
                 "fixer-blocked",

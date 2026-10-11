@@ -116,6 +116,23 @@ def test_a_blocked_report_is_marked_filed_with_its_problem_and_read_once(ctx, mo
     assert closed.trees == {"problem-1": str(path)}
 
 
+def test_a_report_that_waits_on_a_pr_is_marked_waiting_and_files_no_finding(ctx, monkeypatch):
+    url = "https://github.com/alexandrec90/data-lake/pull/66"
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW)
+    path = tree(
+        ctx,
+        monkeypatch,
+        blocked=f"# Fix blocked\n\nWaits on: {url}\n",
+        transcript_age=_dt.timedelta(hours=3),
+    )
+    closed, journal = close(ctx)
+    assert closed.lines == [f"carameli agent/x-0919 -- waits on {url}"]
+    assert journal.findings == []
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["waits"] == url and "blocked" not in entry
+    assert (path / "logs" / "fix-blocked.filed.md").exists()
+
+
 def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
     path = tree(
         ctx, monkeypatch, friction="- the prompt named logs/gate/ and it was empty\n\n- no .venv\n"

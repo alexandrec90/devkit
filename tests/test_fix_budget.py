@@ -151,6 +151,23 @@ def test_a_blocked_report_is_escalated_rather_than_parked():
     assert go(after), "once the devkit session resolved it, the block is history"
 
 
+def test_a_fix_waiting_on_an_open_pr_holds_unescalated_until_that_pr_closes():
+    """f7c4e5db: ibkr_trader #116 needed data-lake #66 merged. Escalating that reached a
+    devkit session that could not merge it either, and resolving it sent the next fixer
+    at the same wall."""
+    one = decision(fix_plan.DISPATCH, failure())
+    ledger = ledger_after(one)
+    ledger[fix_ledger.decision_key(one)]["waits"] = "https://github.com/o/r/pull/66"
+    later = NOW + _dt.timedelta(days=2)
+    for state in ("OPEN", ""):
+        verdict = fix_budget.budget(one, ledger, later, pr_state=lambda url, s=state: s)
+        assert not verdict.go and verdict.finding is None, state
+        assert "waits on https://github.com/o/r/pull/66" in verdict.why
+    assert not fix_budget.budget(one, ledger, later).go, "unread by default: it waits"
+    for state in fix_budget.SETTLED:
+        assert go(fix_budget.budget(one, ledger, later, pr_state=lambda url, s=state: s)), state
+
+
 def test_the_devkit_session_backs_off_at_the_top_of_the_ladder_and_never_stops():
     """Nothing is above the devkit session to escalate to, so it slows down and climbs
     to the top effort rather than stopping: a backlog nobody fixes is the one outcome
