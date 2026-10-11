@@ -107,7 +107,9 @@ class Closed:
     # ref -> pr of each resolution whose fix has not merged (`in_flight`): the backlog
     # step sends no session at a group waiting on one.
     in_flight: dict[str, str] = field(default_factory=dict)
-    # Directories a session is busy in now (`bg_sessions.working`), stamped one or not.
+    # Every session `claude agents` lists (`session_listing`), and the directories one is
+    # busy in now (`bg_sessions.working`), stamped one or not.
+    listing: list[dict] = field(default_factory=list)
     working: frozenset[str] = frozenset()
     # Each devkit PR still carrying a fix to consumers, as `(number, body)` (`devkit_fixes`):
     # a consumer failure one names waits for it rather than for a second devkit session.
@@ -117,7 +119,8 @@ class Closed:
 def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
     """Every read-back step, each isolated: one that raises is a finding, not a stop."""
     closed = Closed()
-    closed.working = journal.step("sessions", working_dirs, default=frozenset())
+    closed.listing = journal.step("sessions", session_listing, default=[])
+    closed.working = bg_sessions.working(closed.listing)
     trees = journal.step("trees", fix_reports.read_trees, ctx.root, ctx.projects, default=[])
     for tree in trees:
         journal.step("tree", _one_tree, ctx, tree, journal, closed)
@@ -245,6 +248,8 @@ def _judge_session(
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
     live = fix_reports.active_transcript(tree.path, ctx.now)
+    if live is not None and bg_sessions.gone(closed.listing, tree.path, live):
+        live = None
     # By its transcript, the stamped session is never "another" one: a finished fixer's
     # own transcript held six branches while this very pass shipped their intents. A
     # session listed busy in the tree is at work whoever it is, intent or no intent.
@@ -295,9 +300,9 @@ def judge_dead(
     return []
 
 
-def working_dirs() -> frozenset[str]:
-    """`bg_sessions.working` over what `claude agents` lists; empty where it cannot."""
-    return bg_sessions.working(bg_sessions.listed(ship_intent.run_quiet))
+def session_listing() -> list[dict]:
+    """What `claude agents` lists (`bg_sessions.listed`); empty where it cannot say."""
+    return bg_sessions.listed(ship_intent.run_quiet)
 
 
 def fixers_working() -> frozenset[str]:

@@ -310,7 +310,7 @@ def world(tmp_path, monkeypatch):
         lambda *a, **k: loop.fix_verify.Outcome(reopen=list(table["reopen"])),
     )
     monkeypatch.setattr(loop.bg_sessions, "stop_finished", lambda trees, runner: [])
-    monkeypatch.setattr(loop, "working_dirs", frozenset)
+    monkeypatch.setattr(loop, "session_listing", list)
     monkeypatch.setattr(loop.friction_pending, "detector_fixes", lambda gh, git: [])
     monkeypatch.setattr(loop, "devkit_fixes", lambda ctx: tuple(table["devkit_fixes"]))
     monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda _d: "v0.11.22")

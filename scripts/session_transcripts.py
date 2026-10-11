@@ -25,7 +25,7 @@ import json
 import re
 import sys
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 CLAUDE_ROOT = Path.home() / ".claude" / "projects"
@@ -46,6 +46,7 @@ class Event:
     tool: str = ""  # a call's tool name: `Bash`, `Edit`, `AskUserQuestion`, `shell`
     path: str = ""  # the file an edit call names: `Edit`'s `file_path`
     background: bool = False  # a call run with `run_in_background`: its wait holds no turn
+    at: str = ""  # the record's ISO `timestamp`, "" when it has none
 
 
 @dataclass(frozen=True)
@@ -147,7 +148,11 @@ def codex_events(row: dict, line: int) -> Iterator[Event]:
 
 def events(path: Path, rows: tuple[tuple[int, dict], ...]) -> list[Event]:
     reader = codex_events if is_codex(path) else claude_events
-    return [event for number, row in rows for event in reader(row, number)]
+    return [
+        replace(event, at=str(row.get("timestamp") or ""))
+        for number, row in rows
+        for event in reader(row, number)
+    ]
 
 
 def is_codex(path: Path) -> bool:

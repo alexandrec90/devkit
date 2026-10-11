@@ -81,6 +81,11 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # was filed as two groups neither of which devkit could fix (9854b541, 363d8be7). It
 # refuses PowerShell's `Start-Sleep 40; Get-Content` in the same words (228353d8).
 SLEEP_GUARD = re.compile(r"<tool_use_error>Blocked: (?:sleep|Start-Sleep) \d+ followed by")
+# The least a wait holds its turn for to be a `poll`: the `sleep\s+\d{2,}` pattern's own
+# floor. An until-loop ends when its condition holds, so its shape says nothing of its
+# cost: one waiting nine seconds for a database out of recovery was filed as the eighth
+# recurrence of a group, at the cost of a devkit session (62606423).
+POLL_FLOOR = _dt.timedelta(seconds=10)
 # The rewrite a call that sets Git Bash's own conversion switches was measuring, beside the
 # setting that stops it: the probe that put `MSYS2_ARG_CONV_EXCL` in the agent env was
 # filed as the defect it measured (d71a2caf), as `BYTE_DUMP` is for a heredoc's probe.
@@ -691,6 +696,14 @@ def environment_text(command: str, text: str) -> str:
     return "\n".join(GIT_DIAGNOSTIC.findall(text)) if git_reads_only(command) else text
 
 
+def _when(stamp: str) -> _dt.datetime | None:
+    """A record's ISO `timestamp`, `Z` and all; None for none or one unreadable."""
+    try:
+        return _dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else None
+    except ValueError:
+        return None
+
+
 @dataclass
 class _Session:
     """What `detect` accumulates over one session's events."""
@@ -717,6 +730,7 @@ class _Session:
     # (what, call id) of a `user-rejected` row the person has not spoken since: `user`
     # retracts it when their next words take the rejection back (`RESUMED`).
     rejected: tuple[str, str] | None = None
+    started: dict[str, str] = field(default_factory=dict)  # call id -> when it was made
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -745,6 +759,7 @@ class _Session:
 
     def call(self, event: Event) -> None:
         self.calls[event.call_id] = event.command
+        self.started[event.call_id] = event.at
         if event.tool != "AskUserQuestion":
             self.last_said = None  # it went on working: that text was not how it ended
         if changes_the_suite(event):
@@ -780,6 +795,12 @@ class _Session:
     def say(self, event: Event) -> None:
         self.last_said = event
 
+    def _brief_wait(self, result: Event) -> None:
+        """Retract the `poll` of a call whose result came back inside `POLL_FLOOR`."""
+        began, ended = _when(self.started.get(result.call_id, "")), _when(result.at)
+        if began and ended and ended - began < POLL_FLOOR:
+            self.retract("poll", COMMAND_DETAIL["poll"], result.call_id)
+
     def settle(self) -> None:
         """Retract each `environment` row whose missing module a later call declared."""
         for (cls, what), event in list(self.found.items()):
@@ -809,6 +830,7 @@ class _Session:
         """A call that exited 0 still failed if it was a test run or a git call reporting
         a missing environment: `| tail` hides pytest's exit code."""
         command = self.calls.get(event.call_id, "")
+        self._brief_wait(event)
         # Once: the same dirty lock in every later `git status` is no new change.
         if self.checked is None and reports_suite_change(command, event.text):
             self.checked = set()
@@ -823,6 +845,7 @@ class _Session:
         """A failed call only: a file that merely quotes an error is not one."""
         command = self.calls.get(event.call_id, "")
         event = replace(event, command=command)
+        self._brief_wait(event)
         if SLEEP_GUARD.search(event.text):
             self.retract("poll", COMMAND_DETAIL["poll"], event.call_id)
             return

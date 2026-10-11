@@ -61,6 +61,8 @@ from __future__ import annotations
 
 import importlib
 import os
+import signal
+import subprocess
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -117,6 +119,33 @@ def signal_zero_probe(
     return probe
 
 
+# What `taskkill` exits with when it finds no such process.
+TASKKILL_NOT_FOUND = 128
+
+
+def windows_killpg(run: Callable[..., Any] = subprocess.run) -> Callable[[int, int], None]:
+    """`os.killpg` for a POSIX branch running on a real Windows host, which has none.
+
+    The bounded spawns in `sweep`, `ship_intent` and the watchdog start their child as a
+    group leader off Windows and end it with `os.killpg(child.pid, SIGKILL)`; under the
+    rehearsal that raised `AttributeError` in nine tests from 2026-10-07 on. The leader's
+    tree is what the group holds, so `taskkill /T` ends that, and a leader already gone
+    is POSIX's `ProcessLookupError`. Whatever the signal: every caller sends `SIGKILL`.
+    """
+
+    def killpg(pgid: int, sig: int) -> None:
+        done = run(
+            ["taskkill", "/F", "/T", "/PID", str(pgid)],
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        if done.returncode == TASKKILL_NOT_FOUND:
+            raise ProcessLookupError(pgid)
+
+    return killpg
+
+
 def windows_constants(modules: dict[str, object]) -> list[str]:
     """Names of modules carrying a module-level `WINDOWS` that is currently `True`.
 
@@ -158,6 +187,8 @@ class PosixRehearsal:
         self.real_platform = sys.platform
         self.flipped: list[str] = []
         self.real_kill: Callable[[int, int], None] | None = None
+        # Each `(module, name)` `add_missing` set, which `restore` takes away again.
+        self.added: list[tuple[object, str]] = []
 
     def apply(self) -> None:
         self.flipped = windows_constants(dict(sys.modules))
@@ -180,13 +211,27 @@ class PosixRehearsal:
         if self.real_platform == "win32" and self.real_kill is None:
             self.real_kill = os.kill
             os.kill = signal_zero_probe(os.kill, windows_exists)
+            self.add_missing()
         sys.platform = POSIX_PLATFORM
+
+    def add_missing(self) -> None:
+        """What a POSIX branch calls that a Windows host lacks, for the test body only."""
+        for module, name, value in (
+            (os, "killpg", windows_killpg()),
+            (signal, "SIGKILL", 9),
+        ):
+            if not hasattr(module, name):
+                setattr(module, name, value)
+                self.added.append((module, name))
 
     def restore(self) -> None:
         sys.platform = self.real_platform
         if self.real_kill is not None:
             os.kill = self.real_kill
             self.real_kill = None
+        for module, name in self.added:
+            delattr(module, name)
+        self.added = []
 
 
 def pytest_configure(config):

@@ -76,6 +76,9 @@ CLAUDE_CODE_GUARD = re.compile(
 
 # A Markdown list item, the shape a friction file's entries take when it marks them.
 LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s")
+# Every marker an entry opens on, nested ones too -- and nothing past them: stripped as a
+# set of characters, `- 2026-10-10, desktop-ml5f3pj:` lost its date and kept the comma.
+MARKERS = re.compile(r"^(?:(?:[-*+]|\d+[.)])\s+)+")
 
 # A dispatched session with no transcript this long after its stamp never started; one
 # whose transcript has been quiet this long, with nothing left behind, has ended. Both
@@ -300,7 +303,7 @@ def _entries(path: Path) -> tuple[str, ...]:
     kept = [line for line in kept if line and not line.startswith("#")]
     if any(LIST_ITEM.match(line) for line in kept):
         kept = [line for line in kept if LIST_ITEM.match(line)]
-    lines = (line.lstrip("-*+0123456789.) ").strip() for line in kept)
+    lines = (MARKERS.sub("", line).strip() for line in kept)
     return tuple(line for line in lines if line)
 
 

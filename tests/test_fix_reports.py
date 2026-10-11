@@ -430,6 +430,20 @@ def test_friction_lines_drop_markup_and_blanks_and_filing_away_reads_them_once(t
     fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)  # nothing there: no error
 
 
+def test_a_friction_line_that_opens_on_a_date_or_a_number_keeps_it(tmp_path):
+    """Stripping list markers as a set of characters ate `- 2026-10-10, desktop-ml5f3pj:`
+    down to `, desktop-ml5f3pj:`, and the 2026-10-11 rehearsal would have filed that."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        "- 2026-10-10, desktop-ml5f3pj: collectors overlapped\n- 3 sessions waited\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "2026-10-10, desktop-ml5f3pj: collectors overlapped",
+        "3 sessions waited",
+    )
+
+
 def test_a_label_over_listed_entries_is_not_an_entry(tmp_path):
     """b25fcfe9: the file opened on `supervise-fix-pass`, the bare name of what the session
     was doing, over two bulleted reports, and the label was filed as a third report. In
