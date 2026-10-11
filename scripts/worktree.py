@@ -1076,6 +1076,89 @@ def managed_env(
     return env
 
 
+def _unmanaged_lines(text: str) -> list[str]:
+    """`text`'s lines outside any managed block -- what the source checkout itself chose."""
+    kept: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        if line.strip() == MANAGED_BEGIN:
+            skipping = True
+        elif line.strip() == MANAGED_END:
+            skipping = False
+        elif not skipping:
+            kept.append(line)
+    return kept
+
+
+_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
+
+# Hosts a seeded value names when it means "a port published on this machine" -- the only
+# place a compose port mapping lands, and so the only place a box's port differs from its
+# source checkout's.
+_LOCAL_HOSTS = r"localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal"
+
+
+def dotenv_assignments(text: str) -> dict[str, str]:
+    """`KEY -> raw value` for every assignment outside a managed block, last one winning
+    as compose's own dotenv parser has it. Comments and blank lines are skipped."""
+    found: dict[str, str] = {}
+    for line in _unmanaged_lines(text):
+        match = _ASSIGNMENT.match(line)
+        if match and not line.lstrip().startswith("#"):
+            found[match.group(1)] = match.group(2)
+    return found
+
+
+def checkout_ports(registry: devkit_ports.Registry | None, project: str) -> dict[str, str]:
+    """The `*_HOST_PORT` env the source checkout `project` publishes on, from its registry
+    slot; empty for an unregistered project or no registry. Never raises."""
+    if registry is None or project not in registry.slots:
+        return {}
+    return registry.env_for(project)
+
+
+def rebase_seeded_ports(
+    seeded: str, published: Mapping[str, str], managed: Mapping[str, str]
+) -> dict[str, str]:
+    """Overrides moving every seeded value that names the source checkout's published port
+    onto the box's own. Pure.
+
+    The managed block gives a box its own `<SERVICE>_HOST_PORT`, but a value *derived* from
+    one -- a `DATABASE_URL` naming `127.0.0.1:5433` -- is copied verbatim with the rest of
+    the source `.env`. In a box that is worse than stale: the box's stack publishes its db
+    on its own port, the source checkout's is the long-lived database, and a bare
+    `alembic upgrade head` in the box migrated it (ibkr_trader, 2026-10-11). A
+    `[worktree] env` template can fix one key in one project; this fixes the shape, since
+    a port number on a local host is the one thing devkit knows the meaning of.
+
+    `published` is what the source actually publishes on: its registry slot, overridden by
+    any `*_HOST_PORT` its own `.env` sets. Only a port that moved is rewritten, so a UI-only
+    box -- which keeps the donor's ports for the backend -- leaves its backend URLs alone.
+    A key `managed` already sets is skipped: an explicit template knows better.
+    """
+    assigned = dotenv_assignments(seeded)
+    source = {**published}
+    for key, raw in assigned.items():
+        if key.endswith(devkit_ports.ENV_SUFFIX):
+            source[key] = raw.split("#", 1)[0].strip().strip("'\"")
+    moved = {
+        old: managed[key]
+        for key, old in source.items()
+        if old.isdigit() and key in managed and managed[key] != old
+    }
+    if not moved:
+        return {}
+    pattern = re.compile(rf"(?<![\w.-])({_LOCAL_HOSTS}):({'|'.join(map(re.escape, moved))})(?!\d)")
+    overrides: dict[str, str] = {}
+    for key, value in assigned.items():
+        if key in managed:
+            continue
+        rebased = pattern.sub(lambda m: f"{m.group(1)}:{moved[m.group(2)]}", value)
+        if rebased != value:
+            overrides[key] = rebased
+    return overrides
+
+
 def render_env(source: str, managed: Mapping[str, str]) -> str:
     """`source` with the managed block appended, replacing an earlier one.
 
@@ -1085,15 +1168,7 @@ def render_env(source: str, managed: Mapping[str, str]) -> str:
     of keys that must differ — which works because compose's dotenv parser takes the
     last assignment of a duplicated key, so nothing in the seeded half needs editing.
     """
-    kept: list[str] = []
-    skipping = False
-    for line in source.splitlines():
-        if line.strip() == MANAGED_BEGIN:
-            skipping = True
-        elif line.strip() == MANAGED_END:
-            skipping = False
-        elif not skipping:
-            kept.append(line)
+    kept = _unmanaged_lines(source)
     while kept and not kept[-1].strip():
         kept.pop()
     block = [
@@ -2816,16 +2891,28 @@ def write_leases(workspace_root: Path, boxes: Mapping[str, Box]) -> None:
     os.replace(tmp, path)
 
 
-def seed_env(source: Path, target: Path, env: Mapping[str, str]) -> None:
-    """Write the box's `.env`: the source checkout's, plus the managed overrides."""
+def seed_env(
+    source: Path,
+    target: Path,
+    env: Mapping[str, str],
+    published: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Write the box's `.env`: the source checkout's, plus the managed overrides.
+
+    `published` is the source checkout's own `*_HOST_PORT` env (`checkout_ports`); every
+    seeded value naming one of those ports on a local host is moved onto the box's
+    (`rebase_seeded_ports`). Returns those rebased keys, for the spawn's notes.
+    """
     try:
         existing = source.read_text(encoding="utf-8") if source.is_file() else ""
     except OSError:
         existing = ""
+    rebased = rebase_seeded_ports(existing, published or {}, env)
     try:
-        target.write_text(render_env(existing, env), encoding="utf-8", newline="\n")
+        target.write_text(render_env(existing, {**rebased, **env}), encoding="utf-8", newline="\n")
     except OSError as exc:
         print(f"worktree: could not write {target}: {exc}", file=sys.stderr)
+    return rebased
 
 
 # The variable that tells uv which directory is the project's environment.
@@ -3917,19 +4004,39 @@ def apply_new(
             f"`worktree.py reap <box> --yes` one that is done and let the next spawn "
             f"take its slot."
         )
-    if should_seed_env(stack, is_tracked(path, ".env")):
-        seed_env(source / ".env", path / ".env", env)
-        notes.append(f"seeded {path.name}/.env (COMPOSE_PROJECT_NAME={box.name})")
-    elif stack:
-        notes.append(
-            f"[warn] .env is tracked in {box.project}, so it was left alone — this "
-            f"box shares the source checkout's COMPOSE_PROJECT_NAME and ports. Export "
-            f"{' '.join(f'{k}={v}' for k, v in sorted(env.items()))} when running "
-            f"compose here, or gitignore .env so future boxes can be seeded."
-        )
+    notes.extend(seed_box_env(root, path, box, env, stack))
 
     notes.extend(provision_new_box(path, box.name, plan.provision, provision))
     return True, notes
+
+
+def seed_box_env(
+    root: Path, path: Path, box: Box, env: Mapping[str, str], stack: bool
+) -> list[str]:
+    """Seed a new box's `.env` from its source checkout's, and say what was done.
+
+    The source's registry ports go to `seed_env`, so a seeded URL naming the source's
+    published port is moved onto the box's own (`rebase_seeded_ports`).
+    """
+    if should_seed_env(stack, is_tracked(path, ".env")):
+        published: dict[str, str] = {}
+        with contextlib.suppress(devkit_ports.RegistryError):
+            published = checkout_ports(load_registry(root), box.project)
+        rebased = seed_env(root / box.project / ".env", path / ".env", env, published)
+        notes = [f"seeded {path.name}/.env (COMPOSE_PROJECT_NAME={box.name})"]
+        if rebased:
+            notes.append(
+                f"moved {', '.join(sorted(rebased))} off {box.project}'s ports onto this box's"
+            )
+        return notes
+    if not stack:
+        return []
+    return [
+        f"[warn] .env is tracked in {box.project}, so it was left alone — this "
+        f"box shares the source checkout's COMPOSE_PROJECT_NAME and ports. Export "
+        f"{' '.join(f'{k}={v}' for k, v in sorted(env.items()))} when running "
+        f"compose here, or gitignore .env so future boxes can be seeded."
+    ]
 
 
 def provision_new_box(
