@@ -3262,6 +3262,25 @@ def test_a_failed_install_step_says_failed_not_warn(tmp_path, monkeypatch):
     assert rendered.startswith("Provisioned demo")
 
 
+def test_a_failed_install_step_names_a_dependency_conflict_over_npms_last_line(
+    tmp_path, monkeypatch
+):
+    """npm ends a refusal on "A complete log of this run can be found in", which is all
+    the note said; the ERESOLVE line above it is what says the manifest is the cause."""
+    stderr = (
+        "npm error code ERESOLVE\nnpm error ERESOLVE unable to resolve dependency tree\n"
+        "npm error A complete log of this run can be found in: x-debug-0.log\n"
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", stderr)
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, notes = worktree.run_provision(tmp_path, (worktree.ProvisionStep("npm ci", ("npm", "ci")),))
+    assert ok is False
+    assert notes == ["FAILED provision: npm ci failed: npm error code ERESOLVE"]
+
+
 def test_the_verbs_that_change_the_workspace_still_plan_by_default():
     parser = argparse.ArgumentParser()
     worktree.add_common_args(parser)

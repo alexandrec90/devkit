@@ -64,6 +64,20 @@ def test_the_childs_output_is_read_as_utf8_and_a_failure_is_left_as_the_trees_fr
     assert (tmp_path / "logs" / "friction.md").read_text(encoding="utf-8").count("- ") == 2
 
 
+def test_a_tree_whose_own_dependencies_do_not_resolve_is_not_the_harness_s_friction(tmp_path):
+    """e155cd23: `worktree.py provision` said only npm's last line, and the friction line
+    it left went on the devkit ledger though carameli's own manifest was the cause and
+    the PR's gate failed on it too. The step now says the ERESOLVE line, which keeps it
+    off the friction file."""
+
+    def runner(argv, **_given):
+        said = "FAILED provision: .devkit.toml install_command failed: npm error code ERESOLVE"
+        return subprocess.CompletedProcess(argv, 1, said, "")
+
+    assert tree_provision.provision(tmp_path, runner) is False
+    assert not (tmp_path / "logs" / "friction.md").exists()
+
+
 def test_a_background_session_is_opened_only_in_a_provisioned_tree(monkeypatch, tmp_path):
     """`agent_tabs.launch_background` is the one place the pass opens a session, so it
     provisions first -- with the same runner, before the session's own spawn."""
