@@ -965,6 +965,59 @@ def test_a_sibling_path_holding_another_repo_is_named_not_moved(tmp_path):
     assert "is not a worktree of" in line
 
 
+def _dir_link(link: Path, aimed: Path) -> None:
+    """A junction on Windows, as the one d2e29fee found, which needs no privilege there."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(aimed), str(link))
+    else:
+        link.symlink_to(aimed, target_is_directory=True)
+
+
+def test_a_link_to_a_reaped_box_at_the_sibling_path_is_replaced_by_a_cut(tmp_path):
+    """d2e29fee: `.worktrees/data-lake` was a junction to a reaped box, so `exists()`
+    read the sibling as missing and `worktree add` refused the path as already there."""
+    _lake, checkout, tree = _with_sibling_source(tmp_path)
+    reaped = tmp_path / "data-lake--reaped"
+    reaped.mkdir()
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    _dir_link(target, reaped)
+    reaped.rmdir()
+    lines = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert any(line.startswith(f"devkit: removed {target}") for line in lines), lines
+    assert (target / ".gitignore").is_file(), lines
+    assert reaped.exists() is False and tmp_path.exists(), "only the link went"
+
+
+def test_only_a_link_to_nothing_is_cleared(tmp_path):
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "kept.txt").write_text("x\n", encoding="utf-8")
+    assert wt_env.clear_dead_link(live) == "", "a real directory"
+    assert wt_env.clear_dead_link(tmp_path / "absent") == "", "nothing there at all"
+    link = tmp_path / "link"
+    _dir_link(link, live)
+    assert wt_env.clear_dead_link(link) == "", "a link whose target is there"
+    assert (link / "kept.txt").is_file()
+
+
+def test_a_dead_link_that_will_not_go_is_named(tmp_path, monkeypatch):
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    link = tmp_path / "link"
+    _dir_link(link, gone)
+    gone.rmdir()
+
+    def refuse(path):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(wt_env.os, "unlink", refuse)
+    monkeypatch.setattr(wt_env.os, "rmdir", refuse)
+    line = wt_env.clear_dead_link(link)
+    assert "which is gone, and stays (in use)" in line
+
+
 def test_no_sibling_repo_beside_the_checkout_means_nothing_is_cut(tmp_path):
     _lake, checkout, tree = _with_sibling_source(tmp_path, sibling=False)
 
