@@ -75,6 +75,10 @@ def test_the_upstream_prompt_names_every_project_and_pr_and_ends_in_the_ship_ski
     assert "2 checkout(s) (carameli, roguelike)" in text
     assert "carameli #412 u/412" in text and "roguelike #16 u/16" in text
     assert "not in each consumer" in text
+    # sports_betting #67: a template fix reaches no generated project, so a right test
+    # of a project's own runner is fixed in that project.
+    assert "A template reaches no project already generated" in text
+    assert all(owned in text for owned in fix_plan.PROJECT_OWNED)
     assert "ship skill" in text and "agent/fix-x-0918" in text
 
 

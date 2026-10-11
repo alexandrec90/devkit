@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -80,7 +81,9 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))  # the vendored tier
 import gate_evidence
+import harness_events
 import release
 import sweep
 import task_branch
@@ -649,7 +652,10 @@ def prepare_outcome(number: int, failure: str) -> int:
     -- and 2, the failed step, otherwise.
     """
     if number == ANOTHER_RUN:
-        _say(f"{failure}; that run carries the release, so this one stops here")
+        _say(
+            f"{failure}; that run carries the release, so this one stops here -- its PR "
+            "says which machine and job started it"
+        )
         return 0
     print(f"release-pipeline: {failure}", file=sys.stderr)
     return 2
@@ -690,7 +696,7 @@ def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
             "--title",
             f"Release {version}",
             "--body",
-            PR_BODY.format(version=version, expected=EXPECTED_RED_TEST),
+            PR_BODY.format(version=version, expected=EXPECTED_RED_TEST, origin=started_by()),
         ],
         cwd=devkit,
     )
@@ -936,7 +942,28 @@ tag exists still pins something resolvable.
 Opened by `scripts/release-pipeline.py`. **`{expected}` is expected to fail on this PR**
 — it compares the constant against `git describe --tags`, and `{version}` is not tagged
 until this merges. The pipeline verifies that it is the *only* failure before merging.
+
+{origin}
 """
+
+# `log-wrap.py`'s `JOB_ENV`, spelled here because a hyphenated script is not importable;
+# a test holds the two spellings together.
+JOB_ENV = "DEVKIT_JOB"
+
+
+def started_by(env: Mapping[str, str] | None = None) -> str:
+    """The machine and the job that started this run, as one sentence. Pure given `env`.
+
+    A run's `log-wrap.py` record stays in the `logs/` of the machine it ran on. On
+    2026-10-11 release/v0.11.58 was cut and #619 opened by a run that left no record
+    on the machine reading the ledger -- the nightly job there lost the push race to
+    it -- and nothing said which machine or job it was. The release PR is the one thing
+    every machine can read, so it carries the answer.
+    """
+    source = os.environ if env is None else env
+    job = (source.get(JOB_ENV) or "").strip()
+    by = f"the `{job}` job" if job else "hand (no `log-wrap.py` job named it)"
+    return f"Started on `{harness_events.host_name(source)}` by {by}."
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1039,7 +1066,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"release-pipeline: releasing because {reason}")
 
-    print(f"release-pipeline: {version} ({args.level})")
+    print(f"release-pipeline: {version} ({args.level}). {started_by()}")
     for index, step in enumerate(plan_steps(version, args.adopt, projects), 1):
         print(f"  {index}. {step}")
     if args.dry_run:
