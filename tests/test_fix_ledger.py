@@ -320,6 +320,23 @@ def test_since_makes_everything_before_a_resolved_escalation_history(tmp_path):
     assert fix_ledger.attempts(decision, ledger, before) == 1, "only what came before it"
 
 
+def test_a_wait_is_remembered_per_problem_newest_first_and_is_not_a_block(tmp_path):
+    path = tmp_path / "dispatch.json"
+    first = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="a1"),))
+    later = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="b2"),))
+    assert not fix_ledger.mark_waiting(path, fix_ledger.decision_key(first), "u/1")
+    fix_ledger.record(path, fix_ledger.decision_key(first), "n", NOW)
+    fix_ledger.record(path, fix_ledger.decision_key(later), "n", NOW + _dt.timedelta(hours=1))
+    assert fix_ledger.waiting_on(later, fix_ledger.read_ledger(path)) == ""
+    assert fix_ledger.mark_waiting(path, fix_ledger.decision_key(first), "u/1")
+    assert fix_ledger.mark_waiting(path, fix_ledger.decision_key(later), "u/2")
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.waiting_on(first, ledger) == "u/2", "the newest session's word"
+    assert fix_ledger.blocked_reason(first, ledger) == ""
+    resolved = (NOW + _dt.timedelta(hours=2)).isoformat(timespec="seconds")
+    assert fix_ledger.waiting_on(first, ledger, resolved) == ""
+
+
 def test_a_blocked_dispatch_is_remembered_with_its_reason_until_its_escalation_resolves(tmp_path):
     path = tmp_path / "dispatch.json"
     decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))

@@ -127,7 +127,9 @@ STOP = (
     "is not one of them: adding a worktree on another branch, fetching or merging a ref, "
     "reproducing the failure, reading code outside the diff, reshaping code to fit a "
     f"limit. If you write {BLOCKED_FILE.as_posix()}, name which of the three it is and "
-    "what you tried first."
+    "what you tried first. A fix that waits on another open PR, in any repository, is "
+    "none of the three and not yours to merge: put a line Waits on: and the full "
+    "github.com URL of that PR in the same file, and the pass holds this until it closes."
 )
 
 # Every prompt's first sentence: the role, declared by the one thing that starts a

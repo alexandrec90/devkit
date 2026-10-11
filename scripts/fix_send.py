@@ -189,8 +189,9 @@ def push_clean_merge(failure: fix_plan.Failure, root: Path) -> int:
     return EXIT_OK
 
 
-def _state(gh, number: int) -> str:
-    """The PR's state (`OPEN`, `CLOSED`, `MERGED`), or "" when it cannot be read."""
+def _state(gh, number: int | str) -> str:
+    """The PR's state (`OPEN`, `CLOSED`, `MERGED`), or "" when it cannot be read. A URL
+    for `number` reads a PR in any repository, from wherever `gh` runs."""
     done = gh("pr", "view", str(number), "--json", "state")
     try:
         return str(json.loads(done.stdout or "{}").get("state", "")) if done.returncode == 0 else ""
@@ -250,7 +251,9 @@ def send_all(
             continue
         problem = fix_ledger.problem_key(decision)
         escalated = fix_loop.fix_findings.escalation(problem, items or [])
-        verdict = fix_budget.budget(decision, ledger, ctx.now, escalated)
+        verdict = fix_budget.budget(
+            decision, ledger, ctx.now, escalated, lambda url: _state(sweep.gh_for(ctx.root), url)
+        )
         if verdict.finding and journal is not None:
             journal.add(verdict.finding.at(closed.trees.get(problem, "")))
         why = verdict.why if not verdict.go else _no_memory(decision, room)

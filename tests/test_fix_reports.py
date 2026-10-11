@@ -121,6 +121,22 @@ def test_a_blocked_report_is_its_first_lines_trimmed_and_absent_is_empty(tmp_pat
     assert len(reason) <= fix_reports.REASON_LIMIT
 
 
+def test_waits_on_reads_the_pr_a_blocked_report_names_on_its_own_line(tmp_path):
+    assert fix_reports.waits_on(tmp_path) == ""
+    (tmp_path / "logs").mkdir()
+    url = "https://github.com/alexandrec90/data-lake/pull/66"
+    report = tmp_path / fix_reports.BLOCKED_FILE
+    report.write_text(f"# Fix blocked\n\n**Waits on:** {url}\n\nIt adds the columns.\n", "utf-8")
+    assert fix_reports.waits_on(tmp_path) == url
+    report.write_text(f"Waits on: `{url}`.\n", encoding="utf-8")
+    assert fix_reports.waits_on(tmp_path) == url
+    # Prose naming a PR is not the line: only a fixer that wrote it is waiting.
+    report.write_text(f"It depends on {url}, which is open.\n", encoding="utf-8")
+    assert fix_reports.waits_on(tmp_path) == ""
+    report.write_text("Waits on: data-lake #66\n", encoding="utf-8")
+    assert fix_reports.waits_on(tmp_path) == "", "a URL, so gh can read it from anywhere"
+
+
 def listing(*entries: tuple[Path, str]) -> str:
     return "".join(
         f"worktree {path.as_posix()}\nHEAD 1\nbranch refs/heads/{branch}\n\n"
