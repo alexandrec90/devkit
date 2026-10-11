@@ -156,8 +156,12 @@ def over_daily_cap(decision: fix_plan.Decision, ledger: dict[str, dict], now: _d
 
 
 def source(decision: fix_plan.Decision) -> str:
-    """The ledger source a dispatch is recorded under: what `over_daily_cap` counts."""
-    if decision.action == fix_plan.UPSTREAM:
+    """The ledger source a dispatch is recorded under: what `over_daily_cap` counts.
+
+    A free action has none: stamped, four updates of one Dependabot PR behind its base
+    spent the day's cap and held another's conflict resolver (2026-10-11).
+    """
+    if decision.action == fix_plan.UPSTREAM or decision.action in fix_plan.NO_SESSION:
         return ""
     return fix_plan.DEPENDABOT if any(fix_plan.is_dependabot(f) for f in decision.failures) else ""
 

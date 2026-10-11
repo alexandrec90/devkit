@@ -59,6 +59,17 @@ def test_a_hold_for_memory_is_a_wait_the_pass_tracks():
     assert supervise.check_record(f"capped   carameli #1 -- {why}", 0, set()) == []
 
 
+def test_every_wait_the_stall_check_calls_tracked_is_tracked_here():
+    """Supervision 2026-10-11: the Dependabot daily cap, which `fix_stall.TRACKED` owns
+    because it frees itself within the day, was reported as a wait nothing tracks: the
+    two lists had been written out separately and drifted."""
+    line = "capped   carameli #440 -- dependabot daily cap: 2 of 2 sessions sent in the last 24h"
+    assert supervise.check_record(line, 0, set()) == []
+    fix_stall = load_script("scripts/fix_stall.py")
+    for why in fix_stall.TRACKED:
+        assert supervise.check_record(f"capped   carameli #1 -- {why}: x", 0, set()) == [], why
+
+
 def test_a_wait_must_name_what_it_waits_on():
     [found] = supervise.check_record("capped   carameli #1 -- because", 0, set())
     assert found.startswith("a wait nothing tracks")
