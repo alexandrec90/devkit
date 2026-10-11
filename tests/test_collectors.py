@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -1697,6 +1698,111 @@ def test_the_marker_goes_even_when_the_pass_raises(tmp_path):
         assert path.is_file()
         raise RuntimeError("boom")
     assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    ("text", "clock", "age", "expected"),
+    [
+        ('{"started_at": 100, "until": 200}', 150, 0, 200),
+        ('{"started_at": 100, "until": 200}', 250, 0, None),  # a killed pass's lock
+        ('{"until": true}', 150, 2, 158),  # unreadable and young: a holder mid-write
+        ("", 150, 0, 160),
+        ("not json", 150, collectors.LOCK_WRITING + 1, None),  # unreadable and old: dead
+        (None, 150, 0, None),
+    ],
+)
+def test_lock_holder_reads_only_a_live_lock(tmp_path, text, clock, age, expected):
+    path = tmp_path / "collectors.lock"
+    if text is not None:
+        path.write_text(text, encoding="utf-8")
+        os.utime(path, (clock - age, clock - age))
+    assert collectors.lock_holder(path, clock) == expected
+
+
+def test_a_held_lock_refuses_a_second_taker_and_a_dead_one_is_broken(tmp_path):
+    path = tmp_path / "logs" / "collectors.lock"
+    assert collectors.take_lock(path, until=200.0, clock=100.0)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        collectors.STARTED_AT: 100.0,
+        collectors.UNTIL: 200.0,
+    }
+    assert not collectors.take_lock(path, until=300.0, clock=150.0), "a live holder"
+    assert collectors.take_lock(path, until=400.0, clock=250.0), "a killed pass's lock"
+    assert json.loads(path.read_text(encoding="utf-8"))[collectors.UNTIL] == 400.0
+
+
+def test_a_waiting_pass_takes_the_lock_once_its_holder_lets_go(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "collectors.lock"
+    at(monkeypatch, 100.0)
+    assert collectors.take_lock(path, until=10_000.0, clock=100.0)
+    looks = []
+
+    def sleep(seconds):
+        looks.append(seconds)
+        if len(looks) == 2:
+            path.unlink()
+
+    with collectors.one_pass(path, 50.0, wait=True, sleep=sleep) as had:
+        assert had and json.loads(path.read_text(encoding="utf-8"))[collectors.UNTIL] == 150.0
+    assert looks == [collectors.LOCK_POLL] * 2
+    assert not path.exists(), "released after the pass"
+    assert "waiting for the collectors pass" in capsys.readouterr().err
+
+
+def test_a_pass_that_does_not_wait_leaves_a_held_lock_alone(tmp_path, monkeypatch):
+    path = tmp_path / "collectors.lock"
+    at(monkeypatch, 100.0)
+    assert collectors.take_lock(path, until=10_000.0, clock=100.0)
+    with collectors.one_pass(path, 50.0, wait=False, sleep=pytest.fail) as had:
+        assert not had
+    assert json.loads(path.read_text(encoding="utf-8"))[collectors.UNTIL] == 10_000.0
+
+
+def test_the_lock_goes_even_when_the_pass_raises(tmp_path, monkeypatch):
+    path = tmp_path / "collectors.lock"
+    at(monkeypatch, 100.0)
+    with pytest.raises(RuntimeError), collectors.one_pass(path, 50.0, wait=False) as had:
+        assert had
+        raise RuntimeError("boom")
+    assert not path.exists()
+
+
+def test_a_scheduled_pass_stands_down_while_a_run_here_is_acting(tmp_path, monkeypatch):
+    """3c3e36f2: `run-here ibkr_trader sports_betting` and the scheduled `maintain` 23s
+    later both ran `compose up -d` for the same collectors, and each exited 2 on the
+    container name the other had just taken."""
+    root = devkit_home(tmp_path, monkeypatch, {"sports_betting": RUN})
+    at(monkeypatch, 10_000.0)
+    assert collectors.take_lock(root / collectors.PASS_LOCK, until=12_000.0, clock=10_000.0)
+    docker = FakeDocker([])
+    assert collectors.main(["maintain"], docker=docker) == 0
+    assert docker.calls == [], "nothing started under another pass"
+    assert collectors.STOOD_DOWN in (root / collectors.ARTIFACT).read_text(encoding="utf-8")
+    assert (root / collectors.PASS_LOCK).is_file(), "the holder's lock is the holder's"
+
+
+def test_act_starts_what_it_is_given_and_records_its_health(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    docker = FakeDocker([])
+    report = collectors.Report()
+    collectors.act([target(tmp_path)], root, docker, report, run=lambda *a, **k: None)
+    assert ("up", "ibkr_trader", "app") in docker.calls
+    assert (root / collectors.HEALTH).is_file()
+    assert not (root / collectors.IN_PASS).exists()
+
+
+def test_a_pass_releases_the_lock_it_acted_under(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {"sports_betting": RUN})
+    seen = []
+
+    class Watching(FakeDocker):
+        def up(self, checkout, service):
+            seen.append((root / collectors.PASS_LOCK).is_file())
+            return super().up(checkout, service)
+
+    assert collectors.main(["run-here", "sports_betting"], docker=Watching([])) == 0
+    assert seen == [True]
+    assert not (root / collectors.PASS_LOCK).exists()
 
 
 def test_a_pass_that_only_stops_containers_writes_no_marker(tmp_path):

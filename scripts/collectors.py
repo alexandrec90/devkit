@@ -88,6 +88,22 @@ CODE_AT, HELD, STARTED_AT = "code_at", "held", "started_at"
 # marker a killed pass left behind (`TARGET_BOUND`).
 IN_PASS = Path("logs/collectors.pass.json")
 UNTIL = "until"
+# Held, `{started_at, until}`, by every pass that starts or stops containers -- `maintain`
+# and the verbs -- for as long as it acts. Nothing serialised them, so a `run-here` at
+# 22:14:38 and the scheduled `maintain` at 22:15:01 both ran `docker compose up -d` for the
+# same newly assigned collectors, and each exited 2 on compose's "container name is already
+# in use" Conflict over the container the other had just created (3c3e36f2). A scheduled
+# pass that finds it held stands down; a verb waits, since it was typed to act now. `until`
+# breaks a lock a killed pass left, as it bounds `IN_PASS`.
+PASS_LOCK = Path("logs/collectors.lock")
+# Seconds a lock may stay unreadable: its holder has created it and not yet written it.
+LOCK_WRITING = 10
+# Seconds between a waiting verb's looks at the lock.
+LOCK_POLL = 5
+STOOD_DOWN = (
+    "another collectors pass is acting right now -- this one stands down; the next "
+    "scheduled pass acts on whatever that one did not"
+)
 # A row's state while that pass is at it.
 STARTING = "being started by the collectors pass"
 
@@ -1050,6 +1066,72 @@ def in_pass(path: Path, clock: float) -> bool:
     return started <= clock < until
 
 
+def lock_holder(path: Path, clock: float) -> float | None:
+    """Until when a live pass holds `PASS_LOCK` at `path`, or None when none does.
+
+    A lock past its `until` is a killed pass's. One that will not parse is a holder
+    between creating and writing it for `LOCK_WRITING` seconds, and a dead one after.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        raw = None
+    until = raw.get(UNTIL) if isinstance(raw, dict) else None
+    if isinstance(until, (int, float)) and not isinstance(until, bool):
+        return until if clock < until else None
+    try:
+        written = path.stat().st_mtime
+    except OSError:
+        return None
+    return written + LOCK_WRITING if clock - written < LOCK_WRITING else None
+
+
+def take_lock(path: Path, until: float, clock: float) -> bool:
+    """Create `path` holding `until`; False while a live pass holds it.
+
+    A dead holder's lock is broken first. Two passes breaking the same dead lock at once
+    can both get through, which is no worse than the unserialised passes this replaced
+    and needs a pass to have been killed first.
+    """
+    if lock_holder(path, clock) is None:
+        path.unlink(missing_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(handle, "w", encoding="utf-8") as lock:
+        lock.write(json.dumps({STARTED_AT: clock, UNTIL: until}) + "\n")
+    return True
+
+
+@contextlib.contextmanager
+def one_pass(
+    path: Path, bound: float, wait: bool, sleep: Callable[[float], None] = _time.sleep
+) -> Iterator[bool]:
+    """Hold `PASS_LOCK` for a pass of at most `bound` seconds; yields whether it was had.
+
+    Without `wait` a held lock yields False at once. With it, this looks again every
+    `LOCK_POLL` seconds, which ends by the holder's `until` at the latest: a lock past it
+    is broken.
+    """
+    held = take_lock(path, _clock() + bound, _clock())
+    if not held and wait:
+        print("collectors: waiting for the collectors pass acting now to finish", file=sys.stderr)
+    while not held and wait:
+        sleep(LOCK_POLL)
+        held = take_lock(path, _clock() + bound, _clock())
+    if not held:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def status(
     collectors: Sequence[config.Collector],
     chosen: Sequence[Target],
@@ -1410,6 +1492,24 @@ def main(
         return finish()
     if not chosen:
         report.say("no collector is assigned to this machine -- nothing to do")
+    in_containers = [t for t in chosen if not t.collector.scheduled]
+    bound = PS_TIMEOUT + max(1, len(in_containers)) * TARGET_BOUND
+    with one_pass(base / PASS_LOCK, bound, wait=args.mode in VERBS) as had:
+        if had:
+            act(chosen, base, engine, report, run)
+        else:
+            report.say(STOOD_DOWN)
+    return finish()
+
+
+def act(
+    chosen: Sequence[Target],
+    base: Path,
+    engine: Docker,
+    report: Report,
+    run: collector_tasks.Runner,
+) -> None:
+    """The part of a `maintain` or a verb that starts and stops things, under `PASS_LOCK`."""
     maintain_scheduled([t for t in chosen if t.collector.scheduled], base, report, run)
     health = load_health(base / HEALTH)
     in_containers = [t for t in chosen if not t.collector.scheduled]
@@ -1418,7 +1518,6 @@ def main(
     with acting(base / IN_PASS, in_containers):
         maintain(in_containers, engine, report, health, awake=awake)
     write_file(base / HEALTH, json.dumps(health, indent=2, sort_keys=True) + "\n")
-    return finish()
 
 
 if __name__ == "__main__":
