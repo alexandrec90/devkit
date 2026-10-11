@@ -625,6 +625,36 @@ def resume_refusal(devkit: Path, version: str, state: str) -> str:
     return "gh cannot show that it never had a PR"
 
 
+# `prepare_pr`'s number when another run owns this release: not a PR, and not a failure.
+ANOTHER_RUN = -1
+
+
+def lost_the_push_race(devkit: Path, branch: str, refusal: str) -> bool:
+    """Whether a failed `prepare` lost to another run cutting the same release.
+
+    `refusal` is `resume_refusal`'s answer from before the prepare: only a branch origin
+    did not hold then, and holds now, was pushed by somebody else in between. On
+    2026-10-11 two runs cut release/v0.11.58 within seconds; one opened #619 and carried
+    the release through, while the other's push was rejected as `reference already
+    exists` and filed a failure for a release that went out. A branch that was on origin
+    *before* is a stranded or foreign push, and stays the failure `prepare` reports.
+    """
+    return refusal == release.NOT_ON_ORIGIN and bool(release.pushed_to_origin(devkit, branch, _run))
+
+
+def prepare_outcome(number: int, failure: str) -> int:
+    """`run_pipeline`'s exit code when `prepare_pr` returned no PR to drive.
+
+    0 when another run owns the release -- driving its PR too would merge and tag twice
+    -- and 2, the failed step, otherwise.
+    """
+    if number == ANOTHER_RUN:
+        _say(f"{failure}; that run carries the release, so this one stops here")
+        return 0
+    print(f"release-pipeline: {failure}", file=sys.stderr)
+    return 2
+
+
 def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
     """The prepare PR's number, pushing and opening it as needed; `(0, why)` on failure.
 
@@ -632,17 +662,20 @@ def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
     before its PR (`resume_refusal` says when that branch is safe to reuse), and
     only failing both cuts the branch afresh. A branch whose PR was *closed* is never
     resumed: closing it was somebody's decision, and `prepare` refuses it out loud.
+    `(ANOTHER_RUN, why)` when a concurrent run pushed the branch first.
     """
     branch = release.branch_for(version)
     number, state = release_pr(devkit, branch)
     if state == "OPEN":
         _say(f"reusing the open prepare PR #{number} for {branch}")
         return number, ""
-    if not resume_refusal(devkit, version, state):
+    if not (refusal := resume_refusal(devkit, version, state)):
         _say(f"{branch} is on origin with no PR -- an earlier run stopped before opening it")
     else:
         _say(f"preparing {branch}")
         ok, detail = release.prepare(devkit, version, _run, _say)
+        if not ok and lost_the_push_race(devkit, branch, refusal):
+            return ANOTHER_RUN, f"another run pushed {branch} while this one prepared it"
         if not ok:
             return 0, f"prepare failed: {detail}"
     created = _run(
@@ -819,9 +852,8 @@ def run_pipeline(
         _say(f"{release.FALLBACK_CONST} already names {version} on main -- skipping to the tag")
     else:
         number, failure = prepare_pr(devkit, version)
-        if not number:
-            print(f"release-pipeline: {failure}", file=sys.stderr)
-            return 2
+        if number <= 0:
+            return prepare_outcome(number, failure)
 
         _say(f"waiting for the gate on #{number} (one blocking call; this takes minutes)")
         wait_for_checks(devkit, number)
