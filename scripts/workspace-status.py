@@ -842,17 +842,31 @@ def events_line(source: Path = SOURCE_ROOT) -> str:
     Read against `SOURCE_ROOT` for `scheduler_line`'s reason: every writer resolves
     the ledger to the permanent checkout (`$DEVKIT_DIR`, or the guard's own path), so
     from a box `REPO_ROOT` would be a `logs/` nothing writes to.
+
+    A pooled ledger that is unreachable is said here too, since it bears on the count:
+    while it is, this machine reads only its own rows and writes where no other machine
+    reads them. Not a filed failure -- a synced folder not mounted yet is the machine's
+    state, which no fixer can change.
     """
     try:
         count = len(_triage.open_items(_triage.load(source)))
     except Exception:
         return ""
-    if not count:
-        return ""
-    return (
+    events = _triage.harness_events
+    named = events.pool_named(source)
+    pool = (
+        f"ledger pool {named} unreachable -- rows stay in this machine's logs/: "
+        "python devkit/scripts/ledger-pool.py"
+        if named is not None and events.pool_dir(source) is None
+        else ""
+    )
+    backlog = (
         f"{count} harness defect(s) open -- agent reports or failed box spawns nobody "
         f"has retired: python devkit/scripts/harness_triage.py"
+        if count
+        else ""
     )
+    return "\n".join(line for line in (backlog, pool) if line)
 
 
 def publish_verdict(branch: str, default: str, canonical_dirty: bool) -> str:
@@ -980,7 +994,8 @@ def render(
         events,
         workspace_sync,
     )
-    lines = [line for line in halves if line]
+    # Split, so a half that says two things gets the prefix on both.
+    lines = [line for half in halves if half for line in half.splitlines() if line]
     if not lines:
         return ""
     return "\n".join(f"[workspace] {line}" for line in lines)

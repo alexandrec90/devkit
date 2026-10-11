@@ -470,6 +470,19 @@ group is recorded in the ledger, and its installer registers it *disabled* from 
 so the nightly `devkit-installers` pass keeps it registered without ever starting it.
 Skills are never touched — they cost nothing until a session invokes one by name.
 
+### One defect ledger across machines
+
+Each machine appends to its own `harness-events-<host>.log`, and the fix pass reads every
+shard beside its own. A second machine running the same scheduled jobs is only on the
+backlog once both put their shard in one shared folder (a OneDrive or Dropbox folder, a
+network share). Run this on each machine, with that machine's path to the same folder:
+
+```bash
+python scripts/ledger-pool.py --set "<shared folder>"   # moves this machine's shard there
+python scripts/ledger-pool.py                           # where it lives, which hosts it holds
+python scripts/ledger-pool.py --unset                   # back to the checkout's logs/
+```
+
 With no branch tier wired, `scripts/agent-box.py` is what cuts, runs, ships and destroys a
 box on purpose. It is one verb per workspace task, and the tasks are the intended way in:
 
