@@ -31,6 +31,7 @@ from fix_plan import (
     EVIDENCE_DIR,
     LEDGER,
     PR,
+    PROJECT_OWNED,
     UNFETCHABLE_ENTRY,
     Failure,
     describe,
@@ -367,7 +368,9 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         + (
             " The fix belongs here in devkit, once -- in the vendored file, the "
             "test, or the template that generates the project-owned file it names -- not in "
-            "each consumer."
+            "each consumer. A template reaches no project already generated, though: where "
+            "the test is right and checks a consumer's own "
+            f"{', '.join(PROJECT_OWNED)}, that copy is fixed on its PR's branch."
             if vendored
             else ""
         )

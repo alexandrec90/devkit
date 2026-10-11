@@ -48,6 +48,7 @@ is the half that asks GitHub.
 
 from __future__ import annotations
 
+import ast
 import functools
 import re
 import sys
@@ -112,6 +113,21 @@ RUNNING = "running"
 # Where the vendored test tier lives in every consumer. A failing id under it is a
 # devkit defect by construction, because the file is byte-identical everywhere.
 VENDORED_TESTS = "scripts/hooks/tests/"
+
+# The files every project keeps its own copy of (`scripts/CLAUDE.md`, "Never vendored"):
+# rendered once from `templates/`, then the project's. A vendored test that checks one
+# is byte-identical everywhere and what it judges is not -- sports_betting #67 was red
+# on the vendored lint-runner contract because its own `scripts/lint-all.py` failed it,
+# and the devkit session it was folded into could change nothing that would turn it
+# green (`project_owned_subject`).
+PROJECT_OWNED = (
+    "scripts/lint-all.py",
+    "scripts/run-tests.py",
+    ".devkit.toml",
+    ".claude/settings.json",
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # `release.py`'s branch namespace. The PR gate on one of these is red by design.
 RELEASE_PREFIX = "release/"
@@ -297,6 +313,44 @@ def in_vendored_tier(entry: str, prefixes: tuple[str, ...] = (VENDORED_TESTS,)) 
 def is_vendored(sig: tuple[str, ...]) -> bool:
     """Every id in the signature is a vendored test -- the shape that belongs upstream."""
     return bool(sig) and all(in_vendored_tier(entry) for entry in sig)
+
+
+def project_owned_subject(entry: str, root: Path = REPO_ROOT) -> str:
+    """The project-owned file the vendored test `entry` reads, or "" when it names none.
+
+    Read off devkit's copy of the test, which is the consumer's byte for byte: the path
+    spelled whole as a string, or every segment of it spelled as one (`REPO_ROOT /
+    "scripts" / "lint-all.py"`). The docstring is skipped -- a test of a vendored file may
+    *mention* a runner -- and so is a test devkit no longer has: unreadable is "", so the
+    failure stays devkit's, the answer before this existed.
+    """
+    path, _, rest = entry.partition("::")
+    name = rest.rsplit("::", 1)[-1].split("[", 1)[0]
+    if not name or not in_vendored_tier(entry):
+        return ""
+    try:
+        source = (root / path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return ""
+    said = _spelled_by(source, name)
+    return next(
+        (owned for owned in PROJECT_OWNED if owned in said or set(owned.split("/")) <= said), ""
+    )
+
+
+def _spelled_by(source: str, name: str) -> set[str]:
+    """Every string the function `name` in `source` spells outside its docstring."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+    found = [node for node in ast.walk(tree) if isinstance(node, functions) and node.name == name]
+    if not found:
+        return set()
+    body = found[0].body[1:] if ast.get_docstring(found[0]) is not None else found[0].body
+    nodes = (node for statement in body for node in ast.walk(statement))
+    return {n.value for n in nodes if isinstance(n, ast.Constant) and isinstance(n.value, str)}
 
 
 def is_release_red(sig: tuple[str, ...]) -> bool:

@@ -1227,9 +1227,30 @@ def test_lost_the_push_race_asks_origin_only_about_a_branch_it_did_not_hold(monk
     assert asked == ["release/v0.0.2"]
 
 
+def test_a_release_pr_names_the_machine_and_job_that_started_it():
+    """2026-10-11: #619 was opened by a run whose record stayed on another machine, and
+    the nightly job here that lost the race to it could not say who that was."""
+    env = {rp.JOB_ENV: "Scheduled: Devkit Release", rp.harness_events.HOST_ENV: "laptop"}
+    origin = rp.started_by(env)
+    assert origin == "Started on `laptop` by the `Scheduled: Devkit Release` job."
+    body = rp.PR_BODY.format(version="v0.0.2", expected=rp.EXPECTED_RED_TEST, origin=origin)
+    assert origin in body
+
+
+def test_a_release_no_wrapper_named_says_it_was_started_by_hand():
+    origin = rp.started_by({rp.JOB_ENV: "  ", rp.harness_events.HOST_ENV: "laptop"})
+    assert origin.startswith("Started on `laptop` by hand")
+
+
+def test_the_job_variable_is_the_one_log_wrap_sets():
+    assert rp.JOB_ENV == load_script("scripts/log-wrap.py").JOB_ENV
+
+
 def test_a_yielded_release_exits_clean_and_a_failed_one_does_not(capsys):
     assert rp.prepare_outcome(rp.ANOTHER_RUN, "another run pushed release/v0.0.2") == 0
-    assert "that run carries the release" in capsys.readouterr().out
+    said = capsys.readouterr().out
+    assert "that run carries the release" in said
+    assert "its PR says which machine and job started it" in said
     assert rp.prepare_outcome(0, "prepare failed: boom") == 2
     assert "prepare failed: boom" in capsys.readouterr().err
 

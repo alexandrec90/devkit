@@ -9,7 +9,8 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   -- a vendored test, a lint finding in a vendored path, a signature shared by two or
   more projects, a commit refused by the toolchain rather than by the change, or
   anything in devkit -- `PROJECT` when the evidence points at the project's own code,
-  a vendored ratchet red on one project's ordinary PR included, and `UNKNOWN` when there is no evidence to point anywhere. Unknown goes to the project
+  a vendored ratchet red on one project's ordinary PR included, and a vendored test of a
+  file that one project owns (`checks_own_files`), and `UNKNOWN` when there is no evidence to point anywhere. Unknown goes to the project
   bucket, where the fixer will say "upstream" and stop; guessing the other way sends a
   devkit session at a project bug.
 - **Hold every project fixer while the harness is red.** Nearly every red PR of the last
@@ -187,6 +188,30 @@ def is_own_ratchet(
     )
 
 
+def checks_own_files(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> bool:
+    """Red, in one project, only on vendored tests of files that project owns.
+
+    The test is right everywhere else it runs, so what differs is the project's own
+    copy, and the fix is on the failure's own branch: sports_betting #67 failed the
+    vendored lint-runner contract on its own `scripts/lint-all.py` and was folded into a
+    devkit session told the fix belonged upstream, where nothing could turn it green.
+    Shared across projects it stays devkit's, as a ratchet does: the test may be wrong.
+    """
+    ids = [entry for entry in failure.signature if entry != fix_plan.CONFLICT]
+    return (
+        bool(ids)
+        and failure.signature not in shared
+        and all(fix_plan.project_owned_subject(entry) for entry in ids)
+    )
+
+
+def is_projects_own(
+    failure: fix_plan.Failure, shared: set[tuple[str, ...]], prefixes: Iterable[str]
+) -> bool:
+    """A vendored test red on what one project owns: its ratchet, or its own files."""
+    return is_own_ratchet(failure, shared, prefixes) or checks_own_files(failure, shared)
+
+
 def classify(
     failure: fix_plan.Failure, shared: set[tuple[str, ...]], prefixes: Iterable[str] = ()
 ) -> str:
@@ -201,7 +226,7 @@ def classify(
     if failure.project == DEVKIT and failure.kind in (fix_plan.PR, fix_plan.COMMIT):
         return PROJECT if ids else UNKNOWN
     # Before `_harness_shaped` and `HARNESS_PATHS`, each of which would claim it (#395).
-    if is_own_ratchet(failure, shared, prefixes):
+    if is_projects_own(failure, shared, prefixes):
         return PROJECT
     if _harness_shaped(failure, shared):
         return HARNESS
