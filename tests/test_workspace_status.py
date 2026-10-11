@@ -980,6 +980,28 @@ def test_no_ledger_file_is_silence(tmp_path):
     assert ws.events_line(source=tmp_path) == ""
 
 
+def test_an_unreachable_ledger_pool_is_said(tmp_path):
+    """While the shared folder is away, this machine's rows reach no other machine."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "ledger-pool").write_text(f"{tmp_path / 'offline'}\n", encoding="utf-8")
+    line = ws.events_line(source=tmp_path)
+    assert "unreachable" in line
+    assert "ledger-pool.py" in line
+    assert ws.failure_kind(line) == ""
+
+
+def test_a_reachable_ledger_pool_is_silence(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "logs" / "ledger-pool").write_text(f"{tmp_path / 'shared'}\n", encoding="utf-8")
+    assert ws.events_line(source=tmp_path) == ""
+
+
+def test_render_prefixes_every_line_of_a_two_line_half():
+    report = ws.render([], {}, "", events="one\ntwo")
+    assert report.splitlines() == ["[workspace] one", "[workspace] two"]
+
+
 def test_an_agent_report_is_surfaced_with_the_command_to_run(tmp_path):
     _ledger(tmp_path, (3600, "agent-report"))
     line = ws.events_line(source=tmp_path)

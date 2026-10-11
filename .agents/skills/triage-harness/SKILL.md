@@ -117,13 +117,14 @@ group with the project they were cut from. Do not filter on the raw field.
 
 **A group can span machines**, and the `host` line names the ones it was seen on. The
 backlog is the union of every `harness-events-<host>.log` in the devkit checkout's `logs/`
-(`$DEVKIT_DIR/logs`, not a worktree's own, which holds none), so on
-a machine whose ledger is pooled you are triaging both. Two consequences: a group seen on
+(`$DEVKIT_DIR/logs`, not a worktree's own, which holds none) and in the shared folder
+`python scripts/ledger-pool.py` names, so on a machine whose ledger is pooled you are
+triaging both. Two consequences: a group seen on
 one host only is a lead worth following — a path, a shell, a scheduler that differs — and a
 `--resolve-like` retires **every** machine's copy in one note, which is the point. A
-machine whose `logs/` is not pooled still shows only its own, and a defect filed on the
-other one is invisible here; that is a transport that was never set up, not an empty
-backlog.
+machine that is not pooled still shows only its own, and a defect filed on the other one
+is invisible here; that is `ledger-pool.py --set` never run on both machines, not an
+empty backlog, and it is a person's step: the folder has to be one both machines sync.
 
 ## 2. Verify each group before believing it
 
