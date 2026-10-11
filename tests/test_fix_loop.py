@@ -42,7 +42,7 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fix_loop.bg_sessions, "stop_finished", lambda trees, runner: [f"x in {t}" for t in trees]
     )
-    monkeypatch.setattr(fix_loop, "working_dirs", frozenset)
+    monkeypatch.setattr(fix_loop, "session_listing", list)
     monkeypatch.setattr(fix_loop.friction_pending, "detector_fixes", lambda gh, git: [])
     monkeypatch.setattr(fix_loop, "devkit_fixes", lambda ctx: ())  # GitHub's devkit PRs
     return fix_loop.Context(
@@ -227,8 +227,7 @@ def test_a_fixed_on_this_branch_from_a_session_still_at_work_is_held(ctx, monkey
 def test_a_session_listed_busy_holds_its_claimed_friction_too(ctx, monkeypatch):
     path = tree(ctx, monkeypatch, friction="- x; fixed on this branch\n")
     monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
-    busy = fix_loop.bg_sessions.working([{"cwd": str(path), "status": "busy"}])
-    monkeypatch.setattr(fix_loop, "working_dirs", lambda: busy)
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [{"cwd": str(path), "status": "busy"}])
     _, journal = close(ctx)
     assert [f for f in journal.findings if f.kind == "reported"] == []
 
@@ -441,7 +440,7 @@ def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ct
     closed, _ = close(ctx)
     assert closed.busy == {} and closed.harness_busy == "", "idle: finished, holds nothing"
     listed = [{"kind": "background", "state": "working", "cwd": str(path)}]
-    monkeypatch.setattr(fix_loop, "working_dirs", lambda: fix_loop.bg_sessions.working(listed))
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: listed)
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
     assert closed.harness_busy == str(path)
@@ -456,7 +455,8 @@ def test_the_session_listing_is_read_from_claude_agents(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, rows, "")
 
     monkeypatch.setattr(fix_loop.ship_intent, "run_quiet", runner)
-    assert fix_loop.working_dirs() == frozenset({"c:/ws/t"})
+    listing = fix_loop.session_listing()
+    assert fix_loop.bg_sessions.working(listing) == frozenset({"c:/ws/t"})
     assert seen == [["claude", "agents", "--json"]]
 
 
@@ -1235,6 +1235,30 @@ def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_n
     )
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
+
+
+def test_a_recent_transcript_whose_session_the_listing_shows_gone_holds_nothing(ctx, monkeypatch):
+    """The 2026-10-11 rehearsal held data-lake #66 and ibkr_trader #116 behind sessions
+    that had ended twenty minutes before: `claude agents` listed none in either tree,
+    and only the transcripts' age said anyone was there."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=20),
+        transcript_age=_dt.timedelta(minutes=10),
+    )
+    resident = fix_reports.transcript_dir(path) / "resident.jsonl"
+    resident.write_text(
+        f'{{"timestamp": "{(NOW - _dt.timedelta(minutes=2)).isoformat()}"}}\n', encoding="utf-8"
+    )
+    elsewhere = {"kind": "interactive", "pid": 1, "cwd": str(ctx.root / "other"), "status": "idle"}
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [elsewhere])
+    closed, _ = close(ctx)
+    assert closed.busy == {}, "nobody listed in the tree: the transcript's session has left"
+    here = {**elsewhere, "cwd": str(path)}
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [elsewhere, here])
+    closed, _ = close(ctx)
+    assert closed.busy == {("carameli", "agent/x-0919"): str(path)}, "idle, but present"
 
 
 def test_the_pass_own_session_that_finished_does_not_hold_its_tree(ctx, monkeypatch):

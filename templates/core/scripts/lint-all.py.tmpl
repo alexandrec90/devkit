@@ -297,7 +297,11 @@ def run_tool(
         print(f"  {name}: not installed — skipped")
         return ""
     try:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        # ruff and mypy write UTF-8 whatever the console's code page, and `text=True` read
+        # it as cp1252 on Windows: ruff's multiplication sign came out as two letters.
+        result = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout
+        )
     except FileNotFoundError:
         _SKIPPED.append(name)
         print(f"  {name}: not installed — skipped")
@@ -482,7 +486,11 @@ def _python_passes(targets: list[str], scoped: bool) -> str:
     no_fix = [arg for path in NO_FIX_SCOPE for arg in ("--exclude", path)]
     fix = ["check", *scope, "--fix", "--unsafe-fixes", "--show-fixes", *no_fix]
     fixed = subprocess.run(
-        [sys.executable, "-m", "ruff", *fix], cwd=REPO_ROOT, capture_output=True, text=True
+        [sys.executable, "-m", "ruff", *fix],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
     )
     for line in applied_fixes(fixed.stdout or ""):
         print(f"  ruff --fix changed {line}")

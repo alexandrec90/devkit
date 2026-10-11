@@ -11,7 +11,7 @@ the conversation, and `claude attach <id>` reopens it.
 Only a background session that is idle, in a tree whose stamped session is finished or
 dead, is stopped -- never an interactive one, and never one still working. The same
 listing says which trees a session is busy in (`working`), which the pass holds a
-dispatch off.
+dispatch off, and which recent transcripts belong to a session that has left (`gone`).
 
 Tested in `tests/test_bg_sessions.py`.
 """
@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable, Iterable
+from pathlib import Path
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -103,6 +104,20 @@ def working(rows: Iterable[dict], kinds: tuple[str, ...] = ()) -> frozenset[str]
 def busy_in(dirs: frozenset[str], tree: object) -> bool:
     """Whether `tree` is one of the directories `working` returned."""
     return _key(str(tree)) in dirs
+
+
+def gone(rows: Iterable[dict], tree: object, transcript: Path) -> bool:
+    """Whether the listing shows `transcript`'s session has left `tree`: it lists a live
+    session, none of them in `tree` and none of them `transcript`'s own.
+
+    A transcript's age is a guess at presence for `QUIET_AFTER`: a person's session
+    that ended twenty minutes ago held data-lake #66 and ibkr_trader #116 as "a session
+    is working in" a tree nobody was in. An empty listing is one that could not say, so
+    the guess stands; so does any live row in the tree, whose own id the stem may not be.
+    """
+    live = [row for row in rows if alive(row)]
+    own = any(row.get("sessionId") == transcript.stem for row in live)
+    return bool(live) and not own and not in_tree(live, tree)
 
 
 def _key(path: str) -> str:

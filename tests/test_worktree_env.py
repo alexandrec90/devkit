@@ -8,12 +8,14 @@ is the thing under test, and a stub would only assert that the stub works.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from support import load_script, worktree_tiers
@@ -555,14 +557,16 @@ def test_a_plain_install_command_keeps_the_inherited_environment(tmp_path, monke
 
 
 def _hold_lock(handle) -> None:
-    """Take the exclusive lock uv takes on a file: `LockFileEx` on Windows, `flock` elsewhere."""
-    if sys.platform == "win32":
-        import msvcrt
+    """Take the exclusive lock uv takes on a file: `LockFileEx` on Windows, `flock` elsewhere.
 
+    By `os.name`, the host's own answer: the lock is taken against the real uv on this
+    machine, so a faked `sys.platform` reached for `fcntl` on Windows. `Any`, because
+    mypy narrows only on `sys.platform` and would check each module on the other OS."""
+    if os.name == "nt":
+        msvcrt: Any = importlib.import_module("msvcrt")
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     else:
-        import fcntl
-
+        fcntl: Any = importlib.import_module("fcntl")
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 

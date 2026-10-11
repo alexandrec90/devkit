@@ -247,6 +247,30 @@ def test_waiting_loops_and_no_verify_are_friction_whatever_they_return():
     assert classes([call("sleep 2", "1")]) == [], "a short settle is not a poll"
 
 
+def test_a_wait_that_ended_inside_the_floor_is_not_a_poll():
+    """62606423: `until pg_isready ...; do sleep 5; done` waited nine seconds for a
+    database out of recovery and was filed as the eighth recurrence of the poll group.
+    Read through `st.events`, as the harvest is, which stamps each record's time."""
+
+    def waited(seconds: int) -> list[str]:
+        loop = "until docker exec db pg_isready -q; do sleep 5; done"
+        rows = (
+            (1, {**call(loop, "1"), "timestamp": "2026-10-11T02:12:42.336Z"}),
+            (
+                2,
+                {
+                    **result("ok", "1", error=False),
+                    "timestamp": f"2026-10-11T02:12:{42 + seconds}Z",
+                },
+            ),
+        )
+        return sorted(cls for cls, _, _ in sf.detect(st.events(Path("t.jsonl"), rows)))
+
+    assert waited(9) == []
+    assert waited(15) == ["poll"], "one that held the turn past the floor still is"
+    assert classes([call("until [ -s f ]; do sleep 5; done", "1")]) == ["poll"], "no stamp"
+
+
 def test_claude_codes_sleep_guard_refusal_is_neither_a_block_nor_a_poll():
     """9854b541 and 363d8be7: one refused `sleep 60; tail` filed twice, once for the
     command and once for its refusal. Claude Code's own guard refused it and named the
