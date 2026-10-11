@@ -221,6 +221,29 @@ def test_the_dependabot_prompt_names_each_bump_and_where_the_evidence_is():
     assert not set("`") & set(text)
 
 
+def test_a_failing_update_job_sends_its_fixer_at_the_cause_not_only_the_bump():
+    """dd07a7ab: data-lake's job failed on sqlalchemy five weeks running; one fixer bumped
+    the lock by hand, the next found nothing to bump, and the manifest spelled it
+    SQLAlchemy, which Dependabot's case-sensitive match never rewrote."""
+    text = fix_prompts.dependabot_prompt(
+        _dependabot("run sqlalchemy: dependency_file_content_not_changed"), "agent/fix-d"
+    )
+    assert "a bump by hand answers one run" in text
+    assert "how many runs in a row each job has failed" in text
+    assert "Find what in this repository stops Dependabot and fix that, with a test" in text
+    assert "case-sensitive match on the lowercase package name" in text
+    assert not set('`"') & set(text), "the prompt crosses a wt command line"
+
+    other = fix_prompts.dependabot_prompt(_dependabot("run Something else broke"), "agent/f")
+    assert "Find what in this repository stops Dependabot" in other
+    assert "case-sensitive" not in other, "a kind's cause is said only for that kind"
+
+    alert_only = fix_prompts.dependabot_prompt(
+        _dependabot(f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0"), "agent/f"
+    )
+    assert "stops Dependabot" not in alert_only, "no failing job, nothing to say about one"
+
+
 def test_an_unfetchable_sibling_is_said_with_the_only_two_fixes_and_never_a_retry():
     """ibkr_trader: every Dependabot job died on `"data-lake" at /pyproject.toml`."""
     text = fix_prompts.dependabot_prompt(

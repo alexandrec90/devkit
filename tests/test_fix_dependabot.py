@@ -68,6 +68,45 @@ def test_only_the_newest_run_of_each_update_job_decides_whether_it_is_failing():
     assert [r["databaseId"] for r in fd.failing_updates(runs)] == [9]
 
 
+def test_a_failing_job_carries_how_many_runs_in_a_row_it_has_failed():
+    """dd07a7ab: data-lake's `uv in /.` failed on sqlalchemy five weeks running, and each
+    fixer read only the newest run."""
+    runs = [
+        {**run("uv in /.", "failure", 9), "createdAt": "2026-10-11T20:26:59Z"},
+        run("github_actions in /.", "success", 8),
+        {**run("uv in /.", "failure", 7), "createdAt": "2026-10-04T20:22:50Z"},
+        {**run("uv in /.", "timed_out", 6), "createdAt": "2026-09-27T20:22:52Z"},
+        {**run("uv in /.", "success", 5), "createdAt": "2026-09-20T20:22:00Z"},
+        {**run("uv in /.", "failure", 4), "createdAt": "2026-09-13T20:22:54Z"},
+    ]
+    assert fd.streak(runs, "uv in /.") == (3, "2026-09-27T20:22:52Z")
+    assert fd.streak(runs, "github_actions in /.") == (0, "")
+    assert fd.streak(runs, "pip in /.") == (0, "")
+    (failing,) = fd.failing_updates(runs)
+    assert failing["databaseId"] == 9
+    assert (failing["failedRuns"], failing["failingSince"]) == (3, "2026-09-27T20:22:52Z")
+    assert fd.recurring(failing) == "; its last 3 runs failed, the first at 2026-09-27T20:22:52Z"
+
+
+def test_a_first_failure_is_not_called_recurring():
+    assert fd.recurring({"failedRuns": 1, "failingSince": "x"}) == ""
+    assert fd.recurring({}) == ""
+    assert fd.recurring({"failedRuns": "3"}) == "", "a shape the pass did not write"
+
+
+def test_the_evidence_says_a_job_has_failed_run_after_run(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    runs = [
+        {**data_lake_run("2026-10-11T20:26:59Z"), "databaseId": 9},
+        {**data_lake_run(), "databaseId": 8},
+    ]
+    gh, _ = gh_world(runs, logs={"9": HANDLED_LOG}, merged=[PR_50])
+    failure, _ = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, gh)
+    assert failure is not None, "#50 merged before the newest run, so it answers nothing"
+    text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
+    assert f"its last 2 runs failed, the first at {RAN})" in text
+
+
 def test_an_unfetchable_path_dependency_is_one_entry_named_by_the_dependency():
     """Every job that dies on it says the same thing, so it is one entry, not one per job."""
     assert fd.run_errors(UNFETCHABLE_LOG + UNFETCHABLE_LOG) == [
