@@ -158,6 +158,8 @@ def test_the_exit_names_its_blockers_what_is_not_one_and_asks_for_evidence():
         "outside this repository",
         "adding a worktree on another branch",
         "what you tried first",
+        # the line `fix_reports.waits_on` reads, so a wait on another PR is held, not filed
+        "a line Waits on: and the full github.com URL",
     ):
         assert expected in fix_prompts.STOP
     # It crosses a wt command line with every other sentence here.

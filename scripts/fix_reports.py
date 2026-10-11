@@ -248,6 +248,26 @@ def blocked_reason(tree: Path) -> str:
     return " ".join(words)[:REASON_LIMIT]
 
 
+# The line a blocked report carries when its fix is another PR's merge, in any repository.
+WAITS_LINE = re.compile(r"^\W*Waits on:\W*(https://github\.com/[\w.-]+/[\w.-]+/pull/\d+)", re.M)
+
+
+def waits_on(tree: Path) -> str:
+    """The PR the tree's blocked report says its fix waits on, or "" when it names none.
+
+    f7c4e5db: ibkr_trader #116 needed columns only data-lake #66 adds, still open. Its
+    fixer stopped correctly and the pass escalated that to the devkit session, which can
+    no more merge #66 than the fixer could -- and resolving it sent a fresh fixer at the
+    same wall. A wait is not a defect: the pass holds the problem until that PR closes.
+    """
+    try:
+        text = (tree / BLOCKED_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    found = WAITS_LINE.search(text)
+    return found.group(1) if found else ""
+
+
 def agent_trees(
     root: Path, projects: list[str], git_for: GitFor = sweep.git_for
 ) -> Iterator[tuple[str, Path, str]]:
