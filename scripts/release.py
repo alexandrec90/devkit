@@ -152,6 +152,11 @@ def branch_for(version: str) -> str:
     return f"release/{version}"
 
 
+# `unresumable`'s answer for a branch origin does not hold: the one state in which a
+# `prepare` that then fails to push has lost a race rather than met a stranded branch.
+NOT_ON_ORIGIN = "not on origin"
+
+
 # --- the release branch's lifecycle -------------------------------------------
 #
 # Here rather than in `release-pipeline.py` because that module is already over every
@@ -173,7 +178,7 @@ def unresumable(devkit: Path, version: str, run: GitRunner) -> str:
     branch = branch_for(version)
     on_origin = pushed_to_origin(devkit, branch, run)
     if not on_origin:
-        return "origin could not be asked" if on_origin is None else "not on origin"
+        return "origin could not be asked" if on_origin is None else NOT_ON_ORIGIN
     remote = f"refs/remotes/origin/{branch}"
     relative = NEW_PROJECT.relative_to(REPO_ROOT).as_posix()
 

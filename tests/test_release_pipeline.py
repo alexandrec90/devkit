@@ -1174,6 +1174,72 @@ def test_an_open_pr_is_reused_and_nothing_is_pushed(monkeypatch):
     assert steps == []
 
 
+REJECTED = "`git push -u origin release/v0.0.2`: ! [remote rejected] (reference already exists)"
+
+
+def _rejected_push(monkeypatch, why, on_origin):
+    """`_pr_stage` with `prepare` refused at its push, and origin holding the branch
+    afterwards exactly when `on_origin` says so."""
+    steps = _pr_stage(monkeypatch, "", why)
+    monkeypatch.setattr(
+        rp.release, "prepare", lambda *_a: steps.append("prepare") or (False, REJECTED)
+    )
+    monkeypatch.setattr(
+        rp.release, "pushed_to_origin", lambda *_a: steps.append("ls-remote") or on_origin
+    )
+    return steps
+
+
+def test_a_push_lost_to_a_concurrent_run_yields_the_release_to_it(monkeypatch):
+    """2026-10-11: two runs cut release/v0.11.58 seconds apart. The winner opened #619 and
+    shipped it; the loser's push was rejected and it filed a failure for a release that
+    went out. Origin not holding the branch before the prepare, and holding it after, is
+    another run's push -- so this one stands down rather than fail or drive that PR too."""
+    steps = _rejected_push(monkeypatch, rp.release.NOT_ON_ORIGIN, True)
+
+    number, why = rp.prepare_pr(Path("devkit"), "v0.0.2")
+
+    assert number == rp.ANOTHER_RUN
+    assert "another run pushed release/v0.0.2" in why
+    assert steps == ["ask", "prepare", "ls-remote"]
+
+
+@pytest.mark.parametrize(
+    ("why", "on_origin"),
+    [
+        (rp.release.NOT_ON_ORIGIN, False),  # the push failed and nobody else's landed
+        (rp.release.NOT_ON_ORIGIN, None),  # origin could not be asked: not a yes
+        ("release/v0.0.2's commit is not `Release v0.0.2`", True),  # there before: foreign
+    ],
+)
+def test_any_other_failed_prepare_stays_a_failure(monkeypatch, why, on_origin):
+    _rejected_push(monkeypatch, why, on_origin)
+
+    assert rp.prepare_pr(Path("devkit"), "v0.0.2") == (0, f"prepare failed: {REJECTED}")
+
+
+def test_lost_the_push_race_asks_origin_only_about_a_branch_it_did_not_hold(monkeypatch):
+    asked: list[str] = []
+    monkeypatch.setattr(rp.release, "pushed_to_origin", lambda _d, b, _r: asked.append(b) or True)
+
+    assert rp.lost_the_push_race(Path("devkit"), "release/v0.0.2", rp.release.NOT_ON_ORIGIN)
+    assert not rp.lost_the_push_race(Path("devkit"), "release/v0.0.2", "its PR is CLOSED")
+    assert asked == ["release/v0.0.2"]
+
+
+def test_a_yielded_release_exits_clean_and_a_failed_one_does_not(capsys):
+    assert rp.prepare_outcome(rp.ANOTHER_RUN, "another run pushed release/v0.0.2") == 0
+    assert "that run carries the release" in capsys.readouterr().out
+    assert rp.prepare_outcome(0, "prepare failed: boom") == 2
+    assert "prepare failed: boom" in capsys.readouterr().err
+
+
+def test_the_pipeline_exits_through_prepare_outcome():
+    """`run_pipeline` reads no PR to drive -- a failure or a yield -- through
+    `prepare_outcome`, so a yield is never mistaken for PR number -1."""
+    assert "return prepare_outcome(number, failure)" in inspect.getsource(rp.run_pipeline)
+
+
 def _git_run(cmd, env=None):
     """Stands in for `release-pipeline.py`'s `_run`, which is what `prepare` spawns
     through in production -- the same call without its console-discipline flags."""
