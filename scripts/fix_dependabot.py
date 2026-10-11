@@ -10,9 +10,10 @@ Dependabot runner clones one repository. Nobody noticed for days.
 
 Three of Dependabot's outputs are read here, per project:
 
-- **its update runs**: the newest run of each update job (`uv in /. for urllib3`), and the
-  error its failed log names (`run_errors`), less a package's error that a PR merged
-  since the run has answered (`answered_since`);
+- **its update runs**: the newest run of each update job (`uv in /. for urllib3`), how
+  many runs in a row that job has failed (`streak`), and the error its failed log names
+  (`run_errors`), less a package's error that a PR merged since the run has answered
+  (`answered_since`);
 - **its open alerts that no open PR answers**, once Dependabot has had `ALERT_GRACE` to
   open one -- matched by the package's name in a PR's title, branch or body, so a
   fixer's hand bump answers it as well as Dependabot's own PR would;
@@ -85,12 +86,35 @@ def update_job(run: dict) -> str:
     return _UPDATE_SUFFIX.sub("", str(run.get("displayTitle", ""))).strip()
 
 
+def _failed(run: dict) -> bool:
+    return str(run.get("conclusion", "")).lower() in FAILED
+
+
+def streak(runs: Iterable[dict], job: str) -> tuple[int, str]:
+    """`(how many of the job's runs failed in a row, newest first; when the first ran)`.
+
+    data-lake's `uv in /.` failed on `sqlalchemy` five weeks running, whatever version it
+    was moving to, and two fixers each read only the newest run: one bumped the lock by
+    hand, which answered a week, and the next found nothing left to bump (dd07a7ab).
+    """
+    count, since = 0, ""
+    for run in runs:
+        if update_job(run) != job:
+            continue
+        if not _failed(run):
+            break
+        count, since = count + 1, str(run.get("createdAt", "") or "")
+    return count, since
+
+
 def failing_updates(runs: Iterable[dict]) -> list[dict]:
-    """The newest run of each update job, where that run failed; newest first.
+    """The newest run of each update job, where that run failed; newest first, each
+    carrying its job's `streak` as `failedRuns` and `failingSince`.
 
     A job that failed last week and passed since is not failing, so only its newest
     run counts -- `runs` is `gh run list`'s order, newest first.
     """
+    runs = list(runs)
     seen: set[str] = set()
     failing = []
     for run in runs:
@@ -98,8 +122,9 @@ def failing_updates(runs: Iterable[dict]) -> list[dict]:
         if not job or job in seen:
             continue
         seen.add(job)
-        if str(run.get("conclusion", "")).lower() in FAILED:
-            failing.append(run)
+        if _failed(run):
+            count, since = streak(runs, job)
+            failing.append({**run, "failedRuns": count, "failingSince": since})
     return failing
 
 
@@ -282,6 +307,15 @@ def ran_on(run: dict) -> str:
     return f"run on {sha} at {run.get('createdAt', '') or 'an unknown time'}"
 
 
+def recurring(run: dict) -> str:
+    """`; its last 5 runs failed, the first at <time>` for a job failing run after run,
+    "" for a first failure: a fix that answers one run is not a fix for that job."""
+    count = run.get("failedRuns", 0)
+    if not isinstance(count, int) or count < 2:
+        return ""
+    return f"; its last {count} runs failed, the first at {run.get('failingSince', '')}"
+
+
 def read_runs(gh: Gh) -> tuple[list[tuple[dict, list[str]]], list[dict], list[str]]:
     """`(failing jobs read, with what each still says; every failing run still counted;
     a line per run a later merge answered)`.
@@ -315,7 +349,8 @@ def evidence_text(
     if failing:
         lines += ["## Failing update jobs", ""]
         for run, errors in failing:
-            lines.append(f"- {update_job(run)} -- {run.get('url', '')} ({ran_on(run)})")
+            where = f"{ran_on(run)}{recurring(run)}"
+            lines.append(f"- {update_job(run)} -- {run.get('url', '')} ({where})")
             lines += [f"  - {error}" for error in errors] or ["  - (no error line in the log)"]
         lines.append("")
     if wanted:

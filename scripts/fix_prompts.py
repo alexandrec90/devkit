@@ -454,6 +454,38 @@ def _unfetchable_note(names: list[str]) -> str:
     )
 
 
+# What a handled error's kind says about the cause, for the kinds whose cause is a
+# spelling in this repository rather than the version Dependabot was moving to.
+_RUN_CAUSES = {
+    "dependency_file_content_not_changed": (
+        "dependency_file_content_not_changed means Dependabot found nothing to rewrite: "
+        "its uv and pip updaters find a declaration by a case-sensitive match on the "
+        "lowercase package name, so a declaration spelled SQLAlchemy is never rewritten "
+        "-- spell it lowercase in the manifest."
+    ),
+}
+
+
+def _runs_note(runs: list[str]) -> str:
+    """Why a failing update job wants its cause fixed, not only the bump it was making.
+
+    data-lake's job failed on sqlalchemy five weeks running: one fixer bumped the lock
+    by hand, which answered a week, and the next found nothing to bump (dd07a7ab). The
+    cause was the manifest spelling SQLAlchemy. No quotes or backticks: the prompt
+    crosses a `wt` command line.
+    """
+    if not runs:
+        return ""
+    kinds = [cause for kind, cause in _RUN_CAUSES.items() if any(kind in r for r in runs)]
+    return (
+        " A failing update job is Dependabot failing to write an update itself, so a bump "
+        "by hand answers one run and the next scheduled run fails the same way -- the "
+        "evidence says how many runs in a row each job has failed. Find what in this "
+        "repository stops Dependabot and fix that, with a test, as well as the bump."
+        + "".join(f" {cause}" for cause in kinds)
+    )
+
+
 def dependabot_prompt(failure: Failure, branch: str) -> str:
     """What Dependabot cannot do for a project: alerts no PR answers, update jobs failing.
 
@@ -469,7 +501,7 @@ def dependabot_prompt(failure: Failure, branch: str) -> str:
     wanted = (
         f" Bump each of these to at least the version named: {'; '.join(bumps)}." if bumps else ""
     )
-    failing = f" Update jobs also fail on: {'; '.join(runs)}." if runs else ""
+    failing = f" Update jobs also fail on: {'; '.join(runs)}.{_runs_note(runs)}" if runs else ""
     return _framed(
         f"{failure.title} ({failure.url}).{wanted}{failing} Every alert, with its advisory, "
         f"and every failing job with its error, is in {EVIDENCE_DIR}/{DEPENDABOT_EVIDENCE} "
