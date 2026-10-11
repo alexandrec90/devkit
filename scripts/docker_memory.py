@@ -22,6 +22,9 @@ So the pass now does two things with this module:
   what does not work then, so only Windows is read -- Docker Desktop's own log of OOM
   kills reported from inside the VM, and the VM process's working set against the
   `.wslconfig` cap. Both stay readable while the VM is frozen.
+
+And a third, so the VM holds no more of Windows' memory than its containers use
+(`reclaim_argv`): it drops the VM's file cache and compacts what that freed.
 """
 
 from __future__ import annotations
@@ -60,6 +63,14 @@ VM_IMAGE = "vmmem"
 WSL_MEMORY = re.compile(r"^\s*memory\s*=\s*(?P<n>\d+(?:\.\d+)?)\s*(?P<unit>[KMGT]?B?)\s*$", re.I)
 _UNITS = {"": 1, "B": 1, "K": 2**10, "M": MIB, "G": GIB, "T": 2**40}
 _FRACTION = re.compile(r"\.\d+")
+# Drop the VM's file cache, then compact the memory that freed. Measured 2026-10-10 with
+# the containers using 950 MiB: the VM held 3.81 GB of Windows' memory, 2.2 GB of it
+# file cache. `autoMemoryReclaim=dropcache` in `.wslconfig` never fired, since WSL drops
+# only once the VM's CPU idles and one running Postgres and a collector never does. The
+# drop alone gave Windows back 0.6 GB of the 1.75 GB it freed: the VM reports free
+# memory only in whole 2 MiB blocks (`page_reporting_order` 9). Compacting gave back
+# 0.34 GB more. `echo 1` drops the page cache alone, never dentries or a process's memory.
+RECLAIM = "sync; echo 1 > /proc/sys/vm/drop_caches; echo 1 > /proc/sys/vm/compact_memory"
 
 
 def gib(size: float) -> str:
@@ -235,3 +246,8 @@ def silent_vm_evidence(kills: Sequence[float], working_set: int | None, cap: int
     if working_set is not None and cap and working_set >= NEAR_CAP * cap:
         said.append(f"the VM holds {gib(working_set)} of its {gib(cap)} cap")
     return "; ".join(said)
+
+
+def reclaim_argv(distro: str) -> list[str]:
+    """The `wsl` call that runs `RECLAIM` as root inside `distro`."""
+    return ["wsl", "-d", distro, "-u", "root", "-e", "sh", "-c", RECLAIM]

@@ -53,7 +53,13 @@ class FakeDocker:
         self.evidence = ""
         # Kept out of `calls`, which other tests compare whole.
         self.memory_asks: list[tuple] = []
+        self.reclaim_answer = (True, "")
+        self.reclaims = 0
         self.calls: list[tuple] = []
+
+    def reclaim_cache(self):
+        self.reclaims += 1
+        return self.reclaim_answer
 
     def limits(self, ids):
         self.memory_asks.append(("limits", tuple(ids)))
@@ -1233,6 +1239,58 @@ def test_the_real_docker_asks_the_engine_for_limits_and_the_vm_size(monkeypatch)
     assert docker.limits(["c1"]) == {"c1full": 512 * 2**20}
     assert docker.vm_memory() == 4109926400
     assert asked[0][:3] == ["docker", "inspect", "--format"] and asked[0][-1] == "c1"
+
+
+def test_the_scheduled_pass_drops_the_vms_file_cache_once_the_engine_answers(tmp_path):
+    """2026-10-10: the VM held 3.81 GB of Windows' memory for containers using 950 MiB,
+    and `autoMemoryReclaim` never fired because the VM never idles."""
+    docker, report = FakeDocker([ours(tmp_path, cid="c1")]), collectors.Report()
+    docker.restarts = tmp_path / "r.json"
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert docker.reclaims == 1 and report.failures == 0
+
+
+def test_a_drop_that_did_not_run_is_said_not_failed(tmp_path):
+    docker, report = FakeDocker([]), collectors.Report()
+    docker.reclaim_answer = (False, "Access is denied.\n")
+    collectors.reclaim_vm_memory(docker, report)
+    assert report.failures == 0
+    assert report.lines == ["the VM's file cache was not dropped: Access is denied."]
+
+
+def test_only_the_scheduled_pass_drops_the_cache(tmp_path):
+    """The tray's `Docker` carries no restart record, and a refresh must change nothing."""
+    docker = FakeDocker([ours(tmp_path, cid="c1")])
+    collectors.maintain([target(tmp_path)], docker, collectors.Report(), {})
+    assert docker.reclaims == 0
+
+
+def test_a_silent_engine_has_no_cache_dropped(tmp_path):
+    docker = FakeDocker(None)
+    docker.restarts = tmp_path / "r.json"
+    collectors.maintain([target(tmp_path, mode=STOP)], docker, collectors.Report(), {})
+    assert docker.reclaims == 0
+
+
+def test_the_real_docker_drops_the_cache_as_root_inside_dockers_distro(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    docker = collectors.Docker()
+    asked = []
+
+    def run(argv, timeout, cwd=None):
+        asked.append(list(argv))
+        return 1, "n\x00o\x00 \x00s\x00u\x00c\x00h\x00"  # wsl.exe writes UTF-16
+
+    docker.run = run
+    assert docker.reclaim_cache() == (False, "no such")
+    assert asked == [collectors.docker_memory.reclaim_argv(collectors.DOCKER_DISTRO)]
+
+
+def test_off_windows_there_is_no_cache_to_drop(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "posix")
+    docker = collectors.Docker()
+    docker.run = lambda argv, timeout, cwd=None: pytest.fail(f"asked {argv}")
+    assert docker.reclaim_cache() == (True, "")
 
 
 def test_a_silent_vm_is_read_from_windows_alone(tmp_path):
