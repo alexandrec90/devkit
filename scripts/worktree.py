@@ -4006,14 +4006,7 @@ def apply_new(
         )
     notes.extend(seed_box_env(root, path, box, env, stack))
 
-    if provision and plan.provision:
-        _, provision_notes = run_provision(path, plan.provision)
-        notes.extend(provision_notes)
-    elif plan.provision:
-        notes.append(
-            f"not provisioned - run `python {Path(__file__).resolve()} provision "
-            f"{box.name} --yes` before running its tests or /ship"
-        )
+    notes.extend(provision_new_box(path, box.name, plan.provision, provision))
     return True, notes
 
 
@@ -4044,6 +4037,24 @@ def seed_box_env(
         f"{' '.join(f'{k}={v}' for k, v in sorted(env.items()))} when running "
         f"compose here, or gitignore .env so future boxes can be seeded."
     ]
+
+
+def provision_new_box(
+    path: Path, name: str, steps: tuple[ProvisionStep, ...], provision: bool
+) -> list[str]:
+    """`apply_new`'s last step: link the siblings and install, or name the command that would.
+
+    The siblings are linked again rather than left to the hook inside the captured
+    `worktree add`: d2e29fee's failed link was reported only as the `uv sync` it broke.
+    """
+    if not steps:
+        return []
+    if not provision:
+        return [
+            f"not provisioned - run `python {Path(__file__).resolve()} provision "
+            f"{name} --yes` before running its tests or /ship"
+        ]
+    return [*link_siblings(path), *run_provision(path, steps)[1]]
 
 
 def serve_preview(

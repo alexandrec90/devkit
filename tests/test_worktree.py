@@ -2759,6 +2759,33 @@ def test_a_box_is_provisioned_when_it_is_created(workspace, monkeypatch):
     assert ran == [plan.provision]
 
 
+def test_a_new_box_reports_its_sibling_links_before_the_sync_they_feed(workspace, monkeypatch):
+    """d2e29fee: the hook's failed sibling cut was swallowed with the `worktree add`
+    output, so `new` reported only the `uv sync` it broke."""
+    order: list[str] = []
+    refused = "devkit: could not cut .worktrees/data-lake (fatal: already exists)"
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    monkeypatch.setattr(worktree, "link_siblings", lambda path: order.append("link") or [refused])
+    monkeypatch.setattr(
+        worktree, "run_provision", lambda path, steps: (order.append("sync"), (False, ["uv"]))[1]
+    )
+    plan = _spawned(workspace, provision=(worktree.ProvisionStep("uv sync", ("uv", "sync")),))
+
+    ok, notes = worktree.apply_new(plan, workspace)
+    assert ok is True and order == ["link", "sync"]
+    assert notes.index(refused) < notes.index("uv")
+
+
+def test_provision_new_box_links_nothing_it_will_not_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "link_siblings", lambda path: pytest.fail("linked"))
+    monkeypatch.setattr(worktree, "run_provision", lambda *a: pytest.fail("installed"))
+    step = (worktree.ProvisionStep("uv sync", ("uv", "sync")),)
+    assert worktree.provision_new_box(tmp_path, "demo--x", (), True) == [], "nothing to install"
+    [note] = worktree.provision_new_box(tmp_path, "demo--x", step, False)
+    assert note.startswith("not provisioned") and "provision demo--x --yes" in note
+
+
 def test_the_cut_leaves_provisioning_to_the_box_not_the_checkout_hook(workspace, monkeypatch):
     """4a9086cf / 77a810f7: the `post-checkout` hook ran carameli's 600 s-bounded
     `scripts/bootstrap.py` inside a `worktree add` bounded at 300 s, so the adoption's

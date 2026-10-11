@@ -565,6 +565,30 @@ def resolve_pin(source: Path, pin: str, env: Mapping[str, str]) -> str:
     return ""
 
 
+def clear_dead_link(target: Path) -> str:
+    """Remove `target` when it is a link to nothing; the line saying so, else "".
+
+    d2e29fee: `.worktrees/data-lake` was a junction to a box reaped weeks before.
+    `exists()` follows the link, so the sibling read as missing, and the `worktree add`
+    that would cut it refused the path as taken -- every ibkr box then failed `uv sync`.
+    Only the link goes: `unlink` and `rmdir` never follow one into its target.
+    """
+    if not os.path.lexists(target) or os.path.exists(target):
+        return ""
+    try:
+        aimed = os.readlink(target)
+    except OSError:
+        aimed = "a path"
+    try:
+        os.unlink(target)
+    except OSError:
+        try:
+            os.rmdir(target)  # a directory link on a Python whose `unlink` refuses one
+        except OSError as exc:
+            return f"devkit: {target} links to {aimed}, which is gone, and stays ({exc})"
+    return f"devkit: removed {target}, a link to {aimed}, which is gone"
+
+
 def link_path_sources(
     here: Path,
     checkout: Path,
@@ -582,6 +606,7 @@ def link_path_sources(
     provisioning -- the sibling is built from source by this tree's sync, not its own.
     The sibling repo is fetched first, and a sibling tree already there is moved to that
     ref by `advance_sibling`: "origin/HEAD" meant the last fetch's, at the first cut's.
+    A link to nothing at the sibling's path is removed first (`clear_dead_link`).
     One line per sibling cut, moved or refused; nothing for one already current.
     """
     env = git_env(os.environ if environ is None else environ)
@@ -601,6 +626,7 @@ def link_path_sources(
         ref = ref or (
             _git(source, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", env=env) or "HEAD"
         )
+        lines.append(clear_dead_link(target))
         if target.exists():
             lines.append(advance_sibling(target, source, ref, env))
             continue
