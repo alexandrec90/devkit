@@ -283,3 +283,20 @@ def test_only_a_dependabot_session_is_recorded_under_its_source():
     assert fix_budget.source(_dependabot()) == fix_plan.DEPENDABOT
     assert fix_budget.source(decision(fix_plan.DISPATCH, failure())) == ""
     assert fix_budget.source(decision(fix_plan.UPSTREAM, failure(head="dependabot/x"))) == ""
+
+
+def test_a_free_update_of_a_dependabot_pr_spends_none_of_the_cap(tmp_path):
+    """Supervision 2026-10-11: carameli #446, a Dependabot PR behind its base, was
+    updated four times in a day, each stamped under the Dependabot source, and the
+    resolver for #440's conflict read "6 of 2 sessions sent" -- the cap spent by
+    branch updates that are no session at all."""
+    path = tmp_path / "dispatch.json"
+    bump = failure(number=446, head="dependabot/npm/vite-7")
+    for action in fix_plan.NO_SESSION:
+        free = decision(action, bump)
+        assert fix_budget.source(free) == ""
+        fix_ledger.record(
+            path, fix_ledger.decision_key(free), "n", NOW, source=fix_budget.source(free)
+        )
+    resolver = decision(fix_plan.RESOLVE, failure(number=440, head="dependabot/npm/x"))
+    assert fix_budget.over_daily_cap(resolver, fix_ledger.read_ledger(path), NOW) == ""
