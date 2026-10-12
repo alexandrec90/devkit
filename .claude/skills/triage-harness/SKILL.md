@@ -168,7 +168,9 @@ retired before by a fix that did not hold: its last note is what not to repeat. 
 marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, so the
 pass sends no session at it, and the pass retires the rows filed while it waited against
 that PR once it merges; only a row filed after the merge reads `RECURRED`. One marked
-`IN HAND at <tree>` has a session the pass sent at it still at work there: leave it. A
+`IN HAND at <tree>` has a session the pass sent at it still at work there: leave it. One
+with an `OPEN PR` line names a branch whose PR is still open, and says whether its gate is
+red: read that PR before writing a second fix beside it. A
 `REOPENED <id>` line is a resolution `scripts/fix_verify.py` undid, most often because
 its `--pr` named a branch that never became a PR. A merged PR whose text names the group
 id settles it before that (`fix_verify.named_by`), so a reopened group has no such PR:
