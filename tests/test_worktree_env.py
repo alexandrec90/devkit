@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from support import load_script, worktree_tiers
+from support import REPO_ROOT, load_script, worktree_tiers
 
 wt_env = load_script("scripts/worktree_env.py")
 
@@ -867,6 +867,52 @@ def test_a_sibling_tree_already_there_is_moved_to_the_ref_it_was_cut_at(tmp_path
     assert _git(target, "rev-parse", "HEAD").stdout.strip() == new
 
 
+def test_a_sibling_a_run_in_another_tree_holds_at_another_pin_is_not_moved(tmp_path):
+    """d32ffcc2: the #116 fixer's `worktree.py provision` moved the shared data-lake
+    d32d4d5 -> c0aa963 while the #123 fixer was checking its lock against d32d4d5."""
+    lake, checkout, tree, target = _cut_sibling(tmp_path)
+    old = _git(target, "rev-parse", "HEAD").stdout.strip()
+    _advance_lake(lake)
+    pins = wt_env.sibling_pins()
+    # The parent of this test process: alive, and not this run.
+    other = pins.hold(pins.lease_dir(target), old, tmp_path / "tree-123", os.getppid())
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert wt_env.held([line]) and "tree-123" in line, line
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == old
+    pins.release(other)
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert "moved" in line and not wt_env.held([line])
+    mine = pins.lease_dir(target) / f"{os.getpid()}{pins.LEASE_SUFFIX}"
+    assert mine.read_text(encoding="utf-8").splitlines()[1] == str(tree), "leased for the tree"
+
+
+def test_the_lease_module_is_found_in_devkit_and_beside_the_installed_hook(tmp_path, monkeypatch):
+    monkeypatch.delitem(sys.modules, "sibling_pins", raising=False)
+    found = wt_env.sibling_pins()
+    assert found is not None and Path(found.__file__).name == "sibling_pins.py"
+    installed = tmp_path / "hooks"
+    installed.mkdir()
+    shutil.copy(REPO_ROOT / "scripts" / "worktree_env.py", installed / "devkit_worktree_env.py")
+    hook = load_script(str(installed / "devkit_worktree_env.py"))
+    monkeypatch.delitem(sys.modules, "sibling_pins", raising=False)
+    assert hook.sibling_pins() is None, "neither copy: the move runs unguarded, as before"
+    shutil.copy(
+        REPO_ROOT / "scripts" / "hooks" / "sibling_pins.py", installed / "devkit_sibling_pins.py"
+    )
+    assert Path(hook.sibling_pins().__file__) == installed / "devkit_sibling_pins.py"
+    monkeypatch.delitem(sys.modules, "sibling_pins", raising=False)
+
+
+def test_the_hook_does_not_sync_a_tree_whose_sibling_another_run_holds(tmp_path, monkeypatch):
+    held = f"devkit: data-lake {wt_env.HELD} a run in tree-123 (pid 9)"
+    monkeypatch.setattr(wt_env, "checkout_of", lambda here: tmp_path / "main")
+    monkeypatch.setattr(wt_env, "name_compose_project", lambda here, checkout: "")
+    monkeypatch.setattr(wt_env, "agent_tree", lambda here, environ: True)
+    monkeypatch.setattr(wt_env, "link_path_sources", lambda *a, **k: [held])
+    monkeypatch.setattr(wt_env, "provision", lambda *a, **k: pytest.fail("synced"))
+    assert wt_env._set_up(tmp_path / "tree", None, {}) == 0
+
+
 PR_GATE = """\
 jobs:
   test:
@@ -890,25 +936,34 @@ def _pin(tree: Path, ref: str, name: str = "pr-gate.yml", text: str = PR_GATE) -
     (workflows / name).write_text(text.replace("{ref}", ref), encoding="utf-8")
 
 
-def test_the_pin_is_the_ref_the_trees_own_gate_checks_the_sibling_out_at(tmp_path):
+@pytest.mark.parametrize(
+    "module",
+    [wt_env, load_script("scripts/hooks/toolchain.py")],
+    ids=["worktree_env-cuts-the-sibling", "vendored-toolchain-re-checks-it"],
+)
+def test_the_pin_is_the_ref_the_trees_own_gate_checks_the_sibling_out_at(tmp_path, module):
+    """Both readers, held to one answer: the git hook cuts the sibling at the pin and is
+    installed alone, so it cannot import the vendored `toolchain.pinned_ref` every runner
+    re-checks the pin with (0db0d931, 941b7470)."""
+    pinned_ref = module.pinned_ref
     sha = "4305" * 10  # a full commit sha's shape, without the entropy detect-secrets flags
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == "", "no workflows: no pin"
+    assert pinned_ref(tmp_path, "data-lake") == "", "no workflows: no pin"
     _pin(tmp_path, f'"{sha}"')
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == sha, "quotes and a comment are not the ref"
-    assert wt_env.pinned_ref(tmp_path, "Data-Lake") == sha
-    assert wt_env.pinned_ref(tmp_path, "other") == "", "another repo's step is not its pin"
+    assert pinned_ref(tmp_path, "data-lake") == sha, "quotes and a comment are not the ref"
+    assert pinned_ref(tmp_path, "Data-Lake") == sha
+    assert pinned_ref(tmp_path, "other") == "", "another repo's step is not its pin"
     # The PR gate outranks a nightly that tracks the default branch on purpose.
     _pin(tmp_path, "main", name="nightly.yml")
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == sha
+    assert pinned_ref(tmp_path, "data-lake") == sha
     # A step with no `ref:`, or an expression, pins nothing.
     _pin(tmp_path, "${{ inputs.ref }}")
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == "main", "the nightly's, now the only one"
+    assert pinned_ref(tmp_path, "data-lake") == "main", "the nightly's, now the only one"
     unpinned = PR_GATE.replace(
         "          ref: {ref}  # the commit uv.lock was resolved against\n", ""
     )
     _pin(tmp_path, "x", text=unpinned)
     (tmp_path / ".github" / "workflows" / "nightly.yml").unlink()
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == ""
+    assert pinned_ref(tmp_path, "data-lake") == ""
 
 
 def test_a_sibling_is_cut_and_moved_at_the_ref_the_trees_gate_pins(tmp_path):

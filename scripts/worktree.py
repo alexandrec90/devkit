@@ -4054,7 +4054,15 @@ def provision_new_box(
             f"not provisioned - run `python {Path(__file__).resolve()} provision "
             f"{name} --yes` before running its tests or /ship"
         ]
-    return [*link_siblings(path), *run_provision(path, steps)[1]]
+    linked = link_siblings(path)
+    if worktree_env.held(linked):
+        # Never waits: a `new` that stalls behind another box's test run reads as a hang.
+        return [
+            *linked,
+            f"not provisioned - run `python {Path(__file__).resolve()} provision {name}` "
+            "once the run holding the sibling ends",
+        ]
+    return [*linked, *run_provision(path, steps)[1]]
 
 
 def serve_preview(
@@ -6129,17 +6137,20 @@ def provision_target(root: Path, name: str) -> tuple[str, Path]:
     raise WorktreeError(f"no live box or checkout called {name!r}; live boxes: {known}")
 
 
-def link_siblings(path: Path) -> list[str]:
+def link_siblings(path: Path, wait: float = 0.0) -> list[str]:
     """Cut or move a linked worktree's path-source siblings to the ref its CI pins now.
 
     916daf9b: the `post-checkout` hook aims the shared `../data-lake` at ibkr's PR-gate
     pin when a tree is cut, and nothing re-aimed it after a session moved that pin -- so
     the relock the pin's own comment prescribes ran against the old data-lake. Re-running
     provisioning is the one command a session is told to reach for, so it re-reads the
-    pin. Nothing for a static checkout: its `..` is the sibling's own checkout.
+    pin. Nothing for a static checkout: its `..` is the sibling's own checkout. A move
+    waits up to `wait` seconds for a run in another tree on another pin (d32ffcc2).
     """
     checkout = worktree_env.checkout_of(path)
-    return [] if checkout is None else worktree_env.link_path_sources(path, checkout)
+    if checkout is None:
+        return []
+    return worktree_env.link_path_sources(path, checkout, wait=wait)
 
 
 def _run_provision(args: argparse.Namespace) -> int:
@@ -6147,8 +6158,14 @@ def _run_provision(args: argparse.Namespace) -> int:
     name, path = provision_target(root, args.box)
     steps = plan_provision(path)
     # Before the sync, which resolves the path source against wherever the sibling sits.
-    linked = [] if args.dry_run else link_siblings(path)
-    ok, notes = run_provision(path, steps) if steps and not args.dry_run else (True, [])
+    linked = [] if args.dry_run else link_siblings(path, wait=worktree_env.SESSION_WAIT)
+    if worktree_env.held(linked):
+        # d32ffcc2: syncing against another run's pin relocks `uv.lock` against it.
+        ok, notes = False, ["not synced: run it again once the run holding the sibling ends"]
+    elif steps and not args.dry_run:
+        ok, notes = run_provision(path, steps)
+    else:
+        ok, notes = True, []
     if args.json:
         payload = {
             "box": name,
