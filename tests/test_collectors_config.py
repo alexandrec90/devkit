@@ -62,6 +62,26 @@ def test_the_workspace_declares_what_ibkr_trader_s_image_copies():
     assert ibkr.builds_from == ("data-lake",)
 
 
+def test_a_container_collector_may_declare_its_handoff():
+    handoff = ["uv", "run", "python", "scripts/handoff.py"]
+    text = workspace({config.SETTING: {"p": {"service": "s", "handoff": handoff}}})
+    found, notes = config.parse_setting(text)
+    assert found == [config.Collector("p", "s", (), handoff=tuple(handoff))] and notes == []
+
+
+def test_no_handoff_is_a_collector_moved_by_hand():
+    found, _ = config.parse_setting(workspace({config.SETTING: {"p": {"service": "s"}}}))
+    assert found[0].handoff == ()
+
+
+def test_the_workspace_declares_ibkr_trader_s_handoff_with_the_extra_boto3_needs():
+    found, _notes = config.parse_setting(
+        (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
+    )
+    [ibkr] = [c for c in found if c.project == "ibkr_trader"]
+    assert ibkr.handoff == ("uv", "run", "--extra", "archive", "python", "scripts/handoff.py")
+
+
 def test_no_setting_declares_nothing_and_says_nothing():
     assert config.parse_setting(workspace({})) == ([], [])
 
@@ -87,6 +107,10 @@ def test_no_setting_declares_nothing_and_says_nothing():
         ({"command": ["uv"], "minutes": True}, "positive whole number"),
         ({"command": ["uv"], "minutes": 30, "needs": "db"}, "compose service names"),
         ({"command": ["uv"], "minutes": 30, "service": "app"}, "one kind"),
+        ({"service": "app", "handoff": "uv run python scripts/handoff.py"}, "list of strings"),
+        ({"service": "app", "handoff": ["uv", ""]}, "list of strings"),
+        ({"service": "app", "handoff": ["uv", 3]}, "list of strings"),
+        ({"command": ["uv"], "minutes": 30, "handoff": ["uv"]}, "for a `service` collector"),
     ],
 )
 def test_a_malformed_entry_is_a_note_not_silence(entry, reason):

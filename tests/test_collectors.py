@@ -2216,3 +2216,829 @@ def test_single_takes_exactly_one_name_and_dispatches_on_the_verb(tmp_path, monk
     assert "exactly one collector name" in capsys.readouterr().err
     once = collectors.parse_args(["run-once", "social-scraper"])
     assert collectors.single(once, root, when, FakeSchtasks(), None, lambda argv, cwd: 7) == 7
+
+
+# --- claims: one actor per collector at a time ------------------------------------------
+
+
+def test_a_claim_is_held_while_the_block_runs_and_released_after(tmp_path, monkeypatch):
+    at(monkeypatch, 1_000.0)
+    path = collectors.claim_path(tmp_path, "ibkr_trader")
+    with collectors.claim(path, "`collectors.py move` to b", 600) as other:
+        assert other == ""
+        assert collectors.live_claim(path, 1_000.0) == "`collectors.py move` to b"
+        with collectors.claim(path, "`collectors.py maintain`", 600) as second:
+            assert second == "`collectors.py move` to b"
+        assert path.is_file(), "the loser's exit must not release the winner's claim"
+    assert not path.exists()
+    assert list(path.parent.iterdir()) == [], "no draft is left behind"
+
+
+def test_a_claim_goes_even_when_the_block_raises(tmp_path):
+    path = collectors.claim_path(tmp_path, "p")
+    with pytest.raises(RuntimeError), collectors.claim(path, "x", 600):
+        raise RuntimeError("boom")
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    ("record", "clock"),
+    [
+        ({"holder": "old", "started_at": 0.0, "until": 500.0}, 1_000.0),  # a killed holder's
+        ({"holder": "future", "started_at": 5_000.0, "until": 9_000.0}, 1_000.0),
+        ("not json", 1_000.0),
+    ],
+)
+def test_a_stale_or_unreadable_claim_is_taken_over(tmp_path, monkeypatch, record, clock):
+    at(monkeypatch, clock)
+    path = collectors.claim_path(tmp_path, "p")
+    path.parent.mkdir(parents=True)
+    path.write_text(record if isinstance(record, str) else json.dumps(record), encoding="utf-8")
+    with collectors.claim(path, "me", 600) as other:
+        assert other == "" and collectors.live_claim(path, clock) == "me"
+
+
+def test_a_claim_released_after_another_took_it_over_leaves_theirs(tmp_path, monkeypatch):
+    at(monkeypatch, 1_000.0)
+    path = collectors.claim_path(tmp_path, "p")
+    with collectors.claim(path, "me", 600):
+        path.write_text(
+            json.dumps({"holder": "them", "started_at": 1_000.0, "until": 2_000.0, "token": "t"}),
+            encoding="utf-8",
+        )
+    assert collectors.live_claim(path, 1_000.0) == "them"
+
+
+def test_a_claim_naming_no_holder_still_holds(tmp_path):
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps({"started_at": 0.0, "until": 10.0}), encoding="utf-8")
+    assert collectors.live_claim(path, 5.0) == "another collectors.py"
+    assert collectors.live_claim(path, 10.0) == ""
+
+
+def test_take_claim_names_the_holder_it_lost_to(tmp_path):
+    path = tmp_path / "p.json"
+    live = {"holder": "a pass", "started_at": 0.0, "until": 100.0, "token": "1"}
+    assert collectors.take_claim(path, live, 50.0) == ""
+    assert collectors.take_claim(path, {**live, "holder": "me", "token": "2"}, 50.0) == "a pass"
+
+
+def test_claiming_leaves_out_and_says_a_target_someone_else_holds(tmp_path, monkeypatch):
+    at(monkeypatch, 1_000.0)
+    ibkr, sports = target(tmp_path), target(tmp_path, project="sports_betting", service="c")
+    report = collectors.Report()
+    with collectors.claim(collectors.claim_path(tmp_path, "ibkr_trader"), "`move` to b", 600):
+        with collectors.claiming(
+            tmp_path, [ibkr, sports], "`collectors.py maintain`", report
+        ) as mine:
+            assert mine == [sports]
+            assert collectors.live_claim(collectors.claim_path(tmp_path, "sports_betting"), 1_000.0)
+    assert report.lines == ["ibkr_trader: left alone -- `move` to b is acting on it"]
+    assert not collectors.claim_path(tmp_path, "sports_betting").exists()
+
+
+def test_run_here_during_a_pass_does_not_start_the_service_beside_the_pass(tmp_path, monkeypatch):
+    """Both ran `docker compose up -d`, and one failed on "container name already in use"."""
+    root = devkit_home(tmp_path, monkeypatch)
+    at(monkeypatch, 1_000.0)
+    docker = FakeDocker([])
+    with collectors.claim(
+        collectors.claim_path(root, "ibkr_trader"), "`collectors.py maintain`", 600
+    ):
+        assert collectors.main(["run-here", "ibkr_trader"], docker=docker) == 0
+    assert ("up", "ibkr_trader", "app") not in docker.calls
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": RUN}
+    assert "left alone -- `collectors.py maintain` is acting on it" in (
+        root / collectors.ARTIFACT
+    ).read_text(encoding="utf-8")
+
+
+def test_a_pass_holds_each_containers_claim_while_it_acts_and_releases_it(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    seen = []
+
+    class Watching(FakeDocker):
+        def up(self, checkout, service):
+            seen.append(collectors.live_claim(collectors.claim_path(root, "ibkr_trader"), 1_000.0))
+            return super().up(checkout, service)
+
+    at(monkeypatch, 1_000.0)
+    assert collectors.main(["maintain"], docker=Watching([])) == 0
+    assert seen == ["`collectors.py maintain`"]
+    assert not collectors.claim_path(root, "ibkr_trader").exists()
+
+
+# --- move: handing a collector to another machine ------------------------------------------
+
+HANDOFF = ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"]
+THIS, OTHER = "desktop-b9fc8vp", "desktop-ml5f3pj"
+Said = collectors.handoff.Said
+MARKER = json.dumps({"state": "pending", "from": OTHER, "to": THIS})
+
+
+class FakeHandoff(collectors.handoff.Handoff):
+    """The project's handoff command; logs into `log`, which a test shares with docker's
+    calls when the order between the two is the property."""
+
+    def __init__(self, log=None, export=None, pending=None, restore=None):
+        self.log = [] if log is None else log
+        self.answers = {
+            verb: Said(0) if answer is None else answer
+            for verb, answer in (("export", export), ("pending", pending), ("import", restore))
+        }
+
+    def run(self, command, cwd, timeout, echo=False):
+        assert list(command[: len(HANDOFF)]) == HANDOFF
+        verb, flags = command[len(HANDOFF)], tuple(command[len(HANDOFF) + 1 :])
+        self.log.append(("handoff", verb, flags, Path(cwd).name, timeout, echo))
+        answer = self.answers[verb]
+        return answer(flags) if callable(answer) else answer
+
+
+class Moving(FakeDocker):
+    """A docker whose `stop` stops the container, so a later `ps` says so."""
+
+    def stop(self, container):
+        self.containers = [
+            collectors.Container(c.id, c.workdir, c.service, "exited", "Exited (0)")
+            if c.id == container.id
+            else c
+            for c in self.containers
+        ]
+        return super().stop(container)
+
+
+def handoff_home(tmp_path, monkeypatch, assignment=None):
+    monkeypatch.setenv("DEVKIT_HOST", THIS.upper())
+    return devkit_home(
+        tmp_path,
+        monkeypatch,
+        assignment,
+        {
+            "ibkr_trader": {"service": "app", "health": ["h"], "handoff": HANDOFF},
+            "sports_betting": {"service": "collector"},
+        },
+    )
+
+
+def project(tmp_path, cid, service, state="running", name="ibkr_trader"):
+    return box(service, state, str(tmp_path / name), cid)
+
+
+def stack(tmp_path):
+    return [
+        project(tmp_path, "c1", "app"),
+        project(tmp_path, "c2", "db"),
+        project(tmp_path, "c3", "collector", name="sports_betting"),
+    ]
+
+
+def artifact(root):
+    return (root / collectors.ARTIFACT).read_text(encoding="utf-8")
+
+
+def test_move_stops_exports_then_assigns_stop_and_stops_the_rest_in_that_order(
+    tmp_path, monkeypatch
+):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN, "sports_betting": RUN})
+    at(monkeypatch, 5_000.0)
+    assignments = []
+
+    class Watching(Moving):
+        def stop(self, container):
+            assignments.append(config.load_assignment(root / config.ASSIGNMENT)["ibkr_trader"])
+            return super().stop(container)
+
+    docker = Watching(stack(tmp_path))
+    handoffs = FakeHandoff(docker.calls)
+    assert (
+        collectors.main(["move", "ibkr_trader", "--to", OTHER.upper()], docker, handoffs=handoffs)
+        == 0
+    )
+    assert docker.calls == [
+        ("ps",),
+        ("stop", "c1"),
+        (
+            "handoff",
+            "export",
+            ("--from", THIS, "--to", OTHER),
+            "ibkr_trader",
+            collectors.handoff.EXPORT_TIMEOUT,
+            True,
+        ),
+        ("ps",),
+        ("stop", "c2"),
+    ], "the db goes only after the export, and sports_betting is never touched"
+    assert assignments == [RUN, STOP]
+    assert config.load_assignment(root / config.ASSIGNMENT) == {
+        "ibkr_trader": STOP,
+        "sports_betting": RUN,
+    }
+    sent = collectors.handoff.load_outgoing(root / collectors.handoff.OUTGOING)
+    assert sent == {"ibkr_trader": {"to": OTHER, "at": 5_000.0}}
+    assert f"handed off to {OTHER}" in artifact(root)
+    assert not collectors.claim_path(root, "ibkr_trader").exists()
+
+
+def test_move_holds_the_collector_against_a_pass_for_the_whole_export(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    at(monkeypatch, 5_000.0)
+    during = []
+
+    def export(flags):
+        during.append(collectors.live_claim(collectors.claim_path(root, "ibkr_trader"), 5_000.0))
+        pass_docker = FakeDocker([project(tmp_path, "c1", "app", "exited")])
+        collectors.main(["maintain"], docker=pass_docker)
+        during.append(pass_docker.calls)
+        return Said(0)
+
+    docker = Moving(stack(tmp_path))
+    collectors.main(
+        ["move", "ibkr_trader", "--to", OTHER], docker, handoffs=FakeHandoff(export=export)
+    )
+    assert during[0] == f"`collectors.py move` to {OTHER}"
+    assert ("up", "ibkr_trader", "app") not in during[1], "the pass must not restart it mid-dump"
+
+
+def test_a_failed_export_starts_the_service_again_and_leaves_the_assignment(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    docker = Moving(stack(tmp_path))
+    handoffs = FakeHandoff(docker.calls, export=Said(1, "", "upload failed: 403"))
+    assert collectors.main(["move", "ibkr_trader", "--to", OTHER], docker, handoffs=handoffs) == 2
+    assert [c[0] for c in docker.calls] == ["ps", "stop", "handoff", "up"]
+    assert docker.calls[-1] == ("up", "ibkr_trader", "app")
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": RUN}
+    assert collectors.handoff.load_outgoing(root / collectors.handoff.OUTGOING) == {}
+    text = artifact(root)
+    assert "export failed (exit 1: upload failed: 403)" in text
+    assert str(Path("logs/handoff.json")) in text and "`app` is started again" in text
+
+
+def test_a_failed_export_whose_restart_fails_says_both(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    docker = Moving(stack(tmp_path), up_ok=False)
+    collectors.main(
+        ["move", "ibkr_trader", "--to", OTHER], docker, handoffs=FakeHandoff(export=Said(124))
+    )
+    assert "could NOT be started again (Error response from daemon: no space)" in artifact(root)
+
+
+def test_move_exports_nothing_when_the_service_cannot_be_stopped(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    handoffs = FakeHandoff()
+    assert (
+        collectors.main(["move", "ibkr_trader", "--to", OTHER], FakeDocker(None), handoffs=handoffs)
+        == 2
+    )
+    assert handoffs.log == []
+    assert "docker is not answering" in artifact(root)
+
+
+def test_move_of_a_collector_already_stopped_exports_without_stopping_it(tmp_path, monkeypatch):
+    handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    docker = Moving([project(tmp_path, "c1", "app", "exited"), project(tmp_path, "c2", "db")])
+    handoffs = FakeHandoff(docker.calls)
+    assert collectors.main(["move", "ibkr_trader", "--to", OTHER], docker, handoffs=handoffs) == 0
+    assert [c[:2] for c in docker.calls] == [
+        ("ps",),
+        ("handoff", "export"),
+        ("ps",),
+        ("stop", "c2"),
+    ]
+
+
+def test_a_move_whose_rest_cannot_be_stopped_is_handed_off_and_still_fails(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+
+    class Silenced(Moving):
+        def ps(self):
+            asked = sum(call == ("ps",) for call in self.calls)
+            answer = super().ps()
+            return answer if asked == 0 else None
+
+    assert (
+        collectors.main(
+            ["move", "ibkr_trader", "--to", OTHER],
+            Silenced(stack(tmp_path)),
+            handoffs=FakeHandoff(),
+        )
+        == 2
+    )
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": STOP}
+    assert "handed off, but docker did not answer" in artifact(root)
+
+
+@pytest.mark.parametrize(
+    ("assignment", "argv", "words"),
+    [
+        ({"ibkr_trader": STOP}, ["ibkr_trader", "--to", OTHER], "not set to run it (`stop`)"),
+        ({}, ["ibkr_trader", "--to", OTHER], "not set to run it (hands off)"),
+        (
+            {"sports_betting": RUN},
+            ["sports_betting", "--to", OTHER],
+            "`collectors.py stop-here sports_betting` here",
+        ),
+        ({"ibkr_trader": RUN}, ["ibkr_trader", "--to", THIS.upper()], "names this machine"),
+        (
+            {"ibkr_trader": RUN},
+            ["ibkr_trader", "--to", f"{THIS}.tail1.ts.net"],
+            "names this machine",
+        ),
+        ({"ibkr_trader": RUN}, ["ibkr_trader"], "needs `--to HOST`"),
+        ({"ibkr_trader": RUN}, ["--to", OTHER], "by name"),
+        ({"ibkr_trader": RUN}, ["ibkr", "--to", OTHER], "not declared"),
+    ],
+)
+def test_a_move_that_cannot_happen_is_refused_and_touches_nothing(
+    tmp_path, monkeypatch, assignment, argv, words
+):
+    root = handoff_home(tmp_path, monkeypatch, assignment)
+    docker, handoffs = FakeDocker(stack(tmp_path)), FakeHandoff()
+    assert collectors.main(["move", *argv], docker, handoffs=handoffs) == 2
+    assert docker.calls == [] and handoffs.log == []
+    assert config.load_assignment(root / config.ASSIGNMENT) == assignment
+    assert words in artifact(root)
+
+
+def test_a_collector_without_a_handoff_is_told_how_to_move_by_hand(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"sports_betting": RUN})
+    collectors.main(
+        ["move", "sports_betting", "--to", OTHER], FakeDocker([]), handoffs=FakeHandoff()
+    )
+    assert "then `collectors.py run-here sports_betting` there" in artifact(root)
+
+
+def test_a_move_without_a_checkout_is_refused(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    (tmp_path / "ibkr_trader" / ".git").rmdir()
+    assert (
+        collectors.main(
+            ["move", "ibkr_trader", "--to", OTHER], FakeDocker([]), handoffs=FakeHandoff()
+        )
+        == 2
+    )
+    assert "no checkout at" in artifact(root)
+
+
+def test_a_move_while_something_holds_the_collector_is_refused(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    at(monkeypatch, 1_000.0)
+    docker, handoffs = FakeDocker(stack(tmp_path)), FakeHandoff()
+    with collectors.claim(
+        collectors.claim_path(root, "ibkr_trader"), "`collectors.py maintain`", 600
+    ):
+        assert (
+            collectors.main(["move", "ibkr_trader", "--to", OTHER], docker, handoffs=handoffs) == 2
+        )
+    assert docker.calls == [] and handoffs.log == []
+    assert "`collectors.py maintain` is acting on it" in artifact(root)
+
+
+def test_to_belongs_to_move_alone():
+    with pytest.raises(SystemExit):
+        collectors.parse_args(["run-here", "ibkr_trader", "--to", OTHER])
+    assert collectors.parse_args(["move", "ibkr_trader", "--to", OTHER]).to == OTHER
+
+
+# --- the pass: taking over a handoff, and following one sent ----------------------------
+
+
+@pytest.mark.parametrize("assignment", [{"ibkr_trader": STOP}, {}])
+def test_a_pass_takes_over_a_handoff_addressed_here_and_starts_it(
+    tmp_path, monkeypatch, assignment
+):
+    """Hands off as well as `stop`: a marker addressed to this machine by name is as
+    explicit as `run-here` typed here."""
+    root = handoff_home(tmp_path, monkeypatch, assignment)
+    at(monkeypatch, 1_000.0)
+    docker = FakeDocker([project(tmp_path, "c2", "db")])
+    seen = []
+
+    def restore(flags):
+        seen.append(collectors.live_claim(collectors.claim_path(root, "ibkr_trader"), 1_000.0))
+        return Said(0)
+
+    handoffs = FakeHandoff(docker.calls, pending=Said(0, MARKER + "\n"), restore=restore)
+    assert collectors.main(["maintain"], docker=docker, handoffs=handoffs) == 0
+    steps = [c[:2] for c in docker.calls]
+    assert steps[:3] == [("handoff", "pending"), ("ps",), ("handoff", "import")]
+    assert docker.calls[0][2] == ("--host", THIS) and docker.calls[2][2] == ("--host", THIS)
+    assert docker.calls[2][4] == collectors.handoff.IMPORT_TIMEOUT
+    assert ("up", "ibkr_trader", "app") in docker.calls, "started this pass, as run-here would"
+    assert seen == ["a handoff import"], "held, so a second import cannot start beside it"
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": RUN}
+    health = collectors.load_health(root / collectors.HEALTH)
+    assert collectors.STARTED_AT in health["ibkr_trader"], "settles like any start"
+    assert f"taken over from {OTHER}" in artifact(root)
+
+
+def test_the_import_runs_only_once_the_service_is_stopped_here(tmp_path, monkeypatch):
+    handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    docker = Moving([project(tmp_path, "c1", "app")])
+    handoffs = FakeHandoff(docker.calls, pending=Said(0, MARKER))
+    collectors.main(["maintain"], docker=docker, handoffs=handoffs)
+    assert [c[:2] for c in docker.calls][:4] == [
+        ("handoff", "pending"),
+        ("ps",),
+        ("stop", "c1"),
+        ("handoff", "import"),
+    ]
+
+
+def test_a_handoff_waiting_while_docker_is_silent_is_left_for_the_next_pass(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    handoffs = FakeHandoff(pending=Said(0, MARKER))
+    collectors.main(["maintain"], docker=FakeDocker(None), handoffs=handoffs)
+    assert [c[1] for c in handoffs.log] == ["pending"]
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": STOP}
+    assert "the next pass tries again" in artifact(root)
+
+
+def test_nothing_addressed_here_imports_nothing_and_assigns_nothing(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    docker = FakeDocker([])
+    handoffs = FakeHandoff(pending=Said(0, "", "Installed 40 packages"))
+    assert collectors.main(["maintain"], docker=docker, handoffs=handoffs) == 0
+    assert [c[1] for c in handoffs.log] == ["pending"]
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": STOP}
+    assert ("up", "ibkr_trader", "app") not in docker.calls
+
+
+@pytest.mark.parametrize("said", [Said(2, "", "R2 unreachable"), Said(124, "", "timed out")])
+def test_a_store_that_cannot_be_read_is_silence_not_a_failure(tmp_path, monkeypatch, said):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    assert (
+        collectors.main(["maintain"], docker=FakeDocker([]), handoffs=FakeHandoff(pending=said))
+        == 0
+    )
+    assert "handoff" not in artifact(root)
+
+
+def test_a_broken_pending_is_said_and_imports_nothing(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    handoffs = FakeHandoff(pending=Said(1, "", "ModuleNotFoundError: boto3"))
+    assert collectors.main(["maintain"], docker=FakeDocker([]), handoffs=handoffs) == 0
+    assert [c[1] for c in handoffs.log] == ["pending"]
+    assert "could not ask whether a handoff waits (exit 1: ModuleNotFoundError: boto3)" in artifact(
+        root
+    )
+
+
+def test_a_failed_import_fails_the_pass_and_assigns_nothing(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    docker = FakeDocker([])
+    handoffs = FakeHandoff(pending=Said(0, MARKER), restore=Said(1, "", "sha256 mismatch\nmore"))
+    assert collectors.main(["maintain"], docker=docker, handoffs=handoffs) == 2
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": STOP}
+    assert ("up", "ibkr_trader", "app") not in docker.calls
+    text = artifact(root)
+    assert "its import failed (exit 1: sha256 mismatch)" in text and "    more" in text
+    assert text.rstrip().splitlines()[-1].startswith("error: ibkr_trader: handed to this machine")
+
+
+def test_a_machine_that_runs_it_is_never_asked_about_a_handoff(tmp_path, monkeypatch):
+    handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    handoffs = FakeHandoff(pending=Said(0, MARKER))
+    collectors.main(
+        ["maintain"], docker=FakeDocker([project(tmp_path, "c1", "app")]), handoffs=handoffs
+    )
+    assert handoffs.log == []
+
+
+def test_a_machine_without_the_checkout_asks_nothing(tmp_path, monkeypatch):
+    handoff_home(tmp_path, monkeypatch)
+    (tmp_path / "ibkr_trader" / ".git").rmdir()
+    handoffs = FakeHandoff(pending=Said(0, MARKER))
+    collectors.main(["maintain"], docker=FakeDocker([]), handoffs=handoffs)
+    assert handoffs.log == []
+
+
+def test_an_import_already_running_is_not_started_again(tmp_path, monkeypatch):
+    """The scheduler runs one pass at a time, but a pass killed mid-restore, or one run by
+    hand, would otherwise start a second restore into the same database."""
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    at(monkeypatch, 1_000.0)
+    handoffs = FakeHandoff(pending=Said(0, MARKER))
+    with collectors.claim(collectors.claim_path(root, "ibkr_trader"), "a handoff import", 600):
+        collectors.main(["maintain"], docker=FakeDocker([]), handoffs=handoffs)
+    assert handoffs.log == []
+    assert "not asked about a handoff -- a handoff import is acting on it" in artifact(root)
+
+
+def test_a_taken_over_collector_forgets_a_handoff_it_once_sent(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    collectors.handoff.record_outgoing(
+        root / collectors.handoff.OUTGOING, "ibkr_trader", OTHER, 1.0
+    )
+    handoffs = FakeHandoff(pending=lambda flags: Said(0, MARKER) if THIS in flags else Said(0))
+    collectors.main(["maintain"], docker=FakeDocker([]), handoffs=handoffs)
+    assert collectors.handoff.load_outgoing(root / collectors.handoff.OUTGOING) == {}
+
+
+def sent_home(tmp_path, monkeypatch, sent_at, assignment=None):
+    root = handoff_home(tmp_path, monkeypatch, assignment or {"ibkr_trader": STOP})
+    collectors.handoff.record_outgoing(
+        root / collectors.handoff.OUTGOING, "ibkr_trader", OTHER, sent_at
+    )
+    return root
+
+
+def test_a_handoff_taken_over_is_forgotten(tmp_path, monkeypatch):
+    root = sent_home(tmp_path, monkeypatch, 1_000.0)
+    handoffs = FakeHandoff(pending=lambda flags: Said(0))
+    assert collectors.main(["maintain"], docker=FakeDocker([]), handoffs=handoffs) == 0
+    assert ("handoff", "pending", ("--host", OTHER), "ibkr_trader", 120, False) in handoffs.log
+    assert collectors.handoff.load_outgoing(root / collectors.handoff.OUTGOING) == {}
+    assert f"{OTHER} has taken it over" in artifact(root)
+
+
+def waiting_there(flags):
+    """A marker addressed to the other machine, and none to this one."""
+    return Said(0, MARKER) if OTHER in flags else Said(0)
+
+
+def test_a_handoff_waiting_inside_its_grace_is_said(tmp_path, monkeypatch):
+    root = sent_home(tmp_path, monkeypatch, 1_000.0)
+    at(monkeypatch, 1_000.0 + collectors.HANDOFF_GRACE - 1)
+    assert (
+        collectors.main(
+            ["maintain"], docker=FakeDocker([]), handoffs=FakeHandoff(pending=waiting_there)
+        )
+        == 0
+    )
+    assert "waiting for its next pass" in artifact(root)
+    assert "ibkr_trader" in collectors.handoff.load_outgoing(root / collectors.handoff.OUTGOING)
+
+
+def test_a_handoff_nobody_took_over_fails_the_pass_once_overdue(tmp_path, monkeypatch):
+    """Until it is taken over nothing runs the collector, and no row on either machine
+    says so: here it is `stop` by choice, there not yet `run`."""
+    root = sent_home(tmp_path, monkeypatch, 1_000.0)
+    at(monkeypatch, 1_000.0 + collectors.HANDOFF_GRACE)
+    assert (
+        collectors.main(
+            ["maintain"], docker=FakeDocker([]), handoffs=FakeHandoff(pending=waiting_there)
+        )
+        == 2
+    )
+    last = artifact(root).rstrip().splitlines()[-1]
+    assert last == (
+        f"error: ibkr_trader: handed off to {OTHER}, which has not taken it over within "
+        f"{collectors.HANDOFF_GRACE // 60} minutes -- nothing runs it until it does. Is "
+        f"{OTHER} on, with devkit-collectors running?"
+    ), "no count in the cause, so recurrences are one ledger group"
+
+
+def test_a_handoff_whose_store_cannot_be_read_is_said_and_kept(tmp_path, monkeypatch):
+    root = sent_home(tmp_path, monkeypatch, 0.0)
+    assert (
+        collectors.main(["maintain"], docker=FakeDocker([]), handoffs=FakeHandoff(pending=Said(2)))
+        == 0
+    )
+    assert f"could not ask whether {OTHER} has taken it over (exit 2)" in artifact(root)
+    assert "ibkr_trader" in collectors.handoff.load_outgoing(root / collectors.handoff.OUTGOING)
+
+
+def test_a_handoff_this_machine_runs_again_is_forgotten_unasked(tmp_path, monkeypatch):
+    root = sent_home(tmp_path, monkeypatch, 0.0, {"ibkr_trader": RUN})
+    handoffs = FakeHandoff()
+    collectors.main(
+        ["maintain"], docker=FakeDocker([project(tmp_path, "c1", "app")]), handoffs=handoffs
+    )
+    assert handoffs.log == []
+    assert collectors.handoff.load_outgoing(root / collectors.handoff.OUTGOING) == {}
+
+
+def test_run_here_over_a_handoff_sent_warns_of_two_writers(tmp_path, monkeypatch):
+    root = sent_home(tmp_path, monkeypatch, 0.0)
+    collectors.main(["run-here", "ibkr_trader"], docker=FakeDocker([]), handoffs=FakeHandoff())
+    assert f"warning: it was handed off to {OTHER}" in artifact(root)
+
+
+# --- status and the tray ---------------------------------------------------------------
+
+
+def test_status_says_a_handoff_waiting_here_and_one_sent_from_here(tmp_path, monkeypatch, capsys):
+    root = sent_home(tmp_path, monkeypatch, 0.0)
+    handoffs = FakeHandoff(pending=lambda flags: Said(0, MARKER))
+    assert collectors.main([], docker=FakeDocker([]), handoffs=handoffs) == 0
+    out = capsys.readouterr().out
+    assert f"ibkr_trader: handed off to {OTHER} -- not taken over yet" in out
+    assert f"ibkr_trader: handed to this machine by {OTHER} -- the next pass takes it over" in out
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": STOP}
+    assert [c[1] for c in handoffs.log] == ["pending", "pending"], "and nothing imported"
+
+
+@pytest.mark.parametrize(
+    ("said", "words"),
+    [
+        (Said(0), f"handed off to {OTHER} -- taken over"),
+        (Said(2), f"handed off to {OTHER} -- the store could not say"),
+    ],
+)
+def test_status_says_whether_a_handoff_sent_was_taken_over(
+    tmp_path, monkeypatch, capsys, said, words
+):
+    sent_home(tmp_path, monkeypatch, 0.0, {"ibkr_trader": RUN})
+    collectors.main([], docker=FakeDocker([]), handoffs=FakeHandoff(pending=said))
+    assert words in capsys.readouterr().out
+
+
+def test_status_says_when_it_could_not_ask_about_a_handoff_here(tmp_path, monkeypatch, capsys):
+    handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    collectors.main([], docker=FakeDocker([]), handoffs=FakeHandoff(pending=Said(2, "", "R2 down")))
+    assert "could not ask whether a handoff waits here (exit 2: R2 down)" in capsys.readouterr().out
+
+
+def test_status_asks_nothing_of_a_collector_without_a_handoff(tmp_path, monkeypatch):
+    devkit_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    handoffs = FakeHandoff()
+    collectors.main([], docker=FakeDocker([]), handoffs=handoffs)
+    assert handoffs.log == []
+
+
+def test_the_tray_shows_a_collector_handed_off_from_here(tmp_path, monkeypatch):
+    sent_home(tmp_path, monkeypatch, 0.0)
+    assert collectors.tray_rows(docker=FakeDocker([])) == [
+        (
+            "collector: ibkr_trader",
+            collectors.OK,
+            f"handed off to {OTHER} -- it takes it over on its next collectors pass",
+        )
+    ]
+
+
+def test_the_tray_keeps_a_collector_being_moved_green(tmp_path, monkeypatch):
+    """The fix pass files every row that is not OK, and a move stops the service for an
+    hour on purpose."""
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    at(monkeypatch, 1_000.0)
+    docker = FakeDocker([project(tmp_path, "c1", "app", "exited")])
+    with collectors.claim(
+        collectors.claim_path(root, "ibkr_trader"), f"`collectors.py move` to {OTHER}", 600
+    ):
+        [(_name, level, detail)] = collectors.tray_rows(docker=docker)
+    assert level == collectors.OK and detail.startswith(
+        f"`collectors.py move` to {OTHER} is acting on it"
+    )
+    assert collectors.tray_rows(docker=docker)[0][1] == collectors.FAIL
+
+
+def test_holding_reads_only_local_files(tmp_path):
+    run, stop = target(tmp_path), target(tmp_path, mode=STOP)
+    assert collectors.holding(tmp_path, run, {}, 1.0) == ""
+    assert collectors.holding(tmp_path, stop, {}, 1.0) == ""
+    sent = {"ibkr_trader": {"to": OTHER, "at": 0.0}}
+    assert collectors.holding(tmp_path, stop, sent, 1.0).startswith(f"handed off to {OTHER}")
+
+
+def test_down_row_names_whoever_holds_the_collector():
+    assert collectors.down_row(None, False, "x") == (
+        collectors.OK,
+        "x is acting on it (no container)",
+    )
+
+
+# --- the handoff functions, one by one -------------------------------------------------
+
+
+def here_at(tmp_path, monkeypatch, assignment=None, docker=None, handoffs=None):
+    root = handoff_home(tmp_path, monkeypatch, assignment)
+    return collectors.Here(
+        root,
+        tmp_path,
+        THIS,
+        docker or FakeDocker([]),
+        handoffs or FakeHandoff(),
+        collectors.Report(),
+    )
+
+
+def declared_here(here):
+    return config.declared(here.base)[0]
+
+
+@pytest.mark.parametrize(
+    ("dest", "projects", "unknown", "words"),
+    [
+        ("", ["p"], [], "needs `--to HOST`"),
+        (THIS, ["p"], [], "names this machine"),
+        (OTHER, [], [], "by name"),
+        (OTHER, ["p", "x"], ["x"], "not declared"),
+        (OTHER, ["p"], [], ""),
+    ],
+)
+def test_move_refused_says_why_nothing_moves(dest, projects, unknown, words):
+    why = collectors.move_refused(dest, projects, unknown, THIS)
+    assert (words in why) if words else why == ""
+
+
+def test_move_hands_off_what_it_can_and_refuses_the_rest(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch, {"ibkr_trader": RUN, "sports_betting": RUN})
+    here.docker = Moving(stack(tmp_path))
+    collectors.move(
+        ["sports_betting", "ibkr_trader"],
+        OTHER,
+        declared_here(here),
+        {"ibkr_trader": RUN, "sports_betting": RUN},
+        here,
+    )
+    assert here.report.failures == 1 and "declares no `handoff`" in here.report.cause
+    assert config.load_assignment(here.assignment)["ibkr_trader"] == STOP
+
+
+def test_move_one_restarts_the_service_after_a_failed_export(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch, {"ibkr_trader": RUN}, Moving(stack(tmp_path)))
+    here.handoffs = FakeHandoff(here.docker.calls, export=Said(1))
+    [ibkr] = [c for c in declared_here(here) if c.project == "ibkr_trader"]
+    collectors.move_one(ibkr, OTHER, here)
+    assert here.docker.calls[-1] == ("up", "ibkr_trader", "app") and here.report.failures == 1
+
+
+def test_stop_service_stops_only_a_running_collector_and_says_why_it_could_not(
+    tmp_path, monkeypatch
+):
+    here = here_at(tmp_path, monkeypatch)
+    [ibkr] = [c for c in declared_here(here) if c.project == "ibkr_trader"]
+    here.docker = FakeDocker([project(tmp_path, "c1", "app", "exited")])
+    assert collectors.stop_service(ibkr, here) == "" and here.docker.calls == [("ps",)]
+
+    class Refusing(FakeDocker):
+        def stop(self, container):
+            return False, "Error: permission denied"
+
+    here.docker = Refusing([project(tmp_path, "c1", "app")])
+    assert collectors.stop_service(ibkr, here) == "`docker stop` said Error: permission denied"
+    here.docker = FakeDocker(None)
+    assert collectors.stop_service(ibkr, here) == "docker is not answering"
+
+
+def test_handed_off_assigns_stop_records_the_host_and_stops_the_project(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch, {"ibkr_trader": RUN}, Moving(stack(tmp_path)))
+    at(monkeypatch, 7.0)
+    [ibkr] = [c for c in declared_here(here) if c.project == "ibkr_trader"]
+    collectors.handed_off(ibkr, OTHER, here)
+    assert config.load_assignment(here.assignment) == {"ibkr_trader": STOP}
+    assert collectors.handoff.load_outgoing(here.outgoing) == {
+        "ibkr_trader": {"to": OTHER, "at": 7.0}
+    }
+    assert here.docker.calls == [("ps",), ("stop", "c1"), ("stop", "c2")]
+
+
+def test_pick_up_returns_the_assignment_to_act_on(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch, handoffs=FakeHandoff(pending=Said(0, MARKER)))
+    assert collectors.pick_up(declared_here(here), {}, here) == {"ibkr_trader": RUN}
+    here.handoffs = FakeHandoff(pending=Said(0))
+    assert collectors.pick_up(declared_here(here), {"ibkr_trader": STOP}, here) == {
+        "ibkr_trader": STOP
+    }
+
+
+def test_take_over_with_nothing_waiting_does_nothing(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch)
+    [ibkr] = [c for c in declared_here(here) if c.project == "ibkr_trader"]
+    assert collectors.take_over(ibkr, here) is False
+    assert here.docker.calls == [] and here.report.lines == []
+
+
+def test_follow_handoffs_forgets_one_no_longer_declared_with_a_handoff(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch)
+    collectors.handoff.record_outgoing(here.outgoing, "sports_betting", OTHER, 0.0)
+    collectors.handoff.record_outgoing(here.outgoing, "retired", OTHER, 0.0)
+    collectors.follow_handoffs(declared_here(here), {}, here)
+    assert collectors.handoff.load_outgoing(here.outgoing) == {} and here.handoffs.log == []
+
+
+def test_handoff_status_says_nothing_when_nothing_waits(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch)
+    collectors.handoff_status(declared_here(here), {}, here)
+    assert here.report.lines == [] and [c[1] for c in here.handoffs.log] == ["pending"]
+
+
+def test_act_keeps_what_it_holds_and_leaves_what_another_holds(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch)
+    at(monkeypatch, 1_000.0)
+    ibkr, sports = target(tmp_path), target(tmp_path, project="sports_betting", service="collector")
+    with collectors.claim(collectors.claim_path(here.base, "ibkr_trader"), "`move` to b", 600):
+        collectors.act("maintain", [ibkr, sports], here, FakeSchtasks())
+    assert ("up", "sports_betting", "collector") in here.docker.calls
+    assert ("up", "ibkr_trader", "app") not in here.docker.calls
+    assert (here.base / collectors.HEALTH).is_file()
+
+
+def test_set_mode_keeps_the_rest_of_the_assignment(tmp_path):
+    here = collectors.Here(
+        tmp_path, tmp_path, THIS, FakeDocker([]), FakeHandoff(), collectors.Report()
+    )
+    config.save_assignment(here.assignment, {"a": RUN, "b": RUN})
+    collectors.set_mode(here, "a", STOP)
+    assert config.load_assignment(here.assignment) == {"a": STOP, "b": RUN}
+
+
+def test_refusal_is_empty_for_a_collector_that_can_move(tmp_path):
+    here = collectors.Here(
+        tmp_path, tmp_path, THIS, FakeDocker([]), FakeHandoff(), collectors.Report()
+    )
+    (tmp_path / "ibkr_trader" / ".git").mkdir(parents=True)
+    ibkr = config.Collector("ibkr_trader", "app", handoff=tuple(HANDOFF))
+    assert collectors.refusal(ibkr, {"ibkr_trader": RUN}, here) == ""

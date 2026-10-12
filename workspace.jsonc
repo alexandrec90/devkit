@@ -2823,8 +2823,15 @@
 		// job), after starting the compose services it `needs`. Its exit code is the verdict.
 		"devkit.collectors": {
 			// `buildsFrom`: its image copies the sibling data-lake checkout in, so a merge
-			// there redeploys it as one in ibkr_trader does.
-			"ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"], "buildsFrom": ["data-lake"] },
+			// there redeploys it as one in ibkr_trader does. `handoff`: the project's own
+			// command that carries its database through R2 for `collectors.py move`
+			// (`collector_handoff`); `--extra archive` because boto3 comes only with it.
+			"ibkr_trader": {
+				"service": "app",
+				"health": ["ibkr-trader", "health"],
+				"buildsFrom": ["data-lake"],
+				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"]
+			},
 			"sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"] },
 			// On the host, not in a container: it drives the installed Chrome with the
 			// browser profiles in its checkout.
