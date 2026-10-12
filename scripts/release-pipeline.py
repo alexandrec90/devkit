@@ -924,16 +924,51 @@ def run_pipeline(
     ]
     if workspace is not None:
         command += ["--workspace", str(workspace)]
+    upgrade = upgrade_module()
+    # Emptied first, so a pass that dies before writing its own leaves nothing that
+    # `adoption_outcome` could read as the previous run's verdict.
+    upgrade.write_artifact(upgrade.REPO_ROOT, "")
     adopted = _run(command, cwd=devkit, capture=False)
-    if adopted.returncode != 0:
-        # Not a release failure: the release is cut and tagged. Adoption is a separate
-        # per-consumer act with its own artifact, and `logs/upgrade.log` says which.
-        return _stop(
-            f"{version} is released, but the adoption pass exited {adopted.returncode} "
-            f"-- see logs/upgrade.log, then re-run `upgrade-project.py {scope} --yes`"
+    return adoption_outcome(
+        version, scope, adopted.returncode, read_text(upgrade.REPO_ROOT / upgrade.ARTIFACT)
+    )
+
+
+def read_text(path: Path) -> str:
+    """`path`'s text, or "" when it cannot be read."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def adoption_outcome(version: str, scope: str, code: int, artifact: str) -> int:
+    """The exit code of a release run whose adoption pass exited `code`.
+
+    **Main moving on while the release was cut is not a failure of this run.**
+    `upgrade-project.py` exits 1 when devkit main carries a vendored change the new tag
+    does not, and that is routine here: a PR merged between the release PR and the
+    adoption is untagged by construction. On 2026-10-11 #629 merged while v0.11.62 was
+    cut, every consumer's adoption PR opened, and the run was filed as a failed
+    scheduled job anyway. The next `--if-needed` run cuts the release that change
+    needs, so the warning is said and the run succeeds.
+    """
+    if code == 0:
+        _say(f"{version} released and up for adoption everywhere.")
+        return 0
+    if upgrade_module().owes_only_a_release(artifact):
+        _say(
+            f"{version} released and up for adoption everywhere. Main moved on while it "
+            "was cut, so it carries vendored changes no tag delivers yet (logs/upgrade.log "
+            "names them); the next `--if-needed` run releases them."
         )
-    _say(f"{version} released and up for adoption everywhere.")
-    return 0
+        return 0
+    # Not a release failure: the release is cut and tagged. Adoption is a separate
+    # per-consumer act with its own artifact, and `logs/upgrade.log` says which.
+    return _stop(
+        f"{version} is released, but the adoption pass exited {code} "
+        f"-- see logs/upgrade.log, then re-run `upgrade-project.py {scope} --yes`"
+    )
 
 
 PR_BODY = """Bumps `FALLBACK_DEVKIT_REF` to `{version}` so a project generated before the

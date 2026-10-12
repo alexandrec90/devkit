@@ -1884,3 +1884,25 @@ def test_a_run_level_outcome_is_not_offered_as_a_retry_target():
     )
     assert "# retry: python scripts/upgrade-project.py carameli --yes" in mixed
     assert up.RELEASE_SCOPED not in mixed.split("# unresolved:")[0]
+
+
+def test_the_unresolved_header_is_read_back_name_by_name():
+    body = up.artifact_body(
+        "v0.7.0",
+        False,
+        [up.Outcome(up.RELEASE_SCOPED, 1, "cut a release"), up.Outcome("carameli", 2, "x")],
+    )
+    assert up.unresolved_names(body) == [up.RELEASE_SCOPED, "carameli"]
+    assert up.unresolved_names("") == []
+
+
+def test_only_an_artifact_holding_nothing_but_the_owed_release_owes_only_a_release():
+    owed = up.Outcome(up.RELEASE_SCOPED, 1, "cut a release")
+    assert up.owes_only_a_release(up.artifact_body("v0.7.0", False, [owed]))
+    assert not up.owes_only_a_release(
+        up.artifact_body("v0.7.0", False, [owed, up.Outcome("carameli", 1, "x")])
+    )
+    assert not up.owes_only_a_release(
+        up.artifact_body("v0.7.0", False, [up.Outcome(up.RUN_SCOPED, 1, "x")])
+    )
+    assert not up.owes_only_a_release("")

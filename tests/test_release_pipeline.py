@@ -360,6 +360,52 @@ def test_the_run_never_spells_the_scope_a_second_time():
     assert rp.adoption_scope(["carameli"]) in step
 
 
+# --- what the adoption pass's exit means for the release ----------------------
+
+
+def _owed_artifact(*extra) -> str:
+    owed = up.unreleased_line(["scripts/hooks/toolchain.py"], "v0.11.62")
+    return up.artifact_body("v0.11.62", False, [up.Outcome(up.RELEASE_SCOPED, 1, owed), *extra])
+
+
+def test_main_moving_on_during_the_release_is_not_a_failed_release(capsys):
+    """The regression (ledger 14539eb2). #629 merged while v0.11.62 was cut, every
+    consumer's adoption PR opened, and the run still exited 1 as `STOPPED`, filed as a
+    failed scheduled job, because the adoption pass flagged the release main now owed."""
+    assert rp.adoption_outcome("v0.11.62", "--all", 1, _owed_artifact()) == 0
+    out = capsys.readouterr()
+    assert "STOPPED" not in out.err
+    assert "next `--if-needed` run" in out.out
+
+
+def test_a_checkout_that_failed_beside_the_owed_release_still_stops(capsys):
+    failed = up.Outcome("carameli", 2, "upgrade: carameli -- pushed, but the PR failed")
+    assert rp.adoption_outcome("v0.11.62", "--all", 2, _owed_artifact(failed)) == 1
+    assert "adoption pass exited 2" in capsys.readouterr().err
+
+
+def test_an_adoption_that_left_no_artifact_stops(capsys):
+    """A pass that crashed writes nothing; `run_pipeline` empties the file first so a
+    previous run's owed-release verdict cannot stand in for this one."""
+    assert rp.adoption_outcome("v0.11.62", "--all", 1, "") == 1
+    assert "STOPPED" in capsys.readouterr().err
+
+
+def test_a_clean_adoption_releases(capsys):
+    assert rp.adoption_outcome("v0.11.62", "--all", 0, "") == 0
+    assert "up for adoption everywhere" in capsys.readouterr().out
+
+
+def test_the_pipeline_clears_the_adoption_artifact_before_reading_it():
+    source = inspect.getsource(rp.run_pipeline)
+    cleared = source.index('write_artifact(upgrade.REPO_ROOT, "")')
+    assert cleared < source.index("_run(command") < source.index("adoption_outcome(")
+
+
+def test_an_unreadable_artifact_reads_as_empty(tmp_path):
+    assert rp.read_text(tmp_path / "missing.log") == ""
+
+
 def test_an_unreadable_tag_list_raises_rather_than_reading_as_none(tmp_path):
     """[] is `next_version`'s cue for a first release, so a git failure must not be it."""
     with pytest.raises(RuntimeError, match="fatal:"):
