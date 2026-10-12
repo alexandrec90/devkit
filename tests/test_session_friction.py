@@ -413,6 +413,29 @@ def test_a_ledger_evidence_line_is_read_back_as_the_audit_lines_around_it(tmp_pa
     assert st.window("L1 CALL: a\nL9 CALL: b\nnoise\n", 1, 3) == "L1 CALL: a\n"
 
 
+def test_an_agent_reports_ranges_and_pairs_of_evidence_are_read_back_whole(tmp_path, capsys):
+    """An `agent-report` row's evidence is `<a>#L82-L94; <b>#L62-L67`, and the reader took
+    the whole string for one path and answered `no transcript at` it (1011-10)."""
+    first, second = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    for path in (first, second):
+        rows = [call(f"echo {i}", str(i)) for i in range(1, 31)]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert st.main([f"{first}#L10-L12"]) == 0
+    out = capsys.readouterr().out
+    assert [line.split()[0] for line in out.splitlines()] == ["L10", "L11", "L12"], "no widening"
+    assert st.main([f"{first}#L10-L12; {second}#L20", "--around", "1"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == f"== {first}" and f"== {second}" in out
+    lines = [line.split()[0] for line in out if line.startswith("L")]
+    assert lines == [f"L{n}" for n in (9, 10, 11, 12, 13, 19, 20, 21)]
+    assert st.main([f"{first}#L10; {tmp_path / 'gone.jsonl'}#L3"]) == 2
+    captured = capsys.readouterr()
+    assert "L10 " in captured.out and "no transcript at" in captured.err
+    assert st.evidence_path(f"{first}#L82-L94") == first
+    assert st.read_evidence(f"{tmp_path / 'gone.jsonl'}#L1", None) is None
+    assert st.read_evidence(str(first), None) == st.render(first), "no #L: the whole session"
+
+
 def test_a_complaint_is_filed_whole_with_the_tree_it_was_said_in(tmp_path):
     """The detail is a 90-character snippet, so a sweep parsed a 5,672-line transcript to
     read one complaint -- and then 5 calls to learn the session it was said to had its fix
