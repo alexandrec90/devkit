@@ -3345,18 +3345,37 @@ def test_provision_re_aims_path_source_siblings_before_the_sync(workspace, monke
     monkeypatch.setattr(
         worktree,
         "link_siblings",
-        lambda path: order.append("link") or ["devkit: data-lake moved from c14c6be"],
+        lambda path, wait: (
+            order.append(f"link {wait:.0f}") or ["devkit: data-lake moved from c14c6be"]
+        ),
     )
     monkeypatch.setattr(
         worktree, "run_provision", lambda path, steps: (order.append("sync"), (True, []))[1]
     )
 
     assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 0
-    assert order == ["link", "sync"]
+    assert order == [f"link {worktree.worktree_env.SESSION_WAIT:.0f}", "sync"], "a session waits"
     assert "data-lake moved from c14c6be" in capsys.readouterr().out
 
     assert worktree.main(["provision", "demo", "--dry-run", "--workspace", str(workspace)]) == 0
-    assert order == ["link", "sync"]
+    assert len(order) == 2
+
+
+def test_provision_never_syncs_against_a_sibling_another_run_holds(workspace, monkeypatch, capsys):
+    """d32ffcc2: a sync against another run's pin relocks `uv.lock` against it."""
+    root = workspace.parent
+    (root / "demo" / ".git").mkdir(parents=True)
+    step = worktree.ProvisionStep(label="uv sync", argv=("uv", "sync"))
+    monkeypatch.setattr(worktree, "plan_provision", lambda path: (step,))
+    held = f"devkit: data-lake {worktree.worktree_env.HELD} a run in tree-123 (pid 9)"
+    monkeypatch.setattr(worktree, "link_siblings", lambda path, wait=0.0: [held])
+    monkeypatch.setattr(worktree, "run_provision", lambda *a: pytest.fail("synced"))
+
+    assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 1
+    out = capsys.readouterr().out
+    assert held in out and "not synced" in out
+    [linked, note] = worktree.provision_new_box(root / "demo", "demo", (step,), True)
+    assert linked == held and note.startswith("not provisioned")
 
 
 def test_link_siblings_leaves_a_static_checkout_alone(tmp_path, monkeypatch):
@@ -3365,7 +3384,7 @@ def test_link_siblings_leaves_a_static_checkout_alone(tmp_path, monkeypatch):
     monkeypatch.setattr(
         worktree.worktree_env,
         "link_path_sources",
-        lambda here, checkout: calls.append((here, checkout)) or ["cut"],
+        lambda here, checkout, wait: calls.append((here, checkout)) or ["cut"],
     )
     monkeypatch.setattr(worktree.worktree_env, "checkout_of", lambda path: None)
     assert worktree.link_siblings(tmp_path) == [] and calls == []

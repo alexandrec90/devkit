@@ -20,6 +20,7 @@ from conftest import REPO_ROOT, load_module
 
 tc = load_module("scripts/hooks/toolchain.py")
 hc = load_module("scripts/hooks/harness_config.py")
+sp = load_module("scripts/hooks/sibling_pins.py")
 
 PYPROJECT = '[project]\nname = "probe"\nversion = "0.1.0"\n'
 
@@ -776,6 +777,27 @@ def test_align_sibling_says_whether_it_moved_and_nothing_when_there_was_nothing_
     assert moved and shas[1][:7] in line
     assert tc.align_sibling(root, sibling) == (False, "")
     assert tc.align_sibling(root, tmp_path / "absent") == (False, ""), "no tree: nothing to do"
+
+
+def test_a_run_leases_the_sibling_at_its_pin(tmp_path):
+    root, sibling, shas = _shared_lake(tmp_path)
+    tc.align_path_sources(root, env={})
+    lease = sp.lease_dir(sibling) / f"{os.getpid()}{sp.LEASE_SUFFIX}"
+    assert lease.read_text(encoding="utf-8").splitlines() == [shas[1], str(root)]
+
+
+def test_a_sibling_another_run_holds_at_another_pin_is_not_moved_under_it(tmp_path, capsys):
+    """d32ffcc2: a provision in one tree moved data-lake d32d4d5 -> c0aa963 while a run
+    in another tree on d32d4d5's pin was checking its lock against it."""
+    root, sibling, shas = _shared_lake(tmp_path)
+    # The parent of this test process: a pid that is alive and is not this run's.
+    holder = sp.hold(sp.lease_dir(sibling), shas[2], tmp_path / "tree-123", os.getppid())
+    moved, line = tc.align_sibling(root, sibling, wait=0)
+    assert not moved and _git(sibling, "rev-parse", "HEAD") == shas[2]
+    assert "tree-123" in line and "do not `uv lock` here" in line
+    sp.release(holder)
+    moved, line = tc.align_sibling(root, sibling, wait=0)
+    assert moved and _git(sibling, "rev-parse", "HEAD") == shas[1]
 
 
 def test_ci_checks_its_own_pin_out_and_is_never_aligned(tmp_path):

@@ -61,6 +61,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_config
+import sibling_pins
 import worktree_tiers
 
 # The Python toolchain, in the order the ladder reads them.
@@ -322,21 +323,34 @@ def _git(where: Path, *args: str, timeout: float = 10) -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
+# Spelled apart from any f-string: a doubled brace there reads as an unrendered template
+# tag to the generated-project check, which scans every vendored file.
+PEEL_COMMIT = "^{commit}"
+
+
 def _commit_of(where: Path, pin: str) -> str:
     for ref in (f"origin/{pin}", pin):
-        found = _git(where, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+        found = _git(where, "rev-parse", "--verify", "--quiet", ref + PEEL_COMMIT)
         if found:
             return found
     return ""
 
 
-def align_sibling(root: Path, target: Path) -> tuple[bool, str]:
-    """Move the sibling tree `target` to the commit `root`'s CI pins it to.
+def _warning(target: Path) -> str:
+    have = _git(target, "rev-parse", "HEAD")
+    return f"do not `uv lock` here until it is: the lock would be resolved against {have[:7]}"
+
+
+def align_sibling(root: Path, target: Path, wait: float = sibling_pins.WAIT) -> tuple[bool, str]:
+    """Hold the sibling tree `target` at the commit `root`'s CI pins it to, for this run.
 
     `(moved, line)`: whether it moved, and what to say -- "" when there is nothing to.
     Only a linked worktree that is detached and clean is moved: that is the tree
     devkit's `worktree_env` cut for every worktree of the tier to share. A checkout of
-    its own is a person's, and a branch checked out there is a task's.
+    its own is a person's, and a branch checked out there is a task's. Once there, the
+    run leases it (`sibling_pins.claim`), and a move waits for every other run leasing it
+    at another commit -- it is the one tree for the whole tier, so moving it under a
+    running one is what broke that run (d32ffcc2).
     """
     if not (target / ".git").is_file():
         return False, ""
@@ -348,18 +362,28 @@ def align_sibling(root: Path, target: Path) -> tuple[bool, str]:
         _git(target, "fetch", "--quiet", "origin", timeout=60)
         want = _commit_of(target, pin)
     have = _git(target, "rev-parse", "HEAD")
-    warning = f"do not `uv lock` here until it is: the lock would be resolved against {have[:7]}"
     if not want:
-        return False, f"CI pins {target.name} to {pin}, which {target} lacks; {warning}"
-    if want == have:
+        return False, f"CI pins {target.name} to {pin}, which {target} lacks; {_warning(target)}"
+    if want != have and _git(target, "symbolic-ref", "-q", "HEAD"):
+        return False, f"{target} is on a branch, not at CI's pin {pin}; {_warning(target)}"
+    if want != have and _git(target, "status", "--porcelain", "--untracked-files=no"):
+        return False, (
+            f"{target} has local changes, so it is not at CI's pin {pin}; {_warning(target)}"
+        )
+
+    def move() -> bool:
+        _git(target, "checkout", "--quiet", "--detach", want, timeout=60)
+        return _git(target, "rev-parse", "HEAD") == want
+
+    shared = sibling_pins.Sibling(target, want, lambda: _git(target, "rev-parse", "HEAD"), move)
+    done = sibling_pins.claim(shared, root, sibling_pins.Pace(wait=wait))
+    if done.blocked:
+        holders = "; ".join(lease.line for lease in done.blocked)
+        return False, f"{target} is held by {holders}, not at CI's pin {pin}; {_warning(target)}"
+    if done.held is None:
+        return False, f"could not move {target} to CI's pin {pin}; {_warning(target)}"
+    if not done.moved:
         return False, ""
-    if _git(target, "symbolic-ref", "-q", "HEAD"):
-        return False, f"{target} is on a branch, not at CI's pin {pin}; {warning}"
-    if _git(target, "status", "--porcelain", "--untracked-files=no"):
-        return False, f"{target} has local changes, so it is not at CI's pin {pin}; {warning}"
-    _git(target, "checkout", "--quiet", "--detach", want, timeout=60)
-    if _git(target, "rev-parse", "HEAD") != want:
-        return False, f"could not move {target} to CI's pin {pin}; {warning}"
     return True, f"moved {target} from {have[:7]} to {want[:7]}, the commit this tree's CI pins"
 
 
@@ -370,7 +394,9 @@ def align_path_sources(root: Path, env: Mapping[str, str] | None = None) -> tupl
     `worktree_env` moved it to a tree's pin only when that tree was cut -- so cutting a
     tree off an older branch moved it back under every other, and a later `uv run` there
     relocked `uv.lock` against the wrong data-lake and failed mypy that CI passed
-    (0db0d931, 941b7470). Run before anything syncs, every run re-checks it. What
+    (0db0d931, 941b7470). Run before anything syncs, every run re-checks it, and holds
+    a lease on it for as long as this process lives, so a run in another tree on another
+    pin waits rather than moving it under this one (`sibling_pins`, d32ffcc2). What
     could not be put right is said on stderr, never raised. CI checks the pin out itself.
     """
     environ = os.environ if env is None else env

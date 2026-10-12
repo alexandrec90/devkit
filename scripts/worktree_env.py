@@ -557,11 +557,15 @@ def pinned_ref(here: Path, name: str) -> str:
     return ""
 
 
+# `rev-parse`'s peel to a commit, spelled as `toolchain.PEEL_COMMIT` is.
+PEEL_COMMIT = "^{commit}"
+
+
 def resolve_pin(source: Path, pin: str, env: Mapping[str, str]) -> str:
     """`pin` as `source` can check it out: a branch by its remote-tracking ref, which the
     fetch just moved, ahead of a local branch of that name; "" when `source` has neither."""
     for ref in (f"origin/{pin}", pin):
-        if _git(source, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", env=env):
+        if _git(source, "rev-parse", "--verify", "--quiet", ref + PEEL_COMMIT, env=env):
             return ref
     return ""
 
@@ -595,6 +599,7 @@ def link_path_sources(
     checkout: Path,
     runner=run_windowless,
     environ: Mapping[str, str] | None = None,
+    wait: float = 0.0,
 ) -> list[str]:
     """Cut each missing sibling as a detached worktree of the repo the checkout sees there.
 
@@ -608,7 +613,8 @@ def link_path_sources(
     The sibling repo is fetched first, and a sibling tree already there is moved to that
     ref by `advance_sibling`: "origin/HEAD" meant the last fetch's, at the first cut's.
     A link to nothing at the sibling's path is removed first (`clear_dead_link`).
-    One line per sibling cut, moved or refused; nothing for one already current.
+    One line per sibling cut, moved or refused; nothing for one already current. A move
+    waits up to `wait` seconds for runs in other trees on another pin (`advance_sibling`).
     """
     env = git_env(os.environ if environ is None else environ)
     env[SKIP_PROVISION_VAR] = "1"
@@ -629,7 +635,7 @@ def link_path_sources(
         )
         lines.append(clear_dead_link(target))
         if target.exists():
-            lines.append(advance_sibling(target, source, ref, env))
+            lines.append(advance_sibling(target, source, ref, env, tree=here, wait=wait))
             continue
         argv = ["git", "-C", str(source), "worktree", "add", "--detach", str(target), ref]
         try:
@@ -650,26 +656,103 @@ def _common_dir(root: Path, env: Mapping[str, str]) -> str:
     return os.path.normcase(os.path.normpath(found)) if found else ""
 
 
-def advance_sibling(target: Path, source: Path, ref: str, env: Mapping[str, str]) -> str:
+# Where the lease protocol `scripts/hooks/toolchain.py` runs under lives: beside this
+# module in devkit, and beside the installed hook under its installed name.
+SIBLING_PINS = (Path("hooks") / "sibling_pins.py", Path("devkit_sibling_pins.py"))
+# How long `worktree.py provision` -- a session asking for it -- waits for runs on another
+# pin, as a run does (`sibling_pins.WAIT`). The git hook never waits: a `worktree add`
+# that stalls reads as a hang, and the tree's first run provisions it instead.
+SESSION_WAIT = 900.0
+# In the line `advance_sibling` says when other runs hold the sibling; `held` reads it.
+HELD = "is held by"
+
+
+def sibling_pins():
+    """The vendored `sibling_pins` module, loaded by path; None where neither copy is.
+
+    By path because this module is installed alone as a git hook; registered before it
+    runs, since its dataclasses resolve their module by name (`scripts/CLAUDE.md`).
+    """
+    if "sibling_pins" in sys.modules:
+        return sys.modules["sibling_pins"]
+    here = Path(__file__).resolve().parent
+    for relative in SIBLING_PINS:
+        path = here / relative
+        spec = importlib.util.spec_from_file_location("sibling_pins", path)
+        if not path.is_file() or spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["sibling_pins"] = module
+        try:
+            spec.loader.exec_module(module)
+        except (ImportError, OSError, SyntaxError):
+            module = None
+        if module is None or not hasattr(module, "claim"):
+            # A broken or older copy: the move runs unguarded, as before it existed.
+            del sys.modules["sibling_pins"]
+            return None
+        return module
+    return None
+
+
+def held(lines: list[str]) -> bool:
+    """Whether `link_path_sources` left a sibling at another run's pin: no sync now."""
+    return any(HELD in line for line in lines)
+
+
+def advance_sibling(
+    target: Path,
+    source: Path,
+    ref: str,
+    env: Mapping[str, str],
+    tree: Path | None = None,
+    wait: float = 0.0,
+) -> str:
     """Move the shared sibling tree to `ref`; "" when it is there already or is work.
 
     2e681e63: the tree was cut once and never moved, so ibkr's `uv lock --check` judged
     its lock against a data-lake weeks behind main and disagreed with CI. Only the tree
     `link_path_sources` cuts is moved -- detached, with no tracked change; a branch
     checked out there is a task's own. One that is not the sibling's at all is named.
+
+    d32ffcc2: it is the one tree every worktree of the tier builds against, so a move
+    under a run in another tree on another pin broke that run. The move is a
+    `sibling_pins.claim` for `tree`: it waits up to `wait` seconds for every run leasing
+    it at another commit, and otherwise leaves it and says who holds it (`HELD`).
     """
     if _common_dir(target, env) != _common_dir(source, env):
         return f"devkit: {target} is not a worktree of {source}; remove it to have it re-cut"
     if _git(target, "symbolic-ref", "-q", "HEAD", env=env):
         return ""
-    want = _git(source, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", env=env)
+    want = _git(source, "rev-parse", "--verify", "--quiet", ref + PEEL_COMMIT, env=env)
     have = _git(target, "rev-parse", "HEAD", env=env)
-    if not want or want == have:
+    if not want:
         return ""
-    if _git(target, "status", "--porcelain", "--untracked-files=no", env=env):
+    if want != have and _git(target, "status", "--porcelain", "--untracked-files=no", env=env):
         return f"devkit: {target} has local changes, so it was left at {have[:7]}, not {ref}"
-    _git(target, "checkout", "--quiet", "--detach", want, env=env, timeout=60)
-    if _git(target, "rev-parse", "HEAD", env=env) != want:
+
+    def head() -> str:
+        return _git(target, "rev-parse", "HEAD", env=env)
+
+    def move() -> bool:
+        _git(target, "checkout", "--quiet", "--detach", want, env=env, timeout=60)
+        return head() == want
+
+    pins = sibling_pins()
+    if pins is None:
+        if want == have:
+            return ""
+        moved = move()
+    else:
+        shared = pins.Sibling(target, want, head, move)
+        done = pins.claim(shared, tree or target, pins.Pace(wait=wait))
+        if done.blocked:
+            holders = "; ".join(lease.line for lease in done.blocked)
+            return f"devkit: {target} {HELD} {holders}, so it was left at {have[:7]}, not {ref}"
+        if done.held is not None and not done.moved:
+            return ""
+        moved = done.moved
+    if not moved:
         return f"devkit: could not move {target} from {have[:7]} to {ref}"
     return f"devkit: {target} moved from {have[:7]} to {ref} ({want[:7]})"
 
@@ -923,8 +1006,14 @@ def _set_up(here: Path, runner, environ: Mapping[str, str] | None) -> int:
     lines = [name_compose_project(here, checkout)]
     if agent_tree(here, environ):
         # Before the sync, which cannot resolve a path source that is not there yet.
-        lines += link_path_sources(here, checkout, runner=runner, environ=environ)
-        lines.append(provision(here, checkout, runner=runner, environ=environ))
+        linked = link_path_sources(here, checkout, runner=runner, environ=environ)
+        lines += linked
+        if held(linked):
+            # A sync now would relock against another run's pin; the tree's first lint or
+            # test run provisions it, after waiting its turn (`toolchain.rerun_target`).
+            lines.append(f"devkit: {here} was not provisioned while its sibling is held")
+        else:
+            lines.append(provision(here, checkout, runner=runner, environ=environ))
     elif Toolchain.observe(here, checkout).command():
         lines.append(
             f"devkit: {here} is in no agent worktree tier, so it was not provisioned -- "

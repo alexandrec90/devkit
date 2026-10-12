@@ -47,6 +47,8 @@ RUNTIME_FILES = {
     "scripts/git_policy/dispatch.py": "devkit_git_policy/dispatch.py",
     "scripts/git_policy/framework.py": "devkit_git_policy/framework.py",
     "scripts/worktree_env.py": "devkit_worktree_env.py",
+    # Loaded by path by `devkit_worktree_env` (`SIBLING_PINS`) to lease a shared sibling.
+    "scripts/hooks/sibling_pins.py": "devkit_sibling_pins.py",
     "scripts/git-hooks/pre-commit": "pre-commit",
     "scripts/git-hooks/pre-push": "pre-push",
     "scripts/git-hooks/post-checkout": "post-checkout",
