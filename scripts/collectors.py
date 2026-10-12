@@ -52,17 +52,20 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time as _time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import collector_build
 import collector_tasks
 import collectors_config as config
 import docker_memory
 import machine_clock
 import sweep
+import worktree_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -124,9 +127,15 @@ STOP_TIMEOUT = 120
 HEALTH_TIMEOUT = 120
 INSPECT_TIMEOUT = 30
 GIT_TIMEOUT = 30
+# One `git archive` of a checkout into a staged build context (`collector_build`).
+EXPORT_TIMEOUT = 120
 # The longest one container target can hold a pass: every spawn `keep_running` makes, at
-# its timeout -- three inspects, three git calls, the build and the health check.
-TARGET_BOUND = 3 * INSPECT_TIMEOUT + 3 * GIT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
+# its timeout -- three inspects; three git calls for the checkout and three for a sibling
+# it `builds_from` (resolve the pin, read it, check it is merged); an export of each; the
+# build and the health check.
+TARGET_BOUND = (
+    3 * INSPECT_TIMEOUT + 6 * GIT_TIMEOUT + 2 * EXPORT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
+)
 # How long after the machine boots or wakes a silent engine is Docker Desktop still
 # starting rather than down (`wait_for_engine`), and how often it is asked meanwhile.
 # Measured start on this workstation: about three minutes from boot to running containers.
@@ -364,11 +373,14 @@ class Docker:
         )
         return parse_created(out) if code == 0 else None
 
-    def deploy(self, checkout: Path, service: str) -> tuple[bool, str]:
+    def deploy(self, checkout: Path, service: str, files: Sequence[Path] = ()) -> tuple[bool, str]:
         # Builds first and recreates only once the build succeeded, so a build that fails
-        # leaves the running container as it was.
+        # leaves the running container as it was. `files` are compose files to read in
+        # place of the checkout's own lookup (`collector_build.stage`); the project
+        # directory stays the first one's, so the project name and paths do not move.
+        named = [arg for f in files for arg in ("-f", str(f))]
         code, out = self.run(
-            ["docker", "compose", "up", "-d", "--build", service], UP_TIMEOUT, checkout
+            ["docker", "compose", *named, "up", "-d", "--build", service], UP_TIMEOUT, checkout
         )
         return code == 0, out
 
@@ -483,29 +495,61 @@ class Git:
     def run(self, checkout: Path, *args: str) -> tuple[int, str]:
         return spawn(["git", *args], GIT_TIMEOUT, checkout)
 
-    def head(self, checkout: Path) -> tuple[str, float] | None:
-        """`(short sha, commit time)` of HEAD; None when git cannot say."""
-        code, out = self.run(checkout, "log", "-1", "--format=%h %ct", "HEAD")
+    def head(self, checkout: Path, rev: str = "HEAD") -> tuple[str, float] | None:
+        """`(short sha, commit time)` of `rev`, HEAD by default; None when git cannot say."""
+        code, out = self.run(checkout, "log", "-1", "--format=%h %ct", rev, "--")
         sha, _, when = out.strip().partition(" ")
         try:
             return (sha, float(when)) if code == 0 and sha else None
         except ValueError:
             return None
 
-    def held(self, checkout: Path) -> str:
-        """Why HEAD must not be deployed by a timer, or "" when it may: it is on origin's
-        default branch (at its tip or behind it) and no tracked file is edited."""
+    def held(self, checkout: Path, rev: str = "HEAD") -> str:
+        """Why `rev` must not be deployed by a timer, or "" when it may: it is on origin's
+        default branch (at its tip or behind it) and, for HEAD, no tracked file is edited.
+        Any other rev is built from an export of the commit (`collector_build`), so the
+        files on disk are not what ships."""
         code, _out = self.run(
-            checkout, "merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/HEAD"
+            checkout, "merge-base", "--is-ancestor", rev, "refs/remotes/origin/HEAD"
         )
         if code == 1:
-            return "HEAD is not on origin's default branch"
+            return f"{'HEAD' if rev == 'HEAD' else rev[:7]} is not on origin's default branch"
         if code != 0:
             return "origin's default branch is unknown here"
+        if rev != "HEAD":
+            return ""
         code, out = self.run(checkout, "status", "--porcelain", "--untracked-files=no")
         if code != 0:
             return "git status failed"
         return "the checkout has uncommitted edits" if out.strip() else ""
+
+    def pin(self, checkout: Path, sibling: str) -> str:
+        """The ref `checkout`'s own PR gate checks `sibling` out at; "" when it pins none."""
+        return worktree_env.pinned_ref(checkout, sibling)
+
+    def resolve(self, checkout: Path, ref: str) -> str:
+        """`ref`'s full commit sha in `checkout` -- a branch by its remote-tracking ref,
+        which a fetch moves, ahead of a local one -- or "" when it has no such commit."""
+        for name in (f"refs/remotes/origin/{ref}", ref):
+            code, out = self.run(checkout, "rev-parse", "--verify", "--quiet", f"{name}^{{commit}}")
+            if code == 0 and out.strip():
+                return out.strip()
+        return ""
+
+    def export(self, checkout: Path, rev: str, dest: Path) -> str:
+        """Write `rev`'s tree into `dest` (`collector_build.Export`); "" on success."""
+        archive = dest.with_name(f"{dest.name}.tar")
+        code, out = spawn(
+            ["git", "archive", "--format=tar", f"--output={archive}", rev],
+            EXPORT_TIMEOUT,
+            checkout,
+        )
+        if code != 0:
+            return first_line(out) or f"git archive exited {code}"
+        try:
+            return collector_build.unpack(archive, dest)
+        finally:
+            archive.unlink(missing_ok=True)
 
 
 @dataclass
@@ -591,28 +635,28 @@ def redeploy(
     target: Target, box: Container, docker: Docker, git: Git, report: Report, last: dict
 ) -> dict:
     """Rebuild `box` onto the checkout's HEAD when its code is older and HEAD is merged
-    code -- the newest HEAD among the checkout and those it `builds_from`, each of which
-    must be merged code. Returns what to record: `code_at`, `held` when a redeploy was
-    owed and refused, and `deployed` when this pass redeployed (and so must skip the
-    health check)."""
+    code -- the newest commit among the checkout and those it `builds_from`, each of
+    which must be merged code. A sibling the checkout's PR gate pins is built at that
+    pin, not at its own HEAD (`source_heads`, `deploy_sources`). Returns what to record:
+    `code_at`, `held` when a redeploy was owed and refused, and `deployed` when this
+    pass redeployed (and so must skip the health check)."""
     name, service = target.collector.project, target.collector.service
     known = code_at(box, docker, last)
     if known is None:
         return {}
-    heads = source_heads(target, git)
-    newest = max(heads, key=lambda pair: pair[1][1], default=None)
-    if newest is None or newest[1][1] <= known:
+    sources = source_heads(target, git)
+    newest = max(sources, key=lambda source: source.committed, default=None)
+    if newest is None or newest.committed <= known:
         return {CODE_AT: known}
-    where, (sha, committed) = newest
-    sha = sha if where == target.checkout else f"{where.name}@{sha}"
+    sha = newest.sha if newest.root == target.checkout else f"{newest.root.name}@{newest.sha}"
     # Every checkout the image copies is baked into it, so each must be merged code.
-    held = next((_held_in(target, w, why) for w, _head in heads if (why := git.held(w))), "")
+    held = next((why for source in sources if (why := _held(target, source, git))), "")
     if held:
         report.say(
             f"{name}: `{service}` runs code older than {sha} and was not redeployed -- {held}"
         )
         return {CODE_AT: known, HELD: held}
-    ok, out = docker.deploy(target.checkout, service)
+    ok, out = deploy_sources(target, sources, docker, git)
     if not ok:
         report.fail(
             f"{name}: could not redeploy `{service}` onto {sha} -- {first_line(out) or 'no output'}"
@@ -620,14 +664,77 @@ def redeploy(
         report.lines.extend(f"    {line}" for line in out.splitlines()[-20:])
         return {CODE_AT: known}
     report.say(f"{name}: redeployed `{service}` onto {sha} -- its code was older")
-    return {CODE_AT: committed, "deployed": True}
+    return {CODE_AT: newest.committed, "deployed": True}
 
 
-def source_heads(target: Target, git: Git) -> list[tuple[Path, tuple[str, float]]]:
-    """`(checkout, its HEAD)` for the target's checkout and each it `builds_from`, leaving
-    out any git cannot read."""
-    roots = [target.checkout, *(target.checkout.parent / s for s in target.collector.builds_from)]
-    return [(root, head) for root in roots if (head := git.head(root)) is not None]
+@dataclass(frozen=True)
+class Source:
+    """A checkout an image is built from, and the commit it is built at: `rev`, HEAD
+    unless the target's PR gate pins this sibling, when `pin` is that ref as written and
+    `rev` its commit here -- "" when this checkout does not have it."""
+
+    root: Path
+    sha: str
+    committed: float
+    rev: str = "HEAD"
+    pin: str = ""
+
+
+def source_heads(target: Target, git: Git) -> list[Source]:
+    """A `Source` for the target's checkout and each it `builds_from`, leaving out any git
+    cannot read -- except a pinned sibling, which is kept so the redeploy holds on it.
+
+    8e3c4a67: the image took data-lake at its own HEAD, and twice in two days that HEAD
+    was a commit whose models needed a migration ibkr_trader had not merged yet. The
+    commit ibkr_trader's gate pins is the one its schema was tested against, so that is
+    the commit to build, and the one whose time says whether the image is behind."""
+    found: list[Source] = []
+    if (head := git.head(target.checkout)) is not None:
+        found.append(Source(target.checkout, *head))
+    for sibling in target.collector.builds_from:
+        root = target.checkout.parent / sibling
+        pin = git.pin(target.checkout, sibling)
+        if not pin:
+            if (head := git.head(root)) is not None:
+                found.append(Source(root, *head))
+            continue
+        rev = git.resolve(root, pin)
+        commit = git.head(root, rev) if rev else None
+        sha, committed = commit or (pin[:7], 0.0)
+        found.append(Source(root, sha, committed, rev if commit else "", pin))
+    return found
+
+
+def _held(target: Target, source: Source, git: Git) -> str:
+    """Why `source` must not be built by a timer, named for a sibling, or ""."""
+    if source.pin and not source.rev:
+        why = f"{target.checkout.name} pins {source.pin[:12]}, which this checkout does not have"
+    else:
+        why = git.held(source.root, source.rev)
+    return _held_in(target, source.root, why) if why else ""
+
+
+def deploy_sources(
+    target: Target, sources: Sequence[Source], docker: Docker, git: Git
+) -> tuple[bool, str]:
+    """`Docker.deploy` the target from its checkouts as they stand, or -- when a sibling
+    is pinned -- from a context staged at each source's commit (`collector_build`)."""
+    service = target.collector.service
+    if not any(source.pin for source in sources):
+        return docker.deploy(target.checkout, service)
+    with tempfile.TemporaryDirectory(
+        prefix=f"{target.collector.project}-build-", ignore_cleanup_errors=True
+    ) as staging:
+        files, why = collector_build.stage(
+            target.checkout,
+            service,
+            [(source.root, source.rev) for source in sources],
+            Path(staging),
+            git.export,
+        )
+        if why:
+            return False, why
+        return docker.deploy(target.checkout, service, files)
 
 
 def _held_in(target: Target, where: Path, why: str) -> str:

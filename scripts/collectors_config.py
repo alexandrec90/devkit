@@ -84,7 +84,9 @@ class Collector:
     `builds_from` (`buildsFrom`) names the sibling checkouts a container's image copies in
     beside its own -- ibkr_trader's `COPY data-lake` -- so a merge there redeploys it as
     one in the project does (`collectors.redeploy`). Without it a data-lake fix reached
-    the container only with ibkr_trader's next unrelated merge (110defb0).
+    the container only with ibkr_trader's next unrelated merge (110defb0). A sibling the
+    project's own PR gate pins is built at that pin instead of its HEAD
+    (`collectors.source_heads`, 8e3c4a67).
     """
 
     project: str
