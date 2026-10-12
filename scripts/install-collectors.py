@@ -50,6 +50,15 @@ LABEL = "Scheduled: Collectors"
 
 DEFAULT_INTERVAL_MINUTES = 15
 
+# Two hours, not `devkit_schtasks`' default hour: a pass that takes over a handed-off
+# collector restores its database (`collectors.PICKUP_BOUND`, an hour of it the import)
+# and then starts it (`collectors.TARGET_BOUND`, a first build on this machine included).
+# Killed at an hour, the pass would leave the marker unimported for the next pass to
+# restore again from the start, every pass. The cost is the one `devkit_schtasks` warns
+# of: a wedged pass now silences the fires behind it for two hours rather than one.
+# `tests/test_install_collectors.py` holds the limit above both bounds.
+TIME_LIMIT = "PT2H"
+
 # See `install-reconcile-task.py` for why this is resolved once at import.
 WINDOWS = os.name == "nt"
 
@@ -79,6 +88,7 @@ def task_document(python: str, arguments: str, minutes: int, script: Path) -> st
         python,
         devkit_schtasks.logged(LABEL, python, arguments, root),
         devkit_schtasks.repeating_trigger(minutes) + devkit_schtasks.logon_trigger(),
+        time_limit=TIME_LIMIT,
         working_dir=root,
         enabled=TASK_NAME not in harness_state.stood_down(),
     )

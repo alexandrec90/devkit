@@ -349,6 +349,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/log-wrap.py": "the wrapper every job but the tray is launched through",
     "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
     "scripts/collector_tasks.py": "the schtasks that pass makes, and each scheduled collector's fire",
+    "scripts/collector_handoff.py": "the project's handoff command that pass asks and imports through",
     # reached from `workspace-status.py --notify`, which is the one script that imports
     # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.
     "scripts/notify.py": "the Windows PowerShell the status pass raises its toast through",

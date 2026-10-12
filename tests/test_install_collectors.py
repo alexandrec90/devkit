@@ -87,6 +87,15 @@ def test_check_is_green_when_the_scheduler_holds_what_yes_would_register(monkeyp
     assert installer.main(["--check"]) == 0
 
 
+def test_the_time_limit_lets_a_pass_restore_a_handoff_and_start_it():
+    """Killed mid-restore, a pass leaves the marker unimported, and every later pass would
+    start the restore again from the beginning."""
+    collectors = load_script("scripts/collectors.py")
+    hours = int(installer.TIME_LIMIT.removeprefix("PT").removesuffix("H"))
+    assert f"<ExecutionTimeLimit>{installer.TIME_LIMIT}</ExecutionTimeLimit>" in document()
+    assert hours * 3600 >= collectors.PICKUP_BOUND + collectors.TARGET_BOUND
+
+
 def test_the_parser_is_read_only_by_default():
     args = installer.build_parser().parse_args([])
     assert args.apply is False and args.minutes == installer.DEFAULT_INTERVAL_MINUTES

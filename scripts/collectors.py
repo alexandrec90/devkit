@@ -22,11 +22,29 @@ collectors this machine was assigned, and a machine assigned none spawns nothing
     collectors.py run-here [PROJECT..]  # this machine runs them; starts them now
     collectors.py stop-here [PROJECT..] # this machine must not; stops them now
     collectors.py release [PROJECT..]   # forget; neither started nor stopped from now on
+    collectors.py move PROJECT.. --to HOST  # hand them, data and all, to HOST
     collectors.py maintain              # what `devkit-collectors` runs every 15 minutes
     collectors.py fire NAME             # one scheduled collector, once: what its task runs
     collectors.py run-once NAME         # the same by hand, output in this terminal
 
-No names means every collector `devkit.collectors` declares.
+No names means every collector `devkit.collectors` declares -- except for `move`, which
+takes them by name.
+
+**Moving one is a command on one machine** (`move`), for a collector that declares a
+`handoff` (`collector_handoff` owns the contract). Typed on the machine that runs it, it
+stops the collector's service, has the project export its data addressed to HOST, sets
+this machine to `stop` and stops the project's other containers. HOST takes it over on
+its next pass, with nobody at it (`pick_up`): it imports the data, sets itself to `run`
+and starts it as `run-here` would. Without a `handoff` a move is `stop-here` on one
+machine and `run-here` on the other, and the data stays where it was. The sending machine
+keeps asking whether HOST has taken it over, and fails its pass once that is overdue
+(`follow_handoffs`): until then nothing runs the collector, and no row on either machine
+would otherwise say so.
+
+**One actor at a time** (`PASS_LOCK`). `move` holds the lock a pass holds, for its whole
+export, so a scheduled pass meanwhile stands down rather than restarting the service
+`move` stopped for the dump; and the pickup runs inside `maintain`, under that pass's lock,
+whose bound allows for the restore (`pass_bound`).
 
 **Started, and redeployed onto merged code -- only merged code.** A pass that finds the
 container down runs `docker compose up -d <service>`, which builds an image only when
@@ -60,6 +78,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collector_build
+import collector_handoff as handoff
 import collector_tasks
 import collectors_config as config
 import docker_memory
@@ -136,6 +155,23 @@ EXPORT_TIMEOUT = 120
 TARGET_BOUND = (
     3 * INSPECT_TIMEOUT + 6 * GIT_TIMEOUT + 2 * EXPORT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
 )
+# The longest one handoff pickup can hold a pass (`take_over`): asking, stopping the
+# service, the restore. A pass's `PASS_LOCK` allows each it may make this long
+# (`pass_bound`), so no stale-lock takeover starts a second pass mid-restore; and the
+# scheduled task's time limit covers one plus a target's `TARGET_BOUND`
+# (`tests/test_install_collectors.py`), since a pass killed mid-restore would leave the
+# marker unimported for every later pass to start the restore again.
+PICKUP_BOUND = handoff.PENDING_TIMEOUT + PS_TIMEOUT + STOP_TIMEOUT + handoff.IMPORT_TIMEOUT
+# How long `move` holds `PASS_LOCK` for each collector it hands off (`move_one`): stopping
+# it, the export, and either starting it again or stopping the rest.
+MOVE_BOUND = PS_TIMEOUT + STOP_TIMEOUT + handoff.EXPORT_TIMEOUT + UP_TIMEOUT + 2 * PS_TIMEOUT
+# How long after a `move` the receiving machine may take before the sender's pass fails on
+# it (`follow_handoffs`): two of its passes, 15 minutes apart, and the restore.
+HANDOFF_GRACE = 2 * 15 * 60 + PICKUP_BOUND
+# What `move` writes into `PASS_LOCK` beside `{started_at, until}`: who holds it and for
+# which collectors, so the tray keeps those rows green for the hour a move stops them
+# (`move_holding`). A pass writes neither; `IN_PASS` speaks for it.
+HOLDER, PROJECTS = "holder", "projects"
 # How long after the machine boots or wakes a silent engine is Docker Desktop still
 # starting rather than down (`wait_for_engine`), and how often it is asked meanwhile.
 # Measured start on this workstation: about three minutes from boot to running containers.
@@ -1195,8 +1231,9 @@ def lock_holder(path: Path, clock: float) -> float | None:
     return written + LOCK_WRITING if clock - written < LOCK_WRITING else None
 
 
-def take_lock(path: Path, until: float, clock: float) -> bool:
-    """Create `path` holding `until`; False while a live pass holds it.
+def take_lock(path: Path, until: float, clock: float, extra: dict | None = None) -> bool:
+    """Create `path` holding `until`, and `extra` beside it (`move`'s `HOLDER` and
+    `PROJECTS`); False while a live pass holds it.
 
     A dead holder's lock is broken first. Two passes breaking the same dead lock at once
     can both get through, which is no worse than the unserialised passes this replaced
@@ -1210,26 +1247,48 @@ def take_lock(path: Path, until: float, clock: float) -> bool:
     except FileExistsError:
         return False
     with os.fdopen(handle, "w", encoding="utf-8") as lock:
-        lock.write(json.dumps({STARTED_AT: clock, UNTIL: until}) + "\n")
+        lock.write(json.dumps({**(extra or {}), STARTED_AT: clock, UNTIL: until}) + "\n")
     return True
+
+
+def move_holding(path: Path, clock: float) -> dict[str, str]:
+    """`{project: holder}` for each collector a live `move` holds `PASS_LOCK` for; {}
+    while a pass holds it, or nothing does. The tray's reason to keep a collector `move`
+    stopped for its export green (`holding`)."""
+    if lock_holder(path, clock) is None:
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    holder = raw.get(HOLDER) if isinstance(raw, dict) else None
+    projects = raw.get(PROJECTS) if isinstance(raw, dict) else None
+    if not isinstance(holder, str) or not isinstance(projects, list):
+        return {}
+    return {str(project): holder for project in projects}
 
 
 @contextlib.contextmanager
 def one_pass(
-    path: Path, bound: float, wait: bool, sleep: Callable[[float], None] = _time.sleep
+    path: Path,
+    bound: float,
+    wait: bool,
+    sleep: Callable[[float], None] = _time.sleep,
+    extra: dict | None = None,
 ) -> Iterator[bool]:
     """Hold `PASS_LOCK` for a pass of at most `bound` seconds; yields whether it was had.
+    `extra` is written into the lock beside its bound (`take_lock`).
 
     Without `wait` a held lock yields False at once. With it, this looks again every
     `LOCK_POLL` seconds, which ends by the holder's `until` at the latest: a lock past it
     is broken.
     """
-    held = take_lock(path, _clock() + bound, _clock())
+    held = take_lock(path, _clock() + bound, _clock(), extra)
     if not held and wait:
         print("collectors: waiting for the collectors pass acting now to finish", file=sys.stderr)
     while not held and wait:
         sleep(LOCK_POLL)
-        held = take_lock(path, _clock() + bound, _clock())
+        held = take_lock(path, _clock() + bound, _clock(), extra)
     if not held:
         yield False
         return
@@ -1289,25 +1348,324 @@ def write_file(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+# --- handing a collector to another machine -----------------------------------------
+
+
+@dataclass
+class Here:
+    """This machine, as a handoff acts on it: its devkit checkout (`base`), the directory
+    its project checkouts sit in, its name (`handoff.this_host`), and what it spawns
+    through."""
+
+    base: Path
+    workspace: Path
+    name: str
+    docker: Docker
+    handoffs: handoff.Handoff
+    report: Report
+
+    def checkout(self, collector: config.Collector) -> Path:
+        return self.workspace / collector.project
+
+    @property
+    def assignment(self) -> Path:
+        return self.base / config.ASSIGNMENT
+
+    @property
+    def outgoing(self) -> Path:
+        return self.base / handoff.OUTGOING
+
+
+def set_mode(here: Here, project: str, mode: str) -> None:
+    """Assign `project` `mode` on this machine, rereading the file so nothing else in it
+    is undone."""
+    path = here.assignment
+    config.save_assignment(path, config.assign(config.load_assignment(path), [project], mode))
+
+
+def refusal(collector: config.Collector, assignment: dict[str, str], here: Here) -> str:
+    """Why `move` will not hand `collector` off from here, or ""."""
+    name = collector.project
+    if not collector.handoff:
+        return (
+            f"{name}: declares no `handoff`, so its data cannot go with it -- move it by hand: "
+            f"`collectors.py stop-here {name}` here, then `collectors.py run-here {name}` there"
+        )
+    mode = assignment.get(name)
+    if mode != config.RUN:
+        said = f"`{mode}`" if mode else "hands off"
+        return f"{name}: this machine is not set to run it ({said}) -- `move` it from the one that does"
+    if not (here.checkout(collector) / ".git").exists():
+        return f"{name}: no checkout at {here.checkout(collector)} -- nothing to export from"
+    return ""
+
+
+def move(
+    projects: Sequence[str],
+    to: str | None,
+    collectors: Sequence[config.Collector],
+    assignment: dict[str, str],
+    here: Here,
+) -> None:
+    """`move PROJECT.. --to HOST`: hand each to HOST, data and all (`move_one`). Refused
+    whole for a missing or self-naming `--to`, a missing or misspelt name; per collector
+    for one this machine does not run, or one without a `handoff`."""
+    dest = handoff.host_key(to or "")
+    picked, unknown = config.pick(list(collectors), list(projects))
+    if why := move_refused(dest, projects, unknown, here.name):
+        here.report.fail(why)
+        return
+    for collector in picked:
+        if why := refusal(collector, assignment, here):
+            here.report.fail(why)
+        else:
+            move_one(collector, dest, here)
+
+
+def move_refused(dest: str, projects: Sequence[str], unknown: Sequence[str], this: str) -> str:
+    """Why `move` acts on nothing at all, or "": no `--to`, a `--to` naming this machine
+    (`this`), no collector named, or one misspelt."""
+    if not dest:
+        return "`move` needs `--to HOST`: the machine to hand the collector to"
+    if dest == this:
+        return f"`--to {dest}` names this machine -- name the one to hand it to"
+    if not projects:
+        return "`move` takes the collectors to move by name"
+    if unknown:
+        return f"not declared in `{config.SETTING}`: {', '.join(unknown)}"
+    return ""
+
+
+def move_one(collector: config.Collector, dest: str, here: Here) -> None:
+    """Stop the collector's service, have the project export its data for `dest`, then
+    set this machine to `stop` and stop the rest of the project here (`handed_off`). An
+    export that fails starts the service again and leaves the assignment `run`.
+
+    `PASS_LOCK` is held throughout, waited for as a verb waits for it: a scheduled pass
+    meanwhile stands down rather than restarting the service under the dump. The lock
+    names this move and the collector (`move_holding`), so the tray keeps its row green."""
+    name, service = collector.project, collector.service
+    checkout = here.checkout(collector)
+    holder = {HOLDER: f"`collectors.py move` to {dest}", PROJECTS: [name]}
+    with one_pass(here.base / PASS_LOCK, MOVE_BOUND, wait=True, extra=holder) as had:
+        if not had:
+            here.report.fail(f"{name}: not moved -- {STOOD_DOWN}")
+            return
+        if why := stop_service(collector, here):
+            here.report.fail(f"{name}: not moved -- `{service}` could not be stopped first: {why}")
+            return
+        print(
+            f"collectors: exporting {name}'s data for {dest}, for up to "
+            f"{handoff.EXPORT_TIMEOUT // 60} minutes; its account is {checkout / handoff.PROJECT_LOG}",
+            flush=True,
+        )
+        said = here.handoffs.export(collector, checkout, here.name, dest)
+        if said.code == 0:
+            handed_off(collector, dest, here)
+            return
+        ok, out = here.docker.up(checkout, service)
+        again = (
+            f"`{service}` is started again"
+            if ok
+            else f"`{service}` could NOT be started again ({first_line(out) or 'no output'})"
+        )
+        here.report.fail(
+            f"{name}: not moved -- the handoff export failed ({said.summary()}); see "
+            f"{checkout / handoff.PROJECT_LOG}. {again}, and this machine still runs it"
+        )
+
+
+def stop_service(collector: config.Collector, here: Here) -> str:
+    """Stop the collector's own container, leaving the rest of its project up; "" once it
+    is not running, else why it could not be stopped. `docker stop` by container, as
+    `keep_stopped` does: ibkr_trader's `app` sits behind a compose profile, which naming it
+    activates for `up` but which `compose stop` is not to be trusted with."""
+    containers = here.docker.ps()
+    if containers is None:
+        return "docker is not answering"
+    box = find(containers, here.checkout(collector), collector.service)
+    if box is None or not box.running:
+        return ""
+    ok, out = here.docker.stop(box)
+    return "" if ok else f"`docker stop` said {first_line(out) or 'nothing'}"
+
+
+def handed_off(collector: config.Collector, dest: str, here: Here) -> None:
+    """After an export that succeeded: this machine `stop`s it, remembers where it went
+    (`handoff.OUTGOING`, which `follow_handoffs` reads), and stops every other container
+    the project runs here -- its db, and anything behind a profile -- to give the memory
+    back. `docker stop`, never `down`: the volumes hold the data, should it come back."""
+    name = collector.project
+    set_mode(here, name, config.STOP)
+    handoff.record_outgoing(here.outgoing, name, dest, _clock())
+    here.report.say(
+        f"{name}: handed off to {dest}, and set to `stop` here. {dest} takes it over on its "
+        "next collectors pass -- within 15 minutes, if it is on; `collectors.py` here says when"
+    )
+    containers = here.docker.ps()
+    if containers is None:
+        here.report.fail(
+            f"{name}: handed off, but docker did not answer, so its containers are still up here"
+        )
+        return
+    for box in containers:
+        if box.running and same_dir(box.workdir, here.checkout(collector)):
+            ok, out = here.docker.stop(box)
+            if not ok:
+                here.report.fail(
+                    f"{name}: handed off, but `{box.service}` could not be stopped here -- "
+                    f"{first_line(out) or 'no output'}"
+                )
+
+
+def pick_up(
+    collectors: Sequence[config.Collector], assignment: dict[str, str], here: Here
+) -> dict[str, str]:
+    """Take over each collector handed to this machine (`take_over`), before the pass acts
+    on its assignment; returns the assignment to act on, so one taken over is started this
+    same pass through `keep_running`, settle and all, as `run-here` would start it.
+
+    Asked for every collector with a `handoff` this machine is not set to `run`: set to
+    `stop`, **or not assigned at all**. A marker addressed to this machine by name is as
+    explicit as `run-here` typed here, and newer than whatever left it hands off; asking
+    only `stop` machines would leave a fresh PC unable to receive one until someone stopped
+    there a collector that was never running. That narrows "a machine assigned nothing
+    spawns nothing" to docker: a machine with a checkout of a project that declares a
+    handoff asks its store once a pass. Without the checkout there is nothing to ask
+    with, and nothing is asked.
+
+    A machine set to `run` it is not asked: an import there would restore over the data
+    its own collector is writing."""
+    for collector in collectors:
+        if not collector.handoff or assignment.get(collector.project) == config.RUN:
+            continue
+        if (here.checkout(collector) / ".git").exists() and take_over(collector, here):
+            assignment = {**assignment, collector.project: config.RUN}
+    return assignment
+
+
+def take_over(collector: config.Collector, here: Here) -> bool:
+    """Import a handoff addressed to this machine and set it to `run` the collector; True
+    when it did. A store that cannot be read, or no answer in time, is silence -- the next
+    pass asks again, as `fix_migrate.py` does of a db that is down. A failed import is a
+    failure of the pass and assigns nothing, so the next pass tries again. It runs under
+    the pass's `PASS_LOCK`, whose bound allows for it (`pass_bound`), so a second import --
+    a pass by hand, or the next scheduled one -- cannot start beside it."""
+    name, checkout = collector.project, here.checkout(collector)
+    pending = here.handoffs.pending(collector, checkout, here.name)
+    if pending.state == handoff.BROKEN:
+        here.report.say(f"{name}: could not ask whether a handoff waits ({pending.said.summary()})")
+    if pending.state != handoff.WAITING:
+        return False
+    if why := stop_service(collector, here):
+        here.report.say(
+            f"{name}: {pending.source} handed it here, but `{collector.service}` could not be "
+            f"stopped for the import: {why} -- the next pass tries again"
+        )
+        return False
+    said = here.handoffs.restore(collector, checkout, here.name)
+    if said.code != 0:
+        here.report.fail(
+            f"{name}: handed to this machine, and its import failed ({said.summary()}) -- "
+            f"see {checkout / handoff.PROJECT_LOG}; nothing assigned, the next pass tries again"
+        )
+        here.report.lines.extend(f"    {line}" for line in said.tail())
+        return False
+    set_mode(here, name, config.RUN)
+    handoff.forget_outgoing(here.outgoing, name)
+    here.report.say(f"{name}: taken over from {pending.source} -- its data is restored here")
+    return True
+
+
+def follow_handoffs(
+    collectors: Sequence[config.Collector], assignment: dict[str, str], here: Here
+) -> None:
+    """Ask, of each handoff this machine sent (`handoff.OUTGOING`), whether its receiver
+    has taken it over; forget it once it has, and fail the pass once that is
+    `HANDOFF_GRACE` overdue. Until then nothing runs the collector, and no row on either
+    machine says so: here it is `stop` by choice, there it is not yet `run`. One this
+    machine runs again, or no longer declares with a handoff, is forgotten unasked."""
+    declared = {c.project: c for c in collectors if c.handoff}
+    for name, record in handoff.load_outgoing(here.outgoing).items():
+        collector, dest = declared.get(name), record[handoff.TO]
+        if collector is None or assignment.get(name) == config.RUN:
+            handoff.forget_outgoing(here.outgoing, name)
+            continue
+        pending = here.handoffs.pending(collector, here.checkout(collector), dest)
+        if pending.state == handoff.NONE:
+            handoff.forget_outgoing(here.outgoing, name)
+            here.report.say(f"{name}: {dest} has taken it over")
+        elif pending.state != handoff.WAITING:
+            here.report.say(
+                f"{name}: could not ask whether {dest} has taken it over ({pending.said.summary()})"
+            )
+        elif _clock() - record[handoff.AT] >= HANDOFF_GRACE:
+            here.report.fail(
+                f"{name}: handed off to {dest}, which has not taken it over within "
+                f"{HANDOFF_GRACE // 60} minutes -- nothing runs it until it does. Is {dest} on, "
+                "with devkit-collectors running?"
+            )
+        else:
+            here.report.say(
+                f"{name}: handed off to {dest}; waiting for its next pass to take it over"
+            )
+
+
+def handoff_status(
+    collectors: Sequence[config.Collector], assignment: dict[str, str], here: Here
+) -> None:
+    """`status`'s lines on handoffs, read-only: one sent from here and not yet taken over,
+    and one addressed to this machine and waiting. Asks the project's store once for each,
+    and only of a collector with a `handoff` and a checkout here."""
+    sent = handoff.load_outgoing(here.outgoing)
+    for collector in collectors:
+        name, checkout = collector.project, here.checkout(collector)
+        if not collector.handoff or not (checkout / ".git").exists():
+            continue
+        if name in sent:
+            dest = sent[name][handoff.TO]
+            state = here.handoffs.pending(collector, checkout, dest).state
+            said = {handoff.NONE: "taken over", handoff.WAITING: "not taken over yet"}
+            here.report.say(
+                f"{name}: handed off to {dest} -- {said.get(state, 'the store could not say')}"
+            )
+        if assignment.get(name) != config.RUN:
+            pending = here.handoffs.pending(collector, checkout, here.name)
+            if pending.state == handoff.WAITING:
+                here.report.say(
+                    f"{name}: handed to this machine by {pending.source} -- the next pass takes it over"
+                )
+            elif pending.state != handoff.NONE:
+                here.report.say(
+                    f"{name}: could not ask whether a handoff waits here ({pending.said.summary()})"
+                )
+
+
 # --- the tray's half --------------------------------------------------------------
 
 
 def row(
-    target: Target, containers: Sequence[Container] | None, health: dict, busy: bool = False
+    target: Target,
+    containers: Sequence[Container] | None,
+    health: dict,
+    busy: bool = False,
+    held: str = "",
 ) -> tuple[str, str]:
     """`(level, detail)` for one assigned collector. `busy` is a `maintain` pass at work
     (`in_pass`), which is starting whatever it finds down: green until it is done, and a
-    start that fails fails that pass."""
+    start that fails fails that pass. `held` names a `move` holding `PASS_LOCK` for this
+    collector, which stopped it for its export -- green on the same terms. A `stop`
+    one this machine handed off (`held`, then, says to whom) is green and says so."""
     if target.mode == config.STOP:
         box = find(containers or [], target.checkout, target.collector.service)
         if box is not None and box.running:
             return WARN, "running here, but this machine is set to stop it"
-        return OK, "off on this machine (by choice)"
+        return OK, held or "off on this machine (by choice)"
     if containers is None:
         return FAIL, NOT_ANSWERING
     box = find(containers, target.checkout, target.collector.service)
     if box is None or not box.running:
-        return down_row(box, busy)
+        return down_row(box, busy, held)
     verdict = health.get(target.collector.project, {})
     if verdict.get("container") == box.id and verdict.get("ok") is False:
         jobs = verdict.get("unhealthy")
@@ -1316,14 +1674,28 @@ def row(
     return OK, f"running ({box.status})"
 
 
-def down_row(box: Container | None, busy: bool) -> tuple[str, str]:
+def down_row(box: Container | None, busy: bool, held: str = "") -> tuple[str, str]:
     """`row`'s answer for a `run` collector with no running container: red, unless a
-    pass is at work (`busy`), which is starting it."""
+    pass is at work (`busy`), which is starting it, or a `move` is exporting it (`held`)."""
     if busy:
         return OK, f"{STARTING} ({box.status if box else 'no container yet'})"
+    if held:
+        return OK, f"{held} is acting on it ({box.status if box else 'no container'})"
     if box is None:
         return FAIL, "no container -- see logs/collectors.log"
     return FAIL, f"not running ({box.status})"
+
+
+def holding(target: Target, moving: dict[str, str], sent: dict[str, dict]) -> str:
+    """`row`'s `held` for `target`: for a `run` one, the `move` exporting it (`moving`,
+    `move_holding`); for a `stop` one, the machine this one handed it to (`sent`,
+    `handoff.OUTGOING`). Local files only -- the tray asks the store nothing."""
+    if target.mode == config.RUN:
+        return moving.get(target.collector.project, "")
+    record = sent.get(target.collector.project)
+    if record is None:
+        return ""
+    return f"handed off to {record[handoff.TO]} -- it takes it over on its next collectors pass"
 
 
 def assigned(root: Path = REPO_ROOT) -> tuple[list[config.Collector], list[Target]]:
@@ -1379,9 +1751,16 @@ def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tupl
     if chosen:
         containers = (docker or Docker(TRAY_PS_TIMEOUT)).ps()
         health = load_health(base / HEALTH)
-        busy = in_pass(base / IN_PASS, _clock())
+        clock = _clock()
+        busy = in_pass(base / IN_PASS, clock)
+        sent = handoff.load_outgoing(base / handoff.OUTGOING)
+        moving = move_holding(base / PASS_LOCK, clock)
         rows += [
-            (ROW_PREFIX + t.collector.project, *row(t, containers, health, busy)) for t in chosen
+            (
+                ROW_PREFIX + t.collector.project,
+                *row(t, containers, health, busy, holding(t, moving, sent)),
+            )
+            for t in chosen
         ]
     rows += [
         (ROW_PREFIX + t.collector.project, OK, "off on this machine (by choice)")
@@ -1406,6 +1785,10 @@ ONCE = "run-once"
 # The verbs that act on exactly one collector, named.
 SINGLE = ("fire", ONCE)
 
+# Hands collectors to another machine, data and all (`move`). Not one of `VERBS`: it
+# takes a host as well, and assigns this machine only once the export has succeeded.
+MOVE = "move"
+
 
 def split_pick(argv: Sequence[str]) -> list[str]:
     """`run-here:ibkr_trader` -> `run-here ibkr_trader`.
@@ -1426,18 +1809,26 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "mode",
         nargs="?",
         default="status",
-        choices=("status", "maintain", *SINGLE, *VERBS, NOTHING),
+        choices=("status", "maintain", MOVE, *SINGLE, *VERBS, NOTHING),
         help=(
             "status: report only (default). maintain: what the scheduler runs. run-here / "
             "stop-here: assign this machine, then act on it now. release: forget. "
+            "move NAME.. --to HOST: hand them, data and all, to HOST, which takes them over "
+            "on its next pass. "
             "fire NAME: run one scheduled collector once (what its own task runs). "
             "run-once NAME: the same, by hand, its output in this terminal. "
             "Also takes `<mode>:<project>`, the VS Code picker's spelling."
         ),
     )
     parser.add_argument("projects", nargs="*", help="collectors to assign (default: all)")
+    parser.add_argument(
+        "--to", help="move: the machine to hand them to, by its hostname (any case)"
+    )
     parser.add_argument("--devkit", type=Path, default=REPO_ROOT, help=argparse.SUPPRESS)
-    return parser.parse_args(split_pick(sys.argv[1:] if argv is None else argv))
+    args = parser.parse_args(split_pick(sys.argv[1:] if argv is None else argv))
+    if args.to is not None and args.mode != MOVE:
+        parser.error("--to is for `move` only")
+    return args
 
 
 def reassign(args: argparse.Namespace, base: Path, collectors, report: Report) -> dict | None:
@@ -1450,10 +1841,17 @@ def reassign(args: argparse.Namespace, base: Path, collectors, report: Report) -
     mode = VERBS[args.mode]
     updated = config.assign(config.load_assignment(path), [c.project for c in picked], mode)
     config.save_assignment(path, updated)
+    sent = handoff.load_outgoing(base / handoff.OUTGOING)
     for collector in picked:
         report.say(
             f"{collector.project}: {'released' if mode is None else mode + ' on this machine'}"
         )
+        if mode == config.RUN and collector.project in sent:
+            dest = sent[collector.project][handoff.TO]
+            report.say(
+                f"  warning: it was handed off to {dest}. If {dest} has not taken it over yet "
+                f"it still will, and then both run it -- `stop-here` it there once it has"
+            )
     return updated
 
 
@@ -1563,6 +1961,7 @@ def main(
     run: collector_tasks.Runner = collector_tasks.run_argv,
     spawner: collector_tasks.Spawner | None = None,
     streamer: collector_tasks.Streamer | None = None,
+    handoffs: handoff.Handoff | None = None,
 ) -> int:
     args = parse_args(argv)
     if args.mode == NOTHING:
@@ -1585,28 +1984,72 @@ def main(
     for note in notes:
         report.fail(note)
     assignment = config.load_assignment(base / config.ASSIGNMENT)
-    if args.mode in VERBS:
-        acted_on = apply_verb(args, base, collectors, run, report)
-        if acted_on is None:
-            return finish()
-        assignment = acted_on
-    chosen = targets(collectors, assignment, sweep.default_workspace(base).parent)
-    engine = docker or Docker(
-        restarts=base / RESTARTED, holds=lambda: scheduled_in_flight(chosen, run)
-    )
-    if args.mode == "status":
-        status(collectors, chosen, engine, report, base, run)
-        return finish()
-    if not chosen:
-        report.say("no collector is assigned to this machine -- nothing to do")
-    in_containers = [t for t in chosen if not t.collector.scheduled]
-    bound = PS_TIMEOUT + max(1, len(in_containers)) * TARGET_BOUND
-    with one_pass(base / PASS_LOCK, bound, wait=args.mode in VERBS) as had:
-        if had:
-            act(chosen, base, engine, report, run)
-        else:
-            report.say(STOOD_DOWN)
+    workspace = sweep.default_workspace(base).parent
+
+    def in_flight() -> list[str]:
+        """The scheduled runs a restart would cut short, by the assignment as it stands."""
+        now_assigned = config.load_assignment(base / config.ASSIGNMENT)
+        return scheduled_in_flight(targets(collectors, now_assigned, workspace), run)
+
+    engine = docker or Docker(restarts=base / RESTARTED, holds=in_flight)
+    here = Here(base, workspace, handoff.this_host(), engine, handoffs or handoff.Handoff(), report)
+    if args.mode == MOVE:
+        move(args.projects, args.to, collectors, assignment, here)
+    elif args.mode == "status":
+        status(collectors, targets(collectors, assignment, workspace), engine, report, base, run)
+        handoff_status(collectors, assignment, here)
+    else:
+        run_pass(args, collectors, assignment, here, run)
     return finish()
+
+
+def pass_bound(
+    collectors: Sequence[config.Collector], assignment: dict[str, str], picks_up: bool
+) -> float:
+    """How long a pass acting on `assignment` may hold `PASS_LOCK`: a `TARGET_BOUND` for
+    each container collector it may act on, and -- for a `maintain`, which `picks_up` --
+    a `PICKUP_BOUND` and a `pending` for each it may take over, counting one it is not yet
+    assigned among the targets. A lock that expired mid-restore would let the next pass
+    break it and start a second restore into the same database."""
+    containers = [c for c in collectors if not c.scheduled]
+    takers = [
+        c for c in containers if picks_up and c.handoff and assignment.get(c.project) != config.RUN
+    ]
+    acted_on = {c.project for c in containers if c.project in assignment}
+    acted_on |= {c.project for c in takers}
+    pickups = len(takers) * (PICKUP_BOUND + handoff.PENDING_TIMEOUT)
+    return PS_TIMEOUT + max(1, len(acted_on)) * TARGET_BOUND + pickups
+
+
+def run_pass(
+    args: argparse.Namespace,
+    collectors: Sequence[config.Collector],
+    assignment: dict[str, str],
+    here: Here,
+    run: collector_tasks.Runner,
+) -> None:
+    """`maintain`, `run-here` and `stop-here`, under `PASS_LOCK`: a verb waits for it, a
+    scheduled `maintain` that finds it held stands down. A `maintain` takes over what was
+    handed to this machine (`pick_up`) and follows what it handed off (`follow_handoffs`)
+    inside the lock, so a `move` holding it is never raced, and a restore is never run
+    twice at once."""
+    if args.mode in VERBS:
+        acted_on = apply_verb(args, here.base, list(collectors), run, here.report)
+        if acted_on is None:
+            return
+        assignment = acted_on
+    bound = pass_bound(collectors, assignment, picks_up=args.mode == "maintain")
+    with one_pass(here.base / PASS_LOCK, bound, wait=args.mode in VERBS) as had:
+        if not had:
+            here.report.say(STOOD_DOWN)
+            return
+        if args.mode == "maintain":
+            assignment = pick_up(collectors, assignment, here)
+            follow_handoffs(collectors, assignment, here)
+        chosen = targets(collectors, assignment, here.workspace)
+        if not chosen:
+            here.report.say("no collector is assigned to this machine -- nothing to do")
+        act(chosen, here.base, here.docker, here.report, run)
 
 
 def act(

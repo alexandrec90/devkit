@@ -14,9 +14,12 @@ Two answers from two places, and the split between them is the whole design:
   to prevent. **Absent means hands off** -- neither started nor stopped -- so a new
   workstation does nothing until someone assigns it.
 
-Moving a collector between machines is `collectors.py stop-here` on the one and
-`run-here` on the other. The mechanism is in `collectors.py`; this module only reads
-and writes the two answers, and spawns nothing.
+Moving a collector between machines is one command on the machine that runs it,
+`collectors.py move <project> --to <host>`, for a collector that declares a `handoff`
+(`Collector.handoff`): its data goes with it, and the other machine takes it over on its
+next pass. One without a `handoff` moves by hand -- `stop-here` on the one and `run-here`
+on the other -- and moves no data. The mechanism is in `collectors.py`; this module only
+reads and writes the two answers, and spawns nothing.
 """
 
 from __future__ import annotations
@@ -87,6 +90,12 @@ class Collector:
     the container only with ibkr_trader's next unrelated merge (110defb0). A sibling the
     project's own PR gate pins is built at that pin instead of its HEAD
     (`collectors.source_heads`, 8e3c4a67).
+
+    `handoff` is a container collector's argv prefix for the project's own command that
+    carries its data between machines (`collector_handoff`), run on the host from the
+    project's checkout with a verb appended: `export --from A --to B`, `pending --host H`,
+    `import --host H`. Empty means the collector moves by hand and its data stays where
+    it is. A `command` collector takes none: it has no service to stop for the export.
     """
 
     project: str
@@ -97,6 +106,7 @@ class Collector:
     needs: tuple[str, ...] = ()
     settle: int = DEFAULT_SETTLE
     builds_from: tuple[str, ...] = ()
+    handoff: tuple[str, ...] = ()
 
     @property
     def scheduled(self) -> bool:
@@ -127,6 +137,11 @@ def _scheduled_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     """A `command` entry, or `None` and the reason it was refused."""
     if "service" in raw:
         return None, f"{project}: has both `service` and `command` -- a collector is one kind"
+    if "handoff" in raw:
+        return None, (
+            f"{project}: `handoff` is for a `service` collector -- a `command` one has no "
+            "service to stop while its data moves"
+        )
     command = _argv(raw["command"])
     if not command:
         return None, f"{project}: `command` must be a non-empty list of strings (argv)"
@@ -171,7 +186,12 @@ def _container_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     builds_from = _argv(raw.get("buildsFrom", []))
     if builds_from is None or any("/" in name or "\\" in name for name in builds_from):
         return None, f"{project}: `buildsFrom` must be a list of sibling checkout names"
-    return Collector(project, service, tuple(health), settle=settle, builds_from=builds_from), ""
+    handoff = _argv(raw.get("handoff", []))
+    if handoff is None:
+        return None, f"{project}: `handoff` must be a list of strings (argv, not a shell line)"
+    return Collector(
+        project, service, tuple(health), settle=settle, builds_from=builds_from, handoff=handoff
+    ), ""
 
 
 def parse_setting(text: str) -> tuple[list[Collector], list[str]]:
