@@ -117,13 +117,14 @@ group with the project they were cut from. Do not filter on the raw field.
 
 **A group can span machines**, and the `host` line names the ones it was seen on. The
 backlog is the union of every `harness-events-<host>.log` in the devkit checkout's `logs/`
-(`$DEVKIT_DIR/logs`, not a worktree's own, which holds none), so on
-a machine whose ledger is pooled you are triaging both. Two consequences: a group seen on
+(`$DEVKIT_DIR/logs`, not a worktree's own, which holds none) and in the shared folder
+`python scripts/ledger-pool.py` names, so on a machine whose ledger is pooled you are
+triaging both. Two consequences: a group seen on
 one host only is a lead worth following — a path, a shell, a scheduler that differs — and a
 `--resolve-like` retires **every** machine's copy in one note, which is the point. A
-machine whose `logs/` is not pooled still shows only its own, and a defect filed on the
-other one is invisible here; that is a transport that was never set up, not an empty
-backlog.
+machine that is not pooled still shows only its own, and a defect filed on the other one
+is invisible here; that is `ledger-pool.py --set` never run on both machines, not an
+empty backlog, and it is a person's step: the folder has to be one both machines sync.
 
 ## 2. Verify each group before believing it
 
@@ -166,7 +167,10 @@ it not* — then fix that, and test it. A group marked `RECURRED` in the triage 
 retired before by a fix that did not hold: its last note is what not to repeat. One
 marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, so the
 pass sends no session at it, and the pass retires the rows filed while it waited against
-that PR once it merges; only a row filed after the merge reads `RECURRED`. A
+that PR once it merges; only a row filed after the merge reads `RECURRED`. One marked
+`IN HAND at <tree>` has a session the pass sent at it still at work there: leave it. One
+with an `OPEN PR` line names a branch whose PR is still open, and says whether its gate is
+red: read that PR before writing a second fix beside it. A
 `REOPENED <id>` line is a resolution `scripts/fix_verify.py` undid, most often because
 its `--pr` named a branch that never became a PR. A merged PR whose text names the group
 id settles it before that (`fix_verify.named_by`), so a reopened group has no such PR:

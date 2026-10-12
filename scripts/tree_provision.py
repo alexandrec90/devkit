@@ -76,6 +76,9 @@ def provision(tree: Path, runner=sweep.run_windowless) -> bool:
     if done.returncode != 0:
         tail = " ".join(((done.stderr or "") + (done.stdout or "")).split())[-200:]
         print(f"  provisioning {tree} failed: {tail}", file=sys.stderr)
+        if worktree_env.unresolvable(done.stderr, done.stdout):
+            # The tree's own manifest, which its own gate fails on too: the project's.
+            return False
         friction = tree / fix_reports.FRICTION_FILE
         friction.parent.mkdir(parents=True, exist_ok=True)
         with friction.open("a", encoding="utf-8", newline="\n") as handle:

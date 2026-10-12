@@ -6,6 +6,7 @@ import dataclasses
 import datetime as _dt
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,12 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(fix_loop.session_friction, "harvest", lambda *a, **k: [])
     # The machine's own Task Scheduler, which `close` would otherwise read and file.
     monkeypatch.setattr(fix_loop.schedule_health, "query", lambda *a, **k: [])
+    # Nor has it any task asked about by name.
+    monkeypatch.setattr(
+        fix_loop.collector_tasks,
+        "run_argv",
+        lambda argv: subprocess.CompletedProcess(argv, 1, "", "ERROR: no such task"),
+    )
     # And its collectors: this machine's assignment, and a `docker ps` to judge it by.
     monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda *a, **k: {})
     monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda *a, **k: [])
@@ -42,7 +49,7 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fix_loop.bg_sessions, "stop_finished", lambda trees, runner: [f"x in {t}" for t in trees]
     )
-    monkeypatch.setattr(fix_loop, "working_dirs", frozenset)
+    monkeypatch.setattr(fix_loop, "session_listing", list)
     monkeypatch.setattr(fix_loop.friction_pending, "detector_fixes", lambda gh, git: [])
     monkeypatch.setattr(fix_loop, "devkit_fixes", lambda ctx: ())  # GitHub's devkit PRs
     return fix_loop.Context(
@@ -116,6 +123,23 @@ def test_a_blocked_report_is_marked_filed_with_its_problem_and_read_once(ctx, mo
     assert closed.trees == {"problem-1": str(path)}
 
 
+def test_a_report_that_waits_on_a_pr_is_marked_waiting_and_files_no_finding(ctx, monkeypatch):
+    url = "https://github.com/alexandrec90/data-lake/pull/66"
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW)
+    path = tree(
+        ctx,
+        monkeypatch,
+        blocked=f"# Fix blocked\n\nWaits on: {url}\n",
+        transcript_age=_dt.timedelta(hours=3),
+    )
+    closed, journal = close(ctx)
+    assert closed.lines == [f"carameli agent/x-0919 -- waits on {url}"]
+    assert journal.findings == []
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["waits"] == url and "blocked" not in entry
+    assert (path / "logs" / "fix-blocked.filed.md").exists()
+
+
 def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
     path = tree(
         ctx, monkeypatch, friction="- the prompt named logs/gate/ and it was empty\n\n- no .venv\n"
@@ -135,6 +159,26 @@ def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
     for finding in reported:
         assert Path(finding.evidence).is_file(), finding.evidence
         assert finding.detail in Path(finding.evidence).read_text(encoding="utf-8")
+
+
+def test_a_reports_evidence_outlives_the_tree_it_was_written_in(ctx, monkeypatch):
+    """5233840a: two friction groups cited `<box>/logs/friction.filed.md`, and the box was
+    reaped once its PR merged, so the fixer sent at them found no evidence at all. The
+    copy kept beside the ledger is what the row names; a blocked report's likewise."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        blocked="needs a database the box cannot start\n",
+        friction="- the prompt named logs/gate/ and it was empty\n",
+        transcript_age=_dt.timedelta(hours=3),
+    )
+    _, journal = close(ctx)
+    shutil.rmtree(path)  # reaped
+    by_kind = {f.kind: f for f in journal.findings}
+    for kind, said in (("reported", "logs/gate/"), ("fixer-blocked", "needs a database")):
+        evidence = Path(by_kind[kind].evidence)
+        assert evidence.is_relative_to(ctx.devkit_dir), evidence
+        assert said in evidence.read_text(encoding="utf-8"), kind
 
 
 def test_a_line_its_session_fixed_on_this_branch_is_filed_settled_by_that_branch(ctx, monkeypatch):
@@ -210,8 +254,7 @@ def test_a_fixed_on_this_branch_from_a_session_still_at_work_is_held(ctx, monkey
 def test_a_session_listed_busy_holds_its_claimed_friction_too(ctx, monkeypatch):
     path = tree(ctx, monkeypatch, friction="- x; fixed on this branch\n")
     monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
-    busy = fix_loop.bg_sessions.working([{"cwd": str(path), "status": "busy"}])
-    monkeypatch.setattr(fix_loop, "working_dirs", lambda: busy)
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [{"cwd": str(path), "status": "busy"}])
     _, journal = close(ctx)
     assert [f for f in journal.findings if f.kind == "reported"] == []
 
@@ -424,7 +467,7 @@ def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ct
     closed, _ = close(ctx)
     assert closed.busy == {} and closed.harness_busy == "", "idle: finished, holds nothing"
     listed = [{"kind": "background", "state": "working", "cwd": str(path)}]
-    monkeypatch.setattr(fix_loop, "working_dirs", lambda: fix_loop.bg_sessions.working(listed))
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: listed)
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
     assert closed.harness_busy == str(path)
@@ -439,7 +482,8 @@ def test_the_session_listing_is_read_from_claude_agents(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, rows, "")
 
     monkeypatch.setattr(fix_loop.ship_intent, "run_quiet", runner)
-    assert fix_loop.working_dirs() == frozenset({"c:/ws/t"})
+    listing = fix_loop.session_listing()
+    assert fix_loop.bg_sessions.working(listing) == frozenset({"c:/ws/t"})
     assert seen == [["claude", "agents", "--json"]]
 
 
@@ -1030,6 +1074,23 @@ def test_unscheduled_names_only_the_tasks_the_scheduler_did_not_list(ctx):
     assert fix_loop.unscheduled(ctx, tasks, frozenset(tasks)) == []
 
 
+def test_a_task_the_bulk_query_missed_but_the_scheduler_has_is_not_filed(ctx, monkeypatch):
+    """9f5249cb: social-scraper's task was registered and mid-run when the pass filed it
+    "not scheduled on this machine". `schedule_health.query` reads a failed or timed-out
+    `schtasks /Query /V` as no tasks at all, so absence from it is asked again by name."""
+    asked = []
+
+    def run(argv):
+        asked.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "<Task/>", "")
+
+    monkeypatch.setattr(fix_loop.collector_tasks, "run_argv", run)
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda root: tasks)
+    assert fix_loop.job_findings(ctx) == []  # the fixture's bulk query lists nothing
+    assert [argv[argv.index("/TN") + 1] for argv in asked] == ["social-scraper"]
+
+
 # Verbatim from the tray on 2026-10-03: ibkr_trader's reddit job 39 runs into failing on
 # credentials never set, `devkit-collectors` exiting 0 over it, and no pass ever filing it.
 _IBKR_HEALTH = (
@@ -1218,6 +1279,30 @@ def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_n
     )
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
+
+
+def test_a_recent_transcript_whose_session_the_listing_shows_gone_holds_nothing(ctx, monkeypatch):
+    """The 2026-10-11 rehearsal held data-lake #66 and ibkr_trader #116 behind sessions
+    that had ended twenty minutes before: `claude agents` listed none in either tree,
+    and only the transcripts' age said anyone was there."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=20),
+        transcript_age=_dt.timedelta(minutes=10),
+    )
+    resident = fix_reports.transcript_dir(path) / "resident.jsonl"
+    resident.write_text(
+        f'{{"timestamp": "{(NOW - _dt.timedelta(minutes=2)).isoformat()}"}}\n', encoding="utf-8"
+    )
+    elsewhere = {"kind": "interactive", "pid": 1, "cwd": str(ctx.root / "other"), "status": "idle"}
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [elsewhere])
+    closed, _ = close(ctx)
+    assert closed.busy == {}, "nobody listed in the tree: the transcript's session has left"
+    here = {**elsewhere, "cwd": str(path)}
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [elsewhere, here])
+    closed, _ = close(ctx)
+    assert closed.busy == {("carameli", "agent/x-0919"): str(path)}, "idle, but present"
 
 
 def test_the_pass_own_session_that_finished_does_not_hold_its_tree(ctx, monkeypatch):

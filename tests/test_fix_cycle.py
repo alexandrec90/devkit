@@ -126,6 +126,38 @@ def test_a_ratchet_shared_adopted_or_beside_a_vendored_test_is_still_the_harness
     assert fix_cycle.classify(mixed, set(), PREFIXES) == fix_cycle.HARNESS
 
 
+OWN_FILE = (
+    "scripts/hooks/tests/test_repo_contract.py::"
+    "test_the_lint_runner_reruns_under_the_tree_venv_rather_than_skip_its_linters",
+)
+
+
+def test_a_vendored_test_of_a_projects_own_file_is_fixed_on_its_own_branch():
+    """sports_betting #67, adopting v0.11.58, failed the vendored lint-runner contract on
+    its own `scripts/lint-all.py`. Classed as the harness it went to a devkit session
+    told the fix belonged upstream; the only fix was on the adoption branch."""
+    head = "agent/auto/devkit-upgrade-v0-11-58-1011"
+    red = failure(project="sports_betting", number=67, head=head, signature=OWN_FILE)
+    assert fix_cycle.checks_own_files(red, set())
+    assert fix_cycle.is_projects_own(red, set(), PREFIXES)
+    assert fix_cycle.classify(red, set(), PREFIXES) == fix_cycle.PROJECT
+    classes = fix_cycle.classify_all([red], PREFIXES)
+    harness = fix_cycle.harness_state(classes, True, ["sports_betting"])
+    go, held = fix_cycle.phase([decision(fix_plan.DISPATCH, red)], classes, harness, PREFIXES)
+    assert harness.clean and held == []
+    assert [(d.action, d.failures) for d in go] == [(fix_plan.DISPATCH, (red,))]
+
+
+def test_a_vendored_test_of_own_files_shared_or_beside_another_is_still_the_harness():
+    both = [failure(signature=OWN_FILE), failure(project="roguelike", number=9, signature=OWN_FILE)]
+    shared = fix_cycle.shared_signatures(both)
+    assert all(fix_cycle.classify(f, shared, PREFIXES) == fix_cycle.HARNESS for f in both)
+    mixed = failure(signature=(*OWN_FILE, *VENDORED))
+    assert not fix_cycle.checks_own_files(mixed, set())
+    assert fix_cycle.classify(mixed, set(), PREFIXES) == fix_cycle.HARNESS
+    assert not fix_cycle.checks_own_files(failure(signature=(fix_plan.CONFLICT,)), set())
+
+
 def test_a_ratchet_is_the_projects_own_only_alone_and_off_an_adoption():
     own = failure(head="agent/secrets-baseline-lf-0926", signature=RATCHET)
     assert fix_cycle.is_own_ratchet(own, set(), PREFIXES)

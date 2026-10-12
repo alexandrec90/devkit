@@ -46,6 +46,7 @@ import bg_sessions
 import devkit_project
 import fix_findings
 import fix_reports
+import fix_stall
 import harness_triage as triage
 import session_friction
 import session_transcripts as st
@@ -80,12 +81,11 @@ BRAKE_TOKENS = 1_000_000
 
 # A person named as the next step, in any wording the pass has ever used.
 PERSON = re.compile(r"needs a human|read the record|waits? for (?:a person|you)\b|by hand", re.I)
-# Why a decision may wait: each names what it waits on, which something tracks.
+# Why a decision may wait: each names what it waits on, which something tracks. Every
+# wait the stall check calls owned is one (the Dependabot cap drifted out of a second
+# copy of that list, 2026-10-11), plus the holds that check files once they last a day.
 TRACKED_WAITS = (
-    "already dispatched",
-    "escalated",
-    "backing off",
-    "held until the devkit session",
+    *fix_stall.TRACKED,
     "a session is working in",
     "held for memory",  # fix_send.HELD_FOR_MEMORY
     "held for time",  # fix_send.HELD_FOR_TIME: the next pass, with a fresh deadline

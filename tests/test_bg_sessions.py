@@ -109,6 +109,24 @@ def test_in_tree_is_every_session_in_the_tree_or_under_it_and_nothing_beside_it(
     assert [r["id"] for r in found] == ["a1", "b2", "c3", "e5"]
 
 
+def test_a_transcript_is_gone_only_when_a_listing_shows_no_live_session_of_it_or_its_tree():
+    tree = "c:/WS/devkit/.claude/worktrees/y"
+    transcript = Path("C:/home/.claude/projects/y/5e55-10a.jsonl")
+    assert bg_sessions.gone(ROWS, tree, transcript), "nobody listed in y, nor 5e55-10a"
+    assert not bg_sessions.gone([], tree, transcript), "an empty listing could not say"
+    under = {
+        "pid": 7,
+        "kind": "interactive",
+        "status": "idle",
+        "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\y\\app",
+    }
+    assert not bg_sessions.gone([*ROWS, under], tree, transcript), "idle is still present"
+    moved = {"pid": 8, "kind": "interactive", "cwd": "C:\\elsewhere", "sessionId": "5e55-10a"}
+    assert not bg_sessions.gone([*ROWS, moved], tree, transcript), "its own session, listed"
+    exited = {"id": "g7", "kind": "background", "state": "done", "cwd": tree}
+    assert bg_sessions.gone([*ROWS, exited], tree, transcript), "a row with no process is gone"
+
+
 def test_only_an_idle_background_session_is_stoppable():
     assert [r["id"] for r in ROWS if bg_sessions.stoppable(r)] == ["a1", "d4"]
 

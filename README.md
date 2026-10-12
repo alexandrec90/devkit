@@ -470,6 +470,19 @@ group is recorded in the ledger, and its installer registers it *disabled* from 
 so the nightly `devkit-installers` pass keeps it registered without ever starting it.
 Skills are never touched — they cost nothing until a session invokes one by name.
 
+### One defect ledger across machines
+
+Each machine appends to its own `harness-events-<host>.log`, and the fix pass reads every
+shard beside its own. A second machine running the same scheduled jobs is only on the
+backlog once both put their shard in one shared folder (a OneDrive or Dropbox folder, a
+network share). Run this on each machine, with that machine's path to the same folder:
+
+```bash
+python scripts/ledger-pool.py --set "<shared folder>"   # moves this machine's shard there
+python scripts/ledger-pool.py                           # where it lives, which hosts it holds
+python scripts/ledger-pool.py --unset                   # back to the checkout's logs/
+```
+
 With no branch tier wired, `scripts/agent-box.py` is what cuts, runs, ships and destroys a
 box on purpose. It is one verb per workspace task, and the tasks are the intended way in:
 
@@ -619,7 +632,10 @@ each, run here.
    carried to its own branch, CI pin moved with it, for the next pass to ship. Any other
    drift on a default branch is reported in the record and never touched. A
    scheduled-failure issue whose workflow is green at the tip is closed as completed
-   (`scripts/fix_issues.py`) when the reporter's own close did not happen.
+   (`scripts/fix_issues.py`) when the reporter's own close did not happen. Each database
+   checkout's dev database is upgraded to its head (`scripts/fix_migrate.py`, through an
+   upgrade script each database project ships, whose contract that module states), but only on the default branch, with a clean
+   tree and HEAD already on origin, so nothing unmerged is ever applied.
 
 `--mode plan` writes the whole plan to `logs/fix-pass.log` and does nothing, which is
 what the scheduled job does while the switch says `plan`. What each dispatch looks like
@@ -1040,10 +1056,10 @@ A collector without a `handoff` moves by hand, and its data stays where it was: 
 on the old machine, then `run-here` on the new one. `move` is not a row of the picker:
 devkit keeps no list of the workspace's machines, and the picker cannot ask for a typed name.
 
-While `move` exports, it holds the collector so no pass restarts it under the dump, and the
-tray keeps its row green. A pass holds each container collector the same way while it acts
-on it, so a `run-here` typed during a pass leaves that collector to the pass rather than
-racing its `docker compose up`.
+While `move` exports, it holds the collectors pass lock (`PASS_LOCK` in
+`scripts/collectors.py`), waiting for it as `run-here` does. A scheduled pass meanwhile stands down rather than restarting the
+service under the dump, and the tray keeps the row green. The receiving pass runs its import
+under its own lock, whose bound allows for the restore, so two imports never overlap.
 
 `devkit-collectors` is registered everywhere and acts only on the assignment. It starts a
 stopped collector with `docker compose up -d <service>`, stops one on a `stop-here` machine
@@ -1052,7 +1068,8 @@ its checkout's HEAD -- only when that HEAD is on origin's default branch and no 
 is edited, so a timer deploys merged code and nothing else; otherwise `logs/collectors.log`
 says why it held. A collector whose image copies in a sibling checkout names it in
 `buildsFrom` (ibkr_trader's `["data-lake"]`), and a merge there redeploys it on the same
-terms. A container it started or redeployed is not health-checked for its
+terms -- unless the project's own PR gate pins that sibling to a commit: then the image is
+built from a context staged at the pin, and only a move of the pin redeploys it. A container it started or redeployed is not health-checked for its
 `settle` minutes (default 60, settable per collector beside `health`): until every job
 inside has fired on the new code, the verdict is still the old code's. A scheduled collector's task is registered on a `run-here` machine, and
 removed on a `stop-here` or `release`. The tray gets a `collector: <name>` row per

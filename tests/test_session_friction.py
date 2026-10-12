@@ -247,6 +247,30 @@ def test_waiting_loops_and_no_verify_are_friction_whatever_they_return():
     assert classes([call("sleep 2", "1")]) == [], "a short settle is not a poll"
 
 
+def test_a_wait_that_ended_inside_the_floor_is_not_a_poll():
+    """62606423: `until pg_isready ...; do sleep 5; done` waited nine seconds for a
+    database out of recovery and was filed as the eighth recurrence of the poll group.
+    Read through `st.events`, as the harvest is, which stamps each record's time."""
+
+    def waited(seconds: int) -> list[str]:
+        loop = "until docker exec db pg_isready -q; do sleep 5; done"
+        rows = (
+            (1, {**call(loop, "1"), "timestamp": "2026-10-11T02:12:42.336Z"}),
+            (
+                2,
+                {
+                    **result("ok", "1", error=False),
+                    "timestamp": f"2026-10-11T02:12:{42 + seconds}Z",
+                },
+            ),
+        )
+        return sorted(cls for cls, _, _ in sf.detect(st.events(Path("t.jsonl"), rows)))
+
+    assert waited(9) == []
+    assert waited(15) == ["poll"], "one that held the turn past the floor still is"
+    assert classes([call("until [ -s f ]; do sleep 5; done", "1")]) == ["poll"], "no stamp"
+
+
 def test_claude_codes_sleep_guard_refusal_is_neither_a_block_nor_a_poll():
     """9854b541 and 363d8be7: one refused `sleep 60; tail` filed twice, once for the
     command and once for its refusal. Claude Code's own guard refused it and named the
@@ -387,6 +411,29 @@ def test_a_ledger_evidence_line_is_read_back_as_the_audit_lines_around_it(tmp_pa
     assert st.main([str(tmp_path / "gone.jsonl#L3")]) == 2
     assert "no transcript at" in capsys.readouterr().err
     assert st.window("L1 CALL: a\nL9 CALL: b\nnoise\n", 1, 3) == "L1 CALL: a\n"
+
+
+def test_an_agent_reports_ranges_and_pairs_of_evidence_are_read_back_whole(tmp_path, capsys):
+    """An `agent-report` row's evidence is `<a>#L82-L94; <b>#L62-L67`, and the reader took
+    the whole string for one path and answered `no transcript at` it (1011-10)."""
+    first, second = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    for path in (first, second):
+        rows = [call(f"echo {i}", str(i)) for i in range(1, 31)]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    assert st.main([f"{first}#L10-L12"]) == 0
+    out = capsys.readouterr().out
+    assert [line.split()[0] for line in out.splitlines()] == ["L10", "L11", "L12"], "no widening"
+    assert st.main([f"{first}#L10-L12; {second}#L20", "--around", "1"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == f"== {first}" and f"== {second}" in out
+    lines = [line.split()[0] for line in out if line.startswith("L")]
+    assert lines == [f"L{n}" for n in (9, 10, 11, 12, 13, 19, 20, 21)]
+    assert st.main([f"{first}#L10; {tmp_path / 'gone.jsonl'}#L3"]) == 2
+    captured = capsys.readouterr()
+    assert "L10 " in captured.out and "no transcript at" in captured.err
+    assert st.evidence_path(f"{first}#L82-L94") == first
+    assert st.read_evidence(f"{tmp_path / 'gone.jsonl'}#L1", None) is None
+    assert st.read_evidence(str(first), None) == st.render(first), "no #L: the whole session"
 
 
 def test_a_complaint_is_filed_whole_with_the_tree_it_was_said_in(tmp_path):

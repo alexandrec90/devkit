@@ -31,6 +31,7 @@ from fix_plan import (
     EVIDENCE_DIR,
     LEDGER,
     PR,
+    PROJECT_OWNED,
     UNFETCHABLE_ENTRY,
     Failure,
     describe,
@@ -84,7 +85,9 @@ FINISH = (
     "the file's last lines with themselves plus the new text. "
     f"Either way, if the harness cost you turns -- a refusal, a missing tool, evidence "
     f"that was wrong or absent, an instruction that sent you the wrong way -- put one line "
-    f"per thing in {FRICTION_FILE.as_posix()}: the pass files each for the devkit session, "
+    f"per thing in {FRICTION_FILE.as_posix()}, and quote the harness words you saw, not "
+    f"your paraphrase of them, since the line is filed as written and the session sent "
+    f"at it has nothing else: the pass files each for the devkit session, "
     f"which fixes it at the cause, and a cause that lives outside this repository is "
     f"fixed there, not worked around here. End a line whose cause you fixed yourself "
     f"with fixed on this branch: the pass then files it as settled by this branch, not "
@@ -127,7 +130,9 @@ STOP = (
     "is not one of them: adding a worktree on another branch, fetching or merging a ref, "
     "reproducing the failure, reading code outside the diff, reshaping code to fit a "
     f"limit. If you write {BLOCKED_FILE.as_posix()}, name which of the three it is and "
-    "what you tried first."
+    "what you tried first. A fix that waits on another open PR, in any repository, is "
+    "none of the three and not yours to merge: put a line Waits on: and the full "
+    "github.com URL of that PR in the same file, and the pass holds this until it closes."
 )
 
 # Every prompt's first sentence: the role, declared by the one thing that starts a
@@ -365,7 +370,9 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         + (
             " The fix belongs here in devkit, once -- in the vendored file, the "
             "test, or the template that generates the project-owned file it names -- not in "
-            "each consumer."
+            "each consumer. A template reaches no project already generated, though: where "
+            "the test is right and checks a consumer's own "
+            f"{', '.join(PROJECT_OWNED)}, that copy is fixed on its PR's branch."
             if vendored
             else ""
         )
@@ -449,6 +456,38 @@ def _unfetchable_note(names: list[str]) -> str:
     )
 
 
+# What a handled error's kind says about the cause, for the kinds whose cause is a
+# spelling in this repository rather than the version Dependabot was moving to.
+_RUN_CAUSES = {
+    "dependency_file_content_not_changed": (
+        "dependency_file_content_not_changed means Dependabot found nothing to rewrite: "
+        "its uv and pip updaters find a declaration by a case-sensitive match on the "
+        "lowercase package name, so a declaration spelled SQLAlchemy is never rewritten "
+        "-- spell it lowercase in the manifest."
+    ),
+}
+
+
+def _runs_note(runs: list[str]) -> str:
+    """Why a failing update job wants its cause fixed, not only the bump it was making.
+
+    data-lake's job failed on sqlalchemy five weeks running: one fixer bumped the lock
+    by hand, which answered a week, and the next found nothing to bump (dd07a7ab). The
+    cause was the manifest spelling SQLAlchemy. No quotes or backticks: the prompt
+    crosses a `wt` command line.
+    """
+    if not runs:
+        return ""
+    kinds = [cause for kind, cause in _RUN_CAUSES.items() if any(kind in r for r in runs)]
+    return (
+        " A failing update job is Dependabot failing to write an update itself, so a bump "
+        "by hand answers one run and the next scheduled run fails the same way -- the "
+        "evidence says how many runs in a row each job has failed. Find what in this "
+        "repository stops Dependabot and fix that, with a test, as well as the bump."
+        + "".join(f" {cause}" for cause in kinds)
+    )
+
+
 def dependabot_prompt(failure: Failure, branch: str) -> str:
     """What Dependabot cannot do for a project: alerts no PR answers, update jobs failing.
 
@@ -464,7 +503,7 @@ def dependabot_prompt(failure: Failure, branch: str) -> str:
     wanted = (
         f" Bump each of these to at least the version named: {'; '.join(bumps)}." if bumps else ""
     )
-    failing = f" Update jobs also fail on: {'; '.join(runs)}." if runs else ""
+    failing = f" Update jobs also fail on: {'; '.join(runs)}.{_runs_note(runs)}" if runs else ""
     return _framed(
         f"{failure.title} ({failure.url}).{wanted}{failing} Every alert, with its advisory, "
         f"and every failing job with its error, is in {EVIDENCE_DIR}/{DEPENDABOT_EVIDENCE} "

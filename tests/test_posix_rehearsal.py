@@ -184,6 +184,35 @@ def test_signal_zero_asks_whether_the_process_exists_and_sends_nothing():
     assert sent == [(7, 15)], "any other signal is the real one"
 
 
+def test_killpg_ends_the_leaders_tree_and_a_gone_leader_is_a_lookup_error():
+    """Nine bounded-spawn tests raised `AttributeError` on `os.killpg` under the rehearsal
+    from 2026-10-07: a Windows host has none, so their POSIX branch never ran here."""
+    calls = []
+
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 128 if argv[-1] == "8" else 0)
+
+    killpg = plugin.windows_killpg(run)
+    assert killpg(7, 9) is None
+    assert calls == [["taskkill", "/F", "/T", "/PID", "7"]]
+    with pytest.raises(ProcessLookupError):
+        killpg(8, 9)
+
+
+def test_what_a_windows_host_lacks_is_added_for_the_body_and_taken_away(monkeypatch):
+    host_os = types.SimpleNamespace()
+    host_signal = types.SimpleNamespace(SIGKILL=99)
+    monkeypatch.setattr(plugin, "os", host_os)
+    monkeypatch.setattr(plugin, "signal", host_signal)
+    state = plugin.PosixRehearsal()
+    state.add_missing()
+    assert callable(host_os.killpg)
+    assert host_signal.SIGKILL == 99, "one the host has is its own"
+    state.restore()
+    assert not hasattr(host_os, "killpg") and host_signal.SIGKILL == 99
+
+
 def test_the_probe_stands_in_for_kill_only_on_a_windows_host(monkeypatch):
     real = lambda pid, sig: None
     monkeypatch.setattr(plugin.os, "kill", real)

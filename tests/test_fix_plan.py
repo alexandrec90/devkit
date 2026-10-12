@@ -185,6 +185,63 @@ def test_a_projects_own_test_beside_the_vendored_ones_is_not_vendored():
     assert fix_plan.in_vendored_tier(".pre-commit-config.yaml", (".pre-commit-config.yaml",))
 
 
+VENDORED_FILE = "scripts/hooks/tests/test_repo_contract.py"
+FIXTURE_TESTS = '''
+def test_whole():
+    assert (ROOT / "scripts/run-tests.py").is_file()
+
+
+def test_segments(case):
+    """Checks scripts/run-tests.py only in words: the code below is what decides."""
+    assert (ROOT / ".claude" / "settings.json").is_file()
+
+
+def test_mentions_only():
+    """Mirrors scripts/lint-all.py, as the runner does."""
+    assert toolchain.rerun_in_venv
+
+
+class TestNested:
+    def test_inner(self):
+        assert ".devkit.toml"
+'''
+
+
+def test_a_vendored_test_is_read_for_the_project_owned_file_it_checks(tmp_path):
+    """sports_betting #67 was red on the vendored lint-runner contract, which reads the
+    project's own `scripts/lint-all.py` -- the one thing a devkit session cannot fix."""
+    (tmp_path / VENDORED_FILE).parent.mkdir(parents=True)
+    (tmp_path / VENDORED_FILE).write_text(FIXTURE_TESTS, encoding="utf-8")
+
+    def subject(name: str) -> str:
+        return fix_plan.project_owned_subject(f"{VENDORED_FILE}::{name}", tmp_path)
+
+    assert subject("test_whole") == "scripts/run-tests.py"
+    assert subject("test_segments[a-b]") == ".claude/settings.json"
+    assert subject("TestNested::test_inner") == ".devkit.toml"
+    # Named in the docstring alone, it is a test of something else.
+    assert subject("test_mentions_only") == ""
+    assert subject("test_gone") == ""
+    assert subject("") == ""
+
+
+def test_an_unreadable_or_project_owned_test_names_no_subject(tmp_path):
+    assert fix_plan.project_owned_subject(f"{VENDORED_FILE}::test_whole", tmp_path) == ""
+    own = tmp_path / "tests" / "test_x.py"
+    own.parent.mkdir()
+    own.write_text(FIXTURE_TESTS, encoding="utf-8")
+    assert fix_plan.project_owned_subject("tests/test_x.py::test_whole", tmp_path) == ""
+
+
+def test_the_lint_runner_contract_is_read_as_a_check_of_the_projects_runner():
+    """The live test the sports_betting #67 report named, read off devkit's own copy."""
+    entry = (
+        f"{VENDORED_FILE}::"
+        "test_the_lint_runner_reruns_under_the_tree_venv_rather_than_skip_its_linters"
+    )
+    assert fix_plan.project_owned_subject(entry) == "scripts/lint-all.py"
+
+
 def test_the_vendored_paths_are_sync_devkits_manifest():
     known = fix_plan.vendored_paths()
     assert known is not None

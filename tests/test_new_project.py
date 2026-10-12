@@ -882,6 +882,11 @@ def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
     coloured = [sys.executable, "-c", "print('\\x1b[91mE1\\x1b[0m a.py'); raise SystemExit(1)"]
     section = lint_all.run_tool("ruff", coloured, "hint")
     assert "\x1b" not in section and "E1 a.py" in section
+    # ruff writes UTF-8 whatever the code page, which `text=True` read as cp1252 on
+    # Windows: the multiplication sign in its `1 x F841` reached the artifact as two letters.
+    utf8 = "import sys; sys.stdout.buffer.write('1 \\u00d7 F841'.encode()); raise SystemExit(1)"
+    section = lint_all.run_tool("ruff", [sys.executable, "-c", utf8], "hint")
+    assert "1 \N{MULTIPLICATION SIGN} F841" in section, section
     # A linter that never answers is killed at the bound and reported, never waited on.
     hung = [sys.executable, "-c", "import time; time.sleep(120)"]
     section = lint_all.run_tool("mypy", hung, "hint", timeout=2)

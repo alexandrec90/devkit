@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,11 +72,21 @@ BACKOFF = (
 TOP_EFFORT = "max"
 
 
+# What a PR a fix waits on reads as once it can no longer change: either way, the next
+# fixer goes. Anything else -- open, or unreadable -- keeps the problem waiting.
+SETTLED = frozenset({"MERGED", "CLOSED"})
+
+
+def _unreadable(url: str) -> str:
+    return ""
+
+
 def budget(
     decision: fix_plan.Decision,
     ledger: dict[str, dict],
     now: _dt.datetime,
     escalated: fix_findings.Escalation = fix_findings.NOT_ESCALATED,
+    pr_state: Callable[[str], str] = _unreadable,
 ) -> Budget:
     """Whether this dispatch goes now; when it does not, why, and whether to file that.
 
@@ -88,6 +99,10 @@ def budget(
     moved since (`fix_ledger.moved_on`): a resolver pushes only a merge that resolved,
     so a new conflict at a new commit is the base moving again (devkit #390). The
     devkit session's own exhaustion backs off instead (`BACKOFF`).
+
+    A fixer that found its fix waits on another PR (`fix_ledger.waiting_on`) holds the
+    problem, unescalated, while `pr_state` reads that PR as anything but `SETTLED`: no
+    session can merge it, so neither another fixer nor the devkit session moves it.
     """
     if decision.action in fix_plan.NO_SESSION:
         # Free, so never rationed -- but made once per head (or tip), like everything else.
@@ -96,6 +111,10 @@ def budget(
     if escalated.open:
         return Budget(False, "escalated: the devkit session has it on the harness ledger")
     since = escalated.resolved_at
+    if (url := fix_ledger.waiting_on(decision, ledger, since)) and (
+        state := pr_state(url)
+    ) not in SETTLED:
+        return Budget(False, f"waits on {url}: {state.lower() or 'its state is unreadable'}")
     if reason := fix_ledger.blocked_reason(decision, ledger, since):
         return _escalate(decision, "fixer-blocked", f"a fixer reported it blocked: {reason}")
     if when := fix_ledger.already_sent(decision, ledger, now, since):
@@ -137,8 +156,12 @@ def over_daily_cap(decision: fix_plan.Decision, ledger: dict[str, dict], now: _d
 
 
 def source(decision: fix_plan.Decision) -> str:
-    """The ledger source a dispatch is recorded under: what `over_daily_cap` counts."""
-    if decision.action == fix_plan.UPSTREAM:
+    """The ledger source a dispatch is recorded under: what `over_daily_cap` counts.
+
+    A free action has none: stamped, four updates of one Dependabot PR behind its base
+    spent the day's cap and held another's conflict resolver (2026-10-11).
+    """
+    if decision.action == fix_plan.UPSTREAM or decision.action in fix_plan.NO_SESSION:
         return ""
     return fix_plan.DEPENDABOT if any(fix_plan.is_dependabot(f) for f in decision.failures) else ""
 

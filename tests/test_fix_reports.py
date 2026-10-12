@@ -121,6 +121,22 @@ def test_a_blocked_report_is_its_first_lines_trimmed_and_absent_is_empty(tmp_pat
     assert len(reason) <= fix_reports.REASON_LIMIT
 
 
+def test_waits_on_reads_the_pr_a_blocked_report_names_on_its_own_line(tmp_path):
+    assert fix_reports.waits_on(tmp_path) == ""
+    (tmp_path / "logs").mkdir()
+    url = "https://github.com/alexandrec90/data-lake/pull/66"
+    report = tmp_path / fix_reports.BLOCKED_FILE
+    report.write_text(f"# Fix blocked\n\n**Waits on:** {url}\n\nIt adds the columns.\n", "utf-8")
+    assert fix_reports.waits_on(tmp_path) == url
+    report.write_text(f"Waits on: `{url}`.\n", encoding="utf-8")
+    assert fix_reports.waits_on(tmp_path) == url
+    # Prose naming a PR is not the line: only a fixer that wrote it is waiting.
+    report.write_text(f"It depends on {url}, which is open.\n", encoding="utf-8")
+    assert fix_reports.waits_on(tmp_path) == ""
+    report.write_text("Waits on: data-lake #66\n", encoding="utf-8")
+    assert fix_reports.waits_on(tmp_path) == "", "a URL, so gh can read it from anywhere"
+
+
 def listing(*entries: tuple[Path, str]) -> str:
     return "".join(
         f"worktree {path.as_posix()}\nHEAD 1\nbranch refs/heads/{branch}\n\n"
@@ -428,6 +444,20 @@ def test_friction_lines_drop_markup_and_blanks_and_filing_away_reads_them_once(t
     assert fix_reports.friction_lines(tmp_path) == ()
     assert (tmp_path / "logs" / "friction.filed.md").exists()
     fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)  # nothing there: no error
+
+
+def test_a_friction_line_that_opens_on_a_date_or_a_number_keeps_it(tmp_path):
+    """Stripping list markers as a set of characters ate `- 2026-10-10, desktop-ml5f3pj:`
+    down to `, desktop-ml5f3pj:`, and the 2026-10-11 rehearsal would have filed that."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        "- 2026-10-10, desktop-ml5f3pj: collectors overlapped\n- 3 sessions waited\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "2026-10-10, desktop-ml5f3pj: collectors overlapped",
+        "3 sessions waited",
+    )
 
 
 def test_a_label_over_listed_entries_is_not_an_entry(tmp_path):

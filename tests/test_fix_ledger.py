@@ -164,6 +164,16 @@ def test_a_sourced_entry_keeps_every_send_and_a_day_counts_them_all(tmp_path):
     assert len(kept) == fix_ledger.AT_KEEP
 
 
+def test_a_free_action_stamped_under_a_source_is_not_counted_as_a_session(tmp_path):
+    """Before `fix_budget.source` left them unsourced, branch updates were stamped as
+    Dependabot sends; a ledger that still holds them must not spend the cap on them."""
+    path = tmp_path / "dispatch.json"
+    for action in (*fix_plan.NO_SESSION, fix_plan.RESOLVE):
+        fix_ledger.record(path, f"pr:c:446:s:d:{action}", "n", NOW, source="dependabot")
+    since = NOW - _dt.timedelta(hours=24)
+    assert fix_ledger.sent_since(fix_ledger.read_ledger(path), "dependabot", since) == 1
+
+
 def test_a_corrupt_ledger_is_empty_rather_than_a_traceback(tmp_path):
     path = tmp_path / "dispatch.json"
     path.write_text("{not json", encoding="utf-8")
@@ -318,6 +328,23 @@ def test_since_makes_everything_before_a_resolved_escalation_history(tmp_path):
     assert fix_ledger.already_sent(decision, ledger, NOW, resolved) == ""
     before = (NOW - _dt.timedelta(hours=1)).isoformat(timespec="seconds")
     assert fix_ledger.attempts(decision, ledger, before) == 1, "only what came before it"
+
+
+def test_a_wait_is_remembered_per_problem_newest_first_and_is_not_a_block(tmp_path):
+    path = tmp_path / "dispatch.json"
+    first = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="a1"),))
+    later = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="b2"),))
+    assert not fix_ledger.mark_waiting(path, fix_ledger.decision_key(first), "u/1")
+    fix_ledger.record(path, fix_ledger.decision_key(first), "n", NOW)
+    fix_ledger.record(path, fix_ledger.decision_key(later), "n", NOW + _dt.timedelta(hours=1))
+    assert fix_ledger.waiting_on(later, fix_ledger.read_ledger(path)) == ""
+    assert fix_ledger.mark_waiting(path, fix_ledger.decision_key(first), "u/1")
+    assert fix_ledger.mark_waiting(path, fix_ledger.decision_key(later), "u/2")
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.waiting_on(first, ledger) == "u/2", "the newest session's word"
+    assert fix_ledger.blocked_reason(first, ledger) == ""
+    resolved = (NOW + _dt.timedelta(hours=2)).isoformat(timespec="seconds")
+    assert fix_ledger.waiting_on(first, ledger, resolved) == ""
 
 
 def test_a_blocked_dispatch_is_remembered_with_its_reason_until_its_escalation_resolves(tmp_path):

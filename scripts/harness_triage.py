@@ -36,9 +36,10 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -425,47 +426,158 @@ def in_flight_here(items: list[Item], cache: Path, now: _dt.datetime) -> dict[st
     return in_flight(items, cache, now) if cache.is_file() else {}
 
 
+# --- groups a dispatched session holds ------------------------------------------------
+#
+# The pass hands a ledger session its groups as this very artifact, under the tree's
+# `fix_plan.EVIDENCE_DIR`; its header and `ids` lines name every id it was sent at.
+HANDED_IDS = re.compile(r"^=== .*\[(?P<head>[0-9a-f]{8})\](?: \(x\d+, since \S+\))? ===$")
+HANDED_MORE = re.compile(r"^  ids    (?P<ids>[0-9a-f ]+)$")
+
+
+def handed_ids(text: str) -> set[str]:
+    """Every item id a handed-over triage log names."""
+    found: set[str] = set()
+    for line in text.splitlines():
+        if match := HANDED_IDS.match(line):
+            found.add(match["head"])
+        elif match := HANDED_MORE.match(line):
+            found.update(match["ids"].split())
+    return found
+
+
+def held_groups(root: Path, live: Callable[[Path], bool], own: Path = REPO_ROOT) -> dict[str, Path]:
+    """`item id -> tree` for each id a session still at work in one of `root`'s
+    `.claude/worktrees` trees was sent at; never `own`, the tree asking.
+
+    a6c2b36e: the pass sent 1010-7 at 62606423 at 02:33, and a `/supervise-fix-pass`
+    session read this backlog at 02:47, saw the group open, and fixed it too: nothing
+    here said a fixer already had it, so one of the two branches was thrown away.
+    """
+    held: dict[str, Path] = {}
+    try:
+        trees = sorted((root / ".claude" / "worktrees").iterdir())
+    except OSError:
+        return held
+    mine = os.path.normcase(str(own.resolve()))
+    for tree in trees:
+        handed = sorted(tree.glob(f"logs/gate/*/{ARTIFACT.name}"))
+        if not handed or os.path.normcase(str(tree.resolve())) == mine or not live(tree):
+            continue
+        for path in handed:
+            try:
+                ids = handed_ids(path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            for one in ids:
+                held.setdefault(one, tree)
+    return held
+
+
+def at_work(now: _dt.datetime) -> Callable[[Path], bool]:
+    """Whether a tree's session is still at work: `fix_reports.active_transcript`, which
+    the pass holds a tree's fixers by. Imported here, not at the top: `fix_verify`
+    imports this module, and `fix_reports` would bring the pass's modules with it."""
+    import fix_reports
+
+    return lambda tree: fix_reports.active_transcript(tree, now) is not None
+
+
+# --- open PRs a group names -----------------------------------------------------------
+#
+# A branch a group's own text names: a task branch (`agent/fix-harness-ledger-1011-9`)
+# or a `claude --worktree` one. Narrower than `BRANCH`, which judges a whole `pr=` value
+# and in free text would take every hyphenated word ("re-aligns", "data-lake"). The
+# lookbehind keeps a tree's slug inside a path (`...-claude-worktrees-x/`) out.
+NAMED_BRANCH = re.compile(r"(?<![\w./-])(?:agent/[\w./-]*\w|worktree-[\w-]*\w)")
+NAMING_KEYS = (*DETAIL_KEYS, "cause", "said")
+
+
+def named_branches(bucket: list[Item]) -> list[str]:
+    """Every branch a group's rows name, first seen first."""
+    found: dict[str, None] = {}
+    for item in bucket:
+        for key in NAMING_KEYS:
+            for match in NAMED_BRANCH.finditer(item.fields.get(key, "")):
+                found.setdefault(match.group(0), None)
+    return list(found)
+
+
+def open_pr_lines(bucket: list[Item], prs: Mapping[str, str]) -> list[str]:
+    """A line for each branch the group names that has an open PR (`prs`, `branch ->
+    what it is`, is `fix_backlog.open_prs`'s).
+
+    e3d8cb27: d32ffcc2's row named `agent/fix-harness-ledger-1011-9`, whose #629 was
+    open, red on its own diff, and the fix the group extended; the text said none of
+    that, and the session handed it spent several calls finding the PR.
+    """
+    return [
+        f"  OPEN PR  {prs[branch]} on {branch} -- this group names a fix not merged yet: "
+        "read its diff and gate before writing another, and put a fix that extends it in "
+        "its tree (the skill's section 3)"
+        for branch in named_branches(bucket)
+        if branch in prs
+    ]
+
+
 def render(
     items: list[Item],
     history: list[Item] | None = None,
     pending: Mapping[tuple[str, str, str, str], str] | None = None,
+    held: Mapping[str, Path] | None = None,
+    prs: Mapping[str, str] | None = None,
 ) -> str:
     """The open backlog as text -- the artifact, and what the CLI prints. With the whole
     `history`, a group that recurred after a resolution says so; one in `pending`
-    (`pending_groups`) says its fix is in flight instead."""
+    (`pending_groups`) says its fix is in flight instead, one in `held`
+    (`held_groups`) names the session already sent at it, and one naming a branch in
+    `prs` names that branch's open PR."""
     if not items:
         return "harness-triage: nothing open\n"
     fixes = past_fixes(history or [])
     back = reopened(history or [])
     pending = pending or {}
+    held = held or {}
     lines = ["# source: scripts/harness_triage.py", f"# open: {count_line(items, pending)}", ""]
     for (event, agent, project, _), bucket in groups(items):
         head = bucket[0]
-        seen = f" (x{len(bucket)}, since {bucket[-1].stamp})" if len(bucket) > 1 else ""
-        lines.append(f"=== {event}  [{agent}]  {project}  [{head.id}]{seen} ===")
-        lines.append(f"  when   {head.stamp}")
-        seen_on = sorted({i.host for i in bucket} - {harness_events.UNKNOWN_HOST})
-        if seen_on:
-            lines.append(f"  host   {' '.join(seen_on)}")
-        lines.append(f"  detail {head.detail}")
-        # Where the skill's §1 table says diagnosis starts. Left out, a sweep greps the
-        # raw ledger for a transcript line the grouped report had already read past.
-        # `cwd` anchors any relative path an agent-report's message or command cites, and
-        # `said` is the cause as the run printed it, before `cause` folded it (718f71c4).
-        # `artifact` is a failed job's kept output: left out, 8751095b's sweep found the
-        # 240 s timeout only by searching the checkout's `logs/` for it.
-        for name in ("cause", "said", "cwd", "command", "artifact", "evidence", "version"):
-            if head.fields.get(name, "").strip(" -"):
-                lines.append(f"  {name:<6} {head.fields[name]}")
-        if len(bucket) > 1:
-            lines.append(f"  ids    {' '.join(i.id for i in bucket)}")
+        lines.extend(head_lines(f"{event}  [{agent}]  {project}", bucket))
         lines.extend(f"  REOPENED {i.id} -- {back[i.id]}" for i in bucket if i.id in back)
         lines.extend(verdict_lines(pending.get(head.signature), fixes.get(head.signature)))
+        lines.extend(open_pr_lines(bucket, prs or {}))
+        holder = next((held[i.id] for i in bucket if i.id in held), None)
+        if holder:
+            lines.append(
+                f"  IN HAND at {holder} -- a session sent at this group is still at work "
+                "there: leave it to that session"
+            )
         lines.append("")
     lines.append(
         "resolve: python scripts/harness_triage.py --resolve-like <id> --note '<what fixed it>'"
     )
     return "\n".join(lines) + "\n"
+
+
+def head_lines(title: str, bucket: list[Item]) -> list[str]:
+    """A group's header and what its newest row says: where, what, and every id."""
+    head = bucket[0]
+    seen = f" (x{len(bucket)}, since {bucket[-1].stamp})" if len(bucket) > 1 else ""
+    lines = [f"=== {title}  [{head.id}]{seen} ===", f"  when   {head.stamp}"]
+    seen_on = sorted({i.host for i in bucket} - {harness_events.UNKNOWN_HOST})
+    if seen_on:
+        lines.append(f"  host   {' '.join(seen_on)}")
+    lines.append(f"  detail {head.detail}")
+    # Where the skill's §1 table says diagnosis starts. Left out, a sweep greps the
+    # raw ledger for a transcript line the grouped report had already read past.
+    # `cwd` anchors any relative path an agent-report's message or command cites, and
+    # `said` is the cause as the run printed it, before `cause` folded it (718f71c4).
+    # `artifact` is a failed job's kept output: left out, 8751095b's sweep found the
+    # 240 s timeout only by searching the checkout's `logs/` for it.
+    for name in ("cause", "said", "cwd", "command", "artifact", "evidence", "version"):
+        if head.fields.get(name, "").strip(" -"):
+            lines.append(f"  {name:<6} {head.fields[name]}")
+    if len(bucket) > 1:
+        lines.append(f"  ids    {' '.join(i.id for i in bucket)}")
+    return lines
 
 
 def verdict_lines(waiting: str | None, before: list[str] | None) -> list[str]:
@@ -669,11 +781,12 @@ def main(argv: list[str] | None = None) -> int:
     shown = for_agent(items if args.all else open_items(items), args.agent)
     now = _dt.datetime.now(_dt.UTC)
     pending = pending_groups(items, in_flight_here(items, verified_cache(ledger_file()), now))
-    text = render(shown, items, pending)
+    held = held_groups(ledger_file().parent.parent, at_work(now))
+    text = render(shown, items, pending, held)
     # The artifact is always the *whole* backlog, whatever the terminal was filtered to:
     # `logs/harness-triage.log` is what the next session reads, and one written under a
     # `--agent` filter would read as "this is everything" while hiding the other runtime.
-    path = write_artifact(render(open_items(items), items, pending))
+    path = write_artifact(render(open_items(items), items, pending, held))
     print(text, end="")
     print(f"harness-triage: {count_line(open_items(items), pending)} -- {path}")
     return 0

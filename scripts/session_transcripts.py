@@ -25,7 +25,7 @@ import json
 import re
 import sys
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 CLAUDE_ROOT = Path.home() / ".claude" / "projects"
@@ -46,6 +46,7 @@ class Event:
     tool: str = ""  # a call's tool name: `Bash`, `Edit`, `AskUserQuestion`, `shell`
     path: str = ""  # the file an edit call names: `Edit`'s `file_path`
     background: bool = False  # a call run with `run_in_background`: its wait holds no turn
+    at: str = ""  # the record's ISO `timestamp`, "" when it has none
 
 
 @dataclass(frozen=True)
@@ -147,7 +148,11 @@ def codex_events(row: dict, line: int) -> Iterator[Event]:
 
 def events(path: Path, rows: tuple[tuple[int, dict], ...]) -> list[Event]:
     reader = codex_events if is_codex(path) else claude_events
-    return [event for number, row in rows for event in reader(row, number)]
+    return [
+        replace(event, at=str(row.get("timestamp") or ""))
+        for number, row in rows
+        for event in reader(row, number)
+    ]
 
 
 def is_codex(path: Path) -> bool:
@@ -235,37 +240,71 @@ def render(path: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
-# A ledger row's `evidence=`: a transcript, and optionally the line a finding was read at.
-EVIDENCE = re.compile(r"^(?P<path>.+?)(?:#L(?P<line>\d+))?$")
+# A ledger row's `evidence=`: a transcript, and optionally the line a finding was read at
+# -- or, in an `agent-report`, the range `#L82-L94`. Several are joined by `;`.
+EVIDENCE = re.compile(r"^(?P<path>.+?)(?:#L(?P<line>\d+)(?:-L?(?P<end>\d+))?)?$")
 RENDERED_LINE = re.compile(r"^L(\d+) ")
+# Transcript lines either side of a single `#L<n>`; a range is read as written.
+AROUND_A_LINE = 40
 
 
-def window(rendered: str, line: int, around: int) -> str:
-    """The rendered lines within `around` transcript lines of `line`."""
+def window(rendered: str, line: int, around: int, end: int | None = None) -> str:
+    """The rendered lines from `around` before `line` to `around` after `end` (or `line`)."""
+    last = line if end is None else end
     kept = [
         text
         for text in rendered.splitlines()
-        if (found := RENDERED_LINE.match(text)) and abs(int(found.group(1)) - line) <= around
+        if (found := RENDERED_LINE.match(text))
+        and line - around <= int(found.group(1)) <= last + around
     ]
     return "".join(f"{text}\n" for text in kept)
 
 
+def evidence_path(evidence: str) -> Path:
+    """The transcript one `<path>[#L<n>[-L<m>]]` names."""
+    found = EVIDENCE.match(evidence)
+    return Path(found.group("path") if found else evidence)
+
+
+def read_evidence(evidence: str, around: int | None) -> str | None:
+    """One `<path>[#L<n>[-L<m>]]` rendered as audit lines; None when no transcript is there."""
+    path = evidence_path(evidence)
+    if not path.is_file():
+        return None
+    rendered = render(path)
+    found = EVIDENCE.match(evidence)
+    if not found or not found.group("line"):
+        return rendered
+    end = found.group("end")
+    wide = around if around is not None else (0 if end else AROUND_A_LINE)
+    return window(rendered, int(found.group("line")), wide, int(end) if end else None)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Render a session transcript as audit lines.")
-    parser.add_argument("evidence", help="a transcript path, or a ledger evidence= `<path>#L<n>`")
     parser.add_argument(
-        "--around", type=int, default=40, help="transcript lines either side of #L<n>"
+        "evidence",
+        help="a transcript path, or a ledger evidence= `<path>#L<n>`, `#L<n>-L<m>`, `;`-joined",
+    )
+    parser.add_argument(
+        "--around",
+        type=int,
+        default=None,
+        help=f"transcript lines either side (default {AROUND_A_LINE} for #L<n>, 0 for a range)",
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    found = EVIDENCE.match(args.evidence.strip())
-    path = Path(found.group("path")) if found else Path(args.evidence)
-    if not path.is_file():
-        print(f"session_transcripts: no transcript at {path}", file=sys.stderr)
-        return 2
-    rendered = render(path)
-    line = found.group("line") if found else None
-    print(window(rendered, int(line), args.around) if line else rendered, end="")
-    return 0
+    parts = [part.strip() for part in args.evidence.split(";") if part.strip()]
+    status = 0
+    for part in parts:
+        out = read_evidence(part, args.around)
+        if out is None:
+            print(f"session_transcripts: no transcript at {evidence_path(part)}", file=sys.stderr)
+            status = 2
+            continue
+        if len(parts) > 1:
+            print(f"== {evidence_path(part)}")
+        print(out, end="")
+    return status
 
 
 if __name__ == "__main__":

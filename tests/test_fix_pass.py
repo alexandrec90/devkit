@@ -236,6 +236,7 @@ def world(tmp_path, monkeypatch):
         "dependabot_notes": [],
         "drift": [],
         "issues": [],
+        "migrated": [],
         "upkeep": [],
     }
     # GitHub's Dependabot, the checkouts' default branches and their tracker issues are
@@ -255,6 +256,13 @@ def world(tmp_path, monkeypatch):
         "sweep_green",
         lambda ws, projects, mode: (
             table["upkeep"].append(("issues", mode)) or list(table["issues"])
+        ),
+    )
+    monkeypatch.setattr(
+        fix_pass.fix_migrate,
+        "tend",
+        lambda ws, projects, mode: (
+            table["upkeep"].append(("migrate", mode)) or list(table["migrated"])
         ),
     )
     # The machine's real scheduler is never touched: `maintain` re-registers tasks.
@@ -310,7 +318,7 @@ def world(tmp_path, monkeypatch):
         lambda *a, **k: loop.fix_verify.Outcome(reopen=list(table["reopen"])),
     )
     monkeypatch.setattr(loop.bg_sessions, "stop_finished", lambda trees, runner: [])
-    monkeypatch.setattr(loop, "working_dirs", frozenset)
+    monkeypatch.setattr(loop, "session_listing", list)
     monkeypatch.setattr(loop.friction_pending, "detector_fixes", lambda gh, git: [])
     monkeypatch.setattr(loop, "devkit_fixes", lambda ctx: tuple(table["devkit_fixes"]))
     monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda _d: "v0.11.22")
@@ -472,23 +480,31 @@ def test_upkeep_runs_in_every_mode_and_lands_on_the_record(world):
         "ibkr_trader main -- uv.lock is origin/main's already; main's uv.lock restored"
     ]
     world["issues"] = ["carameli #12 (Nightly) -- would close: green on origin/main at the tip"]
+    world["migrated"] = ["carameli -- would upgrade its database to head"]
     assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
-    assert world["upkeep"] == [("drift", fix_cycle.PLAN), ("issues", fix_cycle.PLAN)]
+    assert world["upkeep"] == [
+        ("drift", fix_cycle.PLAN),
+        ("issues", fix_cycle.PLAN),
+        ("migrate", fix_cycle.PLAN),
+    ]
     text = artifact(world)
     assert "drift    ibkr_trader main -- uv.lock is origin/main's already" in text
     assert "issue    carameli #12 (Nightly) -- would close" in text
+    assert "migrate  carameli -- would upgrade its database to head" in text
 
 
 def test_an_upkeep_line_that_failed_is_filed_against_its_checkout(world, tmp_path):
     world["drift"] = ["ibkr_trader main -- uv.lock relocked: FAILED to cut agent/auto/relock-x"]
     world["issues"] = ["carameli #12 (Nightly) -- FAILED to close: HTTP 403"]
+    world["migrated"] = ["ibkr_trader -- FAILED to upgrade its database: DuplicateTable"]
     journal = fix_pass.Journal(tmp_path)
     ctx = fix_pass.context(world["workspace"], fix_cycle.DISPATCH, NOW)
-    drift, issues = fix_pass.tend(world["workspace"], ctx, journal)
-    assert (drift, issues) == (world["drift"], world["issues"])
+    upkeep = fix_pass.tend(world["workspace"], ctx, journal)
+    assert upkeep == (world["drift"], world["issues"], world["migrated"])
     assert [(f.kind, f.project) for f in journal.findings] == [
         ("drift-failed", "ibkr_trader"),
         ("issue-close-failed", "carameli"),
+        ("migrate-failed", "ibkr_trader"),
     ]
 
 
@@ -1152,7 +1168,7 @@ def test_a_pass_out_of_time_still_writes_its_record_and_leaves_the_rest(world, t
     assert world["installers"] == [] and world["upkeep"] == []
     [late] = [line for line in artifact(world).splitlines() if line.startswith("late")]
     assert late.startswith(f"late     {fix_pass.LATE}: ship, merge, read-back, collect")
-    assert late.endswith("current, installers, drift, issues"), "the send runs regardless"
+    assert late.endswith("current, installers, drift, issues, migrate"), "the send runs regardless"
     assert history.is_file()
 
 
@@ -1257,7 +1273,7 @@ def test_every_step_says_when_it_starts(world, capsys):
     rescue had to rebuild the timeline from file times. Each step is now a flushed line."""
     fix_pass.run(world["workspace"], fix_cycle.PLAN, _launch(), NOW)
     out = capsys.readouterr().out
-    for name in ("ship", "read-back", "collect", "plan", "send", "drift", "issues"):
+    for name in ("ship", "read-back", "collect", "plan", "send", "drift", "issues", "migrate"):
         assert f"fix-pass: step {name} at " in out
 
 

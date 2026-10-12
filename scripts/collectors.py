@@ -41,12 +41,10 @@ keeps asking whether HOST has taken it over, and fails its pass once that is ove
 (`follow_handoffs`): until then nothing runs the collector, and no row on either machine
 would otherwise say so.
 
-**One actor per collector at a time** (`claim`). `move` holds a collector's claim for its
-export, a pass holds it for each container collector it acts on, and an import holds it
-for the restore; whoever finds it held leaves that collector alone. Without it the pass
-restarted the service `move` had just stopped for the dump, and a `run-here` typed during
-a pass ran `docker compose up -d` beside the pass's own, one of them failing on compose's
-"container name already in use".
+**One actor at a time** (`PASS_LOCK`). `move` holds the lock a pass holds, for its whole
+export, so a scheduled pass meanwhile stands down rather than restarting the service
+`move` stopped for the dump; and the pickup runs inside `maintain`, under that pass's lock,
+whose bound allows for the restore (`pass_bound`).
 
 **Started, and redeployed onto merged code -- only merged code.** A pass that finds the
 container down runs `docker compose up -d <service>`, which builds an image only when
@@ -72,18 +70,21 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time as _time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import collector_build
 import collector_handoff as handoff
 import collector_tasks
 import collectors_config as config
 import docker_memory
 import machine_clock
 import sweep
+import worktree_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -109,6 +110,22 @@ CODE_AT, HELD, STARTED_AT = "code_at", "held", "started_at"
 # marker a killed pass left behind (`TARGET_BOUND`).
 IN_PASS = Path("logs/collectors.pass.json")
 UNTIL = "until"
+# Held, `{started_at, until}`, by every pass that starts or stops containers -- `maintain`
+# and the verbs -- for as long as it acts. Nothing serialised them, so a `run-here` at
+# 22:14:38 and the scheduled `maintain` at 22:15:01 both ran `docker compose up -d` for the
+# same newly assigned collectors, and each exited 2 on compose's "container name is already
+# in use" Conflict over the container the other had just created (3c3e36f2). A scheduled
+# pass that finds it held stands down; a verb waits, since it was typed to act now. `until`
+# breaks a lock a killed pass left, as it bounds `IN_PASS`.
+PASS_LOCK = Path("logs/collectors.lock")
+# Seconds a lock may stay unreadable: its holder has created it and not yet written it.
+LOCK_WRITING = 10
+# Seconds between a waiting verb's looks at the lock.
+LOCK_POLL = 5
+STOOD_DOWN = (
+    "another collectors pass is acting right now -- this one stands down; the next "
+    "scheduled pass acts on whatever that one did not"
+)
 # A row's state while that pass is at it.
 STARTING = "being started by the collectors pass"
 
@@ -129,25 +146,32 @@ STOP_TIMEOUT = 120
 HEALTH_TIMEOUT = 120
 INSPECT_TIMEOUT = 30
 GIT_TIMEOUT = 30
+# One `git archive` of a checkout into a staged build context (`collector_build`).
+EXPORT_TIMEOUT = 120
 # The longest one container target can hold a pass: every spawn `keep_running` makes, at
-# its timeout -- three inspects, three git calls, the build and the health check.
-TARGET_BOUND = 3 * INSPECT_TIMEOUT + 3 * GIT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
+# its timeout -- three inspects; three git calls for the checkout and three for a sibling
+# it `builds_from` (resolve the pin, read it, check it is merged); an export of each; the
+# build and the health check.
+TARGET_BOUND = (
+    3 * INSPECT_TIMEOUT + 6 * GIT_TIMEOUT + 2 * EXPORT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
+)
 # The longest one handoff pickup can hold a pass (`take_over`): asking, stopping the
-# service, the restore. The scheduled task's time limit covers it plus a target's
-# `TARGET_BOUND` (`tests/test_install_collectors.py`): a pass killed mid-restore would
-# leave the marker unimported, and every later pass would start the restore again.
+# service, the restore. A pass's `PASS_LOCK` allows each it may make this long
+# (`pass_bound`), so no stale-lock takeover starts a second pass mid-restore; and the
+# scheduled task's time limit covers one plus a target's `TARGET_BOUND`
+# (`tests/test_install_collectors.py`), since a pass killed mid-restore would leave the
+# marker unimported for every later pass to start the restore again.
 PICKUP_BOUND = handoff.PENDING_TIMEOUT + PS_TIMEOUT + STOP_TIMEOUT + handoff.IMPORT_TIMEOUT
-# How long `move` holds a collector (`move_one`): stopping it, the export, and either
-# starting it again or stopping the rest.
+# How long `move` holds `PASS_LOCK` for each collector it hands off (`move_one`): stopping
+# it, the export, and either starting it again or stopping the rest.
 MOVE_BOUND = PS_TIMEOUT + STOP_TIMEOUT + handoff.EXPORT_TIMEOUT + UP_TIMEOUT + 2 * PS_TIMEOUT
 # How long after a `move` the receiving machine may take before the sender's pass fails on
 # it (`follow_handoffs`): two of its passes, 15 minutes apart, and the restore.
 HANDOFF_GRACE = 2 * 15 * 60 + PICKUP_BOUND
-
-# One file per collector while something acts on it, `{holder, started_at, until, token}`
-# (`claim`). `until` bounds one a killed holder left behind, as for `IN_PASS`.
-CLAIMS = Path("logs/collectors.claims")
-HOLDER, TOKEN = "holder", "token"
+# What `move` writes into `PASS_LOCK` beside `{started_at, until}`: who holds it and for
+# which collectors, so the tray keeps those rows green for the hour a move stops them
+# (`move_holding`). A pass writes neither; `IN_PASS` speaks for it.
+HOLDER, PROJECTS = "holder", "projects"
 # How long after the machine boots or wakes a silent engine is Docker Desktop still
 # starting rather than down (`wait_for_engine`), and how often it is asked meanwhile.
 # Measured start on this workstation: about three minutes from boot to running containers.
@@ -385,11 +409,14 @@ class Docker:
         )
         return parse_created(out) if code == 0 else None
 
-    def deploy(self, checkout: Path, service: str) -> tuple[bool, str]:
+    def deploy(self, checkout: Path, service: str, files: Sequence[Path] = ()) -> tuple[bool, str]:
         # Builds first and recreates only once the build succeeded, so a build that fails
-        # leaves the running container as it was.
+        # leaves the running container as it was. `files` are compose files to read in
+        # place of the checkout's own lookup (`collector_build.stage`); the project
+        # directory stays the first one's, so the project name and paths do not move.
+        named = [arg for f in files for arg in ("-f", str(f))]
         code, out = self.run(
-            ["docker", "compose", "up", "-d", "--build", service], UP_TIMEOUT, checkout
+            ["docker", "compose", *named, "up", "-d", "--build", service], UP_TIMEOUT, checkout
         )
         return code == 0, out
 
@@ -504,29 +531,61 @@ class Git:
     def run(self, checkout: Path, *args: str) -> tuple[int, str]:
         return spawn(["git", *args], GIT_TIMEOUT, checkout)
 
-    def head(self, checkout: Path) -> tuple[str, float] | None:
-        """`(short sha, commit time)` of HEAD; None when git cannot say."""
-        code, out = self.run(checkout, "log", "-1", "--format=%h %ct", "HEAD")
+    def head(self, checkout: Path, rev: str = "HEAD") -> tuple[str, float] | None:
+        """`(short sha, commit time)` of `rev`, HEAD by default; None when git cannot say."""
+        code, out = self.run(checkout, "log", "-1", "--format=%h %ct", rev, "--")
         sha, _, when = out.strip().partition(" ")
         try:
             return (sha, float(when)) if code == 0 and sha else None
         except ValueError:
             return None
 
-    def held(self, checkout: Path) -> str:
-        """Why HEAD must not be deployed by a timer, or "" when it may: it is on origin's
-        default branch (at its tip or behind it) and no tracked file is edited."""
+    def held(self, checkout: Path, rev: str = "HEAD") -> str:
+        """Why `rev` must not be deployed by a timer, or "" when it may: it is on origin's
+        default branch (at its tip or behind it) and, for HEAD, no tracked file is edited.
+        Any other rev is built from an export of the commit (`collector_build`), so the
+        files on disk are not what ships."""
         code, _out = self.run(
-            checkout, "merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/HEAD"
+            checkout, "merge-base", "--is-ancestor", rev, "refs/remotes/origin/HEAD"
         )
         if code == 1:
-            return "HEAD is not on origin's default branch"
+            return f"{'HEAD' if rev == 'HEAD' else rev[:7]} is not on origin's default branch"
         if code != 0:
             return "origin's default branch is unknown here"
+        if rev != "HEAD":
+            return ""
         code, out = self.run(checkout, "status", "--porcelain", "--untracked-files=no")
         if code != 0:
             return "git status failed"
         return "the checkout has uncommitted edits" if out.strip() else ""
+
+    def pin(self, checkout: Path, sibling: str) -> str:
+        """The ref `checkout`'s own PR gate checks `sibling` out at; "" when it pins none."""
+        return worktree_env.pinned_ref(checkout, sibling)
+
+    def resolve(self, checkout: Path, ref: str) -> str:
+        """`ref`'s full commit sha in `checkout` -- a branch by its remote-tracking ref,
+        which a fetch moves, ahead of a local one -- or "" when it has no such commit."""
+        for name in (f"refs/remotes/origin/{ref}", ref):
+            code, out = self.run(checkout, "rev-parse", "--verify", "--quiet", f"{name}^{{commit}}")
+            if code == 0 and out.strip():
+                return out.strip()
+        return ""
+
+    def export(self, checkout: Path, rev: str, dest: Path) -> str:
+        """Write `rev`'s tree into `dest` (`collector_build.Export`); "" on success."""
+        archive = dest.with_name(f"{dest.name}.tar")
+        code, out = spawn(
+            ["git", "archive", "--format=tar", f"--output={archive}", rev],
+            EXPORT_TIMEOUT,
+            checkout,
+        )
+        if code != 0:
+            return first_line(out) or f"git archive exited {code}"
+        try:
+            return collector_build.unpack(archive, dest)
+        finally:
+            archive.unlink(missing_ok=True)
 
 
 @dataclass
@@ -612,28 +671,28 @@ def redeploy(
     target: Target, box: Container, docker: Docker, git: Git, report: Report, last: dict
 ) -> dict:
     """Rebuild `box` onto the checkout's HEAD when its code is older and HEAD is merged
-    code -- the newest HEAD among the checkout and those it `builds_from`, each of which
-    must be merged code. Returns what to record: `code_at`, `held` when a redeploy was
-    owed and refused, and `deployed` when this pass redeployed (and so must skip the
-    health check)."""
+    code -- the newest commit among the checkout and those it `builds_from`, each of
+    which must be merged code. A sibling the checkout's PR gate pins is built at that
+    pin, not at its own HEAD (`source_heads`, `deploy_sources`). Returns what to record:
+    `code_at`, `held` when a redeploy was owed and refused, and `deployed` when this
+    pass redeployed (and so must skip the health check)."""
     name, service = target.collector.project, target.collector.service
     known = code_at(box, docker, last)
     if known is None:
         return {}
-    heads = source_heads(target, git)
-    newest = max(heads, key=lambda pair: pair[1][1], default=None)
-    if newest is None or newest[1][1] <= known:
+    sources = source_heads(target, git)
+    newest = max(sources, key=lambda source: source.committed, default=None)
+    if newest is None or newest.committed <= known:
         return {CODE_AT: known}
-    where, (sha, committed) = newest
-    sha = sha if where == target.checkout else f"{where.name}@{sha}"
+    sha = newest.sha if newest.root == target.checkout else f"{newest.root.name}@{newest.sha}"
     # Every checkout the image copies is baked into it, so each must be merged code.
-    held = next((_held_in(target, w, why) for w, _head in heads if (why := git.held(w))), "")
+    held = next((why for source in sources if (why := _held(target, source, git))), "")
     if held:
         report.say(
             f"{name}: `{service}` runs code older than {sha} and was not redeployed -- {held}"
         )
         return {CODE_AT: known, HELD: held}
-    ok, out = docker.deploy(target.checkout, service)
+    ok, out = deploy_sources(target, sources, docker, git)
     if not ok:
         report.fail(
             f"{name}: could not redeploy `{service}` onto {sha} -- {first_line(out) or 'no output'}"
@@ -641,14 +700,77 @@ def redeploy(
         report.lines.extend(f"    {line}" for line in out.splitlines()[-20:])
         return {CODE_AT: known}
     report.say(f"{name}: redeployed `{service}` onto {sha} -- its code was older")
-    return {CODE_AT: committed, "deployed": True}
+    return {CODE_AT: newest.committed, "deployed": True}
 
 
-def source_heads(target: Target, git: Git) -> list[tuple[Path, tuple[str, float]]]:
-    """`(checkout, its HEAD)` for the target's checkout and each it `builds_from`, leaving
-    out any git cannot read."""
-    roots = [target.checkout, *(target.checkout.parent / s for s in target.collector.builds_from)]
-    return [(root, head) for root in roots if (head := git.head(root)) is not None]
+@dataclass(frozen=True)
+class Source:
+    """A checkout an image is built from, and the commit it is built at: `rev`, HEAD
+    unless the target's PR gate pins this sibling, when `pin` is that ref as written and
+    `rev` its commit here -- "" when this checkout does not have it."""
+
+    root: Path
+    sha: str
+    committed: float
+    rev: str = "HEAD"
+    pin: str = ""
+
+
+def source_heads(target: Target, git: Git) -> list[Source]:
+    """A `Source` for the target's checkout and each it `builds_from`, leaving out any git
+    cannot read -- except a pinned sibling, which is kept so the redeploy holds on it.
+
+    8e3c4a67: the image took data-lake at its own HEAD, and twice in two days that HEAD
+    was a commit whose models needed a migration ibkr_trader had not merged yet. The
+    commit ibkr_trader's gate pins is the one its schema was tested against, so that is
+    the commit to build, and the one whose time says whether the image is behind."""
+    found: list[Source] = []
+    if (head := git.head(target.checkout)) is not None:
+        found.append(Source(target.checkout, *head))
+    for sibling in target.collector.builds_from:
+        root = target.checkout.parent / sibling
+        pin = git.pin(target.checkout, sibling)
+        if not pin:
+            if (head := git.head(root)) is not None:
+                found.append(Source(root, *head))
+            continue
+        rev = git.resolve(root, pin)
+        commit = git.head(root, rev) if rev else None
+        sha, committed = commit or (pin[:7], 0.0)
+        found.append(Source(root, sha, committed, rev if commit else "", pin))
+    return found
+
+
+def _held(target: Target, source: Source, git: Git) -> str:
+    """Why `source` must not be built by a timer, named for a sibling, or ""."""
+    if source.pin and not source.rev:
+        why = f"{target.checkout.name} pins {source.pin[:12]}, which this checkout does not have"
+    else:
+        why = git.held(source.root, source.rev)
+    return _held_in(target, source.root, why) if why else ""
+
+
+def deploy_sources(
+    target: Target, sources: Sequence[Source], docker: Docker, git: Git
+) -> tuple[bool, str]:
+    """`Docker.deploy` the target from its checkouts as they stand, or -- when a sibling
+    is pinned -- from a context staged at each source's commit (`collector_build`)."""
+    service = target.collector.service
+    if not any(source.pin for source in sources):
+        return docker.deploy(target.checkout, service)
+    with tempfile.TemporaryDirectory(
+        prefix=f"{target.collector.project}-build-", ignore_cleanup_errors=True
+    ) as staging:
+        files, why = collector_build.stage(
+            target.checkout,
+            service,
+            [(source.root, source.rev) for source in sources],
+            Path(staging),
+            git.export,
+        )
+        if why:
+            return False, why
+        return docker.deploy(target.checkout, service, files)
 
 
 def _held_in(target: Target, where: Path, why: str) -> str:
@@ -1087,85 +1209,93 @@ def in_pass(path: Path, clock: float) -> bool:
     return started <= clock < until
 
 
-def claim_path(base: Path, project: str) -> Path:
-    return base / CLAIMS / f"{project}.json"
+def lock_holder(path: Path, clock: float) -> float | None:
+    """Until when a live pass holds `PASS_LOCK` at `path`, or None when none does.
+
+    A lock past its `until` is a killed pass's. One that will not parse is a holder
+    between creating and writing it for `LOCK_WRITING` seconds, and a dead one after.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        raw = None
+    until = raw.get(UNTIL) if isinstance(raw, dict) else None
+    if isinstance(until, (int, float)) and not isinstance(until, bool):
+        return until if clock < until else None
+    try:
+        written = path.stat().st_mtime
+    except OSError:
+        return None
+    return written + LOCK_WRITING if clock - written < LOCK_WRITING else None
 
 
-def live_claim(path: Path, clock: float) -> str:
-    """Who holds the claim at `path` at `clock`, or "" when nobody does: none, one past
-    its `until` (a killed holder's), one starting after `clock`, or one unreadable."""
+def take_lock(path: Path, until: float, clock: float, extra: dict | None = None) -> bool:
+    """Create `path` holding `until`, and `extra` beside it (`move`'s `HOLDER` and
+    `PROJECTS`); False while a live pass holds it.
+
+    A dead holder's lock is broken first. Two passes breaking the same dead lock at once
+    can both get through, which is no worse than the unserialised passes this replaced
+    and needs a pass to have been killed first.
+    """
+    if lock_holder(path, clock) is None:
+        path.unlink(missing_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(handle, "w", encoding="utf-8") as lock:
+        lock.write(json.dumps({**(extra or {}), STARTED_AT: clock, UNTIL: until}) + "\n")
+    return True
+
+
+def move_holding(path: Path, clock: float) -> dict[str, str]:
+    """`{project: holder}` for each collector a live `move` holds `PASS_LOCK` for; {}
+    while a pass holds it, or nothing does. The tray's reason to keep a collector `move`
+    stopped for its export green (`holding`)."""
+    if lock_holder(path, clock) is None:
+        return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return ""
-    if not isinstance(raw, dict) or not in_pass(path, clock):
-        return ""
-    holder = raw.get(HOLDER)
-    return holder if isinstance(holder, str) and holder else "another collectors.py"
-
-
-def take_claim(path: Path, record: dict, clock: float) -> str:
-    """Write `record` at `path` unless a live claim is there; "" when written, else who
-    holds it. The file appears whole or not at all (`os.link` of a finished temporary
-    refuses an existing name on Windows and POSIX alike), so a reader never finds a claim
-    half-written and reads it as stale. A stale one is removed and taken once."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    draft = path.with_name(f"{path.name}.{record[TOKEN]}")
-    draft.write_text(json.dumps(record) + "\n", encoding="utf-8")
-    try:
-        for _attempt in range(2):
-            try:
-                os.link(draft, path)
-                return ""
-            except FileExistsError:
-                if held := live_claim(path, clock):
-                    return held
-                path.unlink(missing_ok=True)
-        return live_claim(path, clock) or "another collectors.py"
-    finally:
-        draft.unlink(missing_ok=True)
+        return {}
+    holder = raw.get(HOLDER) if isinstance(raw, dict) else None
+    projects = raw.get(PROJECTS) if isinstance(raw, dict) else None
+    if not isinstance(holder, str) or not isinstance(projects, list):
+        return {}
+    return {str(project): holder for project in projects}
 
 
 @contextlib.contextmanager
-def claim(path: Path, holder: str, bound: float) -> Iterator[str]:
-    """Hold the claim at `path` for at most `bound` seconds while the block runs. Yields ""
-    when it is this block's, else who holds it -- and the block then leaves that
-    collector alone. Released however the block ends, and only while still this one's.
+def one_pass(
+    path: Path,
+    bound: float,
+    wait: bool,
+    sleep: Callable[[float], None] = _time.sleep,
+    extra: dict | None = None,
+) -> Iterator[bool]:
+    """Hold `PASS_LOCK` for a pass of at most `bound` seconds; yields whether it was had.
+    `extra` is written into the lock beside its bound (`take_lock`).
 
-    Two takers of one *stale* claim in the same instant can both win; that needs a killed
-    holder and two actors starting within a millisecond of each other, and is accepted.
+    Without `wait` a held lock yields False at once. With it, this looks again every
+    `LOCK_POLL` seconds, which ends by the holder's `until` at the latest: a lock past it
+    is broken.
     """
-    clock = _clock()
-    token = f"{os.getpid()}-{clock}"
-    record = {HOLDER: holder, STARTED_AT: clock, UNTIL: clock + bound, TOKEN: token}
-    other = take_claim(path, record, clock)
+    held = take_lock(path, _clock() + bound, _clock(), extra)
+    if not held and wait:
+        print("collectors: waiting for the collectors pass acting now to finish", file=sys.stderr)
+    while not held and wait:
+        sleep(LOCK_POLL)
+        held = take_lock(path, _clock() + bound, _clock(), extra)
+    if not held:
+        yield False
+        return
     try:
-        yield other
+        yield True
     finally:
-        if not other:
-            with contextlib.suppress(OSError, ValueError):
-                if json.loads(path.read_text(encoding="utf-8")).get(TOKEN) == token:
-                    path.unlink()
-
-
-@contextlib.contextmanager
-def claiming(
-    base: Path, chosen: Sequence[Target], holder: str, report: Report
-) -> Iterator[list[Target]]:
-    """The targets of `chosen` whose claim this run holds while the block runs. One held
-    elsewhere -- a `move` exporting it, a pass or a `run-here` acting on it -- is said and
-    left out, so two never run `docker compose up -d` on one service at once."""
-    bound = len(chosen) * TARGET_BOUND + PS_TIMEOUT
-    with contextlib.ExitStack() as stack:
-        mine = []
-        for target in chosen:
-            path = claim_path(base, target.collector.project)
-            other = stack.enter_context(claim(path, holder, bound))
-            if other:
-                report.say(f"{target.collector.project}: left alone -- {other} is acting on it")
-            else:
-                mine.append(target)
-        yield mine
+        path.unlink(missing_ok=True)
 
 
 def status(
@@ -1309,13 +1439,17 @@ def move_refused(dest: str, projects: Sequence[str], unknown: Sequence[str], thi
 def move_one(collector: config.Collector, dest: str, here: Here) -> None:
     """Stop the collector's service, have the project export its data for `dest`, then
     set this machine to `stop` and stop the rest of the project here (`handed_off`). An
-    export that fails starts the service again and leaves the assignment `run`. The
-    collector's claim is held throughout, so no pass starts it under the dump."""
+    export that fails starts the service again and leaves the assignment `run`.
+
+    `PASS_LOCK` is held throughout, waited for as a verb waits for it: a scheduled pass
+    meanwhile stands down rather than restarting the service under the dump. The lock
+    names this move and the collector (`move_holding`), so the tray keeps its row green."""
     name, service = collector.project, collector.service
     checkout = here.checkout(collector)
-    with claim(claim_path(here.base, name), f"`collectors.py move` to {dest}", MOVE_BOUND) as other:
-        if other:
-            here.report.fail(f"{name}: not moved -- {other} is acting on it; try once it is done")
+    holder = {HOLDER: f"`collectors.py move` to {dest}", PROJECTS: [name]}
+    with one_pass(here.base / PASS_LOCK, MOVE_BOUND, wait=True, extra=holder) as had:
+        if not had:
+            here.report.fail(f"{name}: not moved -- {STOOD_DOWN}")
             return
         if why := stop_service(collector, here):
             here.report.fail(f"{name}: not moved -- `{service}` could not be stopped first: {why}")
@@ -1414,39 +1548,33 @@ def take_over(collector: config.Collector, here: Here) -> bool:
     """Import a handoff addressed to this machine and set it to `run` the collector; True
     when it did. A store that cannot be read, or no answer in time, is silence -- the next
     pass asks again, as `fix_migrate.py` does of a db that is down. A failed import is a
-    failure of the pass and assigns nothing, so the next pass tries again. The claim held
-    throughout keeps a second import -- a pass by hand, or the next one after this was
-    killed -- from starting beside it."""
+    failure of the pass and assigns nothing, so the next pass tries again. It runs under
+    the pass's `PASS_LOCK`, whose bound allows for it (`pass_bound`), so a second import --
+    a pass by hand, or the next scheduled one -- cannot start beside it."""
     name, checkout = collector.project, here.checkout(collector)
-    with claim(claim_path(here.base, name), "a handoff import", PICKUP_BOUND) as other:
-        if other:
-            here.report.say(f"{name}: not asked about a handoff -- {other} is acting on it")
-            return False
-        pending = here.handoffs.pending(collector, checkout, here.name)
-        if pending.state == handoff.BROKEN:
-            here.report.say(
-                f"{name}: could not ask whether a handoff waits ({pending.said.summary()})"
-            )
-        if pending.state != handoff.WAITING:
-            return False
-        if why := stop_service(collector, here):
-            here.report.say(
-                f"{name}: {pending.source} handed it here, but `{collector.service}` could not be "
-                f"stopped for the import: {why} -- the next pass tries again"
-            )
-            return False
-        said = here.handoffs.restore(collector, checkout, here.name)
-        if said.code != 0:
-            here.report.fail(
-                f"{name}: handed to this machine, and its import failed ({said.summary()}) -- "
-                f"see {checkout / handoff.PROJECT_LOG}; nothing assigned, the next pass tries again"
-            )
-            here.report.lines.extend(f"    {line}" for line in said.tail())
-            return False
-        set_mode(here, name, config.RUN)
-        handoff.forget_outgoing(here.outgoing, name)
-        here.report.say(f"{name}: taken over from {pending.source} -- its data is restored here")
-        return True
+    pending = here.handoffs.pending(collector, checkout, here.name)
+    if pending.state == handoff.BROKEN:
+        here.report.say(f"{name}: could not ask whether a handoff waits ({pending.said.summary()})")
+    if pending.state != handoff.WAITING:
+        return False
+    if why := stop_service(collector, here):
+        here.report.say(
+            f"{name}: {pending.source} handed it here, but `{collector.service}` could not be "
+            f"stopped for the import: {why} -- the next pass tries again"
+        )
+        return False
+    said = here.handoffs.restore(collector, checkout, here.name)
+    if said.code != 0:
+        here.report.fail(
+            f"{name}: handed to this machine, and its import failed ({said.summary()}) -- "
+            f"see {checkout / handoff.PROJECT_LOG}; nothing assigned, the next pass tries again"
+        )
+        here.report.lines.extend(f"    {line}" for line in said.tail())
+        return False
+    set_mode(here, name, config.RUN)
+    handoff.forget_outgoing(here.outgoing, name)
+    here.report.say(f"{name}: taken over from {pending.source} -- its data is restored here")
+    return True
 
 
 def follow_handoffs(
@@ -1525,8 +1653,8 @@ def row(
 ) -> tuple[str, str]:
     """`(level, detail)` for one assigned collector. `busy` is a `maintain` pass at work
     (`in_pass`), which is starting whatever it finds down: green until it is done, and a
-    start that fails fails that pass. `held` names who holds the collector's `claim` --
-    a `move` that stopped it for its export -- which is green on the same terms. A `stop`
+    start that fails fails that pass. `held` names a `move` holding `PASS_LOCK` for this
+    collector, which stopped it for its export -- green on the same terms. A `stop`
     one this machine handed off (`held`, then, says to whom) is green and says so."""
     if target.mode == config.STOP:
         box = find(containers or [], target.checkout, target.collector.service)
@@ -1548,7 +1676,7 @@ def row(
 
 def down_row(box: Container | None, busy: bool, held: str = "") -> tuple[str, str]:
     """`row`'s answer for a `run` collector with no running container: red, unless a
-    pass is at work (`busy`), which is starting it, or someone holds its claim (`held`)."""
+    pass is at work (`busy`), which is starting it, or a `move` is exporting it (`held`)."""
     if busy:
         return OK, f"{STARTING} ({box.status if box else 'no container yet'})"
     if held:
@@ -1558,12 +1686,12 @@ def down_row(box: Container | None, busy: bool, held: str = "") -> tuple[str, st
     return FAIL, f"not running ({box.status})"
 
 
-def holding(base: Path, target: Target, sent: dict[str, dict], clock: float) -> str:
-    """`row`'s `held` for `target`: who holds its claim, for a `run` one; for a `stop`
-    one, the machine this one handed it to (`sent`, `handoff.OUTGOING`). Local files
-    only -- the tray asks the store nothing."""
+def holding(target: Target, moving: dict[str, str], sent: dict[str, dict]) -> str:
+    """`row`'s `held` for `target`: for a `run` one, the `move` exporting it (`moving`,
+    `move_holding`); for a `stop` one, the machine this one handed it to (`sent`,
+    `handoff.OUTGOING`). Local files only -- the tray asks the store nothing."""
     if target.mode == config.RUN:
-        return live_claim(claim_path(base, target.collector.project), clock)
+        return moving.get(target.collector.project, "")
     record = sent.get(target.collector.project)
     if record is None:
         return ""
@@ -1626,10 +1754,11 @@ def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tupl
         clock = _clock()
         busy = in_pass(base / IN_PASS, clock)
         sent = handoff.load_outgoing(base / handoff.OUTGOING)
+        moving = move_holding(base / PASS_LOCK, clock)
         rows += [
             (
                 ROW_PREFIX + t.collector.project,
-                *row(t, containers, health, busy, holding(base, t, sent, clock)),
+                *row(t, containers, health, busy, holding(t, moving, sent)),
             )
             for t in chosen
         ]
@@ -1855,48 +1984,89 @@ def main(
     for note in notes:
         report.fail(note)
     assignment = config.load_assignment(base / config.ASSIGNMENT)
-    chosen: list[Target] = []
-    engine = docker or Docker(
-        restarts=base / RESTARTED, holds=lambda: scheduled_in_flight(chosen, run)
-    )
     workspace = sweep.default_workspace(base).parent
+
+    def in_flight() -> list[str]:
+        """The scheduled runs a restart would cut short, by the assignment as it stands."""
+        now_assigned = config.load_assignment(base / config.ASSIGNMENT)
+        return scheduled_in_flight(targets(collectors, now_assigned, workspace), run)
+
+    engine = docker or Docker(restarts=base / RESTARTED, holds=in_flight)
     here = Here(base, workspace, handoff.this_host(), engine, handoffs or handoff.Handoff(), report)
     if args.mode == MOVE:
         move(args.projects, args.to, collectors, assignment, here)
-        return finish()
-    if args.mode == "maintain":
-        assignment = pick_up(collectors, assignment, here)
-        follow_handoffs(collectors, assignment, here)
-    if args.mode in VERBS:
-        acted_on = apply_verb(args, base, collectors, run, report)
-        if acted_on is None:
-            return finish()
-        assignment = acted_on
-    chosen = targets(collectors, assignment, workspace)
-    if args.mode == "status":
-        status(collectors, chosen, engine, report, base, run)
+    elif args.mode == "status":
+        status(collectors, targets(collectors, assignment, workspace), engine, report, base, run)
         handoff_status(collectors, assignment, here)
-        return finish()
-    act(args.mode, chosen, here, run)
+    else:
+        run_pass(args, collectors, assignment, here, run)
     return finish()
 
 
-def act(mode: str, chosen: list[Target], here: Here, run: collector_tasks.Runner) -> None:
-    """`maintain`, `run-here` and `stop-here` acting on `chosen`: the scheduled collectors'
-    tasks, then each container collector whose claim this run holds (`claiming`)."""
-    base, report = here.base, here.report
-    if not chosen:
-        report.say("no collector is assigned to this machine -- nothing to do")
+def pass_bound(
+    collectors: Sequence[config.Collector], assignment: dict[str, str], picks_up: bool
+) -> float:
+    """How long a pass acting on `assignment` may hold `PASS_LOCK`: a `TARGET_BOUND` for
+    each container collector it may act on, and -- for a `maintain`, which `picks_up` --
+    a `PICKUP_BOUND` and a `pending` for each it may take over, counting one it is not yet
+    assigned among the targets. A lock that expired mid-restore would let the next pass
+    break it and start a second restore into the same database."""
+    containers = [c for c in collectors if not c.scheduled]
+    takers = [
+        c for c in containers if picks_up and c.handoff and assignment.get(c.project) != config.RUN
+    ]
+    acted_on = {c.project for c in containers if c.project in assignment}
+    acted_on |= {c.project for c in takers}
+    pickups = len(takers) * (PICKUP_BOUND + handoff.PENDING_TIMEOUT)
+    return PS_TIMEOUT + max(1, len(acted_on)) * TARGET_BOUND + pickups
+
+
+def run_pass(
+    args: argparse.Namespace,
+    collectors: Sequence[config.Collector],
+    assignment: dict[str, str],
+    here: Here,
+    run: collector_tasks.Runner,
+) -> None:
+    """`maintain`, `run-here` and `stop-here`, under `PASS_LOCK`: a verb waits for it, a
+    scheduled `maintain` that finds it held stands down. A `maintain` takes over what was
+    handed to this machine (`pick_up`) and follows what it handed off (`follow_handoffs`)
+    inside the lock, so a `move` holding it is never raced, and a restore is never run
+    twice at once."""
+    if args.mode in VERBS:
+        acted_on = apply_verb(args, here.base, list(collectors), run, here.report)
+        if acted_on is None:
+            return
+        assignment = acted_on
+    bound = pass_bound(collectors, assignment, picks_up=args.mode == "maintain")
+    with one_pass(here.base / PASS_LOCK, bound, wait=args.mode in VERBS) as had:
+        if not had:
+            here.report.say(STOOD_DOWN)
+            return
+        if args.mode == "maintain":
+            assignment = pick_up(collectors, assignment, here)
+            follow_handoffs(collectors, assignment, here)
+        chosen = targets(collectors, assignment, here.workspace)
+        if not chosen:
+            here.report.say("no collector is assigned to this machine -- nothing to do")
+        act(chosen, here.base, here.docker, here.report, run)
+
+
+def act(
+    chosen: Sequence[Target],
+    base: Path,
+    engine: Docker,
+    report: Report,
+    run: collector_tasks.Runner,
+) -> None:
+    """The part of a `maintain` or a verb that starts and stops things, under `PASS_LOCK`."""
     maintain_scheduled([t for t in chosen if t.collector.scheduled], base, report, run)
     health = load_health(base / HEALTH)
     in_containers = [t for t in chosen if not t.collector.scheduled]
     since = machine_clock.awake_since()
     awake = None if since is None else _time.time() - since
-    with (
-        claiming(base, in_containers, f"`collectors.py {mode}`", report) as mine,
-        acting(base / IN_PASS, mine),
-    ):
-        maintain(mine, here.docker, report, health, awake=awake)
+    with acting(base / IN_PASS, in_containers):
+        maintain(in_containers, engine, report, health, awake=awake)
     write_file(base / HEALTH, json.dumps(health, indent=2, sort_keys=True) + "\n")
 
 

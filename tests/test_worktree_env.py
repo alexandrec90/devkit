@@ -8,15 +8,17 @@ is the thing under test, and a stub would only assert that the stub works.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
-from support import load_script, worktree_tiers
+from support import REPO_ROOT, load_script, worktree_tiers
 
 wt_env = load_script("scripts/worktree_env.py")
 
@@ -454,6 +456,40 @@ def test_a_successful_command_that_made_no_venv_is_not_marked(tmp_path):
     assert not (tree / ".venv").exists()
 
 
+ERESOLVE_TAIL = (
+    "npm error code ERESOLVE\n"
+    "npm error ERESOLVE unable to resolve dependency tree\n"
+    "npm error For a full report see:\n"
+    "npm error C:\\npm-cache\\_logs\\2026-10-11T02_35_18_014Z-eresolve-report.txt\n"
+    "npm error A complete log of this run can be found in: C:\\npm-cache\\_logs\\x-debug-0.log\n"
+)
+
+
+def test_a_tree_whose_own_dependencies_do_not_resolve_leaves_no_harness_friction(tmp_path):
+    """05cedf4b/e155cd23: carameli's test-env branch asked for vitest ^5 beside
+    @vitest/ui ^4, and npm's ERESOLVE became two devkit ledger groups though the PR's own
+    gate failed on that install and its fixer had already fixed it. The manifest is the
+    project's, so the line says so and the friction file is left alone."""
+    checkout, tree = _provisionable(tmp_path)
+    line = wt_env.provision(
+        tree, checkout, runner=_Run(1, stderr=ERESOLVE_TAIL), environ={}, uv="uv"
+    )
+    assert "own dependencies do not resolve" in line
+    assert "npm error code ERESOLVE" in line
+    assert not (tree / wt_env.FRICTION_FILE).exists()
+    assert not (tree / wt_env.PROVISIONED).exists(), "the next update still retries"
+
+
+def test_unresolvable_names_each_resolvers_conflict_and_nothing_else():
+    assert wt_env.unresolvable(ERESOLVE_TAIL) == "npm error code ERESOLVE"
+    assert wt_env.unresolvable(
+        "", "x\n  \N{MULTIPLICATION SIGN} No solution found when resolving dependencies:\n"
+    )
+    assert wt_env.unresolvable(b"ERROR: ResolutionImpossible: for help visit\n")
+    assert wt_env.unresolvable(None, "npm error A complete log ... eresolve-report.txt")
+    assert wt_env.unresolvable("error: no index\n", "npm error code ENOTFOUND", None) == ""
+
+
 def test_a_failure_or_a_gap_is_left_as_the_trees_friction_for_the_pass_to_file(tmp_path):
     """The hook's only report was a line inside `git worktree add`, which `claude
     --worktree` swallows -- so a tree came up with no `.venv` and nothing anywhere said
@@ -521,14 +557,16 @@ def test_a_plain_install_command_keeps_the_inherited_environment(tmp_path, monke
 
 
 def _hold_lock(handle) -> None:
-    """Take the exclusive lock uv takes on a file: `LockFileEx` on Windows, `flock` elsewhere."""
-    if sys.platform == "win32":
-        import msvcrt
+    """Take the exclusive lock uv takes on a file: `LockFileEx` on Windows, `flock` elsewhere.
 
+    By `os.name`, the host's own answer: the lock is taken against the real uv on this
+    machine, so a faked `sys.platform` reached for `fcntl` on Windows. `Any`, because
+    mypy narrows only on `sys.platform` and would check each module on the other OS."""
+    if os.name == "nt":
+        msvcrt: Any = importlib.import_module("msvcrt")
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     else:
-        import fcntl
-
+        fcntl: Any = importlib.import_module("fcntl")
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
@@ -829,6 +867,52 @@ def test_a_sibling_tree_already_there_is_moved_to_the_ref_it_was_cut_at(tmp_path
     assert _git(target, "rev-parse", "HEAD").stdout.strip() == new
 
 
+def test_a_sibling_a_run_in_another_tree_holds_at_another_pin_is_not_moved(tmp_path):
+    """d32ffcc2: the #116 fixer's `worktree.py provision` moved the shared data-lake
+    d32d4d5 -> c0aa963 while the #123 fixer was checking its lock against d32d4d5."""
+    lake, checkout, tree, target = _cut_sibling(tmp_path)
+    old = _git(target, "rev-parse", "HEAD").stdout.strip()
+    _advance_lake(lake)
+    pins = wt_env.sibling_pins()
+    # The parent of this test process: alive, and not this run.
+    other = pins.hold(pins.lease_dir(target), old, tmp_path / "tree-123", os.getppid())
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert wt_env.held([line]) and "tree-123" in line, line
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == old
+    pins.release(other)
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert "moved" in line and not wt_env.held([line])
+    mine = pins.lease_dir(target) / f"{os.getpid()}{pins.LEASE_SUFFIX}"
+    assert mine.read_text(encoding="utf-8").splitlines()[1] == str(tree), "leased for the tree"
+
+
+def test_the_lease_module_is_found_in_devkit_and_beside_the_installed_hook(tmp_path, monkeypatch):
+    monkeypatch.delitem(sys.modules, "sibling_pins", raising=False)
+    found = wt_env.sibling_pins()
+    assert found is not None and Path(found.__file__).name == "sibling_pins.py"
+    installed = tmp_path / "hooks"
+    installed.mkdir()
+    shutil.copy(REPO_ROOT / "scripts" / "worktree_env.py", installed / "devkit_worktree_env.py")
+    hook = load_script(str(installed / "devkit_worktree_env.py"))
+    monkeypatch.delitem(sys.modules, "sibling_pins", raising=False)
+    assert hook.sibling_pins() is None, "neither copy: the move runs unguarded, as before"
+    shutil.copy(
+        REPO_ROOT / "scripts" / "hooks" / "sibling_pins.py", installed / "devkit_sibling_pins.py"
+    )
+    assert Path(hook.sibling_pins().__file__) == installed / "devkit_sibling_pins.py"
+    monkeypatch.delitem(sys.modules, "sibling_pins", raising=False)
+
+
+def test_the_hook_does_not_sync_a_tree_whose_sibling_another_run_holds(tmp_path, monkeypatch):
+    held = f"devkit: data-lake {wt_env.HELD} a run in tree-123 (pid 9)"
+    monkeypatch.setattr(wt_env, "checkout_of", lambda here: tmp_path / "main")
+    monkeypatch.setattr(wt_env, "name_compose_project", lambda here, checkout: "")
+    monkeypatch.setattr(wt_env, "agent_tree", lambda here, environ: True)
+    monkeypatch.setattr(wt_env, "link_path_sources", lambda *a, **k: [held])
+    monkeypatch.setattr(wt_env, "provision", lambda *a, **k: pytest.fail("synced"))
+    assert wt_env._set_up(tmp_path / "tree", None, {}) == 0
+
+
 PR_GATE = """\
 jobs:
   test:
@@ -852,25 +936,34 @@ def _pin(tree: Path, ref: str, name: str = "pr-gate.yml", text: str = PR_GATE) -
     (workflows / name).write_text(text.replace("{ref}", ref), encoding="utf-8")
 
 
-def test_the_pin_is_the_ref_the_trees_own_gate_checks_the_sibling_out_at(tmp_path):
+@pytest.mark.parametrize(
+    "module",
+    [wt_env, load_script("scripts/hooks/toolchain.py")],
+    ids=["worktree_env-cuts-the-sibling", "vendored-toolchain-re-checks-it"],
+)
+def test_the_pin_is_the_ref_the_trees_own_gate_checks_the_sibling_out_at(tmp_path, module):
+    """Both readers, held to one answer: the git hook cuts the sibling at the pin and is
+    installed alone, so it cannot import the vendored `toolchain.pinned_ref` every runner
+    re-checks the pin with (0db0d931, 941b7470)."""
+    pinned_ref = module.pinned_ref
     sha = "4305" * 10  # a full commit sha's shape, without the entropy detect-secrets flags
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == "", "no workflows: no pin"
+    assert pinned_ref(tmp_path, "data-lake") == "", "no workflows: no pin"
     _pin(tmp_path, f'"{sha}"')
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == sha, "quotes and a comment are not the ref"
-    assert wt_env.pinned_ref(tmp_path, "Data-Lake") == sha
-    assert wt_env.pinned_ref(tmp_path, "other") == "", "another repo's step is not its pin"
+    assert pinned_ref(tmp_path, "data-lake") == sha, "quotes and a comment are not the ref"
+    assert pinned_ref(tmp_path, "Data-Lake") == sha
+    assert pinned_ref(tmp_path, "other") == "", "another repo's step is not its pin"
     # The PR gate outranks a nightly that tracks the default branch on purpose.
     _pin(tmp_path, "main", name="nightly.yml")
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == sha
+    assert pinned_ref(tmp_path, "data-lake") == sha
     # A step with no `ref:`, or an expression, pins nothing.
     _pin(tmp_path, "${{ inputs.ref }}")
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == "main", "the nightly's, now the only one"
+    assert pinned_ref(tmp_path, "data-lake") == "main", "the nightly's, now the only one"
     unpinned = PR_GATE.replace(
         "          ref: {ref}  # the commit uv.lock was resolved against\n", ""
     )
     _pin(tmp_path, "x", text=unpinned)
     (tmp_path / ".github" / "workflows" / "nightly.yml").unlink()
-    assert wt_env.pinned_ref(tmp_path, "data-lake") == ""
+    assert pinned_ref(tmp_path, "data-lake") == ""
 
 
 def test_a_sibling_is_cut_and_moved_at_the_ref_the_trees_gate_pins(tmp_path):
@@ -929,6 +1022,59 @@ def test_a_sibling_path_holding_another_repo_is_named_not_moved(tmp_path):
     _repo(checkout / ".claude" / "worktrees" / "data-lake", compose=False)
     [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
     assert "is not a worktree of" in line
+
+
+def _dir_link(link: Path, aimed: Path) -> None:
+    """A junction on Windows, as the one d2e29fee found, which needs no privilege there."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(aimed), str(link))
+    else:
+        link.symlink_to(aimed, target_is_directory=True)
+
+
+def test_a_link_to_a_reaped_box_at_the_sibling_path_is_replaced_by_a_cut(tmp_path):
+    """d2e29fee: `.worktrees/data-lake` was a junction to a reaped box, so `exists()`
+    read the sibling as missing and `worktree add` refused the path as already there."""
+    _lake, checkout, tree = _with_sibling_source(tmp_path)
+    reaped = tmp_path / "data-lake--reaped"
+    reaped.mkdir()
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    _dir_link(target, reaped)
+    reaped.rmdir()
+    lines = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert any(line.startswith(f"devkit: removed {target}") for line in lines), lines
+    assert (target / ".gitignore").is_file(), lines
+    assert reaped.exists() is False and tmp_path.exists(), "only the link went"
+
+
+def test_only_a_link_to_nothing_is_cleared(tmp_path):
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "kept.txt").write_text("x\n", encoding="utf-8")
+    assert wt_env.clear_dead_link(live) == "", "a real directory"
+    assert wt_env.clear_dead_link(tmp_path / "absent") == "", "nothing there at all"
+    link = tmp_path / "link"
+    _dir_link(link, live)
+    assert wt_env.clear_dead_link(link) == "", "a link whose target is there"
+    assert (link / "kept.txt").is_file()
+
+
+def test_a_dead_link_that_will_not_go_is_named(tmp_path, monkeypatch):
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    link = tmp_path / "link"
+    _dir_link(link, gone)
+    gone.rmdir()
+
+    def refuse(path):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(wt_env.os, "unlink", refuse)
+    monkeypatch.setattr(wt_env.os, "rmdir", refuse)
+    line = wt_env.clear_dead_link(link)
+    assert "which is gone, and stays (in use)" in line
 
 
 def test_no_sibling_repo_beside_the_checkout_means_nothing_is_cut(tmp_path):

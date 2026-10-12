@@ -10,11 +10,12 @@ a new key when it is still red. The user chose click-only over a scheduled dispa
 precisely because a session costs real money and a loop that spent one silently would
 be the worst outcome here.
 
-Three things an entry can say beyond "sent": that it is old enough to look at again
+Four things an entry can say beyond "sent": that it is old enough to look at again
 (`RESEND_AFTER`, because a session that died can leave nothing but its entry), that the
 pass found its session dead (`mark_dead`, which frees it at once; `mark_interrupted`
-when a restart killed it, which also takes the send back), and that the session
-reported itself blocked (`mark_blocked`).
+when a restart killed it, which also takes the send back), that the session
+reported itself blocked (`mark_blocked`), and that its fix waits on another PR's merge
+(`mark_waiting`), which holds the problem until that PR closes rather than escalating it.
 
 And one thing the entries say together: how many sessions one *problem* has had
 (`problem_key`, the key less its commit). A failure that survives `ATTEMPTS` fixers
@@ -204,10 +205,16 @@ AT_KEEP = 8
 
 
 def sent_since(ledger: dict[str, dict], source: str, since: _dt.datetime) -> int:
-    """How many sessions of `source` the ledger records at or after `since`."""
+    """How many sessions of `source` the ledger records at or after `since`.
+
+    An entry keyed under a free action (`fix_plan.NO_SESSION`) is no session: older
+    ledgers stamped branch updates with their source, and those must not spend a cap.
+    """
     count = 0
-    for entry in ledger.values():
+    for key, entry in ledger.items():
         if not isinstance(entry, dict) or entry.get("source") != source:
+            continue
+        if key.rsplit(":", 1)[-1] in fix_plan.NO_SESSION:
             continue
         stamps = entry.get("at")
         for stamp in stamps if isinstance(stamps, list) else []:
@@ -237,6 +244,12 @@ def mark_blocked(path: Path, key: str, reason: str) -> bool:
     noise, not a report. Returns whether one was marked.
     """
     return _mark(path, key, "blocked", reason)
+
+
+def mark_waiting(path: Path, key: str, url: str) -> bool:
+    """A dispatched session found its fix waits on the PR at `url`: keep its entry, with
+    that PR. Only an entry the ledger already has. Returns whether one was marked."""
+    return _mark(path, key, "waits", url)
 
 
 def mark_dead(path: Path, key: str, reason: str) -> bool:
@@ -308,6 +321,22 @@ def blocked_reason(decision: fix_plan.Decision, ledger: dict[str, dict], since: 
         ):
             return str(other["blocked"])
     return ""
+
+
+def waiting_on(decision: fix_plan.Decision, ledger: dict[str, dict], since: str = "") -> str:
+    """The PR the newest session sent at this decision's problem, after `since`, said its
+    fix waits on; "" when none said so. Newest, because a later session's word is what
+    the problem looks like now."""
+    problem = problem_key(decision)
+    waits = sorted(
+        (str(entry.get("when", "")), str(entry["waits"]))
+        for key, entry in ledger.items()
+        if isinstance(entry, dict)
+        and entry.get("waits")
+        and problem_of(key, entry) == problem
+        and _since(entry, since)
+    )
+    return waits[-1][1] if waits else ""
 
 
 def attempts(decision: fix_plan.Decision, ledger: dict[str, dict], since: str = "") -> int:

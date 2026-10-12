@@ -518,6 +518,123 @@ def test_render_env_handles_an_empty_source():
     assert "COMPOSE_PROJECT_NAME=x" in rendered
 
 
+# The source checkout's `.env` as ibkr_trader had it: a URL derived from the db's port.
+IBKR_ENV = "DATABASE_URL=postgresql+psycopg://trader@127.0.0.1:5433/ibkr_trader\nSECRET=x\n"
+BOX_DB_URL = "postgresql+psycopg://trader@127.0.0.1:5435/ibkr_trader"
+
+
+def test_a_seeded_url_on_the_sources_port_is_moved_onto_the_boxs():
+    """Regression (ibkr_trader, 2026-10-11): the box got `DB_HOST_PORT=5435`, but its
+    seeded `DATABASE_URL` still named 5433 -- the static checkout's long-lived database --
+    so a bare `alembic upgrade head` in the box migrated that one."""
+    managed = worktree.managed_env("ibkr_trader--x-1011", registry(ibkr_trader=1), 3)
+    published = worktree.checkout_ports(registry(ibkr_trader=1), "ibkr_trader")
+
+    rebased = worktree.rebase_seeded_ports(IBKR_ENV, published, managed)
+
+    assert rebased == {"DATABASE_URL": BOX_DB_URL}
+
+
+def test_the_rebased_value_wins_in_the_written_env(tmp_path):
+    (tmp_path / "src.env").write_text(IBKR_ENV, encoding="utf-8")
+    managed = worktree.managed_env("ibkr_trader--x-1011", registry(ibkr_trader=1), 3)
+
+    rebased = worktree.seed_env(
+        tmp_path / "src.env",
+        tmp_path / "box.env",
+        managed,
+        worktree.checkout_ports(registry(ibkr_trader=1), "ibkr_trader"),
+    )
+
+    written = (tmp_path / "box.env").read_text(encoding="utf-8")
+    assert set(rebased) == {"DATABASE_URL"}
+    # The source's line is kept above the managed block; the last assignment is what wins.
+    assert written.rsplit("DATABASE_URL=", 1)[1].startswith(f"{BOX_DB_URL}\n")
+    assert "SECRET=x" in written
+
+
+def test_a_port_the_sources_env_sets_beats_its_registry_slot():
+    """The source's own `.env` is what its compose run actually publishes on."""
+    seeded = "DB_HOST_PORT=5440\nURL=http://localhost:5440/x\nOLD=http://localhost:5433/x\n"
+    managed = worktree.managed_env("p--x-1011", registry(p=1), 3)
+
+    rebased = worktree.rebase_seeded_ports(
+        seeded, worktree.checkout_ports(registry(p=1), "p"), managed
+    )
+
+    assert rebased == {"URL": "http://localhost:5435/x"}
+
+
+def test_only_local_hosts_and_whole_port_numbers_are_rebased():
+    """A remote host on the same number is somebody else's service, and 54330 is not 5433."""
+    seeded = (
+        "REMOTE=postgres://u@db.example.com:5433/x\n"
+        "LONGER=http://127.0.0.1:54330\n"
+        "IP=http://10.0.0.1:5433\n"
+        "COMPOSE=postgres://u@db:5432/x\n"
+        "LOCAL=http://[::1]:5433\n"
+    )
+    managed = worktree.managed_env("p--x-1011", registry(p=1), 3)
+
+    rebased = worktree.rebase_seeded_ports(
+        seeded, worktree.checkout_ports(registry(p=1), "p"), managed
+    )
+
+    assert rebased == {"LOCAL": "http://[::1]:5435"}
+
+
+def test_a_key_the_managed_env_sets_is_left_to_the_template():
+    """An explicit `[worktree] env` template knows better than the generic rewrite."""
+    managed = worktree.managed_env(
+        "p--x-1011", registry(p=1), 3, {"DATABASE_URL": "sqlite:///${DB_HOST_PORT}"}
+    )
+    published = worktree.checkout_ports(registry(p=1), "p")
+
+    assert worktree.rebase_seeded_ports(IBKR_ENV, published, managed) == {}
+
+
+def test_a_port_that_did_not_move_is_not_rebased():
+    """A UI-only box keeps the donor's backend ports, so its backend URLs must stay put."""
+    managed = worktree.managed_env(
+        "p--ui-1011", registry(p=1), 3, donor_slot=1, own_services=("app",)
+    )
+
+    assert (
+        worktree.rebase_seeded_ports(IBKR_ENV, worktree.checkout_ports(registry(p=1), "p"), managed)
+        == {}
+    )
+
+
+def test_nothing_is_rebased_without_a_registry_or_for_an_unregistered_project():
+    managed = worktree.managed_env("p--x-1011", registry(p=1), 3)
+    assert worktree.checkout_ports(None, "p") == {}
+    assert worktree.checkout_ports(registry(p=1), "q") == {}
+    assert worktree.rebase_seeded_ports(IBKR_ENV, {}, managed) == {}
+
+
+def test_seed_box_env_warns_rather_than_seeding_a_tracked_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "is_tracked", lambda path, name: True)
+    managed = {"COMPOSE_PROJECT_NAME": "p--x-1011", "DB_HOST_PORT": "5435"}
+
+    notes = worktree.seed_box_env(tmp_path, tmp_path / "box", box(project="p"), managed, True)
+
+    assert len(notes) == 1 and notes[0].startswith("[warn] .env is tracked in p")
+    assert "DB_HOST_PORT=5435" in notes[0]
+    assert not (tmp_path / "box" / ".env").exists()
+
+
+def test_seed_box_env_says_nothing_for_a_box_with_no_stack(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "is_tracked", lambda path, name: False)
+    assert worktree.seed_box_env(tmp_path, tmp_path / "box", box(), {}, False) == []
+
+
+def test_comments_and_a_stale_managed_block_are_not_assignments():
+    text = worktree.render_env(
+        "# URL=http://localhost:5433\nexport A = 1\nA=2\n", {"URL": "http://localhost:5439"}
+    )
+    assert worktree.dotenv_assignments(text) == {"A": "2"}
+
+
 # --- spawn ------------------------------------------------------------------
 
 
@@ -2642,6 +2759,33 @@ def test_a_box_is_provisioned_when_it_is_created(workspace, monkeypatch):
     assert ran == [plan.provision]
 
 
+def test_a_new_box_reports_its_sibling_links_before_the_sync_they_feed(workspace, monkeypatch):
+    """d2e29fee: the hook's failed sibling cut was swallowed with the `worktree add`
+    output, so `new` reported only the `uv sync` it broke."""
+    order: list[str] = []
+    refused = "devkit: could not cut .worktrees/data-lake (fatal: already exists)"
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    monkeypatch.setattr(worktree, "link_siblings", lambda path: order.append("link") or [refused])
+    monkeypatch.setattr(
+        worktree, "run_provision", lambda path, steps: (order.append("sync"), (False, ["uv"]))[1]
+    )
+    plan = _spawned(workspace, provision=(worktree.ProvisionStep("uv sync", ("uv", "sync")),))
+
+    ok, notes = worktree.apply_new(plan, workspace)
+    assert ok is True and order == ["link", "sync"]
+    assert notes.index(refused) < notes.index("uv")
+
+
+def test_provision_new_box_links_nothing_it_will_not_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "link_siblings", lambda path: pytest.fail("linked"))
+    monkeypatch.setattr(worktree, "run_provision", lambda *a: pytest.fail("installed"))
+    step = (worktree.ProvisionStep("uv sync", ("uv", "sync")),)
+    assert worktree.provision_new_box(tmp_path, "demo--x", (), True) == [], "nothing to install"
+    [note] = worktree.provision_new_box(tmp_path, "demo--x", step, False)
+    assert note.startswith("not provisioned") and "provision demo--x --yes" in note
+
+
 def test_the_cut_leaves_provisioning_to_the_box_not_the_checkout_hook(workspace, monkeypatch):
     """4a9086cf / 77a810f7: the `post-checkout` hook ran carameli's 600 s-bounded
     `scripts/bootstrap.py` inside a `worktree add` bounded at 300 s, so the adoption's
@@ -3201,18 +3345,37 @@ def test_provision_re_aims_path_source_siblings_before_the_sync(workspace, monke
     monkeypatch.setattr(
         worktree,
         "link_siblings",
-        lambda path: order.append("link") or ["devkit: data-lake moved from c14c6be"],
+        lambda path, wait: (
+            order.append(f"link {wait:.0f}") or ["devkit: data-lake moved from c14c6be"]
+        ),
     )
     monkeypatch.setattr(
         worktree, "run_provision", lambda path, steps: (order.append("sync"), (True, []))[1]
     )
 
     assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 0
-    assert order == ["link", "sync"]
+    assert order == [f"link {worktree.worktree_env.SESSION_WAIT:.0f}", "sync"], "a session waits"
     assert "data-lake moved from c14c6be" in capsys.readouterr().out
 
     assert worktree.main(["provision", "demo", "--dry-run", "--workspace", str(workspace)]) == 0
-    assert order == ["link", "sync"]
+    assert len(order) == 2
+
+
+def test_provision_never_syncs_against_a_sibling_another_run_holds(workspace, monkeypatch, capsys):
+    """d32ffcc2: a sync against another run's pin relocks `uv.lock` against it."""
+    root = workspace.parent
+    (root / "demo" / ".git").mkdir(parents=True)
+    step = worktree.ProvisionStep(label="uv sync", argv=("uv", "sync"))
+    monkeypatch.setattr(worktree, "plan_provision", lambda path: (step,))
+    held = f"devkit: data-lake {worktree.worktree_env.HELD} a run in tree-123 (pid 9)"
+    monkeypatch.setattr(worktree, "link_siblings", lambda path, wait=0.0: [held])
+    monkeypatch.setattr(worktree, "run_provision", lambda *a: pytest.fail("synced"))
+
+    assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 1
+    out = capsys.readouterr().out
+    assert held in out and "not synced" in out
+    [linked, note] = worktree.provision_new_box(root / "demo", "demo", (step,), True)
+    assert linked == held and note.startswith("not provisioned")
 
 
 def test_link_siblings_leaves_a_static_checkout_alone(tmp_path, monkeypatch):
@@ -3221,7 +3384,7 @@ def test_link_siblings_leaves_a_static_checkout_alone(tmp_path, monkeypatch):
     monkeypatch.setattr(
         worktree.worktree_env,
         "link_path_sources",
-        lambda here, checkout: calls.append((here, checkout)) or ["cut"],
+        lambda here, checkout, wait: calls.append((here, checkout)) or ["cut"],
     )
     monkeypatch.setattr(worktree.worktree_env, "checkout_of", lambda path: None)
     assert worktree.link_siblings(tmp_path) == [] and calls == []
@@ -3260,6 +3423,25 @@ def test_a_failed_install_step_says_failed_not_warn(tmp_path, monkeypatch):
     assert notes[0].startswith("FAILED provision: npm ci") and "[warn]" not in notes[0]
     rendered = worktree.render_provision("demo", (worktree.ProvisionStep("x", ("x",)),), True, [])
     assert rendered.startswith("Provisioned demo")
+
+
+def test_a_failed_install_step_names_a_dependency_conflict_over_npms_last_line(
+    tmp_path, monkeypatch
+):
+    """npm ends a refusal on "A complete log of this run can be found in", which is all
+    the note said; the ERESOLVE line above it is what says the manifest is the cause."""
+    stderr = (
+        "npm error code ERESOLVE\nnpm error ERESOLVE unable to resolve dependency tree\n"
+        "npm error A complete log of this run can be found in: x-debug-0.log\n"
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", stderr)
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, notes = worktree.run_provision(tmp_path, (worktree.ProvisionStep("npm ci", ("npm", "ci")),))
+    assert ok is False
+    assert notes == ["FAILED provision: npm ci failed: npm error code ERESOLVE"]
 
 
 def test_the_verbs_that_change_the_workspace_still_plan_by_default():
@@ -5858,7 +6040,9 @@ def test_a_re_leased_ui_box_keeps_its_two_slot_env(tmp_path, monkeypatch):
     monkeypatch.setattr(worktree, "has_stack", lambda path: True)
     monkeypatch.setattr(worktree, "is_tracked", lambda path, name: False)
     seeded: dict[str, str] = {}
-    monkeypatch.setattr(worktree, "seed_env", lambda src, dst, env: seeded.update(env))
+    monkeypatch.setattr(
+        worktree, "seed_env", lambda src, dst, env, published=None: seeded.update(env) or {}
+    )
     ui = worktree.Box(
         name="demo--preview-ui--x",
         project="demo",
@@ -5886,6 +6070,34 @@ def test_a_re_leased_ui_box_keeps_its_two_slot_env(tmp_path, monkeypatch):
     assert seeded["APP_HOST_PORT"] == "8000"  # still the donor's
     assert seeded["VITE_PROXY_TARGET"] == "http://h:8000"
     assert any("re-leased slot 2" in note for note in notes)
+
+
+def test_a_new_box_seeds_its_db_url_onto_its_own_port(tmp_path, monkeypatch):
+    """The spawn hands `seed_env` the source checkout's registry ports, so the box's
+    `DATABASE_URL` names the box's db -- and says so in the notes."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    (tmp_path / "ws" / "ibkr_trader").mkdir(parents=True)
+    (tmp_path / "ws" / "ibkr_trader" / ".env").write_text(IBKR_ENV, encoding="utf-8")
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "load_registry", lambda root: registry(ibkr_trader=1))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: True)
+    monkeypatch.setattr(worktree, "is_tracked", lambda path, name: False)
+    name = "ibkr_trader--x-1011"
+    path = worktree.box_path(workspace.parent, name)
+    path.mkdir(parents=True)
+    plan = worktree.SpawnPlan(
+        box=box(name, project="ibkr_trader", branch="agent/x-1011", slot=3),
+        path=str(path),
+        steps=(),
+        env=worktree.managed_env(name, registry(ibkr_trader=1), 3),
+    )
+
+    ok, notes = worktree.apply_new(plan, workspace, provision=False)
+
+    assert ok
+    seeded = (path / ".env").read_text(encoding="utf-8").rsplit("DATABASE_URL=", 1)[1]
+    assert seeded.startswith(f"{BOX_DB_URL}\n")
+    assert any("moved DATABASE_URL off ibkr_trader's ports" in note for note in notes)
 
 
 def test_a_ui_preview_of_a_project_with_no_ui_tier_is_refused(workspace):

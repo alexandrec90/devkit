@@ -151,6 +151,23 @@ def test_a_blocked_report_is_escalated_rather_than_parked():
     assert go(after), "once the devkit session resolved it, the block is history"
 
 
+def test_a_fix_waiting_on_an_open_pr_holds_unescalated_until_that_pr_closes():
+    """f7c4e5db: ibkr_trader #116 needed data-lake #66 merged. Escalating that reached a
+    devkit session that could not merge it either, and resolving it sent the next fixer
+    at the same wall."""
+    one = decision(fix_plan.DISPATCH, failure())
+    ledger = ledger_after(one)
+    ledger[fix_ledger.decision_key(one)]["waits"] = "https://github.com/o/r/pull/66"
+    later = NOW + _dt.timedelta(days=2)
+    for state in ("OPEN", ""):
+        verdict = fix_budget.budget(one, ledger, later, pr_state=lambda url, s=state: s)
+        assert not verdict.go and verdict.finding is None, state
+        assert "waits on https://github.com/o/r/pull/66" in verdict.why
+    assert not fix_budget.budget(one, ledger, later).go, "unread by default: it waits"
+    for state in fix_budget.SETTLED:
+        assert go(fix_budget.budget(one, ledger, later, pr_state=lambda url, s=state: s)), state
+
+
 def test_the_devkit_session_backs_off_at_the_top_of_the_ladder_and_never_stops():
     """Nothing is above the devkit session to escalate to, so it slows down and climbs
     to the top effort rather than stopping: a backlog nobody fixes is the one outcome
@@ -266,3 +283,20 @@ def test_only_a_dependabot_session_is_recorded_under_its_source():
     assert fix_budget.source(_dependabot()) == fix_plan.DEPENDABOT
     assert fix_budget.source(decision(fix_plan.DISPATCH, failure())) == ""
     assert fix_budget.source(decision(fix_plan.UPSTREAM, failure(head="dependabot/x"))) == ""
+
+
+def test_a_free_update_of_a_dependabot_pr_spends_none_of_the_cap(tmp_path):
+    """Supervision 2026-10-11: carameli #446, a Dependabot PR behind its base, was
+    updated four times in a day, each stamped under the Dependabot source, and the
+    resolver for #440's conflict read "6 of 2 sessions sent" -- the cap spent by
+    branch updates that are no session at all."""
+    path = tmp_path / "dispatch.json"
+    bump = failure(number=446, head="dependabot/npm/vite-7")
+    for action in fix_plan.NO_SESSION:
+        free = decision(action, bump)
+        assert fix_budget.source(free) == ""
+        fix_ledger.record(
+            path, fix_ledger.decision_key(free), "n", NOW, source=fix_budget.source(free)
+        )
+    resolver = decision(fix_plan.RESOLVE, failure(number=440, head="dependabot/npm/x"))
+    assert fix_budget.over_daily_cap(resolver, fix_ledger.read_ledger(path), NOW) == ""

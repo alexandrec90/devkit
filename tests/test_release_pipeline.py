@@ -360,6 +360,52 @@ def test_the_run_never_spells_the_scope_a_second_time():
     assert rp.adoption_scope(["carameli"]) in step
 
 
+# --- what the adoption pass's exit means for the release ----------------------
+
+
+def _owed_artifact(*extra) -> str:
+    owed = up.unreleased_line(["scripts/hooks/toolchain.py"], "v0.11.62")
+    return up.artifact_body("v0.11.62", False, [up.Outcome(up.RELEASE_SCOPED, 1, owed), *extra])
+
+
+def test_main_moving_on_during_the_release_is_not_a_failed_release(capsys):
+    """The regression (ledger 14539eb2). #629 merged while v0.11.62 was cut, every
+    consumer's adoption PR opened, and the run still exited 1 as `STOPPED`, filed as a
+    failed scheduled job, because the adoption pass flagged the release main now owed."""
+    assert rp.adoption_outcome("v0.11.62", "--all", 1, _owed_artifact()) == 0
+    out = capsys.readouterr()
+    assert "STOPPED" not in out.err
+    assert "next `--if-needed` run" in out.out
+
+
+def test_a_checkout_that_failed_beside_the_owed_release_still_stops(capsys):
+    failed = up.Outcome("carameli", 2, "upgrade: carameli -- pushed, but the PR failed")
+    assert rp.adoption_outcome("v0.11.62", "--all", 2, _owed_artifact(failed)) == 1
+    assert "adoption pass exited 2" in capsys.readouterr().err
+
+
+def test_an_adoption_that_left_no_artifact_stops(capsys):
+    """A pass that crashed writes nothing; `run_pipeline` empties the file first so a
+    previous run's owed-release verdict cannot stand in for this one."""
+    assert rp.adoption_outcome("v0.11.62", "--all", 1, "") == 1
+    assert "STOPPED" in capsys.readouterr().err
+
+
+def test_a_clean_adoption_releases(capsys):
+    assert rp.adoption_outcome("v0.11.62", "--all", 0, "") == 0
+    assert "up for adoption everywhere" in capsys.readouterr().out
+
+
+def test_the_pipeline_clears_the_adoption_artifact_before_reading_it():
+    source = inspect.getsource(rp.run_pipeline)
+    cleared = source.index('write_artifact(upgrade.REPO_ROOT, "")')
+    assert cleared < source.index("_run(command") < source.index("adoption_outcome(")
+
+
+def test_an_unreadable_artifact_reads_as_empty(tmp_path):
+    assert rp.read_text(tmp_path / "missing.log") == ""
+
+
 def test_an_unreadable_tag_list_raises_rather_than_reading_as_none(tmp_path):
     """[] is `next_version`'s cue for a first release, so a git failure must not be it."""
     with pytest.raises(RuntimeError, match="fatal:"):
@@ -1172,6 +1218,93 @@ def test_an_open_pr_is_reused_and_nothing_is_pushed(monkeypatch):
 
     assert rp.prepare_pr(Path("devkit"), "v0.0.2") == (7, "")
     assert steps == []
+
+
+REJECTED = "`git push -u origin release/v0.0.2`: ! [remote rejected] (reference already exists)"
+
+
+def _rejected_push(monkeypatch, why, on_origin):
+    """`_pr_stage` with `prepare` refused at its push, and origin holding the branch
+    afterwards exactly when `on_origin` says so."""
+    steps = _pr_stage(monkeypatch, "", why)
+    monkeypatch.setattr(
+        rp.release, "prepare", lambda *_a: steps.append("prepare") or (False, REJECTED)
+    )
+    monkeypatch.setattr(
+        rp.release, "pushed_to_origin", lambda *_a: steps.append("ls-remote") or on_origin
+    )
+    return steps
+
+
+def test_a_push_lost_to_a_concurrent_run_yields_the_release_to_it(monkeypatch):
+    """2026-10-11: two runs cut release/v0.11.58 seconds apart. The winner opened #619 and
+    shipped it; the loser's push was rejected and it filed a failure for a release that
+    went out. Origin not holding the branch before the prepare, and holding it after, is
+    another run's push -- so this one stands down rather than fail or drive that PR too."""
+    steps = _rejected_push(monkeypatch, rp.release.NOT_ON_ORIGIN, True)
+
+    number, why = rp.prepare_pr(Path("devkit"), "v0.0.2")
+
+    assert number == rp.ANOTHER_RUN
+    assert "another run pushed release/v0.0.2" in why
+    assert steps == ["ask", "prepare", "ls-remote"]
+
+
+@pytest.mark.parametrize(
+    ("why", "on_origin"),
+    [
+        (rp.release.NOT_ON_ORIGIN, False),  # the push failed and nobody else's landed
+        (rp.release.NOT_ON_ORIGIN, None),  # origin could not be asked: not a yes
+        ("release/v0.0.2's commit is not `Release v0.0.2`", True),  # there before: foreign
+    ],
+)
+def test_any_other_failed_prepare_stays_a_failure(monkeypatch, why, on_origin):
+    _rejected_push(monkeypatch, why, on_origin)
+
+    assert rp.prepare_pr(Path("devkit"), "v0.0.2") == (0, f"prepare failed: {REJECTED}")
+
+
+def test_lost_the_push_race_asks_origin_only_about_a_branch_it_did_not_hold(monkeypatch):
+    asked: list[str] = []
+    monkeypatch.setattr(rp.release, "pushed_to_origin", lambda _d, b, _r: asked.append(b) or True)
+
+    assert rp.lost_the_push_race(Path("devkit"), "release/v0.0.2", rp.release.NOT_ON_ORIGIN)
+    assert not rp.lost_the_push_race(Path("devkit"), "release/v0.0.2", "its PR is CLOSED")
+    assert asked == ["release/v0.0.2"]
+
+
+def test_a_release_pr_names_the_machine_and_job_that_started_it():
+    """2026-10-11: #619 was opened by a run whose record stayed on another machine, and
+    the nightly job here that lost the race to it could not say who that was."""
+    env = {rp.JOB_ENV: "Scheduled: Devkit Release", rp.harness_events.HOST_ENV: "laptop"}
+    origin = rp.started_by(env)
+    assert origin == "Started on `laptop` by the `Scheduled: Devkit Release` job."
+    body = rp.PR_BODY.format(version="v0.0.2", expected=rp.EXPECTED_RED_TEST, origin=origin)
+    assert origin in body
+
+
+def test_a_release_no_wrapper_named_says_it_was_started_by_hand():
+    origin = rp.started_by({rp.JOB_ENV: "  ", rp.harness_events.HOST_ENV: "laptop"})
+    assert origin.startswith("Started on `laptop` by hand")
+
+
+def test_the_job_variable_is_the_one_log_wrap_sets():
+    assert rp.JOB_ENV == load_script("scripts/log-wrap.py").JOB_ENV
+
+
+def test_a_yielded_release_exits_clean_and_a_failed_one_does_not(capsys):
+    assert rp.prepare_outcome(rp.ANOTHER_RUN, "another run pushed release/v0.0.2") == 0
+    said = capsys.readouterr().out
+    assert "that run carries the release" in said
+    assert "its PR says which machine and job started it" in said
+    assert rp.prepare_outcome(0, "prepare failed: boom") == 2
+    assert "prepare failed: boom" in capsys.readouterr().err
+
+
+def test_the_pipeline_exits_through_prepare_outcome():
+    """`run_pipeline` reads no PR to drive -- a failure or a yield -- through
+    `prepare_outcome`, so a yield is never mistaken for PR number -1."""
+    assert "return prepare_outcome(number, failure)" in inspect.getsource(rp.run_pipeline)
 
 
 def _git_run(cmd, env=None):

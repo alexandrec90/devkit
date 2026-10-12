@@ -12,8 +12,11 @@ decide whether a machine ingests at all:
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import functools
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -95,8 +98,10 @@ class FakeDocker:
         self.calls.append(("started", container.id))
         return self.started_at
 
-    def deploy(self, checkout, service):
+    def deploy(self, checkout, service, files=()):
         self.calls.append(("deploy", Path(checkout).name, service))
+        # What a staged deploy hands compose, read while the staging still exists.
+        self.deployed_files = [(Path(f).name, Path(f).read_text(encoding="utf-8")) for f in files]
         return self.up_ok, "" if self.up_ok else "failed to solve: pip install exited 1"
 
     def ps(self):
@@ -122,13 +127,16 @@ class FakeGit:
         self.held_answer = held
         self.calls: list[str] = []
 
-    def head(self, checkout):
+    def head(self, checkout, rev="HEAD"):
         self.calls.append("head")
         return self.head_answer
 
-    def held(self, checkout):
+    def held(self, checkout, rev="HEAD"):
         self.calls.append("held")
         return self.held_answer
+
+    def pin(self, checkout, sibling):
+        return ""
 
 
 def target(tmp_path, mode=RUN, project="ibkr_trader", service="app", health=("h",)):
@@ -481,17 +489,39 @@ def test_redeploy_with_a_checkout_git_cannot_read_records_only_the_build(tmp_pat
 class SiblingGit(FakeGit):
     """`FakeGit` answering per checkout, by its directory's name."""
 
-    def __init__(self, heads: dict, held: dict | None = None):
+    def __init__(
+        self,
+        heads: dict,
+        held: dict | None = None,
+        pins: dict | None = None,
+        commits: dict | None = None,
+    ):
         super().__init__()
         self.heads, self.helds = heads, held or {}
+        # `pins`: sibling -> the ref the consumer's gate names; `commits`: that ref ->
+        # `(short sha, time)` in the sibling, absent when the sibling lacks it.
+        self.pins, self.commits = pins or {}, commits or {}
+        self.exported: list[tuple[str, str]] = []
 
-    def head(self, checkout):
-        self.calls.append(f"head {Path(checkout).name}")
-        return self.heads.get(Path(checkout).name)
+    def head(self, checkout, rev="HEAD"):
+        self.calls.append(f"head {Path(checkout).name}" + ("" if rev == "HEAD" else f" {rev}"))
+        return self.heads.get(Path(checkout).name) if rev == "HEAD" else self.commits.get(rev)
 
-    def held(self, checkout):
-        self.calls.append(f"held {Path(checkout).name}")
+    def held(self, checkout, rev="HEAD"):
+        self.calls.append(f"held {Path(checkout).name}" + ("" if rev == "HEAD" else f" {rev}"))
         return self.helds.get(Path(checkout).name, "")
+
+    def pin(self, checkout, sibling):
+        return self.pins.get(sibling, "")
+
+    def resolve(self, checkout, ref):
+        return ref if ref in self.commits else ""
+
+    def export(self, checkout, rev, dest):
+        self.exported.append((Path(checkout).name, rev))
+        dest.mkdir(parents=True)
+        (dest / "REV").write_text(rev, encoding="utf-8")
+        return ""
 
 
 def built_from(tmp_path, *siblings):
@@ -542,10 +572,107 @@ def test_source_heads_is_the_checkout_then_each_it_builds_from_that_git_can_read
     git = SiblingGit({"ibkr_trader": ("aaa", 1.0), "data-lake": ("bbb", 2.0)})
     t = built_from(tmp_path, "data-lake", "gone")
     assert collectors.source_heads(t, git) == [
-        (t.checkout, ("aaa", 1.0)),
-        (t.checkout.parent / "data-lake", ("bbb", 2.0)),
+        collectors.Source(t.checkout, "aaa", 1.0),
+        collectors.Source(t.checkout.parent / "data-lake", "bbb", 2.0),
     ]
-    assert collectors.source_heads(target(tmp_path), git) == [(t.checkout, ("aaa", 1.0))]
+    assert collectors.source_heads(target(tmp_path), git) == [
+        collectors.Source(t.checkout, "aaa", 1.0)
+    ]
+
+
+# A full sha, as ibkr_trader's gate writes its pin; zero-padded so it reads as no secret.
+PIN = "c0aa963" + "0" * 33
+
+
+def compose(t):
+    (t.checkout / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    return t
+
+
+def test_a_pinned_sibling_is_read_at_the_pin_not_at_its_head(tmp_path):
+    """8e3c4a67: data-lake's HEAD ran ahead of the commit ibkr_trader's gate pins."""
+    git = SiblingGit(
+        {"ibkr_trader": ("aaa", 1.0), "data-lake": ("new", 9.0)},
+        pins={"data-lake": PIN},
+        commits={PIN: ("c0aa963", 2.0)},
+    )
+    t = built_from(tmp_path, "data-lake")
+    assert collectors.source_heads(t, git) == [
+        collectors.Source(t.checkout, "aaa", 1.0),
+        collectors.Source(t.checkout.parent / "data-lake", "c0aa963", 2.0, PIN, PIN),
+    ]
+
+
+def test_a_sibling_moving_past_the_pin_does_not_redeploy(tmp_path):
+    """The second 8e3c4a67 incident: data-lake #66 merged, ibkr_trader's migration had
+    not, and the 01:00Z pass rebuilt the image onto #66. Its pin had not moved."""
+    git = SiblingGit(
+        {"ibkr_trader": ("aaa", 1500.0), "data-lake": ("c0aa963", 2500.0)},
+        pins={"data-lake": PIN},
+        commits={PIN: ("730f759", 1800.0)},
+    )
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        compose(built_from(tmp_path, "data-lake")), ours(tmp_path), docker, git, report, {}
+    )
+    assert got == {collectors.CODE_AT: 2000.0}
+    assert not any(call[0] == "deploy" for call in docker.calls)
+
+
+def test_a_redeploy_with_a_pinned_sibling_builds_a_context_staged_at_the_pin(tmp_path):
+    git = SiblingGit(
+        {"ibkr_trader": ("bbb", 2500.0), "data-lake": ("new", 9000.0)},
+        pins={"data-lake": PIN},
+        commits={PIN: ("c0aa963", 1800.0)},
+    )
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        compose(built_from(tmp_path, "data-lake")), ours(tmp_path), docker, git, report, {}
+    )
+    assert got == {collectors.CODE_AT: 2500.0, "deployed": True}
+    assert git.exported == [("ibkr_trader", "HEAD"), ("data-lake", PIN)]
+    assert "held data-lake " + PIN in git.calls, "the pin, not the checkout, must be merged"
+    names = [name for name, _text in docker.deployed_files]
+    assert names == ["docker-compose.yml", collectors.collector_build.OVERRIDE_NAME]
+    context = json.loads(docker.deployed_files[1][1])["services"]["app"]["build"]["context"]
+    assert Path(context).name.startswith("ibkr_trader-build-")
+    assert not Path(context).exists(), "the staged context is removed once built"
+
+
+def test_deploy_sources_builds_from_the_checkouts_when_nothing_is_pinned(tmp_path):
+    t = built_from(tmp_path, "data-lake")
+    sources = [collectors.Source(t.checkout, "aaa", 1.0)]
+    docker, git = FakeDocker(), SiblingGit({})
+    assert collectors.deploy_sources(t, sources, docker, git) == (True, "")
+    assert docker.calls == [("deploy", "ibkr_trader", "app")]
+    assert docker.deployed_files == [] and git.exported == [], "no staging without a pin"
+
+
+def test_a_pin_the_sibling_does_not_have_holds_the_redeploy(tmp_path):
+    git = SiblingGit({"ibkr_trader": ("bbb", 2500.0)}, pins={"data-lake": PIN})
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        compose(built_from(tmp_path, "data-lake")), ours(tmp_path), docker, git, report, {}
+    )
+    assert got[collectors.HELD] == (
+        f"data-lake: ibkr_trader pins {PIN[:12]}, which this checkout does not have"
+    )
+    assert not any(call[0] == "deploy" for call in docker.calls)
+
+
+def test_a_staging_that_fails_is_a_failed_redeploy(tmp_path):
+    git = SiblingGit(
+        {"ibkr_trader": ("bbb", 2500.0)},
+        pins={"data-lake": PIN},
+        commits={PIN: ("c0aa963", 1800.0)},
+    )
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        built_from(tmp_path, "data-lake"), ours(tmp_path), docker, git, report, {}
+    )
+    assert got == {collectors.CODE_AT: 2000.0}
+    assert report.failures == 1 and "has no compose file to build from" in report.cause
+    assert not any(call[0] == "deploy" for call in docker.calls)
 
 
 def test_held_in_names_only_a_checkout_built_from(tmp_path):
@@ -646,6 +773,63 @@ def test_git_deploys_merged_code_only(merged):
 
 def test_git_says_nothing_of_a_directory_that_is_not_a_checkout(tmp_path):
     assert collectors.Git().head(tmp_path) is None
+
+
+def test_deploy_names_the_compose_files_it_is_handed(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(argv=argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(collectors.subprocess, "run", fake_run)
+    base, extra = tmp_path / "docker-compose.yml", tmp_path / "staged.yaml"
+    collectors.Docker().deploy(tmp_path, "app", [base, extra])
+    named = ["-f", str(base), "-f", str(extra)]
+    assert seen["argv"] == ["docker", "compose", *named, "up", "-d", "--build", "app"]
+
+
+def test_git_reads_resolves_and_exports_a_pinned_commit(merged, tmp_path):
+    git = collectors.Git()
+
+    def sha():
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=merged, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    pinned = sha()
+    (merged / "a.txt").write_text("two\n", encoding="utf-8")
+    _git(merged, "commit", "-q", "-am", "two, local only")
+    local = sha()
+    assert git.resolve(merged, pinned) == pinned
+    assert git.resolve(merged, "main") == pinned, "a branch by its remote-tracking ref"
+    assert git.resolve(merged, "0" * 40) == ""
+    assert git.head(merged, pinned)[0] == pinned[:7]
+    (merged / "a.txt").write_text("edited\n", encoding="utf-8")
+    assert git.held(merged, pinned) == "", "a pin is built from its commit, not the files"
+    assert git.held(merged) == "HEAD is not on origin's default branch"
+    assert git.held(merged, local) == f"{local[:7]} is not on origin's default branch"
+    dest = tmp_path / "staged" / "ibkr_trader"
+    dest.parent.mkdir()
+    assert git.export(merged, pinned, dest) == ""
+    assert (dest / "a.txt").read_text(encoding="utf-8") == "one\n"
+    assert list(dest.parent.iterdir()) == [dest], "the archive is removed once unpacked"
+    assert git.export(merged, "0" * 40, tmp_path / "staged" / "gone") != ""
+
+
+def test_git_pin_is_the_ref_the_checkouts_pr_gate_checks_the_sibling_out_at(tmp_path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "pr-gate.yml").write_text(
+        "jobs:\n  t:\n    steps:\n"
+        "      - uses: actions/checkout@v7\n"
+        "        with:\n"
+        "          repository: alexandrec90/data-lake\n"
+        f"          ref: {PIN}\n",
+        encoding="utf-8",
+    )
+    assert collectors.Git().pin(tmp_path, "data-lake") == PIN
+    assert collectors.Git().pin(tmp_path, "other") == ""
 
 
 def test_a_start_that_fails_is_a_failure_with_dockers_words(tmp_path):
@@ -1699,6 +1883,111 @@ def test_the_marker_goes_even_when_the_pass_raises(tmp_path):
     assert not path.exists()
 
 
+@pytest.mark.parametrize(
+    ("text", "clock", "age", "expected"),
+    [
+        ('{"started_at": 100, "until": 200}', 150, 0, 200),
+        ('{"started_at": 100, "until": 200}', 250, 0, None),  # a killed pass's lock
+        ('{"until": true}', 150, 2, 158),  # unreadable and young: a holder mid-write
+        ("", 150, 0, 160),
+        ("not json", 150, collectors.LOCK_WRITING + 1, None),  # unreadable and old: dead
+        (None, 150, 0, None),
+    ],
+)
+def test_lock_holder_reads_only_a_live_lock(tmp_path, text, clock, age, expected):
+    path = tmp_path / "collectors.lock"
+    if text is not None:
+        path.write_text(text, encoding="utf-8")
+        os.utime(path, (clock - age, clock - age))
+    assert collectors.lock_holder(path, clock) == expected
+
+
+def test_a_held_lock_refuses_a_second_taker_and_a_dead_one_is_broken(tmp_path):
+    path = tmp_path / "logs" / "collectors.lock"
+    assert collectors.take_lock(path, until=200.0, clock=100.0)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        collectors.STARTED_AT: 100.0,
+        collectors.UNTIL: 200.0,
+    }
+    assert not collectors.take_lock(path, until=300.0, clock=150.0), "a live holder"
+    assert collectors.take_lock(path, until=400.0, clock=250.0), "a killed pass's lock"
+    assert json.loads(path.read_text(encoding="utf-8"))[collectors.UNTIL] == 400.0
+
+
+def test_a_waiting_pass_takes_the_lock_once_its_holder_lets_go(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "collectors.lock"
+    at(monkeypatch, 100.0)
+    assert collectors.take_lock(path, until=10_000.0, clock=100.0)
+    looks = []
+
+    def sleep(seconds):
+        looks.append(seconds)
+        if len(looks) == 2:
+            path.unlink()
+
+    with collectors.one_pass(path, 50.0, wait=True, sleep=sleep) as had:
+        assert had and json.loads(path.read_text(encoding="utf-8"))[collectors.UNTIL] == 150.0
+    assert looks == [collectors.LOCK_POLL] * 2
+    assert not path.exists(), "released after the pass"
+    assert "waiting for the collectors pass" in capsys.readouterr().err
+
+
+def test_a_pass_that_does_not_wait_leaves_a_held_lock_alone(tmp_path, monkeypatch):
+    path = tmp_path / "collectors.lock"
+    at(monkeypatch, 100.0)
+    assert collectors.take_lock(path, until=10_000.0, clock=100.0)
+    with collectors.one_pass(path, 50.0, wait=False, sleep=pytest.fail) as had:
+        assert not had
+    assert json.loads(path.read_text(encoding="utf-8"))[collectors.UNTIL] == 10_000.0
+
+
+def test_the_lock_goes_even_when_the_pass_raises(tmp_path, monkeypatch):
+    path = tmp_path / "collectors.lock"
+    at(monkeypatch, 100.0)
+    with pytest.raises(RuntimeError), collectors.one_pass(path, 50.0, wait=False) as had:
+        assert had
+        raise RuntimeError("boom")
+    assert not path.exists()
+
+
+def test_a_scheduled_pass_stands_down_while_a_run_here_is_acting(tmp_path, monkeypatch):
+    """3c3e36f2: `run-here ibkr_trader sports_betting` and the scheduled `maintain` 23s
+    later both ran `compose up -d` for the same collectors, and each exited 2 on the
+    container name the other had just taken."""
+    root = devkit_home(tmp_path, monkeypatch, {"sports_betting": RUN})
+    at(monkeypatch, 10_000.0)
+    assert collectors.take_lock(root / collectors.PASS_LOCK, until=12_000.0, clock=10_000.0)
+    docker = FakeDocker([])
+    assert collectors.main(["maintain"], docker=docker) == 0
+    assert docker.calls == [], "nothing started under another pass"
+    assert collectors.STOOD_DOWN in (root / collectors.ARTIFACT).read_text(encoding="utf-8")
+    assert (root / collectors.PASS_LOCK).is_file(), "the holder's lock is the holder's"
+
+
+def test_act_starts_what_it_is_given_and_records_its_health(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    docker = FakeDocker([])
+    report = collectors.Report()
+    collectors.act([target(tmp_path)], root, docker, report, run=lambda *a, **k: None)
+    assert ("up", "ibkr_trader", "app") in docker.calls
+    assert (root / collectors.HEALTH).is_file()
+    assert not (root / collectors.IN_PASS).exists()
+
+
+def test_a_pass_releases_the_lock_it_acted_under(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {"sports_betting": RUN})
+    seen = []
+
+    class Watching(FakeDocker):
+        def up(self, checkout, service):
+            seen.append((root / collectors.PASS_LOCK).is_file())
+            return super().up(checkout, service)
+
+    assert collectors.main(["run-here", "sports_betting"], docker=Watching([])) == 0
+    assert seen == [True]
+    assert not (root / collectors.PASS_LOCK).exists()
+
+
 def test_a_pass_that_only_stops_containers_writes_no_marker(tmp_path):
     path = tmp_path / "pass.json"
     with collectors.acting(path, [target(tmp_path, mode=STOP)]):
@@ -2218,114 +2507,77 @@ def test_single_takes_exactly_one_name_and_dispatches_on_the_verb(tmp_path, monk
     assert collectors.single(once, root, when, FakeSchtasks(), None, lambda argv, cwd: 7) == 7
 
 
-# --- claims: one actor per collector at a time ------------------------------------------
+# --- the pass lock, as a move holds it -----------------------------------------------------
 
 
-def test_a_claim_is_held_while_the_block_runs_and_released_after(tmp_path, monkeypatch):
-    at(monkeypatch, 1_000.0)
-    path = collectors.claim_path(tmp_path, "ibkr_trader")
-    with collectors.claim(path, "`collectors.py move` to b", 600) as other:
-        assert other == ""
-        assert collectors.live_claim(path, 1_000.0) == "`collectors.py move` to b"
-        with collectors.claim(path, "`collectors.py maintain`", 600) as second:
-            assert second == "`collectors.py move` to b"
-        assert path.is_file(), "the loser's exit must not release the winner's claim"
-    assert not path.exists()
-    assert list(path.parent.iterdir()) == [], "no draft is left behind"
-
-
-def test_a_claim_goes_even_when_the_block_raises(tmp_path):
-    path = collectors.claim_path(tmp_path, "p")
-    with pytest.raises(RuntimeError), collectors.claim(path, "x", 600):
-        raise RuntimeError("boom")
-    assert not path.exists()
+def test_a_lock_a_move_takes_names_the_move_and_its_collectors(tmp_path):
+    path = tmp_path / "collectors.lock"
+    extra = {collectors.HOLDER: "`collectors.py move` to b", collectors.PROJECTS: ["ibkr_trader"]}
+    assert collectors.take_lock(path, until=200.0, clock=100.0, extra=extra)
+    assert collectors.move_holding(path, 150.0) == {"ibkr_trader": "`collectors.py move` to b"}
+    assert collectors.move_holding(path, 200.0) == {}, "a killed move's lock speaks for nothing"
 
 
 @pytest.mark.parametrize(
-    ("record", "clock"),
+    "body",
     [
-        ({"holder": "old", "started_at": 0.0, "until": 500.0}, 1_000.0),  # a killed holder's
-        ({"holder": "future", "started_at": 5_000.0, "until": 9_000.0}, 1_000.0),
-        ("not json", 1_000.0),
+        None,
+        '{"started_at": 100, "until": 200}',  # a pass's: `IN_PASS` speaks for it
+        '{"started_at": 100, "until": 200, "holder": "m", "projects": "ibkr_trader"}',
+        '{"started_at": 100, "until": 200, "holder": 3, "projects": ["ibkr_trader"]}',
     ],
 )
-def test_a_stale_or_unreadable_claim_is_taken_over(tmp_path, monkeypatch, record, clock):
-    at(monkeypatch, clock)
-    path = collectors.claim_path(tmp_path, "p")
-    path.parent.mkdir(parents=True)
-    path.write_text(record if isinstance(record, str) else json.dumps(record), encoding="utf-8")
-    with collectors.claim(path, "me", 600) as other:
-        assert other == "" and collectors.live_claim(path, clock) == "me"
+def test_only_a_live_moves_lock_holds_a_collector(tmp_path, body):
+    path = tmp_path / "collectors.lock"
+    if body is not None:
+        path.write_text(body, encoding="utf-8")
+    assert collectors.move_holding(path, 150.0) == {}
 
 
-def test_a_claim_released_after_another_took_it_over_leaves_theirs(tmp_path, monkeypatch):
+def test_one_pass_writes_what_it_is_given_into_the_lock(tmp_path, monkeypatch):
+    at(monkeypatch, 100.0)
+    path = tmp_path / "collectors.lock"
+    with collectors.one_pass(path, 50.0, wait=False, extra={collectors.HOLDER: "x"}) as had:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    assert had and record == {"holder": "x", "started_at": 100.0, "until": 150.0}
+
+
+def test_a_maintain_pass_holds_the_lock_long_enough_to_restore_a_handoff(tmp_path, monkeypatch):
+    """A lock past its `until` is broken, and a second pass would start a second restore."""
+    ibkr = config.Collector("ibkr_trader", "app", handoff=("uv",))
+    sports = config.Collector("sports_betting", "collector")
+    scraper = config.Collector("social-scraper", command=("uv",), minutes=30)
+    every = [ibkr, sports, scraper]
+    base = collectors.PS_TIMEOUT
+    assert collectors.pass_bound(every, {}, picks_up=False) == base + collectors.TARGET_BOUND
+    assert collectors.pass_bound(every, {"sports_betting": RUN}, picks_up=True) == (
+        base + 2 * collectors.TARGET_BOUND + collectors.PICKUP_BOUND + 120
+    ), "a hands-off collector it may take over is a target as well"
+    assert collectors.pass_bound(every, {"ibkr_trader": STOP}, picks_up=True) == (
+        base + collectors.TARGET_BOUND + collectors.PICKUP_BOUND + 120
+    )
+    assert collectors.pass_bound(every, {"ibkr_trader": RUN}, picks_up=True) == (
+        base + collectors.TARGET_BOUND
+    ), "one it runs is never taken over"
+
+
+def test_the_pass_lock_a_maintain_takes_covers_the_restore_it_may_run(tmp_path, monkeypatch):
+    root = devkit_home(
+        tmp_path,
+        monkeypatch,
+        {"ibkr_trader": STOP},
+        {"ibkr_trader": {"service": "app", "handoff": ["uv"]}},
+    )
     at(monkeypatch, 1_000.0)
-    path = collectors.claim_path(tmp_path, "p")
-    with collectors.claim(path, "me", 600):
-        path.write_text(
-            json.dumps({"holder": "them", "started_at": 1_000.0, "until": 2_000.0, "token": "t"}),
-            encoding="utf-8",
-        )
-    assert collectors.live_claim(path, 1_000.0) == "them"
-
-
-def test_a_claim_naming_no_holder_still_holds(tmp_path):
-    path = tmp_path / "p.json"
-    path.write_text(json.dumps({"started_at": 0.0, "until": 10.0}), encoding="utf-8")
-    assert collectors.live_claim(path, 5.0) == "another collectors.py"
-    assert collectors.live_claim(path, 10.0) == ""
-
-
-def test_take_claim_names_the_holder_it_lost_to(tmp_path):
-    path = tmp_path / "p.json"
-    live = {"holder": "a pass", "started_at": 0.0, "until": 100.0, "token": "1"}
-    assert collectors.take_claim(path, live, 50.0) == ""
-    assert collectors.take_claim(path, {**live, "holder": "me", "token": "2"}, 50.0) == "a pass"
-
-
-def test_claiming_leaves_out_and_says_a_target_someone_else_holds(tmp_path, monkeypatch):
-    at(monkeypatch, 1_000.0)
-    ibkr, sports = target(tmp_path), target(tmp_path, project="sports_betting", service="c")
-    report = collectors.Report()
-    with collectors.claim(collectors.claim_path(tmp_path, "ibkr_trader"), "`move` to b", 600):
-        with collectors.claiming(
-            tmp_path, [ibkr, sports], "`collectors.py maintain`", report
-        ) as mine:
-            assert mine == [sports]
-            assert collectors.live_claim(collectors.claim_path(tmp_path, "sports_betting"), 1_000.0)
-    assert report.lines == ["ibkr_trader: left alone -- `move` to b is acting on it"]
-    assert not collectors.claim_path(tmp_path, "sports_betting").exists()
-
-
-def test_run_here_during_a_pass_does_not_start_the_service_beside_the_pass(tmp_path, monkeypatch):
-    """Both ran `docker compose up -d`, and one failed on "container name already in use"."""
-    root = devkit_home(tmp_path, monkeypatch)
-    at(monkeypatch, 1_000.0)
-    docker = FakeDocker([])
-    with collectors.claim(
-        collectors.claim_path(root, "ibkr_trader"), "`collectors.py maintain`", 600
-    ):
-        assert collectors.main(["run-here", "ibkr_trader"], docker=docker) == 0
-    assert ("up", "ibkr_trader", "app") not in docker.calls
-    assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": RUN}
-    assert "left alone -- `collectors.py maintain` is acting on it" in (
-        root / collectors.ARTIFACT
-    ).read_text(encoding="utf-8")
-
-
-def test_a_pass_holds_each_containers_claim_while_it_acts_and_releases_it(tmp_path, monkeypatch):
-    root = devkit_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
     seen = []
 
-    class Watching(FakeDocker):
-        def up(self, checkout, service):
-            seen.append(collectors.live_claim(collectors.claim_path(root, "ibkr_trader"), 1_000.0))
-            return super().up(checkout, service)
+    class Watching(collectors.handoff.Handoff):
+        def run(self, command, cwd, timeout, echo=False):
+            seen.append(json.loads((root / collectors.PASS_LOCK).read_text(encoding="utf-8")))
+            return collectors.handoff.Said(0)
 
-    at(monkeypatch, 1_000.0)
-    assert collectors.main(["maintain"], docker=Watching([])) == 0
-    assert seen == ["`collectors.py maintain`"]
-    assert not collectors.claim_path(root, "ibkr_trader").exists()
+    collectors.main(["maintain"], docker=FakeDocker([]), handoffs=Watching())
+    assert seen and seen[0][collectors.UNTIL] - 1_000.0 >= collectors.PICKUP_BOUND
 
 
 # --- move: handing a collector to another machine ------------------------------------------
@@ -2437,16 +2689,18 @@ def test_move_stops_exports_then_assigns_stop_and_stops_the_rest_in_that_order(
     sent = collectors.handoff.load_outgoing(root / collectors.handoff.OUTGOING)
     assert sent == {"ibkr_trader": {"to": OTHER, "at": 5_000.0}}
     assert f"handed off to {OTHER}" in artifact(root)
-    assert not collectors.claim_path(root, "ibkr_trader").exists()
+    assert not (root / collectors.PASS_LOCK).exists()
 
 
-def test_move_holds_the_collector_against_a_pass_for_the_whole_export(tmp_path, monkeypatch):
+def test_move_holds_the_pass_lock_for_the_whole_export(tmp_path, monkeypatch):
     root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
     at(monkeypatch, 5_000.0)
     during = []
 
     def export(flags):
-        during.append(collectors.live_claim(collectors.claim_path(root, "ibkr_trader"), 5_000.0))
+        lock = root / collectors.PASS_LOCK
+        during.append(collectors.move_holding(lock, 5_000.0))
+        during.append(json.loads(lock.read_text(encoding="utf-8"))[collectors.UNTIL])
         pass_docker = FakeDocker([project(tmp_path, "c1", "app", "exited")])
         collectors.main(["maintain"], docker=pass_docker)
         during.append(pass_docker.calls)
@@ -2456,8 +2710,29 @@ def test_move_holds_the_collector_against_a_pass_for_the_whole_export(tmp_path, 
     collectors.main(
         ["move", "ibkr_trader", "--to", OTHER], docker, handoffs=FakeHandoff(export=export)
     )
-    assert during[0] == f"`collectors.py move` to {OTHER}"
-    assert ("up", "ibkr_trader", "app") not in during[1], "the pass must not restart it mid-dump"
+    assert during[0] == {"ibkr_trader": f"`collectors.py move` to {OTHER}"}
+    assert during[1] == 5_000.0 + collectors.MOVE_BOUND
+    assert during[2] == [], "the scheduled pass stands down rather than restart it mid-dump"
+    assert collectors.STOOD_DOWN not in artifact(root), "the move's own artifact is last"
+
+
+def test_move_waits_for_a_pass_acting_now(tmp_path, monkeypatch):
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    at(monkeypatch, 1_000.0)
+    lock = root / collectors.PASS_LOCK
+    assert collectors.take_lock(lock, until=1_000.0 + 60, clock=1_000.0)
+    waited = []
+
+    def sleep(seconds):
+        waited.append(seconds)
+        lock.unlink()
+
+    monkeypatch.setattr(collectors, "one_pass", functools.partial(collectors.one_pass, sleep=sleep))
+    docker = Moving(stack(tmp_path))
+    assert (
+        collectors.main(["move", "ibkr_trader", "--to", OTHER], docker, handoffs=FakeHandoff()) == 0
+    )
+    assert waited == [collectors.LOCK_POLL] and ("stop", "c1") in docker.calls
 
 
 def test_a_failed_export_starts_the_service_again_and_leaves_the_assignment(tmp_path, monkeypatch):
@@ -2580,18 +2855,18 @@ def test_a_move_without_a_checkout_is_refused(tmp_path, monkeypatch):
     assert "no checkout at" in artifact(root)
 
 
-def test_a_move_while_something_holds_the_collector_is_refused(tmp_path, monkeypatch):
-    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
-    at(monkeypatch, 1_000.0)
-    docker, handoffs = FakeDocker(stack(tmp_path)), FakeHandoff()
-    with collectors.claim(
-        collectors.claim_path(root, "ibkr_trader"), "`collectors.py maintain`", 600
-    ):
-        assert (
-            collectors.main(["move", "ibkr_trader", "--to", OTHER], docker, handoffs=handoffs) == 2
-        )
-    assert docker.calls == [] and handoffs.log == []
-    assert "`collectors.py maintain` is acting on it" in artifact(root)
+def test_a_move_that_never_gets_the_lock_moves_nothing(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch, {"ibkr_trader": RUN}, FakeDocker(stack(tmp_path)))
+
+    @contextlib.contextmanager
+    def never(*_args, **_kwargs):
+        yield False
+
+    monkeypatch.setattr(collectors, "one_pass", never)
+    [ibkr] = [c for c in declared_here(here) if c.project == "ibkr_trader"]
+    collectors.move_one(ibkr, OTHER, here)
+    assert here.docker.calls == [] and here.handoffs.log == []
+    assert here.report.cause == f"ibkr_trader: not moved -- {collectors.STOOD_DOWN}"
 
 
 def test_to_belongs_to_move_alone():
@@ -2615,7 +2890,8 @@ def test_a_pass_takes_over_a_handoff_addressed_here_and_starts_it(
     seen = []
 
     def restore(flags):
-        seen.append(collectors.live_claim(collectors.claim_path(root, "ibkr_trader"), 1_000.0))
+        lock = json.loads((root / collectors.PASS_LOCK).read_text(encoding="utf-8"))
+        seen.append(lock[collectors.UNTIL] - 1_000.0 >= collectors.PICKUP_BOUND)
         return Said(0)
 
     handoffs = FakeHandoff(docker.calls, pending=Said(0, MARKER + "\n"), restore=restore)
@@ -2625,7 +2901,7 @@ def test_a_pass_takes_over_a_handoff_addressed_here_and_starts_it(
     assert docker.calls[0][2] == ("--host", THIS) and docker.calls[2][2] == ("--host", THIS)
     assert docker.calls[2][4] == collectors.handoff.IMPORT_TIMEOUT
     assert ("up", "ibkr_trader", "app") in docker.calls, "started this pass, as run-here would"
-    assert seen == ["a handoff import"], "held, so a second import cannot start beside it"
+    assert seen == [True], "under a lock no takeover can break mid-restore"
     assert config.load_assignment(root / config.ASSIGNMENT) == {"ibkr_trader": RUN}
     health = collectors.load_health(root / collectors.HEALTH)
     assert collectors.STARTED_AT in health["ibkr_trader"], "settles like any start"
@@ -2719,10 +2995,13 @@ def test_an_import_already_running_is_not_started_again(tmp_path, monkeypatch):
     root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": STOP})
     at(monkeypatch, 1_000.0)
     handoffs = FakeHandoff(pending=Said(0, MARKER))
-    with collectors.claim(collectors.claim_path(root, "ibkr_trader"), "a handoff import", 600):
-        collectors.main(["maintain"], docker=FakeDocker([]), handoffs=handoffs)
+    # A pass mid-restore, holding the lock it took for one.
+    bound = collectors.pass_bound(config.declared(root)[0], {"ibkr_trader": STOP}, True)
+    assert collectors.take_lock(root / collectors.PASS_LOCK, 1_000.0 + bound, 1_000.0)
+    at(monkeypatch, 1_000.0 + collectors.PICKUP_BOUND)
+    assert collectors.main(["maintain"], docker=FakeDocker([]), handoffs=handoffs) == 0
     assert handoffs.log == []
-    assert "not asked about a handoff -- a handoff import is acting on it" in artifact(root)
+    assert collectors.STOOD_DOWN in artifact(root)
 
 
 def test_a_taken_over_collector_forgets_a_handoff_it_once_sent(tmp_path, monkeypatch):
@@ -2871,25 +3150,37 @@ def test_the_tray_shows_a_collector_handed_off_from_here(tmp_path, monkeypatch):
 def test_the_tray_keeps_a_collector_being_moved_green(tmp_path, monkeypatch):
     """The fix pass files every row that is not OK, and a move stops the service for an
     hour on purpose."""
-    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
+    root = handoff_home(tmp_path, monkeypatch, {"ibkr_trader": RUN, "sports_betting": RUN})
     at(monkeypatch, 1_000.0)
-    docker = FakeDocker([project(tmp_path, "c1", "app", "exited")])
-    with collectors.claim(
-        collectors.claim_path(root, "ibkr_trader"), f"`collectors.py move` to {OTHER}", 600
-    ):
-        [(_name, level, detail)] = collectors.tray_rows(docker=docker)
+    docker = FakeDocker(
+        [
+            project(tmp_path, "c1", "app", "exited"),
+            project(tmp_path, "c3", "collector", "exited", name="sports_betting"),
+        ]
+    )
+    holder = {
+        collectors.HOLDER: f"`collectors.py move` to {OTHER}",
+        collectors.PROJECTS: ["ibkr_trader"],
+    }
+    with collectors.one_pass(root / collectors.PASS_LOCK, 600, wait=False, extra=holder):
+        rows = dict(
+            (name, (level, detail)) for name, level, detail in collectors.tray_rows(docker=docker)
+        )
+    level, detail = rows["collector: ibkr_trader"]
     assert level == collectors.OK and detail.startswith(
         f"`collectors.py move` to {OTHER} is acting on it"
     )
+    assert rows["collector: sports_betting"][0] == collectors.FAIL, "only what the move holds"
     assert collectors.tray_rows(docker=docker)[0][1] == collectors.FAIL
 
 
 def test_holding_reads_only_local_files(tmp_path):
     run, stop = target(tmp_path), target(tmp_path, mode=STOP)
-    assert collectors.holding(tmp_path, run, {}, 1.0) == ""
-    assert collectors.holding(tmp_path, stop, {}, 1.0) == ""
+    assert collectors.holding(run, {}, {}) == ""
+    assert collectors.holding(run, {"ibkr_trader": "m"}, {}) == "m"
+    assert collectors.holding(stop, {"ibkr_trader": "m"}, {}) == ""
     sent = {"ibkr_trader": {"to": OTHER, "at": 0.0}}
-    assert collectors.holding(tmp_path, stop, sent, 1.0).startswith(f"handed off to {OTHER}")
+    assert collectors.holding(stop, {}, sent).startswith(f"handed off to {OTHER}")
 
 
 def test_down_row_names_whoever_holds_the_collector():
@@ -3015,15 +3306,27 @@ def test_handoff_status_says_nothing_when_nothing_waits(tmp_path, monkeypatch):
     assert here.report.lines == [] and [c[1] for c in here.handoffs.log] == ["pending"]
 
 
-def test_act_keeps_what_it_holds_and_leaves_what_another_holds(tmp_path, monkeypatch):
-    here = here_at(tmp_path, monkeypatch)
+def test_run_pass_takes_over_inside_the_lock_or_stands_down_whole(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch, {"ibkr_trader": STOP})
+    here.handoffs = FakeHandoff(pending=Said(0, MARKER))
     at(monkeypatch, 1_000.0)
-    ibkr, sports = target(tmp_path), target(tmp_path, project="sports_betting", service="collector")
-    with collectors.claim(collectors.claim_path(here.base, "ibkr_trader"), "`move` to b", 600):
-        collectors.act("maintain", [ibkr, sports], here, FakeSchtasks())
-    assert ("up", "sports_betting", "collector") in here.docker.calls
-    assert ("up", "ibkr_trader", "app") not in here.docker.calls
-    assert (here.base / collectors.HEALTH).is_file()
+    maintain = collectors.parse_args(["maintain"])
+    assert collectors.take_lock(here.base / collectors.PASS_LOCK, 2_000.0, 1_000.0)
+    collectors.run_pass(maintain, declared_here(here), {"ibkr_trader": STOP}, here, FakeSchtasks())
+    assert here.handoffs.log == [] and here.report.lines == [collectors.STOOD_DOWN]
+    (here.base / collectors.PASS_LOCK).unlink()
+    collectors.run_pass(maintain, declared_here(here), {"ibkr_trader": STOP}, here, FakeSchtasks())
+    assert [c[1] for c in here.handoffs.log] == ["pending", "import"]
+    assert ("up", "ibkr_trader", "app") in here.docker.calls
+    assert not (here.base / collectors.PASS_LOCK).exists()
+
+
+def test_run_pass_on_a_typo_takes_no_lock(tmp_path, monkeypatch):
+    here = here_at(tmp_path, monkeypatch)
+    verb = collectors.parse_args(["run-here", "ibkr"])
+    collectors.run_pass(verb, declared_here(here), {}, here, FakeSchtasks())
+    assert here.report.failures == 1 and here.docker.calls == []
+    assert not (here.base / collectors.PASS_LOCK).exists()
 
 
 def test_set_mode_keeps_the_rest_of_the_assignment(tmp_path):

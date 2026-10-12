@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import subprocess
+import sys
 import time
 
 import pytest
@@ -198,7 +199,9 @@ def test_posix_never_asks_the_native_reader():
 def test_the_native_table_holds_this_process_with_its_command_line_and_parent():
     """The real kernel on a Windows desk; anywhere else, a decline that names why."""
     table, why = reap_machine.native_table()
-    if os.name != "nt":
+    # The question `win_process_table.read` asks, so the rehearsal's faked platform is
+    # answered as a Linux runner's would be.
+    if sys.platform != "win32":
         assert (table, why) == (None, "the native table is only implemented on Windows")
         return
     assert table is not None

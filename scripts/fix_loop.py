@@ -107,7 +107,9 @@ class Closed:
     # ref -> pr of each resolution whose fix has not merged (`in_flight`): the backlog
     # step sends no session at a group waiting on one.
     in_flight: dict[str, str] = field(default_factory=dict)
-    # Directories a session is busy in now (`bg_sessions.working`), stamped one or not.
+    # Every session `claude agents` lists (`session_listing`), and the directories one is
+    # busy in now (`bg_sessions.working`), stamped one or not.
+    listing: list[dict] = field(default_factory=list)
     working: frozenset[str] = frozenset()
     # Each devkit PR still carrying a fix to consumers, as `(number, body)` (`devkit_fixes`):
     # a consumer failure one names waits for it rather than for a second devkit session.
@@ -117,7 +119,8 @@ class Closed:
 def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
     """Every read-back step, each isolated: one that raises is a finding, not a stop."""
     closed = Closed()
-    closed.working = journal.step("sessions", working_dirs, default=frozenset())
+    closed.listing = journal.step("sessions", session_listing, default=[])
+    closed.working = bg_sessions.working(closed.listing)
     trees = journal.step("trees", fix_reports.read_trees, ctx.root, ctx.projects, default=[])
     for tree in trees:
         journal.step("tree", _one_tree, ctx, tree, journal, closed)
@@ -150,14 +153,21 @@ def _one_tree(
         closed.trees[problem] = str(tree.path)
     # Judged before anything is filed away: a filed report is still the session's outcome.
     at_work = _judge_session(ctx, tree, where, journal, closed)
-    if reason := fix_reports.blocked_reason(tree.path):
+    if waits := fix_reports.waits_on(tree.path):
+        # Not a finding: no session can merge another PR. `fix_budget` holds the problem
+        # until that PR closes, then sends its next fixer.
+        closed.lines.append(f"{where} -- waits on {waits}")
+        if ctx.writes:
+            fix_ledger.mark_waiting(ctx.ledger_path, key, waits)
+            fix_reports.file_away(tree.path, fix_reports.BLOCKED_FILE)
+    elif reason := fix_reports.blocked_reason(tree.path):
         journal.add(
             Finding(
                 "fixer-blocked",
                 tree.project,
                 f"{where}: {reason}",
                 key=problem,
-                evidence=str(tree.path),
+                evidence=_beside_ledger(ctx, tree, fix_reports.BLOCKED_FILE) or str(tree.path),
             )
         )
         closed.lines.append(f"{where} -- {reason}")
@@ -190,16 +200,14 @@ def _file_friction(
     if claims and tree.branch and not out and at_work:
         closed.lines.append(f"{where} -- friction held: its session is still at work on a fix")
         return
-    # Where the lines will be once filed away below: naming the file about to be renamed
-    # gave every friction row a dead path.
-    kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
+    evidence = _friction_evidence(ctx, tree)
     settled = _settlement(tree) if out else {}
     for line in tree.friction:
         reported = Finding(
             "reported",
             tree.project,
             line,
-            evidence=str(tree.path / kept),
+            evidence=evidence,
             event=fix_findings.FRICTION,
         )
         # A line its session fixed here is settled by this branch, not a new job for a
@@ -207,6 +215,33 @@ def _file_friction(
         journal.add(replace(reported, **settled) if fix_reports.fixed_here(line) else reported)
     if tree.friction and ctx.writes:
         fix_reports.file_away(tree.path, fix_reports.FRICTION_FILE)
+
+
+def _friction_evidence(ctx: Context, tree: fix_reports.Tree) -> str:
+    """What the tree's friction rows cite: the copy beside the ledger, else where the lines
+    will be once filed away -- naming the file about to be renamed gave every friction row
+    a dead path."""
+    kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
+    if not tree.friction:
+        return str(tree.path / kept)
+    return _beside_ledger(ctx, tree, fix_reports.FRICTION_FILE) or str(tree.path / kept)
+
+
+def _beside_ledger(ctx: Context, tree: fix_reports.Tree, report: Path) -> str:
+    """A copy of the tree's `report` kept beside the ledger (`fix_findings.evidence_file`);
+    "" in a plan, which writes nothing, and when the report cannot be read or copied.
+
+    The tree's own `logs/` goes when its box is reaped, which a merged PR's box is within
+    the hour: 9000925f and 20322597 cited `<box>/logs/friction.filed.md`, and the fixer
+    sent at them found nothing there (5233840a)."""
+    if not ctx.writes:
+        return ""
+    try:
+        text = (tree.path / report).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    header = f"# {report.as_posix()} from {tree.path} ({tree.branch or 'no branch'})\n\n"
+    return fix_findings.evidence_file(header + text, ctx.devkit_dir, report.stem)
 
 
 def _settlement(tree: fix_reports.Tree) -> dict[str, str]:
@@ -245,6 +280,8 @@ def _judge_session(
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
     live = fix_reports.active_transcript(tree.path, ctx.now)
+    if live is not None and bg_sessions.gone(closed.listing, tree.path, live):
+        live = None
     # By its transcript, the stamped session is never "another" one: a finished fixer's
     # own transcript held six branches while this very pass shipped their intents. A
     # session listed busy in the tree is at work whoever it is, intent or no intent.
@@ -295,9 +332,9 @@ def judge_dead(
     return []
 
 
-def working_dirs() -> frozenset[str]:
-    """`bg_sessions.working` over what `claude agents` lists; empty where it cannot."""
-    return bg_sessions.working(bg_sessions.listed(ship_intent.run_quiet))
+def session_listing() -> list[dict]:
+    """What `claude agents` lists (`bg_sessions.listed`); empty where it cannot say."""
+    return bg_sessions.listed(ship_intent.run_quiet)
 
 
 def fixers_working() -> frozenset[str]:
@@ -483,7 +520,12 @@ UNSCHEDULED = "not scheduled on this machine"
 
 
 def unscheduled(ctx: Context, tasks: dict[str, str], listed: frozenset[str]) -> list[Finding]:
-    """A finding per scheduled collector in `tasks` that the scheduler did not list."""
+    """A finding per scheduled collector in `tasks` that the scheduler did not list, nor
+    has when asked by name.
+
+    `schedule_health.query` answers [] for a bulk query that failed or ran past its
+    timeout, and absent from that, every collector read as unregistered: 9f5249cb filed
+    social-scraper while its task was registered and mid-scrape."""
     return [
         Finding(
             COLLECTOR_KIND,
@@ -492,7 +534,7 @@ def unscheduled(ctx: Context, tasks: dict[str, str], listed: frozenset[str]) -> 
             evidence=str(ctx.devkit_dir / collectors.ARTIFACT),
         )
         for name in sorted(tasks)
-        if name not in listed
+        if name not in listed and not collector_tasks.is_registered(name, collector_tasks.run_argv)
     ]
 
 

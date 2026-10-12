@@ -75,6 +75,10 @@ def test_the_upstream_prompt_names_every_project_and_pr_and_ends_in_the_ship_ski
     assert "2 checkout(s) (carameli, roguelike)" in text
     assert "carameli #412 u/412" in text and "roguelike #16 u/16" in text
     assert "not in each consumer" in text
+    # sports_betting #67: a template fix reaches no generated project, so a right test
+    # of a project's own runner is fixed in that project.
+    assert "A template reaches no project already generated" in text
+    assert all(owned in text for owned in fix_plan.PROJECT_OWNED)
     assert "ship skill" in text and "agent/fix-x-0918" in text
 
 
@@ -158,6 +162,8 @@ def test_the_exit_names_its_blockers_what_is_not_one_and_asks_for_evidence():
         "outside this repository",
         "adding a worktree on another branch",
         "what you tried first",
+        # the line `fix_reports.waits_on` reads, so a wait on another PR is held, not filed
+        "a line Waits on: and the full github.com URL",
     ):
         assert expected in fix_prompts.STOP
     # It crosses a wt command line with every other sentence here.
@@ -213,6 +219,29 @@ def test_the_dependabot_prompt_names_each_bump_and_where_the_evidence_is():
     assert "Name every package you bumped" in text, "how the pass knows an alert is answered"
     assert "path dependency" not in text, "nothing to say about a sibling there is not"
     assert not set("`") & set(text)
+
+
+def test_a_failing_update_job_sends_its_fixer_at_the_cause_not_only_the_bump():
+    """dd07a7ab: data-lake's job failed on sqlalchemy five weeks running; one fixer bumped
+    the lock by hand, the next found nothing to bump, and the manifest spelled it
+    SQLAlchemy, which Dependabot's case-sensitive match never rewrote."""
+    text = fix_prompts.dependabot_prompt(
+        _dependabot("run sqlalchemy: dependency_file_content_not_changed"), "agent/fix-d"
+    )
+    assert "a bump by hand answers one run" in text
+    assert "how many runs in a row each job has failed" in text
+    assert "Find what in this repository stops Dependabot and fix that, with a test" in text
+    assert "case-sensitive match on the lowercase package name" in text
+    assert not set('`"') & set(text), "the prompt crosses a wt command line"
+
+    other = fix_prompts.dependabot_prompt(_dependabot("run Something else broke"), "agent/f")
+    assert "Find what in this repository stops Dependabot" in other
+    assert "case-sensitive" not in other, "a kind's cause is said only for that kind"
+
+    alert_only = fix_prompts.dependabot_prompt(
+        _dependabot(f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0"), "agent/f"
+    )
+    assert "stops Dependabot" not in alert_only, "no failing job, nothing to say about one"
 
 
 def test_an_unfetchable_sibling_is_said_with_the_only_two_fixes_and_never_a_retry():
@@ -557,6 +586,17 @@ def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linu
     head = fix_prompts.FINISH.split("python scripts/lint-all.py")[0]
     assert ".venv interpreter, not the python on PATH" in head and "the linter" in head
     assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
+
+
+def test_a_friction_line_quotes_what_the_session_saw():
+    """2e747f02: e3d8cb27's line said the triage log printed #629 as unrelated, a word no
+    harness text uses, and the fixer sent at it spent turns in the previous transcript
+    finding what the session had actually been shown. A line is filed verbatim, so the
+    words the harness printed are the only evidence a paraphrase cannot lose."""
+    for text in every_prompt():
+        assert "quote the harness words you saw, not your paraphrase" in text
+    skill = " ".join((REPO_ROOT / ".claude/skills/ship/SKILL.md").read_text("utf-8").split())
+    assert "quoting the harness words you saw, not your paraphrase" in skill
 
 
 def test_who_made_a_reused_tree_reaches_every_pr_shape():
