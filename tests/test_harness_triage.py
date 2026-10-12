@@ -1144,3 +1144,40 @@ def test_reopen_appends_one_event_per_id(tmp_path):
     assert triage.reopen([ref], "no PR was ever opened from agent/x", root=tmp_path) == [ref]
     [back] = triage.open_items(triage.load(tmp_path))
     assert back.id == ref
+
+
+# d32ffcc2's own row, cut down: it named the open #629's branch in its detail, and the
+# evidence path holds a tree's slug that is not a branch.
+_NAMES_A_BRANCH = _line(
+    "agent-report",
+    project="devkit",
+    message="toolchain.align_path_sources (agent/fix-harness-ledger-1011-9) re-aligns per "
+    "run, which closes the sequential case only; seen on data-lake and in #116.",
+    evidence="C:/p/C--Users-alexa-vs-code-ibkr-trader--claude-worktrees-stateless-weaving-"
+    "feather/f0.jsonl#L82-L94",
+)
+
+
+def test_named_branches_reads_task_and_worktree_branches_out_of_a_groups_text():
+    said = _line("session-friction", detail="see worktree-gentle-shimmying-phoenix.", cause="-")
+    bucket = triage.open_items(triage.read_items(f"{_NAMES_A_BRANCH}\n{said}"))
+    assert sorted(triage.named_branches(bucket)) == [
+        "agent/fix-harness-ledger-1011-9",
+        "worktree-gentle-shimmying-phoenix",
+    ], "no hyphenated word, PR number or path slug reads as a branch"
+    plain = triage.open_items(triage.read_items(_line("agent-report", message="re-aligns")))
+    assert triage.named_branches(plain) == []
+
+
+def test_a_group_naming_a_branch_with_an_open_pr_names_the_pr():
+    """e3d8cb27: the text handed to d32ffcc2's session named #629's branch and never
+    said it was an open PR -- red on its own diff, and the fix the group extended."""
+    items = triage.open_items(triage.read_items(_NAMES_A_BRANCH))
+    prs = {"agent/fix-harness-ledger-1011-9": "#629 https://x/pull/629 -- its gate is red"}
+    text = triage.render(items, prs=prs)
+    assert (
+        "  OPEN PR  #629 https://x/pull/629 -- its gate is red on "
+        "agent/fix-harness-ledger-1011-9 -- this group names a fix not merged yet"
+    ) in text
+    assert "OPEN PR" not in triage.render(items), "no lookup, no line"
+    assert triage.open_pr_lines(items, {"agent/other": "#1"}) == []

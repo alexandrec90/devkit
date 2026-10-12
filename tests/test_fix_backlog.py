@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -258,3 +259,89 @@ def test_an_absolute_artifact_is_read_where_it_says(tmp_path):
     item = fix_backlog.triage.parse_line(failed_job_row("carameli", str(kept)))
     assert item is not None
     assert fix_backlog.artifact_path(item, tmp_path / "devkit") == kept
+
+
+class _Done:
+    def __init__(self, stdout: str, returncode: int = 0):
+        self.stdout, self.returncode = stdout, returncode
+
+
+def _gh_answering(answers: dict[tuple[str, str], _Done], asked: list):
+    """A `gh_for` whose `gh pr list --head <branch>` answers per `(checkout, branch)`."""
+
+    def gh_for(home):
+        def gh(*args):
+            branch = args[args.index("--head") + 1]
+            asked.append((home.name, branch))
+            return answers.get((home.name, branch), _Done("[]"))
+
+        return gh
+
+    return gh_for
+
+
+def test_the_handed_backlog_names_the_open_pr_a_group_names(monkeypatch, tmp_path):
+    """e3d8cb27: d32ffcc2 named `agent/fix-harness-ledger-1011-9`, whose #629 was open and
+    red on its own diff; the session handed the group found that only after several calls."""
+    devkit = tmp_path / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    shard.write_text(
+        "2026-10-11T23:20:41+00:00\tevent=agent-report\tagent=claude\thost=h\tproject=devkit"
+        "\tmessage=align_path_sources (agent/fix-harness-ledger-1011-9) closes one case\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    rollup = [{"conclusion": "FAILURE"}, {"conclusion": "SUCCESS"}]
+    row = {
+        "number": 629,
+        "url": "https://github.com/o/devkit/pull/629",
+        "statusCheckRollup": rollup,
+    }
+    asked: list = []
+    gh_for = _gh_answering(
+        {("devkit", "agent/fix-harness-ledger-1011-9"): _Done(json.dumps([row]))}, asked
+    )
+    backlog = fix_backlog.ledger_failure(devkit, tmp_path / "ev", gh_for=gh_for)
+    assert backlog is not None
+    text = (Path(backlog.evidence) / "harness-triage.log").read_text(encoding="utf-8")
+    assert (
+        "OPEN PR  #629 https://github.com/o/devkit/pull/629 -- its gate is red (1 failing) "
+        "on agent/fix-harness-ledger-1011-9"
+    ) in text
+    assert asked == [("devkit", "agent/fix-harness-ledger-1011-9")], "asked once, found"
+
+
+def test_open_prs_asks_the_groups_own_project_too_and_survives_a_gh_that_cannot_answer(tmp_path):
+    devkit, carameli = tmp_path / "devkit", tmp_path / "carameli"
+    devkit.mkdir()
+    carameli.mkdir()
+    rows = [
+        "2026-10-11T10:00:00+00:00\tevent=agent-report\tproject=carameli\tmessage=on agent/x-1",
+        "2026-10-11T10:00:01+00:00\tevent=agent-report\tproject=carameli\tmessage=on agent/gone",
+        "2026-10-11T10:00:02+00:00\tevent=agent-report\tproject=carameli\tmessage=nothing named",
+    ]
+    grouped = fix_backlog.triage.groups(fix_backlog.triage.read_items("\n".join(rows)))
+    asked: list = []
+    answers = {
+        ("carameli", "agent/x-1"): _Done(json.dumps([{"number": 7, "statusCheckRollup": []}])),
+        ("devkit", "agent/gone"): _Done("", returncode=1),
+        ("carameli", "agent/gone"): _Done("not json"),
+    }
+    found = fix_backlog.open_prs(devkit, grouped, _gh_answering(answers, asked))
+    assert found == {"agent/x-1": "#7 -- no failing check"}
+    assert ("carameli", "agent/x-1") in asked and ("devkit", "agent/x-1") in asked
+    assert len(asked) == 4, "a backlog line naming no branch costs no gh call"
+
+
+def test_open_pr_reads_nothing_out_of_an_answer_with_no_pr():
+    assert fix_backlog.open_pr(lambda *a: _Done("[]"), "agent/x") == ""
+    assert fix_backlog.open_pr(lambda *a: _Done('[{"url": "u"}]'), "agent/x") == ""
+    assert fix_backlog.open_pr(lambda *a: _Done('{"number": 1}'), "agent/x") == ""
+
+    def no_gh(*args):
+        raise FileNotFoundError("gh")
+
+    assert fix_backlog.open_pr(no_gh, "agent/x") == "", "a missing gh names no PR"
