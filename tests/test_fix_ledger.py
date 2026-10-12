@@ -164,6 +164,16 @@ def test_a_sourced_entry_keeps_every_send_and_a_day_counts_them_all(tmp_path):
     assert len(kept) == fix_ledger.AT_KEEP
 
 
+def test_a_free_action_stamped_under_a_source_is_not_counted_as_a_session(tmp_path):
+    """Before `fix_budget.source` left them unsourced, branch updates were stamped as
+    Dependabot sends; a ledger that still holds them must not spend the cap on them."""
+    path = tmp_path / "dispatch.json"
+    for action in (*fix_plan.NO_SESSION, fix_plan.RESOLVE):
+        fix_ledger.record(path, f"pr:c:446:s:d:{action}", "n", NOW, source="dependabot")
+    since = NOW - _dt.timedelta(hours=24)
+    assert fix_ledger.sent_since(fix_ledger.read_ledger(path), "dependabot", since) == 1
+
+
 def test_a_corrupt_ledger_is_empty_rather_than_a_traceback(tmp_path):
     path = tmp_path / "dispatch.json"
     path.write_text("{not json", encoding="utf-8")

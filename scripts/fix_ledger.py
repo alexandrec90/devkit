@@ -205,10 +205,16 @@ AT_KEEP = 8
 
 
 def sent_since(ledger: dict[str, dict], source: str, since: _dt.datetime) -> int:
-    """How many sessions of `source` the ledger records at or after `since`."""
+    """How many sessions of `source` the ledger records at or after `since`.
+
+    An entry keyed under a free action (`fix_plan.NO_SESSION`) is no session: older
+    ledgers stamped branch updates with their source, and those must not spend a cap.
+    """
     count = 0
-    for entry in ledger.values():
+    for key, entry in ledger.items():
         if not isinstance(entry, dict) or entry.get("source") != source:
+            continue
+        if key.rsplit(":", 1)[-1] in fix_plan.NO_SESSION:
             continue
         stamps = entry.get("at")
         for stamp in stamps if isinstance(stamps, list) else []:
