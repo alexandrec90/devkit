@@ -588,6 +588,17 @@ def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linu
     assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
 
 
+def test_a_friction_line_quotes_what_the_session_saw():
+    """2e747f02: e3d8cb27's line said the triage log printed #629 as unrelated, a word no
+    harness text uses, and the fixer sent at it spent turns in the previous transcript
+    finding what the session had actually been shown. A line is filed verbatim, so the
+    words the harness printed are the only evidence a paraphrase cannot lose."""
+    for text in every_prompt():
+        assert "quote the harness words you saw, not your paraphrase" in text
+    skill = " ".join((REPO_ROOT / ".claude/skills/ship/SKILL.md").read_text("utf-8").split())
+    assert "quoting the harness words you saw, not your paraphrase" in skill
+
+
 def test_who_made_a_reused_tree_reaches_every_pr_shape():
     """df43b14e: a fixer in an operator's elevated tree spent its turns working out whose
     it was; `fix_trees.provenance` says, and every shape a reused tree gets carries it."""
