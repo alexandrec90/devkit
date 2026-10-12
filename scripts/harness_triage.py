@@ -482,16 +482,55 @@ def at_work(now: _dt.datetime) -> Callable[[Path], bool]:
     return lambda tree: fix_reports.active_transcript(tree, now) is not None
 
 
+# --- open PRs a group names -----------------------------------------------------------
+#
+# A branch a group's own text names: a task branch (`agent/fix-harness-ledger-1011-9`)
+# or a `claude --worktree` one. Narrower than `BRANCH`, which judges a whole `pr=` value
+# and in free text would take every hyphenated word ("re-aligns", "data-lake"). The
+# lookbehind keeps a tree's slug inside a path (`...-claude-worktrees-x/`) out.
+NAMED_BRANCH = re.compile(r"(?<![\w./-])(?:agent/[\w./-]*\w|worktree-[\w-]*\w)")
+NAMING_KEYS = (*DETAIL_KEYS, "cause", "said")
+
+
+def named_branches(bucket: list[Item]) -> list[str]:
+    """Every branch a group's rows name, first seen first."""
+    found: dict[str, None] = {}
+    for item in bucket:
+        for key in NAMING_KEYS:
+            for match in NAMED_BRANCH.finditer(item.fields.get(key, "")):
+                found.setdefault(match.group(0), None)
+    return list(found)
+
+
+def open_pr_lines(bucket: list[Item], prs: Mapping[str, str]) -> list[str]:
+    """A line for each branch the group names that has an open PR (`prs`, `branch ->
+    what it is`, is `fix_backlog.open_prs`'s).
+
+    e3d8cb27: d32ffcc2's row named `agent/fix-harness-ledger-1011-9`, whose #629 was
+    open, red on its own diff, and the fix the group extended; the text said none of
+    that, and the session handed it spent several calls finding the PR.
+    """
+    return [
+        f"  OPEN PR  {prs[branch]} on {branch} -- this group names a fix not merged yet: "
+        "read its diff and gate before writing another, and put a fix that extends it in "
+        "its tree (the skill's section 3)"
+        for branch in named_branches(bucket)
+        if branch in prs
+    ]
+
+
 def render(
     items: list[Item],
     history: list[Item] | None = None,
     pending: Mapping[tuple[str, str, str, str], str] | None = None,
     held: Mapping[str, Path] | None = None,
+    prs: Mapping[str, str] | None = None,
 ) -> str:
     """The open backlog as text -- the artifact, and what the CLI prints. With the whole
     `history`, a group that recurred after a resolution says so; one in `pending`
-    (`pending_groups`) says its fix is in flight instead, and one in `held`
-    (`held_groups`) names the session already sent at it."""
+    (`pending_groups`) says its fix is in flight instead, one in `held`
+    (`held_groups`) names the session already sent at it, and one naming a branch in
+    `prs` names that branch's open PR."""
     if not items:
         return "harness-triage: nothing open\n"
     fixes = past_fixes(history or [])
@@ -504,6 +543,7 @@ def render(
         lines.extend(head_lines(f"{event}  [{agent}]  {project}", bucket))
         lines.extend(f"  REOPENED {i.id} -- {back[i.id]}" for i in bucket if i.id in back)
         lines.extend(verdict_lines(pending.get(head.signature), fixes.get(head.signature)))
+        lines.extend(open_pr_lines(bucket, prs or {}))
         holder = next((held[i.id] for i in bucket if i.id in held), None)
         if holder:
             lines.append(

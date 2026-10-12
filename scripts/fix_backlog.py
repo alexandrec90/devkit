@@ -18,13 +18,15 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import json
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import broken_pr_menu as menu
 import fix_cycle
 import fix_ledger
 import fix_plan
@@ -40,13 +42,17 @@ WHEN_SLACK = _dt.timedelta(minutes=5)
 
 
 def ledger_failure(
-    devkit_dir: Path, root: Path, in_flight: Mapping[str, str] | None = None
+    devkit_dir: Path,
+    root: Path,
+    in_flight: Mapping[str, str] | None = None,
+    gh_for: Callable[[Path], Callable[..., object]] = sweep.gh_for,
 ) -> fix_plan.Failure | None:
     """The open backlog as a `LEDGER` failure with its groups as evidence; None when empty.
 
     A group whose fix is still in flight (`in_flight`, `fix_verify.in_flight`'s) is shown
     as pending and sends nothing: its new rows are the defect waiting on a merge, and
-    each one used to change the sha and send a session to re-prove it (d677ea57).
+    each one used to change the sha and send a session to re-prove it (d677ea57). A
+    group naming a branch with an open PR names the PR too (`open_prs`).
     """
     history = triage.load(devkit_dir)
     items = triage.open_items(history)
@@ -79,12 +85,55 @@ def ledger_failure(
     where.mkdir(parents=True, exist_ok=True)
     copied = [copy_artifact(members[0], devkit_dir, where) for _, members in grouped]
     notes = [line for line in copied if line]
-    text = triage.render(items, history, pending)
+    text = triage.render(items, history, pending, prs=open_prs(devkit_dir, grouped, gh_for))
     if notes:
         text += "\ncopied beside this file, as they were when the pass read the ledger:\n"
         text += "".join(f"  {line}\n" for line in notes)
     (where / triage.ARTIFACT.name).write_text(text, encoding="utf-8")
     return replace(failure, evidence=str(where))
+
+
+def open_prs(
+    devkit_dir: Path,
+    grouped: list[tuple[tuple[str, str, str, str], list[triage.Item]]],
+    gh_for: Callable[[Path], Callable[..., object]] = sweep.gh_for,
+) -> dict[str, str]:
+    """`branch -> what its open PR is`, for each branch a group names that has one
+    (`triage.named_branches`), looked up in devkit and in the group's own project.
+
+    Only named branches are asked about, so a backlog naming none costs no `gh` call. A
+    `gh` that cannot answer names no PR: the group still reaches its session as before.
+    """
+    workspace = sweep.default_workspace(devkit_dir).parent
+    found: dict[str, str] = {}
+    for _, members in grouped:
+        homes = [home for home in (devkit_dir, workspace / members[0].project) if home.is_dir()]
+        for branch in triage.named_branches(members):
+            for home in dict.fromkeys(homes):
+                if branch not in found and (said := open_pr(gh_for(home), branch)):
+                    found[branch] = said
+    return found
+
+
+def open_pr(gh: Callable[..., object], branch: str) -> str:
+    """`#N <url> -- <its gate>` for `branch`'s open PR, or "" when it has none."""
+    fields = "number,url,statusCheckRollup"
+    try:
+        done = gh(
+            "pr", "list", "--head", branch, "--state", "open", "--limit", "1", "--json", fields
+        )
+        rows = json.loads(getattr(done, "stdout", "") or "[]")
+    except (OSError, ValueError):  # no `gh` on PATH, or an answer that is not JSON
+        return ""
+    if getattr(done, "returncode", 1) != 0 or not isinstance(rows, list) or not rows:
+        return ""
+    row = rows[0]
+    if not isinstance(row, dict) or not row.get("number"):
+        return ""
+    failed = menu.failing_checks(row.get("statusCheckRollup"))
+    gate = f"its gate is red ({failed} failing)" if failed else "no failing check"
+    url = f" {row['url']}" if row.get("url") else ""
+    return f"#{row['number']}{url} -- {gate}"
 
 
 def artifact_path(item: triage.Item, devkit_dir: Path) -> Path | None:
