@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 from types import SimpleNamespace
 
 import pytest
@@ -2588,7 +2589,11 @@ Said = collectors.handoff.Said
 MARKER = json.dumps({"state": "pending", "from": OTHER, "to": THIS})
 
 
-class FakeHandoff(collectors.handoff.Handoff):
+# A module loaded by path is opaque to mypy, so its class is a base only through `Any`.
+HandoffBase: Any = collectors.handoff.Handoff
+
+
+class FakeHandoff(HandoffBase):
     """The project's handoff command; logs into `log`, which a test shares with docker's
     calls when the order between the two is the property."""
 

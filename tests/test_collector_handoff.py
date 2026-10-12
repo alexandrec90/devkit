@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from support import load_script
@@ -129,7 +130,11 @@ def test_an_echoed_run_captures_nothing(tmp_path):
     assert said == handoff.Said(0, "", "")
 
 
-class Recorded(handoff.Handoff):
+# A module loaded by path is opaque to mypy, so its class is a base only through `Any`.
+HandoffBase: Any = handoff.Handoff
+
+
+class Recorded(HandoffBase):
     def __init__(self, answer):
         self.answer = answer
         self.calls = []
