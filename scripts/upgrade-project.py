@@ -1015,6 +1015,28 @@ def artifact_body(tag: str, dry_run: bool, outcomes: list[Outcome]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def unresolved_names(body: str) -> list[str]:
+    """The names `artifact_body`'s `# unresolved:` header lists; [] for a clean artifact."""
+    for line in body.splitlines():
+        if line.startswith("# unresolved:"):
+            return line.removeprefix("# unresolved:").split()
+    return []
+
+
+def owes_only_a_release(body: str) -> bool:
+    """Is the one thing this artifact holds against its run the `(release)` warning?
+
+    That is every checkout adopted, and devkit main carrying vendored changes the tag
+    does not. Exit 1 is right for the run a person started, but not for the one
+    `release-pipeline.py` starts: there it means main moved on while the release was
+    being cut (#629 merged during v0.11.62's), and the next `--if-needed` run cuts the
+    release it owes. Read off the artifact because the exit code alone cannot tell
+    this apart from a checkout that failed with the same code.
+    """
+    names = unresolved_names(body)
+    return bool(names) and all(name == RELEASE_SCOPED for name in names)
+
+
 def write_artifact(root: Path, body: str) -> Path | None:
     """Persist the report under `root`. Best-effort: an unwritable `logs/` is not
     itself a reason to fail an upgrade that otherwise worked."""
