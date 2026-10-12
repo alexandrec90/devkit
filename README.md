@@ -1036,7 +1036,8 @@ its checkout's HEAD -- only when that HEAD is on origin's default branch and no 
 is edited, so a timer deploys merged code and nothing else; otherwise `logs/collectors.log`
 says why it held. A collector whose image copies in a sibling checkout names it in
 `buildsFrom` (ibkr_trader's `["data-lake"]`), and a merge there redeploys it on the same
-terms. A container it started or redeployed is not health-checked for its
+terms -- unless the project's own PR gate pins that sibling to a commit: then the image is
+built from a context staged at the pin, and only a move of the pin redeploys it. A container it started or redeployed is not health-checked for its
 `settle` minutes (default 60, settable per collector beside `health`): until every job
 inside has fired on the new code, the verdict is still the old code's. A scheduled collector's task is registered on a `run-here` machine, and
 removed on a `stop-here` or `release`. The tray gets a `collector: <name>` row per

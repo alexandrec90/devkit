@@ -96,8 +96,10 @@ class FakeDocker:
         self.calls.append(("started", container.id))
         return self.started_at
 
-    def deploy(self, checkout, service):
+    def deploy(self, checkout, service, files=()):
         self.calls.append(("deploy", Path(checkout).name, service))
+        # What a staged deploy hands compose, read while the staging still exists.
+        self.deployed_files = [(Path(f).name, Path(f).read_text(encoding="utf-8")) for f in files]
         return self.up_ok, "" if self.up_ok else "failed to solve: pip install exited 1"
 
     def ps(self):
@@ -123,13 +125,16 @@ class FakeGit:
         self.held_answer = held
         self.calls: list[str] = []
 
-    def head(self, checkout):
+    def head(self, checkout, rev="HEAD"):
         self.calls.append("head")
         return self.head_answer
 
-    def held(self, checkout):
+    def held(self, checkout, rev="HEAD"):
         self.calls.append("held")
         return self.held_answer
+
+    def pin(self, checkout, sibling):
+        return ""
 
 
 def target(tmp_path, mode=RUN, project="ibkr_trader", service="app", health=("h",)):
@@ -482,17 +487,39 @@ def test_redeploy_with_a_checkout_git_cannot_read_records_only_the_build(tmp_pat
 class SiblingGit(FakeGit):
     """`FakeGit` answering per checkout, by its directory's name."""
 
-    def __init__(self, heads: dict, held: dict | None = None):
+    def __init__(
+        self,
+        heads: dict,
+        held: dict | None = None,
+        pins: dict | None = None,
+        commits: dict | None = None,
+    ):
         super().__init__()
         self.heads, self.helds = heads, held or {}
+        # `pins`: sibling -> the ref the consumer's gate names; `commits`: that ref ->
+        # `(short sha, time)` in the sibling, absent when the sibling lacks it.
+        self.pins, self.commits = pins or {}, commits or {}
+        self.exported: list[tuple[str, str]] = []
 
-    def head(self, checkout):
-        self.calls.append(f"head {Path(checkout).name}")
-        return self.heads.get(Path(checkout).name)
+    def head(self, checkout, rev="HEAD"):
+        self.calls.append(f"head {Path(checkout).name}" + ("" if rev == "HEAD" else f" {rev}"))
+        return self.heads.get(Path(checkout).name) if rev == "HEAD" else self.commits.get(rev)
 
-    def held(self, checkout):
-        self.calls.append(f"held {Path(checkout).name}")
+    def held(self, checkout, rev="HEAD"):
+        self.calls.append(f"held {Path(checkout).name}" + ("" if rev == "HEAD" else f" {rev}"))
         return self.helds.get(Path(checkout).name, "")
+
+    def pin(self, checkout, sibling):
+        return self.pins.get(sibling, "")
+
+    def resolve(self, checkout, ref):
+        return ref if ref in self.commits else ""
+
+    def export(self, checkout, rev, dest):
+        self.exported.append((Path(checkout).name, rev))
+        dest.mkdir(parents=True)
+        (dest / "REV").write_text(rev, encoding="utf-8")
+        return ""
 
 
 def built_from(tmp_path, *siblings):
@@ -543,10 +570,107 @@ def test_source_heads_is_the_checkout_then_each_it_builds_from_that_git_can_read
     git = SiblingGit({"ibkr_trader": ("aaa", 1.0), "data-lake": ("bbb", 2.0)})
     t = built_from(tmp_path, "data-lake", "gone")
     assert collectors.source_heads(t, git) == [
-        (t.checkout, ("aaa", 1.0)),
-        (t.checkout.parent / "data-lake", ("bbb", 2.0)),
+        collectors.Source(t.checkout, "aaa", 1.0),
+        collectors.Source(t.checkout.parent / "data-lake", "bbb", 2.0),
     ]
-    assert collectors.source_heads(target(tmp_path), git) == [(t.checkout, ("aaa", 1.0))]
+    assert collectors.source_heads(target(tmp_path), git) == [
+        collectors.Source(t.checkout, "aaa", 1.0)
+    ]
+
+
+# A full sha, as ibkr_trader's gate writes its pin; zero-padded so it reads as no secret.
+PIN = "c0aa963" + "0" * 33
+
+
+def compose(t):
+    (t.checkout / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    return t
+
+
+def test_a_pinned_sibling_is_read_at_the_pin_not_at_its_head(tmp_path):
+    """8e3c4a67: data-lake's HEAD ran ahead of the commit ibkr_trader's gate pins."""
+    git = SiblingGit(
+        {"ibkr_trader": ("aaa", 1.0), "data-lake": ("new", 9.0)},
+        pins={"data-lake": PIN},
+        commits={PIN: ("c0aa963", 2.0)},
+    )
+    t = built_from(tmp_path, "data-lake")
+    assert collectors.source_heads(t, git) == [
+        collectors.Source(t.checkout, "aaa", 1.0),
+        collectors.Source(t.checkout.parent / "data-lake", "c0aa963", 2.0, PIN, PIN),
+    ]
+
+
+def test_a_sibling_moving_past_the_pin_does_not_redeploy(tmp_path):
+    """The second 8e3c4a67 incident: data-lake #66 merged, ibkr_trader's migration had
+    not, and the 01:00Z pass rebuilt the image onto #66. Its pin had not moved."""
+    git = SiblingGit(
+        {"ibkr_trader": ("aaa", 1500.0), "data-lake": ("c0aa963", 2500.0)},
+        pins={"data-lake": PIN},
+        commits={PIN: ("730f759", 1800.0)},
+    )
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        compose(built_from(tmp_path, "data-lake")), ours(tmp_path), docker, git, report, {}
+    )
+    assert got == {collectors.CODE_AT: 2000.0}
+    assert not any(call[0] == "deploy" for call in docker.calls)
+
+
+def test_a_redeploy_with_a_pinned_sibling_builds_a_context_staged_at_the_pin(tmp_path):
+    git = SiblingGit(
+        {"ibkr_trader": ("bbb", 2500.0), "data-lake": ("new", 9000.0)},
+        pins={"data-lake": PIN},
+        commits={PIN: ("c0aa963", 1800.0)},
+    )
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        compose(built_from(tmp_path, "data-lake")), ours(tmp_path), docker, git, report, {}
+    )
+    assert got == {collectors.CODE_AT: 2500.0, "deployed": True}
+    assert git.exported == [("ibkr_trader", "HEAD"), ("data-lake", PIN)]
+    assert "held data-lake " + PIN in git.calls, "the pin, not the checkout, must be merged"
+    names = [name for name, _text in docker.deployed_files]
+    assert names == ["docker-compose.yml", collectors.collector_build.OVERRIDE_NAME]
+    context = json.loads(docker.deployed_files[1][1])["services"]["app"]["build"]["context"]
+    assert Path(context).name.startswith("ibkr_trader-build-")
+    assert not Path(context).exists(), "the staged context is removed once built"
+
+
+def test_deploy_sources_builds_from_the_checkouts_when_nothing_is_pinned(tmp_path):
+    t = built_from(tmp_path, "data-lake")
+    sources = [collectors.Source(t.checkout, "aaa", 1.0)]
+    docker, git = FakeDocker(), SiblingGit({})
+    assert collectors.deploy_sources(t, sources, docker, git) == (True, "")
+    assert docker.calls == [("deploy", "ibkr_trader", "app")]
+    assert docker.deployed_files == [] and git.exported == [], "no staging without a pin"
+
+
+def test_a_pin_the_sibling_does_not_have_holds_the_redeploy(tmp_path):
+    git = SiblingGit({"ibkr_trader": ("bbb", 2500.0)}, pins={"data-lake": PIN})
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        compose(built_from(tmp_path, "data-lake")), ours(tmp_path), docker, git, report, {}
+    )
+    assert got[collectors.HELD] == (
+        f"data-lake: ibkr_trader pins {PIN[:12]}, which this checkout does not have"
+    )
+    assert not any(call[0] == "deploy" for call in docker.calls)
+
+
+def test_a_staging_that_fails_is_a_failed_redeploy(tmp_path):
+    git = SiblingGit(
+        {"ibkr_trader": ("bbb", 2500.0)},
+        pins={"data-lake": PIN},
+        commits={PIN: ("c0aa963", 1800.0)},
+    )
+    docker, report = FakeDocker(built=2000.0), collectors.Report()
+    got = collectors.redeploy(
+        built_from(tmp_path, "data-lake"), ours(tmp_path), docker, git, report, {}
+    )
+    assert got == {collectors.CODE_AT: 2000.0}
+    assert report.failures == 1 and "has no compose file to build from" in report.cause
+    assert not any(call[0] == "deploy" for call in docker.calls)
 
 
 def test_held_in_names_only_a_checkout_built_from(tmp_path):
@@ -647,6 +771,63 @@ def test_git_deploys_merged_code_only(merged):
 
 def test_git_says_nothing_of_a_directory_that_is_not_a_checkout(tmp_path):
     assert collectors.Git().head(tmp_path) is None
+
+
+def test_deploy_names_the_compose_files_it_is_handed(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(argv=argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(collectors.subprocess, "run", fake_run)
+    base, extra = tmp_path / "docker-compose.yml", tmp_path / "staged.yaml"
+    collectors.Docker().deploy(tmp_path, "app", [base, extra])
+    named = ["-f", str(base), "-f", str(extra)]
+    assert seen["argv"] == ["docker", "compose", *named, "up", "-d", "--build", "app"]
+
+
+def test_git_reads_resolves_and_exports_a_pinned_commit(merged, tmp_path):
+    git = collectors.Git()
+
+    def sha():
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=merged, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    pinned = sha()
+    (merged / "a.txt").write_text("two\n", encoding="utf-8")
+    _git(merged, "commit", "-q", "-am", "two, local only")
+    local = sha()
+    assert git.resolve(merged, pinned) == pinned
+    assert git.resolve(merged, "main") == pinned, "a branch by its remote-tracking ref"
+    assert git.resolve(merged, "0" * 40) == ""
+    assert git.head(merged, pinned)[0] == pinned[:7]
+    (merged / "a.txt").write_text("edited\n", encoding="utf-8")
+    assert git.held(merged, pinned) == "", "a pin is built from its commit, not the files"
+    assert git.held(merged) == "HEAD is not on origin's default branch"
+    assert git.held(merged, local) == f"{local[:7]} is not on origin's default branch"
+    dest = tmp_path / "staged" / "ibkr_trader"
+    dest.parent.mkdir()
+    assert git.export(merged, pinned, dest) == ""
+    assert (dest / "a.txt").read_text(encoding="utf-8") == "one\n"
+    assert list(dest.parent.iterdir()) == [dest], "the archive is removed once unpacked"
+    assert git.export(merged, "0" * 40, tmp_path / "staged" / "gone") != ""
+
+
+def test_git_pin_is_the_ref_the_checkouts_pr_gate_checks_the_sibling_out_at(tmp_path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "pr-gate.yml").write_text(
+        "jobs:\n  t:\n    steps:\n"
+        "      - uses: actions/checkout@v7\n"
+        "        with:\n"
+        "          repository: alexandrec90/data-lake\n"
+        f"          ref: {PIN}\n",
+        encoding="utf-8",
+    )
+    assert collectors.Git().pin(tmp_path, "data-lake") == PIN
+    assert collectors.Git().pin(tmp_path, "other") == ""
 
 
 def test_a_start_that_fails_is_a_failure_with_dockers_words(tmp_path):
