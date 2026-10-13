@@ -789,6 +789,7 @@ def main(argv: list[str] | None = None) -> int:
     agent = SCHEDULED_AGENT if args.scheduled else args.agent
     if args.scheduled:
         mode = fix_cycle.mode_from_workspace(text)
+    mode = fix_send.dispatch_mode(mode, REPO_ROOT)
     if mode == fix_cycle.DISPATCH and not args.scheduled and agent_tabs.is_elevated():
         return hand_to_scheduled_task()
     launch = agent_models.Launch.parse(agent, args.model, args.effort)

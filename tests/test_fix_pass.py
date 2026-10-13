@@ -61,6 +61,15 @@ def git_trusted(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def current_tree(request, monkeypatch):
+    """The pass's code is current unless a test says otherwise: `main` runs from this
+    checkout, a linked tree in a fixer's session, which the real `stale_tree` fetches
+    for and reads as stale once main moves. A test on a `static` repo judges it for real."""
+    if "static" not in request.fixturenames:
+        monkeypatch.setattr(fix_pass.fix_send, "stale_tree", lambda root: "")
+
+
+@pytest.fixture(autouse=True)
 def no_session_busy(monkeypatch):
     """No session on this machine is working in a tree unless a test says one is."""
     monkeypatch.setattr(fix_pass.fix_loop, "fixers_working", frozenset)
@@ -649,6 +658,71 @@ def test_code_moved_leaves_a_branch_of_its_own_and_a_linked_worktree_alone(stati
     (linked / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
     assert fix_pass.fix_send.code_moved(linked) == ""
     assert fix_pass.fix_send.code_moved(tmp_path / "missing") == "", "a git failure is no move"
+
+
+def _linked(checkout: Path, tmp_path: Path) -> Path:
+    """A linked worktree of `checkout` on a branch with a commit of its own."""
+    for key, value in (("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")):
+        _git(checkout, "config", key, value)
+    _git(checkout, "config", "core.hooksPath", str(tmp_path / "no-hooks"))
+    linked = tmp_path / "linked"
+    _git(checkout, "worktree", "add", "-b", "dev", str(linked))
+    (linked / "notes.txt").write_text("x\n", encoding="utf-8")
+    _git(linked, "add", ".")
+    _git(linked, "commit", "-m", "work of its own")
+    return linked
+
+
+def test_stale_tree_names_what_a_linked_worktree_lacks_of_origins_scripts(static, tmp_path):
+    """c335743e / ecff4199: a pass run from `wobbly-snuggling-sunset`, a `claude --worktree`
+    tree two days behind main, dispatched a fixer at two groups awaiting a person -- its
+    code predated `awaiting_person`, and `code_moved` judges no linked worktree."""
+    author, checkout = static
+    linked = _linked(checkout, tmp_path)
+    assert fix_pass.fix_send.stale_tree(linked) == "", "current"
+    _push(author, "README.md")
+    assert fix_pass.fix_send.stale_tree(linked) == "", "a docs-only merge routes nothing"
+    fork = _git(linked, "rev-parse", "HEAD~1")[:9]
+    _push(author, "scripts/route.py")
+    tip = _git(author, "rev-parse", "HEAD")[:9]
+    assert fix_pass.fix_send.stale_tree(linked) == f"{fork}..{tip}"
+    assert fix_pass.fix_send.stale_tree(checkout) == "", "the static checkout is code_moved's"
+    assert fix_pass.fix_send.stale_tree(tmp_path / "missing") == "", "a git failure is not stale"
+
+
+def test_origin_tip_and_scripts_range_read_origin_after_a_fetch(static, tmp_path):
+    author, checkout = static
+    git = fix_pass.fix_send.sweep.git_for(checkout)
+    old = _git(checkout, "rev-parse", "HEAD")
+    _push(author, "scripts/route.py")
+    new = _git(author, "rev-parse", "HEAD")
+    assert fix_pass.fix_send.origin_tip(git) == new, "fetched, not the stale ref"
+    assert fix_pass.fix_send.scripts_range(git, old, new) == f"{old[:9]}..{new[:9]}"
+    assert fix_pass.fix_send.scripts_range(git, new, new) == ""
+    assert fix_pass.fix_send.origin_tip(fix_pass.fix_send.sweep.git_for(tmp_path)) == ""
+
+
+def test_a_dispatch_from_a_stale_worktree_runs_as_a_plan(monkeypatch, capsys):
+    monkeypatch.setattr(fix_pass.fix_send, "stale_tree", lambda root: "aaa..bbb")
+    assert fix_pass.fix_send.dispatch_mode(fix_cycle.DISPATCH, Path("tree")) == fix_cycle.PLAN
+    why = capsys.readouterr().err
+    assert "aaa..bbb" in why and "devkit checkout" in why
+    monkeypatch.setattr(fix_pass.fix_send, "stale_tree", lambda root: pytest.fail("fetched"))
+    assert fix_pass.fix_send.dispatch_mode(fix_cycle.PLAN, Path("tree")) == fix_cycle.PLAN
+    monkeypatch.setattr(fix_pass.fix_send, "stale_tree", lambda root: "")
+    assert fix_pass.fix_send.dispatch_mode(fix_cycle.DISPATCH, Path("tree")) == fix_cycle.DISPATCH
+    assert capsys.readouterr().err == ""
+
+
+def test_the_cli_run_from_a_stale_worktree_plans_and_says_why(monkeypatch, tmp_path, capsys):
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text('{"settings": {"devkit.fixPass": "dispatch"}}', encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(fix_pass, "run", lambda ws, mode, launch, **k: seen.append(mode) or 0)
+    monkeypatch.setattr(fix_pass.fix_send, "stale_tree", lambda root: "aaa..bbb")
+    assert fix_pass.main(["--workspace", str(workspace)]) == 0
+    assert seen == [fix_cycle.PLAN]
+    assert "aaa..bbb" in capsys.readouterr().err
 
 
 def test_a_second_pass_sends_nothing_at_the_same_failure(world):

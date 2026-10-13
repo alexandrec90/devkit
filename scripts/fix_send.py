@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
 import branch_facts
 import fix_budget
+import fix_cycle
 import fix_findings
 import fix_ledger
 import fix_loop
@@ -77,18 +78,65 @@ def code_moved(root: Path) -> str:
     if (root / ".git").is_file():
         return ""
     git = sweep.git_for(root)
+    if not (new := origin_tip(git)):
+        return ""
+    old = LOADED_FROM.get(str(root)) or git("rev-parse", "HEAD").stdout.strip()
+    if not old or old == new:
+        return ""
+    if git("merge-base", "--is-ancestor", old, new).returncode != 0:
+        return ""
+    return scripts_range(git, old, new)
+
+
+def origin_tip(git: sweep.Git) -> str:
+    """`origin/<default>`'s commit, fetched first; "" when the fetch fails."""
     head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip()
     base = head.removeprefix("origin/") or "main"
     if git("fetch", "--quiet", "origin", base).returncode != 0:
         return ""
-    loaded = LOADED_FROM.get(str(root)) or git("rev-parse", "HEAD").stdout.strip()
-    old, new = loaded, git("rev-parse", f"origin/{base}").stdout.strip()
-    if not old or not new or old == new:
-        return ""
-    if git("merge-base", "--is-ancestor", old, new).returncode != 0:
-        return ""
+    return git("rev-parse", f"origin/{base}").stdout.strip()
+
+
+def scripts_range(git: sweep.Git, old: str, new: str) -> str:
+    """`old..new` when `scripts/` differs between them, else ""."""
     changed = git("diff", "--name-only", old, new, "--", "scripts/")
     return f"{old[:9]}..{new[:9]}" if changed.returncode == 0 and changed.stdout.strip() else ""
+
+
+def stale_tree(root: Path) -> str:
+    """`fork..tip` when `root` is a linked worktree whose code lacks `scripts/` changes
+    merged on `origin/<default>` since it forked, else "".
+
+    `code_moved` judges only the static checkout the watchdog updates. A pass run by
+    hand from a linked tree -- a click on the task in a window opened on it -- routes with
+    that tree's code however old: `wobbly-snuggling-sunset`, two days behind, sent a fixer
+    at two groups awaiting a person, since its code predated `awaiting_person`
+    (c335743e, ecff4199). The tree's own commits do not count: it lags or it does not.
+    """
+    if not (root / ".git").is_file():
+        return ""
+    git = sweep.git_for(root)
+    if not (tip := origin_tip(git)):
+        return ""
+    fork = git("merge-base", "HEAD", tip)
+    if fork.returncode != 0 or not (old := fork.stdout.strip()) or old == tip:
+        return ""
+    return scripts_range(git, old, tip)
+
+
+def dispatch_mode(mode: str, root: Path) -> str:
+    """The mode to run: a dispatch from a stale linked worktree (`stale_tree`) runs as a
+    plan -- it ships, merges and sends nothing -- and says so on stderr; any other is as
+    asked."""
+    if mode != fix_cycle.DISPATCH or not (lag := stale_tree(root)):
+        return mode
+    print(
+        f"fix-pass: {root} lacks origin's scripts/ changes {lag}, so it ran as a plan and "
+        "sent no one: dispatch from the devkit checkout, or merge the default branch into "
+        "this tree",
+        file=sys.stderr,
+    )
+    return fix_cycle.PLAN
 
 
 def hold_if_moved(
