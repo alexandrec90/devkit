@@ -538,6 +538,29 @@
 				"problemMatcher": []
 			},
 			{
+				"label": "Docker: Recover Stuck WSL",
+				"detail": "For a WSL service stuck stopping (every `wsl` call hangs, Docker's engine cannot start): ends WSLService through one UAC prompt, installs any pending WSL update, restarts Docker Desktop unelevated. Ends every running WSL distro.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:daemonProject}",
+					"docker-recover-wsl"
+				],
+				"icon": {
+					"id": "debug-disconnect",
+					"color": "terminal.ansiRed"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
 				"label": "Docker: Prune + Compact VHDX",
 				"detail": "For each selected checkout sequentially: reclaim image/build-cache space and compact the WSL2 VHDX. Never touches named volumes; project overrides may tear down and restore their own stack.",
 				"type": "process",

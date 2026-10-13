@@ -205,6 +205,11 @@ ACTIONS: dict[str, Action] = {
     "docker-fix": Action(
         "scripts/docker-maint.py", "Docker: Fix Stalled Desktop", ("fix",), owner=DEVKIT
     ),
+    # The person's step the scheduled jobs name for a stuck WSL service
+    # (`collector_tasks.WSL_REMEDY`); their unelevated runs may not end it themselves.
+    "docker-recover-wsl": Action(
+        "scripts/docker-maint.py", "Docker: Recover Stuck WSL", ("recover-wsl",), owner=DEVKIT
+    ),
     "docker-prune": Action(
         "scripts/docker-maint.py", "Docker: Prune + Compact VHDX", ("prune",), owner=DEVKIT
     ),

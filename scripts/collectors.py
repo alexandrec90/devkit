@@ -234,7 +234,7 @@ PERSON_STEP = collector_tasks.PERSON_STEP
 WSL_HUNG = (
     f"docker is not answering: WSL itself does not answer (`wsl --list` ran past "
     f"{WSL_PROBE_TIMEOUT}s), and no restart of Docker Desktop or its VM reaches a hung WSL "
-    f"-- {PERSON_STEP} restart WslService from an elevated prompt, or reboot"
+    f"-- {PERSON_STEP} {collector_tasks.WSL_REMEDY}"
 )
 # A Desktop nobody's failure stopped was most likely quit by a person, and is theirs to
 # start (`engine_down`); marked like `WSL_HUNG`, for the same reason.
@@ -602,7 +602,7 @@ def wsl_stuck_cause(state: str) -> str:
     """The failure for an engine silent because `WSL_SERVICE` is stuck in `state`."""
     return (
         f"{NOT_ANSWERING}: WSL's service ({WSL_SERVICE}) is stuck in {state} -- only an "
-        "elevated `taskkill /F /IM wslservice.exe`, or a reboot, brings Docker's engine back"
+        f"elevated step brings Docker's engine back: {collector_tasks.WSL_REMEDY}"
     )
 
 

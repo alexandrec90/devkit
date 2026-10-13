@@ -1317,6 +1317,15 @@ the safety property: a collector-style stack doing scheduled work with no client
 connected looks exactly like an idle one, so it is safe by default rather than by
 being remembered.
 
+One failure none of these jobs can mend is WSL's own service stuck stopping — a Windows
+Update WSL install that cannot stop it leaves it there, every `wsl` call hangs, and
+Docker's engine cannot start. The jobs run unelevated and may not end a service, so they
+detect it and name a person's step, which surfaces in the morning toast:
+**"Docker: Recover Stuck WSL"** (`docker-maint.py recover-wsl`). It ends the service
+through one UAC prompt, installs the pending WSL update so the failed install has
+nothing left to retry, and restarts Docker Desktop as the signed-in user, never
+elevated. On a healthy WSL it changes nothing.
+
 A seventh job stood in that table until 2026-09-02: a nightly `git-merge-default.py`
 against a reference checkout, so its trunk arrived daily instead of as one unreviewable
 merge weeks later. It was the only scheduled job that touched a working tree a human was

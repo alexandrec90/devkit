@@ -666,7 +666,8 @@ def test_a_fire_on_a_wsl_service_stuck_stopping_reaches_the_ledger_as_a_persons_
         "2026-10-13T07:36:33+00:00\tevent=scheduled-job-failed\tproject=devkit"
         f"\tcause={cause}\tsaid={said}"
     )[0]
-    assert triage.person_step(row) == "end WSLService from an elevated shell, or restart Windows"
+    assert triage.person_step(row) == tasks.WSL_REMEDY
+    assert "recover-wsl" in tasks.WSL_REMEDY
 
 
 def test_a_fire_on_a_running_wsl_service_still_blames_the_engine(tmp_path, monkeypatch, instant):
