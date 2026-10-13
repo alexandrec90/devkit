@@ -449,6 +449,14 @@ class Docker:
             return ""
         return collector_tasks.stop_reason(docker_memory.log_dir())
 
+    def wsl_stuck(self) -> bool:
+        """Whether WSL's service is stuck stopping (`collector_tasks.wsl_stuck`), which no
+        restart of Docker Desktop can mend; never off Windows."""
+        if os.name != "nt":
+            return False
+        query = list(collector_tasks.WSL_QUERY)
+        return collector_tasks.wsl_stuck(lambda: self.run(query, DESKTOP_TIMEOUT), _time.sleep)
+
     def desktop_process(self) -> bool:
         """Whether `DESKTOP_IMAGE` is running on this machine; never off Windows."""
         if os.name != "nt":
@@ -1163,7 +1171,11 @@ def reach_engine(
 ) -> list[Container] | None:
     """The engine's containers, once `wait_for_engine` has given it `awake` to start; an
     engine silent past that is `revive_engine`'s where `needed` and `docker.restarts` is
-    set. None when it does not answer, failed where `needed` and said where not."""
+    set. None when it does not answer, failed where `needed` and said where not.
+
+    Not revived on a WSL service stuck stopping (`Docker.wsl_stuck`): the engine cannot
+    start on it, and a restart and VM reset only spend half an hour of timeouts, running
+    into the next pass (24907f2a). The failure says what only an administrator can do."""
     containers = wait_for_engine(docker, awake)
     why = "docker is not answering -- is Docker Desktop running?"
     if containers is None and needed and docker.restarts is not None:
@@ -1171,6 +1183,10 @@ def reach_engine(
         if short:
             report.say(f"  {short}")
             report.fail(SHORT_OF_MEMORY)
+        if docker.wsl_stuck():
+            report.say(collector_tasks.WSL_STUCK_STEP)
+            report.fail(collector_tasks.WSL_STUCK)
+            return None
         busy = docker.holds() if docker.holds else ()
         containers, why = revive_engine(docker, report, docker.restarts, _clock(), busy)
     if containers is None:

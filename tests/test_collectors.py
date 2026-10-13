@@ -48,6 +48,7 @@ class FakeDocker:
         # Docker Desktop's own reason its engine is down: none, as for a Desktop quit.
         self.stopped = ""
         self.update = False
+        self.stuck = False
         self.restarts = None
         self.holds = None
         self.restart_answer = (True, "")
@@ -87,6 +88,9 @@ class FakeDocker:
 
     def stop_reason(self):
         return self.stopped
+
+    def wsl_stuck(self):
+        return self.stuck
 
     def restart_desktop(self):
         self.calls.append(("restart",))
@@ -971,6 +975,36 @@ def test_an_engine_that_failed_to_start_is_not_held_for_the_run_waiting_on_it(tm
     assert ("restart",) in docker.calls and report.failures == 0
     assert not any("scheduled run" in line for line in report.lines)
     assert collectors.HOLD_SINCE not in collectors.restart_record(restarts)
+
+
+def test_a_wsl_service_stuck_stopping_is_failed_for_an_administrator_not_restarted_under(
+    tmp_path, instant
+):
+    """24907f2a: 2026-10-13 WSLService sat in STOP_PENDING. The 00:45 pass restarted
+    Docker Desktop and reset its VM anyway -- twenty minutes of timeouts, still running at
+    the 01:00 pass -- and WSL was as stuck after `wsl --shutdown` as before it. Only an
+    administrator can end the service, so the pass says how and leaves Docker alone."""
+    restarts = tmp_path / "restarts.json"
+    docker, report = Wedged(restarts), collectors.Report()
+    docker.desktop, docker.stopped, docker.stuck = False, WSL_HUNG, True
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert ("restart",) not in docker.calls and ("reset",) not in docker.calls
+    assert report.failures == 1 and report.lines[-1] == collectors.collector_tasks.WSL_STUCK
+    assert collectors.collector_tasks.WSL_STUCK_STEP in report.lines
+    assert not restarts.exists(), "no restart recorded, so the next pass may make one"
+
+
+def test_docker_asks_wsls_service_only_on_windows(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "posix")
+    assert collectors.Docker().wsl_stuck() is False
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    monkeypatch.setattr(collectors, "_time", SimpleNamespace(sleep=lambda seconds: None))
+    docker = collectors.Docker()
+    asked: list[tuple] = []
+    stopping = "        STATE              : 3  STOP_PENDING \r\n"
+    docker.run = lambda argv, timeout, cwd=None: asked.append((argv, timeout)) or (0, stopping)
+    assert docker.wsl_stuck() is True
+    assert asked == [(list(collectors.collector_tasks.WSL_QUERY), collectors.DESKTOP_TIMEOUT)] * 2
 
 
 def test_a_desktop_stopped_for_no_failure_is_still_left_to_a_person(tmp_path, instant):
