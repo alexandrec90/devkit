@@ -959,6 +959,20 @@ def test_a_failed_start_that_a_restart_cannot_mend_says_so(tmp_path, instant):
     )
 
 
+def test_an_engine_that_failed_to_start_is_not_held_for_the_run_waiting_on_it(tmp_path, instant):
+    """930844fd: 2026-10-12 23:30 the pass held the revive "under social-scraper's
+    scheduled run" -- a run whose db could not start on the dead engine, failed for it six
+    minutes later. A stopped engine runs no services for a restart to stop."""
+    restarts = tmp_path / "restarts.json"
+    docker, report = Wedged(restarts), collectors.Report()
+    docker.desktop, docker.stopped = False, WSL_HUNG
+    docker.holds = lambda: ["social-scraper"]
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert ("restart",) in docker.calls and report.failures == 0
+    assert not any("scheduled run" in line for line in report.lines)
+    assert collectors.HOLD_SINCE not in collectors.restart_record(restarts)
+
+
 def test_a_desktop_stopped_for_no_failure_is_still_left_to_a_person(tmp_path, instant):
     docker, report = Wedged(tmp_path / "restarts.json"), collectors.Report()
     docker.desktop, docker.stopped = False, "user requested"
@@ -1380,6 +1394,25 @@ def test_reset_vm_stops_desktop_then_its_vm_then_starts_it(monkeypatch):
         ["wsl", "--terminate", "docker-desktop"],
         ["docker", "desktop", "start"],
     ]
+
+
+def test_a_wsl_that_does_not_answer_is_shut_down_not_asked_to_terminate(monkeypatch):
+    """930844fd: `wsl.exe -l -v` hung for good; the listing's timeout text is no distro
+    name, and a hung WSL serves no distro a shutdown could take from anyone."""
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    docker = collectors.Docker()
+    asked: list[list[str]] = []
+
+    def run(argv, timeout, cwd=None):
+        asked.append(list(argv))
+        if argv[:2] == ["wsl", "--list"]:
+            return 124, f"timed out after {timeout}s"
+        return 0, ""
+
+    docker.run = run
+    docker.reset_vm()
+    assert ["wsl", "--shutdown"] in asked
+    assert not any("--terminate" in argv for argv in asked)
 
 
 def test_off_windows_there_is_no_vm_to_reset(monkeypatch):

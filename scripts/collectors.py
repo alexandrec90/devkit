@@ -201,7 +201,10 @@ RESTARTED = Path("logs/collectors.engine-restart.json")
 # the engine on the same frozen VM, and `wsl -d docker-desktop` still did not answer half
 # an hour later (d0651b43, 4034a9e2). `wsl --shutdown` stops every distro on the machine,
 # so it is used only when every running one is Docker's own (`DOCKER_DISTRO` and its
-# `-data` sibling); otherwise only Docker's is terminated.
+# `-data` sibling); otherwise only Docker's is terminated. A listing that fails is read as
+# none running: a `wsl.exe` that does not answer serves no distro to spare. 2026-10-12
+# `wsl.exe -l -v` hung for good under Docker's failed start (930844fd), and the spawn's
+# `timed out after` read as a distro name would have earned it a `--terminate` instead.
 DOCKER_DISTRO = "docker-desktop"
 WSL_TIMEOUT = 120
 DESKTOP_STOP_TIMEOUT = 120
@@ -480,8 +483,9 @@ class Docker:
         said = []
         stop = ["docker", "desktop", "stop", "--force", "--timeout", str(DESKTOP_STOP_TIMEOUT)]
         said.append(self.run(stop, DESKTOP_STOP_TIMEOUT + DESKTOP_TIMEOUT)[1])
-        _, listed = self.run(["wsl", "--list", "--running", "--quiet"], WSL_TIMEOUT)
-        said.append(self.run(wsl_stop(running_distros(listed)), WSL_TIMEOUT)[1])
+        code, listed = self.run(["wsl", "--list", "--running", "--quiet"], WSL_TIMEOUT)
+        running = running_distros(listed) if code == 0 else []
+        said.append(self.run(wsl_stop(running), WSL_TIMEOUT)[1])
         code, out = self.run(
             ["docker", "desktop", "start", "--timeout", str(RESTART_TIMEOUT)],
             RESTART_TIMEOUT + DESKTOP_TIMEOUT,
@@ -1024,15 +1028,14 @@ def revive_engine(
     slow, not wedged. A Desktop that is not running was most likely quit by a person, and
     a timer does not start it behind their back; the answer then says so. Unless Desktop
     itself says its engine `FAILED_TO_START` (`Docker.stop_reason`): that is a stop nobody
-    asked for, and is revived like a wedge. A restart is made once per `RESTART_EVERY`;
-    `clock` is now, as a POSIX time.
+    asked for, revived like a wedge. One restart per `RESTART_EVERY`; `clock` is POSIX now.
 
     Nor is it restarted while a scheduled collector's run is in flight (`busy`, from
     `scheduled_in_flight`) and the wedge is new: its services may outlive a silent engine
-    API, and the restart is what would stop them under it (6c504c34). That wait is no
-    failure -- `(None, "")`. A wedge held for `BUSY_HOLD` is restarted under the run: it
-    is starving the run too, and waiting for a run to end is waiting forever when the
-    next one has started by then (0c428d0e).
+    API, and the restart would stop them under it (6c504c34). That wait is no failure --
+    `(None, "")`. A wedge held for `BUSY_HOLD` is restarted under the run, which it starves
+    too: a run's end never comes when the next has started by then (0c428d0e). An engine
+    that failed to start runs nothing a restart could stop, so is never held (930844fd).
 
     Nor while Docker Desktop installs an update of itself (`Docker.updating`): its engine
     is down by design until the installer starts the new app, a restart would cut the
@@ -1059,6 +1062,7 @@ def revive_engine(
             return None, "docker is not answering and Docker Desktop is not running -- start it"
         report.say(f"Docker Desktop says its engine stopped: {stopped}")
         wedged = "docker is not answering: Docker Desktop's engine failed to start"
+        busy = ()
     containers = wait_for_engine(docker, ENGINE_STARTUP - WEDGE_CONFIRM)
     if containers is not None:
         report.say("docker was slow to answer, not wedged -- it answered when asked again")

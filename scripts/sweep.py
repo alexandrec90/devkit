@@ -1626,10 +1626,13 @@ def gh_for(path: Path) -> Git:
 # (`HTTP 500`) or a push (`remote: Internal Server Error`) words it, a timeout, a dropped
 # or refused connection. Asking again may answer it; a refusal -- a 4xx, a rejected
 # ref -- is the same answer every time. bc1ec6d1 (a dispatch), a0287c8b and 4d942641
-# (a ship's PR and push) each filed a minute's outage as a harness defect.
+# (a ship's PR and push) each filed a minute's outage as a harness defect. A TLS handshake
+# that broke off is the network's too: f1373302, Windows' schannel on a reconcile fetch
+# that went through when run again minutes later.
 _TRANSIENT = re.compile(
     r"\bHTTP 5\d\d\b|internal server error|bad gateway|service unavailable"
-    r"|timeout|timed out|error connecting|connection reset|could not resolve host",
+    r"|timeout|timed out|error connecting|connection reset|could not resolve host"
+    r"|failed to receive handshake|SSL/TLS connection failed",
     re.I,
 )
 
@@ -1763,16 +1766,30 @@ REF_RACE = re.compile(
     re.I,
 )
 REF_RACE_PAUSE = 2.0
+# A step that failed on the network (`transient`) is asked again this many times,
+# `NETWORK_PAUSE` apart, before it counts as failed. f1373302: the scheduled reconcile's
+# `fetch` of ibkr_trader broke off in a TLS handshake, and the run said "git refused,
+# which means the state needs a human" over a fetch that worked when run again.
+NETWORK_RETRIES = 2
+NETWORK_PAUSE = 15.0
+
+
+def _said(completed: subprocess.CompletedProcess[str]) -> str:
+    return f"{completed.stderr or ''}\n{completed.stdout or ''}"
 
 
 def run_step(git: Git, step: tuple[str, ...], pause: Callable[[float], None] = time.sleep):
     """`git(*step)`, run once more after `REF_RACE_PAUSE` when another process raced it
-    for a ref (`REF_RACE`)."""
+    for a ref (`REF_RACE`), and up to `NETWORK_RETRIES` more after `NETWORK_PAUSE` when it
+    failed on the network (`transient`)."""
     completed = git(*step)
-    if completed.returncode != 0 and REF_RACE.search(
-        f"{completed.stderr or ''}\n{completed.stdout or ''}"
-    ):
+    if completed.returncode != 0 and REF_RACE.search(_said(completed)):
         pause(REF_RACE_PAUSE)
+        completed = git(*step)
+    for _ in range(NETWORK_RETRIES):
+        if completed.returncode == 0 or not transient(_said(completed)):
+            break
+        pause(NETWORK_PAUSE)
         completed = git(*step)
     return completed
 
