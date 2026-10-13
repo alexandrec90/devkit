@@ -213,10 +213,10 @@ WSL_TIMEOUT = 120
 # and `reset_vm` changed nothing, and every pass for the next hour said only "a restart
 # did not bring its engine back". The service grants an unelevated user neither start nor
 # stop (`sc sdshow WSLService`) and a timer may not reboot the machine, so a pass that
-# finds it stuck restarts nothing and names the one remedy, which needs a person.
-WSL_SERVICE = "WSLService"
+# finds it stuck restarts nothing and names the one remedy, which needs a person. The
+# query and its parse are `collector_tasks`', whose fire asks the same of a silent engine.
+WSL_SERVICE = collector_tasks.WSL_QUERY[-1]
 WSL_STUCK = ("STOP_PENDING", "START_PENDING")
-SERVICE_STATE = re.compile(r"^\s*STATE\s*:\s*\d+\s+(?P<state>[A-Z_]+)", re.M)
 # How long `wsl --list` may take before WSL itself is called hung (`Docker.wsl_answers`),
 # which no restart of Desktop or reset of its VM reaches: every one of them goes through
 # the WSL service. 2026-10-12 23:45 local: `WslService` sat in `StopPending`, the pass
@@ -402,7 +402,33 @@ def desktop_process(run: Callable[[Sequence[str], int], tuple[int, str]]) -> boo
     return code == 0 and f'"{DESKTOP_IMAGE.lower()}"' in out.lower()
 
 
-class Docker:
+class WslProbes:
+    """What `Docker` asks of WSL under its engine, which no restart of Docker Desktop
+    reaches: a service stuck between states (`wsl_service`), or a WSL that does not
+    answer at all (`wsl_answers`). Both go through the subclass's `run`."""
+
+    def run(self, argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[int, str]:
+        raise NotImplementedError
+
+    def wsl_service(self) -> str:
+        """`WSL_SERVICE`'s state as `sc query` names it (`RUNNING`, `STOP_PENDING`); ""
+        when it cannot say, and off Windows. Asks the service manager, not `wsl.exe`,
+        which is exactly what does not answer while the service is stuck."""
+        if os.name != "nt":
+            return ""
+        code, out = self.run(list(collector_tasks.WSL_QUERY), DESKTOP_TIMEOUT)
+        return collector_tasks.service_state(out) if code == 0 else ""
+
+    def wsl_answers(self) -> bool:
+        """Whether WSL lists its distros within `WSL_PROBE_TIMEOUT`; always off Windows.
+        Only a timeout is silence: an exit code is WSL answering."""
+        if os.name != "nt":
+            return True
+        code, out = self.run(["wsl", "--list", "--quiet"], WSL_PROBE_TIMEOUT)
+        return not (code == TIMED_OUT and out.startswith("timed out"))
+
+
+class Docker(WslProbes):
     """Everything that touches the engine: one captured, window-less spawn per call.
     `restarts` is where `revive_engine` records a restart of Docker Desktop; None, as
     for the tray, makes none. `holds` names the runs a restart would cut short now
@@ -514,14 +540,6 @@ class Docker:
         )
         return code == 0, out
 
-    def wsl_answers(self) -> bool:
-        """Whether WSL lists its distros within `WSL_PROBE_TIMEOUT`; always off Windows.
-        Only a timeout is silence: an exit code is WSL answering."""
-        if os.name != "nt":
-            return True
-        code, out = self.run(["wsl", "--list", "--quiet"], WSL_PROBE_TIMEOUT)
-        return not (code == TIMED_OUT and out.startswith("timed out"))
-
     def reset_vm(self) -> tuple[bool, str]:
         """Stop Docker Desktop, stop the WSL VM under it, and start Desktop again
         (`DOCKER_DISTRO`); `(started, what each step said)`. Never off Windows."""
@@ -538,15 +556,6 @@ class Docker:
             RESTART_TIMEOUT + DESKTOP_TIMEOUT,
         )
         return code == 0, "\n".join(line for line in (*said, out) if line.strip())
-
-    def wsl_service(self) -> str:
-        """`WSL_SERVICE`'s state as `sc query` names it (`RUNNING`, `STOP_PENDING`); ""
-        when it cannot say, and off Windows. Asks the service manager, not `wsl.exe`,
-        which is exactly what does not answer while the service is stuck."""
-        if os.name != "nt":
-            return ""
-        code, out = self.run(["sc.exe", "query", WSL_SERVICE], DESKTOP_TIMEOUT)
-        return service_state(out) if code == 0 else ""
 
     def limits(self, ids: Sequence[str]) -> dict[str, int] | None:
         """Each of `ids`' memory limit in bytes, 0 for none, keyed by full id; None when
@@ -586,12 +595,6 @@ def running_distros(text: str) -> list[str]:
     """The distro names `wsl --list --running --quiet` printed. `wsl.exe` writes UTF-16,
     which `spawn`'s UTF-8 decoding leaves as the name with a NUL after every letter."""
     return [line.strip() for line in text.replace("\x00", "").splitlines() if line.strip()]
-
-
-def service_state(text: str) -> str:
-    """The state `sc query` printed (`STATE : 3  STOP_PENDING`), or "" for none."""
-    hit = SERVICE_STATE.search(text)
-    return hit["state"] if hit else ""
 
 
 def wsl_stuck_cause(state: str) -> str:

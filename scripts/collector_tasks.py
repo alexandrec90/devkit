@@ -79,6 +79,22 @@ STATE_ANSWER = re.compile(r"S->C \S+ GET /backend/state \([^)]*\): (?P<state>\{.
 # How much of the monitor log's end is read for that answer: it rotates at 1 MB, and the
 # answer to a status asked a moment ago is among its last lines.
 MONITOR_TAIL = 256 * 1024
+# Windows' WSL service, which every `wsl.exe` call and Docker's engine run under.
+# 2026-10-13 it sat in STOP_PENDING for good: `wsl.exe -l -v` timed out, Docker's engine
+# could not start, and neither the pass's restart nor its `wsl --shutdown` could end it,
+# since stopping a service is an administrator's and the scheduled jobs run unelevated
+# (24907f2a, after seventeen resolutions). `sc query` answers whatever state it is in. A
+# service is only read as stuck when it is still stopping `WSL_SETTLE` seconds later.
+WSL_QUERY = ("sc.exe", "query", "WSLService")
+WSL_STOPPING = "STOP_PENDING"
+WSL_SETTLE = 30
+SERVICE_STATE = re.compile(r"^\s*STATE\s*:\s*\d+\s+(?P<state>\w+)", re.M)
+WSL_STUCK = "WSL's service is stuck stopping, so Docker's engine cannot start"
+WSL_STUCK_STEP = (
+    "WSL's service has been stopping since before this run (WSLService STOP_PENDING), and "
+    'only an administrator can end it: run `taskkill /F /FI "SERVICES eq WSLService"` '
+    "from an elevated shell, or restart Windows"
+)
 # How long a fire whose `compose up` failed or timed out on a silent engine waits for it, and how
 # often it asks, before trying once more (`start_needs`). The collectors pass restarts a
 # wedged Docker Desktop (`collectors.revive_engine`), which took four to five minutes on
@@ -436,6 +452,33 @@ def desktop_said(
     return [f"Docker Desktop says its engine stopped: {stopped}"] if stopped else []
 
 
+def service_state(listing: str) -> str:
+    """The state an `sc query` listing gives its service (`STOP_PENDING`), "" for none."""
+    hit = SERVICE_STATE.search(listing)
+    return hit["state"] if hit else ""
+
+
+def wsl_stuck(ask: Callable[[], tuple[int, str]], sleep: Callable[[float], None]) -> bool:
+    """Whether `ask` (`WSL_QUERY`'s answer) reads WSL's service stopping, and still does
+    `WSL_SETTLE` seconds later: a service in an ordinary stop is not read as stuck."""
+    for attempt in range(2):
+        if attempt:
+            sleep(WSL_SETTLE)
+        code, out = ask()
+        if code != 0 or service_state(out) != WSL_STOPPING:
+            return False
+    return True
+
+
+def wsl_said(engine: tuple[int, str], checkout: Path, run: Spawner) -> list[str]:
+    """`WSL_STUCK_STEP` for a silent `engine` whose WSL service is stuck (`wsl_stuck`);
+    none where it answers, where the service is not stuck, and off Windows."""
+    if engine[0] == 0 or os.name != "nt":
+        return []
+    stuck = wsl_stuck(lambda: run(list(WSL_QUERY), checkout, PROBE), _time.sleep)
+    return [WSL_STUCK_STEP] if stuck else []
+
+
 def updater_listed(listing: str) -> bool:
     """Whether a `tasklist /FO CSV` listing names Docker Desktop's updater or installer."""
     rows = csv.reader(io.StringIO(listing))
@@ -548,7 +591,7 @@ def fire(
     command's bound is what is left of `FIRE_TIMEOUT` once they are up, so a start that
     waited out an engine restart still ends inside the task's `TIME_LIMIT`. A silent
     engine's log carries Docker Desktop's reason (`stop_reason`) from `desktop_logs`,
-    where one is given.
+    where one is given, and one whose WSL service is stuck (`wsl_said`) is failed on that.
 
     A `needs` that cannot start because Docker Desktop is installing an update
     (`desktop_updating`) skips this run, exit 0: the update is Docker's maintenance, the
@@ -573,7 +616,9 @@ def fire(
                 ]
             *failed, cause = needs_failed(collector.needs, checkout, code, out, run, engine)
             said = desktop_said(engine, checkout, run, desktop_logs)
-            return code, [*lines, *failed, *said, cause]
+            stuck = wsl_said(engine, checkout, run)
+            cause = f"error: {WSL_STUCK}" if stuck else cause
+            return code, [*lines, *failed, *said, *stuck, cause]
         lines.append(f"started: {', '.join(collector.needs)}")
     left = FIRE_TIMEOUT - int(_time.monotonic() - began)
     code, out = run(resolve(collector.command), checkout, left, stamp)

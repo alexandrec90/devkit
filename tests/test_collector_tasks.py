@@ -247,14 +247,33 @@ UPDATER = (
 )
 
 
+def sc_query(state, code=4):
+    """`sc query WSLService` as it printed on 2026-10-13, in `state`."""
+    return (
+        0,
+        "\r\nSERVICE_NAME: WSLService \r\n        TYPE               : 10  WIN32_OWN_PROCESS  \r\n"
+        f"        STATE              : {code}  {state} \r\n"
+        "                                (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)\r\n"
+        "        WIN32_EXIT_CODE    : 0  (0x0)\r\n",
+    )
+
+
+WSL_RUNNING = sc_query("RUNNING")
+WSL_STOPPING = sc_query("STOP_PENDING", code=3)
+
+
 class FakeSpawn:
     """Answers in order; the process listing `desktop_updating` asks for answers
-    `listing` and is kept out of `calls`, so a test counting docker calls is unchanged."""
+    `listing`, and the WSL service query `wsl_said` asks answers from `wsl` (its last
+    answer once spent), both kept out of `calls`, so a test counting docker calls is
+    unchanged."""
 
-    def __init__(self, *answers, listing=(0, NO_UPDATER)):
+    def __init__(self, *answers, listing=(0, NO_UPDATER), wsl=(WSL_RUNNING,)):
         self.answers = list(answers)
         self.listing = listing
         self.listed = 0
+        self.wsl = list(wsl)
+        self.wsl_asked = 0
         self.calls: list[tuple] = []
         self.envs: list = []
 
@@ -262,6 +281,9 @@ class FakeSpawn:
         if list(argv) == list(tasks.UPDATE_LISTING):
             self.listed += 1
             return self.listing
+        if list(argv) == list(tasks.WSL_QUERY):
+            self.wsl_asked += 1
+            return self.wsl.pop(0) if len(self.wsl) > 1 else self.wsl[0]
         self.calls.append((list(argv), Path(cwd).name, timeout))
         self.envs.append(env)
         return self.answers.pop(0)
@@ -610,6 +632,62 @@ def test_desktop_stopped_is_never_asked_off_windows(tmp_path, monkeypatch):
     spawn = FakeSpawn()
     logs = desktop_logs(tmp_path, state_line("stopped", STOPPED_REASON))
     assert tasks.desktop_stopped(tmp_path, spawn, logs) == "" and spawn.calls == []
+
+
+def test_a_fire_on_a_wsl_service_stuck_stopping_names_it_and_what_ends_it(
+    tmp_path, monkeypatch, instant
+):
+    """24907f2a: 2026-10-13 WSLService sat in STOP_PENDING, every `wsl.exe` call timed
+    out, and the fire's cause read "the Docker engine did not answer" -- the cause of
+    seventeen resolutions, none of which could end a service an unelevated job may not
+    stop. The cause names the machine's state, and the step beside it the person's."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(UNABLE, *SILENT_THROUGH_WAIT, wsl=(WSL_STOPPING,))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and spawn.wsl_asked == 2
+    assert lines[-2] == tasks.WSL_STUCK_STEP and "elevated" in lines[-2]
+    assert log_wrap.failure_cause("\n".join(lines)) == f"error: {tasks.WSL_STUCK}"
+
+
+def test_a_fire_on_a_running_wsl_service_still_blames_the_engine(tmp_path, monkeypatch, instant):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(UNABLE, *SILENT_THROUGH_WAIT, wsl=(WSL_RUNNING,))
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert spawn.wsl_asked == 1 and tasks.WSL_STUCK_STEP not in lines
+    assert lines[-1] == "error: the Docker engine did not answer"
+
+
+@pytest.mark.parametrize(
+    ("answers", "stuck", "slept"),
+    [
+        ([WSL_STOPPING, WSL_STOPPING], True, [tasks.WSL_SETTLE]),
+        ([WSL_STOPPING, WSL_RUNNING], False, [tasks.WSL_SETTLE]),
+        ([WSL_RUNNING], False, []),
+        ([(1, "[SC] OpenService FAILED 1060")], False, []),
+        ([(tasks.TIMED_OUT, "timed out after 30s")], False, []),
+    ],
+    ids=["still-stopping", "stopped-meanwhile", "running", "no-service", "no-answer"],
+)
+def test_wsl_stuck_is_a_service_still_stopping_after_the_settle(answers, stuck, slept):
+    asked = iter(answers)
+    waits: list[float] = []
+    assert tasks.wsl_stuck(lambda: next(asked), waits.append) is stuck
+    assert waits == slept
+
+
+def test_service_state_reads_scs_state_column():
+    assert tasks.service_state(WSL_STOPPING[1]) == "STOP_PENDING"
+    assert tasks.service_state(WSL_RUNNING[1]) == "RUNNING"
+    assert tasks.service_state("[SC] EnumQueryServicesStatus:OpenService FAILED 1060") == ""
+
+
+def test_wsl_said_is_nothing_for_an_answering_engine_or_off_windows(tmp_path, monkeypatch):
+    spawn = FakeSpawn(wsl=(WSL_STOPPING,))
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    assert tasks.wsl_said(ENGINE_UP, tmp_path, spawn) == []
+    monkeypatch.setattr(tasks.os, "name", "posix")
+    assert tasks.wsl_said(SILENT, tmp_path, spawn) == []
+    assert spawn.wsl_asked == 0
 
 
 def test_await_engine_stops_asking_once_it_answers(tmp_path, instant):

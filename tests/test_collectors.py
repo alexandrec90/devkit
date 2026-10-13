@@ -1030,7 +1030,7 @@ def test_not_restarting_answers_none_only_when_a_restart_is_due(tmp_path, instan
     ids=["stop-pending", "running", "no-such-service", "empty"],
 )
 def test_service_state_reads_sc_query(text, state):
-    assert collectors.service_state(text) == state
+    assert collectors.collector_tasks.service_state(text) == state
 
 
 def test_docker_asks_the_service_manager_for_wsl_only_on_windows(monkeypatch):
@@ -1134,6 +1134,15 @@ def test_docker_asks_no_wsl_off_windows(monkeypatch):
     monkeypatch.setattr(collectors.os, "name", "posix")
     monkeypatch.setattr(collectors, "spawn", lambda *a, **k: pytest.fail("spawned"))
     assert collectors.Docker().wsl_answers() is True
+
+
+def test_wsl_probes_ask_through_dockers_run_and_have_none_of_their_own(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    with pytest.raises(NotImplementedError):
+        collectors.WslProbes().wsl_answers()
+    docker = collectors.Docker()
+    docker.run = lambda argv, timeout, cwd=None: (0, "docker-desktop\n")
+    assert isinstance(docker, collectors.WslProbes) and docker.wsl_answers() is True
 
 
 def test_spawn_reports_a_timeout_as_timed_out(monkeypatch):
