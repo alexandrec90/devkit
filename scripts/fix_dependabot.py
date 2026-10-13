@@ -28,7 +28,10 @@ dependency Dependabot cannot fetch, with every alert answered, is a line for the
 and no failure (`read_project`): no session can make Dependabot fetch it, and a skip
 standing for a day would be filed as a stall and send the devkit session instead.
 
-Every read answers empty on a `gh` that cannot -- alerts are a 403 where they are off.
+Every read of what is wrong answers empty on a `gh` that cannot -- alerts are a 403 where
+they are off. The two reads of what answers it (`open_prs`, `merged_prs`) answer None
+instead, and hold what they would have cleared for the next pass: read as empty, they
+call every failure unanswered and send a fixer at one a merge already fixed.
 Tested in `tests/test_fix_dependabot.py`.
 """
 
@@ -64,6 +67,8 @@ PR_FIELDS = "number,title,headRefName,body"
 MERGED_FIELDS = f"{PR_FIELDS},mergedAt"
 MERGED_LIMIT = 30
 EVIDENCE_FILE = fix_plan.DEPENDABOT_EVIDENCE
+# What a held run's note says when the merged PRs could not be read (`_answer`).
+UNREAD = "the merged PRs could not be read, so whether a merge answered it is unknown"
 
 # `uv in /. for urllib3 - Update #1607644272`: the job is everything before the counter.
 _UPDATE_SUFFIX = re.compile(r"\s+-\s+Update\s+#\d+\s*$")
@@ -198,6 +203,14 @@ def answered_since(entry: str, run: dict, merged: Iterable[dict]) -> str:
     return ""
 
 
+def _answer(entry: str, run: dict, merged: list[dict] | None) -> str:
+    """`answered_since`, or `UNREAD` for a handled error when the merged PRs could not
+    be read: a run that may already be answered is held for the next pass, not sent."""
+    if merged is None:
+        return UNREAD if _HANDLED_ENTRY.fullmatch(entry) else ""
+    return answered_since(entry, run, merged)
+
+
 def _patched(alert: dict) -> str:
     vuln = alert.get("security_vulnerability")
     first = vuln.get("first_patched_version") if isinstance(vuln, dict) else None
@@ -269,12 +282,26 @@ def open_alerts(gh: Gh) -> list[dict]:
     return _listed(gh("api", ALERTS))
 
 
-def open_prs(gh: Gh) -> list[dict]:
-    return _listed(gh("pr", "list", "--state", "open", "--limit", "100", "--json", PR_FIELDS))
+def _answered(result: object) -> list[dict] | None:
+    """`_listed`, but None where `gh` could not say: the PRs these lists are read for
+    answer a failure, and an empty list where the read failed calls every one of them
+    unanswered. data-lake's run on d32d4d5 was answered by #70 at 03:00 and 04:00 and
+    sent a fixer at 03:30, the one pass whose read of the merged PRs came back empty
+    (793d4a3d)."""
+    parsed = gate_evidence.gh_json(result)
+    if not isinstance(parsed, list):
+        return None
+    return [row for row in parsed if isinstance(row, dict)]
 
 
-def merged_prs(gh: Gh) -> list[dict]:
-    return _listed(
+def open_prs(gh: Gh) -> list[dict] | None:
+    """The open PRs; None where `gh` cannot say."""
+    return _answered(gh("pr", "list", "--state", "open", "--limit", "100", "--json", PR_FIELDS))
+
+
+def merged_prs(gh: Gh) -> list[dict] | None:
+    """The newest merged PRs; None where `gh` cannot say."""
+    return _answered(
         gh("pr", "list", "--state", "merged", "--limit", str(MERGED_LIMIT), "--json", MERGED_FIELDS)
     )
 
@@ -322,7 +349,9 @@ def read_runs(gh: Gh) -> tuple[list[tuple[dict, list[str]]], list[dict], list[st
 
     A run's handled errors that a bump merged since answers are dropped
     (`answered_since`), and a run left saying nothing is not failing at all: it is a
-    line for the record until Dependabot runs the job again.
+    line for the record until Dependabot runs the job again. So is a handled error
+    when the merged PRs cannot be read: whether one answered it is unknown, and the
+    next pass asks again.
     """
     failing_runs = failing_updates(update_runs(gh))
     read = [(run, run_errors(failed_log(gh, run))) for run in failing_runs[:LOGS_READ]]
@@ -330,12 +359,13 @@ def read_runs(gh: Gh) -> tuple[list[tuple[dict, list[str]]], list[dict], list[st
     merged = merged_prs(gh) if handled else []
     failing, stale, notes = [], [], []
     for run, said in read:
-        answered = {e: answered_since(e, run, merged) for e in said}
+        answered = {e: _answer(e, run, merged) for e in said}
         live = [e for e in said if not answered[e]]
         if said and not live:
             stale.append(run)
             by = ", ".join(sorted(set(answered.values())))
-            notes.append(f"{update_job(run)} failed ({ran_on(run)}), and {by} answered it since")
+            said_since = UNREAD if by == UNREAD else f"{by} answered it since"
+            notes.append(f"{update_job(run)} failed ({ran_on(run)}), and {said_since}")
             continue
         failing.append((run, live))
     return failing, [run for run in failing_runs if run not in stale], notes
@@ -389,7 +419,12 @@ def read_project(
         f"run {update_job(run)}: failed" for run, _ in failing
     ]
     alerts = open_alerts(gh)
-    wanted = unanswered(alerts, open_prs(gh), now) if alerts else {}
+    prs = open_prs(gh) if alerts else []
+    if prs is None:
+        # Read as no PR, every alert is unanswered, and an open PR may answer each one.
+        held = f"{project} -- {WORKFLOW}: the open PRs could not be read, so its alerts wait"
+        stale, prs, alerts = "; ".join(filter(None, [stale, held])), [], []
+    wanted = unanswered(alerts, prs, now) if alerts else {}
     sig = signature(errors, wanted)
     if not sig:
         return None, stale
