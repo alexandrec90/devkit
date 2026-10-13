@@ -223,11 +223,23 @@ SERVICE_STATE = re.compile(r"^\s*STATE\s*:\s*\d+\s+(?P<state>[A-Z_]+)", re.M)
 # waited out the engine, a restart and both `wsl` calls of `reset_vm` at their full
 # timeouts, and ran 35 minutes on a 15-minute schedule, so the 00:00 fire was skipped
 # (5b71506f) -- to fail on "a restart did not bring its engine back" at the end.
+# Its step is marked `PERSON_STEP`, so its ledger group awaits the person rather than a
+# fixer, whose unelevated session cannot restart a service (aa6a9022).
 WSL_PROBE_TIMEOUT = 60
+# `harness_triage.PERSON_STEP`, which a test holds this to. Spelled rather than imported:
+# the resident tray imports this module, and `install-tray.TRAY_MODULES` would have to
+# watch `harness_triage` and everything it imports for edits.
+PERSON_STEP = "a person's step:"
 WSL_HUNG = (
     f"docker is not answering: WSL itself does not answer (`wsl --list` ran past "
     f"{WSL_PROBE_TIMEOUT}s), and no restart of Docker Desktop or its VM reaches a hung WSL "
-    f"-- restart WslService from an elevated prompt, or reboot"
+    f"-- {PERSON_STEP} restart WslService from an elevated prompt, or reboot"
+)
+# A Desktop nobody's failure stopped was most likely quit by a person, and is theirs to
+# start (`engine_down`); marked like `WSL_HUNG`, for the same reason.
+DESKTOP_QUIT = (
+    f"docker is not answering and Docker Desktop is not running -- {PERSON_STEP} "
+    "start Docker Desktop"
 )
 DESKTOP_STOP_TIMEOUT = 120
 # Recorded in `RESTARTED` as `VM_RESET_AT`, so a VM is reset once per restart: a pass
@@ -1113,11 +1125,7 @@ def engine_down(
     if not docker.desktop_running():
         stopped = docker.stop_reason()
         if FAILED_TO_START not in stopped.lower():
-            return (
-                wedged,
-                "docker is not answering and Docker Desktop is not running -- start it",
-                busy,
-            )
+            return wedged, DESKTOP_QUIT, busy
         report.say(f"Docker Desktop says its engine stopped: {stopped}")
         wedged = "docker is not answering: Docker Desktop's engine failed to start"
         busy = ()

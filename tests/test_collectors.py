@@ -1064,11 +1064,31 @@ def test_a_hung_wsl_fails_at_once_without_a_restart_it_cannot_reach(tmp_path, in
     assert "elevated" in collectors.WSL_HUNG and "reboot" in collectors.WSL_HUNG
 
 
+@pytest.mark.parametrize("said", ["WSL_HUNG", "DESKTOP_QUIT"])
+def test_a_step_only_a_person_can_take_reaches_the_ledger_marked_as_theirs(said):
+    """aa6a9022, 28a97046: the fix pass sent a fixer at a hung `WslService`, which its
+    unelevated session could not restart. The failure's line, as `log-wrap.py` files it,
+    is read by `harness_triage.person_step`, and its group awaits a person instead."""
+    triage = load_script("scripts/harness_triage.py")
+    assert collectors.PERSON_STEP == triage.PERSON_STEP, "spelled twice, held equal here"
+    line = f"error: {getattr(collectors, said)}"
+    row = triage.read_items(
+        f"2026-10-13T06:01:04+00:00\tevent=scheduled-job-failed\tproject=devkit\tsaid={line}"
+    )[0]
+    step = triage.person_step(row)
+    assert step and step in {
+        "restart WslService from an elevated prompt, or reboot",
+        "start Docker Desktop",
+    }
+
+
 def test_engine_down_asks_wsl_only_of_an_engine_a_revival_would_try():
     docker, report = FakeDocker(None), collectors.Report()
     docker.stopped = "user requested"
     _wedged, refused, _busy = collectors.engine_down(docker, report)
-    assert "start it" in refused and docker.wsl_asks == 0, "a quit Desktop is a person's"
+    assert refused == collectors.DESKTOP_QUIT and docker.wsl_asks == 0, (
+        "a quit Desktop is a person's"
+    )
     docker.stopped = WSL_HUNG
     assert collectors.engine_down(docker, report, ["social-scraper"]) == (
         "docker is not answering: Docker Desktop's engine failed to start",
@@ -1142,7 +1162,7 @@ def test_a_desktop_stopped_for_no_failure_is_still_left_to_a_person(tmp_path, in
     docker, report = Wedged(tmp_path / "restarts.json"), collectors.Report()
     docker.desktop, docker.stopped = False, "user requested"
     collectors.maintain([target(tmp_path)], docker, report, {})
-    assert ("restart",) not in docker.calls and "start it" in report.lines[-1]
+    assert ("restart",) not in docker.calls and report.lines[-1] == collectors.DESKTOP_QUIT
 
 
 def test_docker_reads_desktops_stop_reason_only_on_windows(tmp_path, monkeypatch):

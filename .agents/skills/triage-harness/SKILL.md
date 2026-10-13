@@ -44,7 +44,8 @@ This is the one rule the rest of the skill is arranged around, and it is worth s
 before the steps rather than inside them.
 
 Every group is either **retired with a fix** or **retired as not-a-defect with the
-evidence** (§2). There is no third outcome. A backlog entry that survives a sweep has been
+evidence** (§2). There is no third outcome but a group `AWAITS A PERSON` (§3), which
+the count line keeps apart from the open ones. A backlog entry that survives a sweep has been
 read by an agent, judged real, and handed to the next agent — who pays the same
 verification cost to reach the same conclusion, and hands it on again. That is the exact
 loop the ledger replaced, restored one deferral at a time, and it is worse than the
@@ -169,6 +170,11 @@ marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, 
 pass sends no session at it, and the pass retires the rows filed while it waited against
 that PR once it merges; only a row filed after the merge reads `RECURRED`. One marked
 `IN HAND at <tree>` has a session the pass sent at it still at work there: leave it. One
+marked `AWAITS A PERSON` failed on a step its job says no fixer can take
+(`harness_triage.PERSON_STEP`: an elevated command, a reboot), and the pass sends it
+nothing. It is the one group a sweep may leave open, and only while that step is still
+owed: if the job has passed since its newest row, retire it naming that pass; if a fixer
+*could* take the step, the job's marker is the defect -- fix the job. One
 with an `OPEN PR` line names a branch whose PR is still open, and says whether its gate is
 red: read that PR before writing a second fix beside it. A
 `REOPENED <id>` line is a resolution `scripts/fix_verify.py` undid, most often because

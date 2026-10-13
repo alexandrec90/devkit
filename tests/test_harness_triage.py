@@ -638,6 +638,52 @@ def test_the_count_line_splits_pending_from_open():
     )
     assert triage.count_line([a, b], {}) == "2 open"
     assert triage.count_line([a, b], {a.signature: "9"}) == "1 open, 1 pending an unmerged fix"
+    assert triage.count_line([a, b], {a.signature: "9"}, {a.signature: "reboot"}) == (
+        "1 open, 1 awaiting a person"
+    ), "a person's step outranks a fix in flight: no merge takes it"
+
+
+def test_a_group_whose_newest_row_names_a_persons_step_awaits_that_person():
+    """aa6a9022, 28a97046: a hung `WslService` sent a fixer that could not restart it."""
+    step = triage.PERSON_STEP
+    older = _line(
+        "scheduled-job-failed", stamp=_STAMPS[0], message="job failed", cause="error: hung"
+    )
+    newer = _line(
+        "scheduled-job-failed",
+        stamp=_STAMPS[1],
+        message="job failed",
+        cause="error: hung",
+        said=f"error: hung -- {step} restart WslService from an elevated prompt, or reboot",
+    )
+    other = _line("agent-report", stamp=_STAMPS[0], message="unrelated")
+    items = triage.open_items(triage.read_items("\n".join((older, newer, other))))
+    head = next(i for i in items if i.id == triage.item_id(newer))
+    assert triage.person_step(head) == "restart WslService from an elevated prompt, or reboot"
+    assert triage.awaiting_person(items) == {
+        head.signature: "restart WslService from an elevated prompt, or reboot"
+    }
+    text = triage.render(items, items)
+    block = next(blk for blk in text.split("\n\n") if "job failed" in blk)
+    assert triage.awaiting_line(head.id, "reboot") in text.replace(
+        "restart WslService from an elevated prompt, or reboot", "reboot"
+    )
+    assert "AWAITS A PERSON -- restart WslService" in block
+    assert f"--resolve-like {head.id}" in block
+    assert "AWAITS" not in next(blk for blk in text.split("\n\n") if "unrelated" in blk)
+    assert "1 open, 2 awaiting a person" in text
+    # Only the newest row speaks for its group: a later failure no person is named for is
+    # a fixer's again.
+    later = _line(
+        "scheduled-job-failed",
+        stamp="2026-08-25T00:00:00+00:00",
+        message="job failed",
+        cause="error: hung",
+    )
+    assert triage.awaiting_person(triage.open_items(triage.read_items(f"{newer}\n{later}"))) == {}
+    # `cause` alone is read when the run's line needed no `said`.
+    bare = triage.read_items(_line("scheduled-job-failed", cause=f"x -- {step} start it"))[0]
+    assert triage.person_step(bare) == "start it"
 
 
 def test_a_group_reports_its_count_and_every_id(tmp_path):

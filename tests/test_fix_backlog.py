@@ -120,6 +120,35 @@ def test_a_group_whose_fix_is_in_flight_is_shown_but_sends_no_session(monkeypatc
     assert len(fix_backlog.ledger_failure(devkit, tmp_path / "ev").signature) == 2, "landed"
 
 
+def test_a_group_awaiting_a_person_is_shown_but_sends_no_fixer(monkeypatch, tmp_path):
+    """aa6a9022, 28a97046: `collectors.py maintain` failed on a hung `WslService` and said
+    only an elevated prompt or a reboot would reach it; the pass sent a fixer anyway, whose
+    unelevated `Restart-Service` was refused, and it could only re-check and stop."""
+    devkit = tmp_path / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    step = fix_backlog.triage.PERSON_STEP
+    hung = (
+        "2026-10-13T06:01:04+00:00\tevent=scheduled-job-failed\tagent=claude\thost=h"
+        "\tproject=devkit\tmessage=unattended task 'Scheduled: Collectors' failed"
+        "\tcause=error: docker is not answering: WSL itself does not answer"
+        f"\tsaid=error: docker is not answering -- {step} restart WslService, or reboot"
+    )
+    shard.write_text(hung + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    assert fix_backlog.ledger_failure(devkit, tmp_path / "ev") is None
+    other = "2026-10-13T06:30:00+00:00\tevent=agent-report\tagent=claude\thost=h\tproject=devkit\tmessage=m"
+    with shard.open("a", encoding="utf-8") as handle:
+        handle.write(other + "\n")
+    backlog = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert backlog is not None and len(backlog.signature) == 1
+    assert backlog.signature[0].startswith("agent-report devkit [")
+    log = (Path(backlog.evidence) / "harness-triage.log").read_text(encoding="utf-8")
+    assert "AWAITS A PERSON -- restart WslService, or reboot" in log
+
+
 def failed_job_row(project: str, artifact: str, stamp: str = "2026-10-07T21:00:00+00:00") -> str:
     return (
         f"{stamp}\tevent=scheduled-job-failed\tagent=claude\thost=h\tproject={project}"

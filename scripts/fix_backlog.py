@@ -51,13 +51,16 @@ def ledger_failure(
 
     A group whose fix is still in flight (`in_flight`, `fix_verify.in_flight`'s) is shown
     as pending and sends nothing: its new rows are the defect waiting on a merge, and
-    each one used to change the sha and send a session to re-prove it (d677ea57). A
-    group naming a branch with an open PR names the PR too (`open_prs`).
+    each one used to change the sha and send a session to re-prove it (d677ea57). One
+    awaiting a person (`triage.awaiting_person`) sends nothing either: its step is one no
+    fixer can take, and the one sent at a hung `WslService` could only re-check it
+    (aa6a9022). A group naming a branch with an open PR names the PR too (`open_prs`).
     """
     history = triage.load(devkit_dir)
     items = triage.open_items(history)
     pending = triage.pending_groups(history, in_flight or {})
-    live = [i for i in items if i.signature not in pending]
+    person = triage.awaiting_person(items)
+    live = [i for i in items if i.signature not in pending and i.signature not in person]
     if not live:
         return None
     grouped = triage.groups(live)

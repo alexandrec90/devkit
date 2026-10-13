@@ -85,6 +85,13 @@ SIGNATURE_WIDTH = 80
 
 ARTIFACT = Path("logs") / "harness-triage.log"
 
+# What a job's error line says before a step only a person can take: an elevated command,
+# a reboot, an app a person quit. A group whose newest row carries it awaits that person
+# (`awaiting_person`), and the fix pass sends it no fixer: 563408cf's fixer was sent at a
+# hung `WslService` its unelevated session could not restart, and could only re-check it
+# and stop (aa6a9022, 28a97046). `collectors.PERSON_STEP` writes it, held equal by a test.
+PERSON_STEP = "a person's step:"
+
 
 @dataclass(frozen=True)
 class Item:
@@ -320,6 +327,29 @@ def pending_groups(
     return {sig: in_flight[ref] for sig, (_, ref) in latest.items() if ref in in_flight}
 
 
+def person_step(item: Item) -> str:
+    """The step a row's run said only a person can take (`PERSON_STEP`), or "".
+
+    Read off `said` before `cause`: `cause` is cut at `log-wrap.CAUSE_WIDTH`, and the step
+    comes last on its line, after what went wrong."""
+    for name in ("said", "cause"):
+        text = item.fields.get(name, "")
+        if PERSON_STEP in text:
+            return text.split(PERSON_STEP, 1)[1].strip(" -")
+    return ""
+
+
+def awaiting_person(items: list[Item]) -> dict[tuple[str, str, str, str], str]:
+    """`signature -> step` of each group whose newest row names a person's step.
+
+    The newest row, because it is what the job says now: a group that went on failing
+    for a reason a fixer can reach is a fixer's again. No resolution is implied -- the
+    group stays open until it is retired with the step taken and the job passing."""
+    return {
+        bucket[0].signature: step for _, bucket in groups(items) if (step := person_step(bucket[0]))
+    }
+
+
 # --- fixes in flight ------------------------------------------------------------------
 #
 # What `fix_verify.py` holds a resolution to, kept here rather than there because the CLI
@@ -528,21 +558,29 @@ def render(
 ) -> str:
     """The open backlog as text -- the artifact, and what the CLI prints. With the whole
     `history`, a group that recurred after a resolution says so; one in `pending`
-    (`pending_groups`) says its fix is in flight instead, one in `held`
-    (`held_groups`) names the session already sent at it, and one naming a branch in
-    `prs` names that branch's open PR."""
+    (`pending_groups`) says its fix is in flight instead, one awaiting a person
+    (`awaiting_person`) names the step, one in `held` (`held_groups`) names the session
+    already sent at it, and one naming a branch in `prs` names that branch's open PR."""
     if not items:
         return "harness-triage: nothing open\n"
     fixes = past_fixes(history or [])
     back = reopened(history or [])
     pending = pending or {}
     held = held or {}
-    lines = ["# source: scripts/harness_triage.py", f"# open: {count_line(items, pending)}", ""]
+    awaiting = awaiting_person(items)
+    lines = [
+        "# source: scripts/harness_triage.py",
+        f"# open: {count_line(items, pending, awaiting)}",
+        "",
+    ]
     for (event, agent, project, _), bucket in groups(items):
         head = bucket[0]
         lines.extend(head_lines(f"{event}  [{agent}]  {project}", bucket))
         lines.extend(f"  REOPENED {i.id} -- {back[i.id]}" for i in bucket if i.id in back)
-        lines.extend(verdict_lines(pending.get(head.signature), fixes.get(head.signature)))
+        if step := awaiting.get(head.signature):
+            lines.append(awaiting_line(head.id, step))
+        else:
+            lines.extend(verdict_lines(pending.get(head.signature), fixes.get(head.signature)))
         lines.extend(open_pr_lines(bucket, prs or {}))
         holder = next((held[i.id] for i in bucket if i.id in held), None)
         if holder:
@@ -578,6 +616,16 @@ def head_lines(title: str, bucket: list[Item]) -> list[str]:
     if len(bucket) > 1:
         lines.append(f"  ids    {' '.join(i.id for i in bucket)}")
     return lines
+
+
+def awaiting_line(ref: str, step: str) -> str:
+    """What a group awaiting a person says in place of a verdict: the step, that no fixer
+    is sent, and how it is retired once taken."""
+    return (
+        f"  AWAITS A PERSON -- {step} -- no fixer is sent at it. Once the job has passed "
+        f"since this row: python scripts/harness_triage.py --resolve-like {ref} "
+        "--note '<the step taken>; the job passed at <when>'"
+    )
 
 
 def verdict_lines(waiting: str | None, before: list[str] | None) -> list[str]:
@@ -788,16 +836,27 @@ def main(argv: list[str] | None = None) -> int:
     # `--agent` filter would read as "this is everything" while hiding the other runtime.
     path = write_artifact(render(open_items(items), items, pending, held))
     print(text, end="")
-    print(f"harness-triage: {count_line(open_items(items), pending)} -- {path}")
+    still = open_items(items)
+    print(f"harness-triage: {count_line(still, pending, awaiting_person(still))} -- {path}")
     return 0
 
 
-def count_line(items: list[Item], pending: Mapping[tuple[str, str, str, str], str]) -> str:
-    """`N open`, plus how many more wait on a fix's merge -- the pass's own split
-    (`fix_backlog.ledger_failure`), so a sweep ends at the number the pass acts on."""
-    held = sum(1 for i in items if i.signature in pending)
-    live = f"{len(items) - held} open"
-    return f"{live}, {held} pending an unmerged fix" if held else live
+def count_line(
+    items: list[Item],
+    pending: Mapping[tuple[str, str, str, str], str],
+    awaiting: Mapping[tuple[str, str, str, str], str] | None = None,
+) -> str:
+    """`N open`, plus how many more wait on a fix's merge or on a person -- the pass's own
+    split (`fix_backlog.ledger_failure`), so a sweep ends at the number the pass acts on."""
+    awaiting = awaiting or {}
+    person = sum(1 for i in items if i.signature in awaiting)
+    held = sum(1 for i in items if i.signature in pending and i.signature not in awaiting)
+    parts = [f"{len(items) - held - person} open"]
+    if held:
+        parts.append(f"{held} pending an unmerged fix")
+    if person:
+        parts.append(f"{person} awaiting a person")
+    return ", ".join(parts)
 
 
 if __name__ == "__main__":
