@@ -846,7 +846,8 @@ class FakeWsl:
     `wsl --list` times out while `hung`, and every argv is recorded."""
 
     def __init__(self, *states: str, hung: bool = False, killable: bool = True) -> None:
-        self.states, self.hung, self.killable, self.asked = list(states), hung, killable, []
+        self.states, self.hung, self.killable = list(states), hung, killable
+        self.asked: list[list[str]] = []
 
     def __call__(self, cmd, timeout):
         self.asked.append(list(cmd))
