@@ -49,11 +49,14 @@ class FakeDocker:
         self.stopped = ""
         self.update = False
         # WSL's service as `sc query` names it: running, as on any machine it works on.
-        self.wsl = "RUNNING"
+        self.service = "RUNNING"
         self.restarts = None
         self.holds = None
         self.restart_answer = (True, "")
         self.reset_answer = (True, "")
+        # Whether WSL itself answers; kept out of `calls`, which other tests compare whole.
+        self.wsl = True
+        self.wsl_asks = 0
         # The memory half: no limit answered for, no VM size, nothing said of a silent VM
         # -- which checks nothing, so a test about something else fails on nothing here.
         self.limits_answer: dict[str, int] | None = {}
@@ -91,6 +94,10 @@ class FakeDocker:
         return self.stopped
 
     def wsl_service(self):
+        return self.service
+
+    def wsl_answers(self):
+        self.wsl_asks += 1
         return self.wsl
 
     def restart_desktop(self):
@@ -975,7 +982,7 @@ def test_a_stuck_wsl_service_restarts_nothing_and_names_the_remedy(
     to kill the service."""
     restarts = tmp_path / "restarts.json"
     docker, report = Wedged(restarts), collectors.Report()
-    docker.desktop, docker.stopped, docker.wsl = desktop, WSL_HUNG, state
+    docker.desktop, docker.stopped, docker.service = desktop, WSL_HUNG, state
     collectors.maintain([target(tmp_path)], docker, report, {})
     assert ("restart",) not in docker.calls and ("reset",) not in docker.calls
     assert report.failures == 1
@@ -986,7 +993,7 @@ def test_a_stuck_wsl_service_restarts_nothing_and_names_the_remedy(
 
 def test_a_running_wsl_service_leaves_the_revive_as_it_was(tmp_path, instant):
     docker, report = Wedged(tmp_path / "restarts.json"), collectors.Report()
-    docker.wsl = ""
+    docker.service = ""
     collectors.maintain([target(tmp_path)], docker, report, {})
     assert ("restart",) in docker.calls and report.failures == 0
 
@@ -995,12 +1002,12 @@ def test_not_restarting_answers_none_only_when_a_restart_is_due(tmp_path, instan
     restarts, report = tmp_path / "restarts.json", collectors.Report()
     docker = Wedged(restarts)
     assert collectors.not_restarting(docker, report, restarts, 10_000.0, "wedged") is None
-    docker.wsl = "STOP_PENDING"
+    docker.service = "STOP_PENDING"
     assert collectors.not_restarting(docker, report, restarts, 10_000.0, "wedged") == (
         None,
         collectors.wsl_stuck_cause("STOP_PENDING"),
     )
-    docker.wsl = "RUNNING"
+    docker.service = "RUNNING"
     restarts.write_text(json.dumps({collectors.STARTED_AT: 9_000.0}), encoding="utf-8")
     instead = collectors.not_restarting(docker, report, restarts, 10_000.0, "wedged")
     assert instead == (None, "wedged, and a restart did not bring its engine back")
@@ -1039,6 +1046,82 @@ def test_docker_asks_the_service_manager_for_wsl_only_on_windows(monkeypatch):
     assert asked == [["sc.exe", "query", collectors.WSL_SERVICE]]
     answer = (1060, "        STATE              : 3  STOP_PENDING \r\n")
     assert docker.wsl_service() == "", "a query that failed says nothing"
+
+
+@pytest.mark.parametrize("desktop", [False, True], ids=["failed-to-start", "wedged"])
+def test_a_hung_wsl_fails_at_once_without_a_restart_it_cannot_reach(tmp_path, instant, desktop):
+    """5b71506f: `WslService` sat in `StopPending`. The 23:45 pass waited out the engine,
+    a restart and both `wsl` calls of the VM reset at their full timeouts, ran 35 minutes
+    on a 15-minute schedule, skipped the 00:00 fire, and failed on the restart anyway."""
+    docker = Wedged(tmp_path / "restarts.json", revives=True, resets=True)
+    docker.desktop, docker.stopped, docker.wsl = desktop, "" if desktop else WSL_HUNG, False
+    report = collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 1 and report.lines[-1] == collectors.WSL_HUNG
+    assert ("restart",) not in docker.calls and ("reset",) not in docker.calls
+    assert sum(instant.slept) == 0, "no wait for an engine whose WSL cannot start it"
+    assert collectors.last_restart(tmp_path / "restarts.json") is None
+    assert "elevated" in collectors.WSL_HUNG and "reboot" in collectors.WSL_HUNG
+
+
+def test_engine_down_asks_wsl_only_of_an_engine_a_revival_would_try():
+    docker, report = FakeDocker(None), collectors.Report()
+    docker.stopped = "user requested"
+    _wedged, refused, _busy = collectors.engine_down(docker, report)
+    assert "start it" in refused and docker.wsl_asks == 0, "a quit Desktop is a person's"
+    docker.stopped = WSL_HUNG
+    assert collectors.engine_down(docker, report, ["social-scraper"]) == (
+        "docker is not answering: Docker Desktop's engine failed to start",
+        "",
+        (),
+    ), "a failed start runs nothing a restart could stop, so is held for no run (930844fd)"
+    docker.desktop, docker.wsl = True, False
+    assert collectors.engine_down(docker, report, ["social-scraper"]) == (
+        "docker is not answering though Docker Desktop says it is running",
+        collectors.WSL_HUNG,
+        ["social-scraper"],
+    )
+
+
+def test_wsl_is_asked_only_once_the_engine_is_silent(tmp_path, instant):
+    docker, report = FakeDocker([]), collectors.Report()
+    docker.restarts = tmp_path / "restarts.json"
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert docker.wsl_asks == 0
+
+
+@pytest.mark.parametrize(
+    ("answer", "answers"),
+    [
+        ((collectors.TIMED_OUT, "timed out after 60s"), False),
+        ((1, "Windows Subsystem for Linux has no installed distributions."), True),
+        ((collectors.TIMED_OUT, "a wsl that exited 124 itself"), True),
+        ((0, "docker-desktop\n"), True),
+    ],
+    ids=["timed-out", "an-error-is-an-answer", "its-own-124", "listed"],
+)
+def test_docker_calls_wsl_hung_only_on_a_timeout(monkeypatch, answer, answers):
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    asked: list = []
+    monkeypatch.setattr(
+        collectors, "spawn", lambda argv, timeout, cwd=None: asked.append((argv, timeout)) or answer
+    )
+    assert collectors.Docker().wsl_answers() is answers
+    assert asked == [(["wsl", "--list", "--quiet"], collectors.WSL_PROBE_TIMEOUT)]
+
+
+def test_docker_asks_no_wsl_off_windows(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "posix")
+    monkeypatch.setattr(collectors, "spawn", lambda *a, **k: pytest.fail("spawned"))
+    assert collectors.Docker().wsl_answers() is True
+
+
+def test_spawn_reports_a_timeout_as_timed_out(monkeypatch):
+    def slow(*args, **kwargs):
+        raise collectors.subprocess.TimeoutExpired("wsl", 60)
+
+    monkeypatch.setattr(collectors.subprocess, "run", slow)
+    assert collectors.spawn(["wsl"], 60) == (collectors.TIMED_OUT, "timed out after 60s")
 
 
 def test_an_engine_that_failed_to_start_is_not_held_for_the_run_waiting_on_it(tmp_path, instant):
@@ -1783,6 +1866,17 @@ def test_a_status_that_failed_is_answered_by_desktops_process(
 
     docker.run = run
     assert docker.desktop_running() is expected
+
+
+def test_desktop_process_asks_the_task_list_only_on_windows(monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "posix")
+    assert collectors.desktop_process(lambda argv, timeout: pytest.fail(f"asked {argv}")) is False
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    asked: list[list[str]] = []
+    assert collectors.desktop_process(lambda argv, timeout: asked.append(argv) or (0, DESKTOP_UP))
+    assert asked[0][0] == "tasklist" and collectors.DESKTOP_IMAGE in asked[0][2]
+    assert not collectors.desktop_process(lambda argv, timeout: (0, NO_DESKTOP))
+    assert not collectors.desktop_process(lambda argv, timeout: (1, DESKTOP_UP)), "failed list"
 
 
 @pytest.mark.parametrize(
