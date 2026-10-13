@@ -15,6 +15,7 @@ that decide whether the project's job runs and whether its failure is seen:
 from __future__ import annotations
 
 import datetime as dt
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -369,7 +370,7 @@ def test_a_need_that_will_not_start_skips_the_command_and_fails(tmp_path):
     spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
     assert code == 1 and len(spawn.calls) == 2, "asked the engine once, and not again"
-    assert spawn.calls[1][0] == ["docker", "info", "--format", "{{.ServerVersion}}"]
+    assert spawn.calls[1][0] == list(tasks.ENGINE_PROBE)
     assert any("could not start db" in line for line in lines)
     assert "Error response from daemon: no such image" in lines
 
@@ -501,12 +502,114 @@ def test_start_needs_says_what_the_engine_answered_and_only_when_it_asked(tmp_pa
     assert instant.slept == []
 
 
-def test_probe_asks_docker_info_within_its_bound(tmp_path):
+def test_probe_asks_docker_version_within_its_bound(tmp_path):
     spawn = FakeSpawn(ENGINE_UP)
     assert tasks.probe(tmp_path, spawn) == ENGINE_UP
     assert spawn.calls == [
-        (["docker", "info", "--format", "{{.ServerVersion}}"], tmp_path.name, tasks.PROBE)
+        (["docker", "version", "--format", "{{.Server.Version}}"], tmp_path.name, tasks.PROBE)
     ]
+
+
+# What `compose up` said on 2026-10-12 with WSL hung under Docker Desktop (08ec2a47), and
+# what `docker info --format {{.ServerVersion}}` answered beside it: exit 0, no version.
+UNABLE = (1, "Error response from daemon: Docker Desktop is unable to start")
+NO_VERSION = (0, "\n")
+
+
+def test_a_probe_that_names_no_server_version_is_no_answer(tmp_path):
+    code, said = tasks.probe(tmp_path, FakeSpawn(NO_VERSION))
+    assert code != 0 and "no server version" in said
+    assert tasks.probe(tmp_path, FakeSpawn(UNABLE)) == UNABLE
+
+
+def test_a_fire_on_a_desktop_unable_to_start_waits_for_the_engine_and_blames_it(tmp_path, instant):
+    """08ec2a47: the 22:30 fire failed nine seconds in on "docker compose up failed for
+    db": the probe read an exit 0 with no version as an answering engine, so the wait
+    for a silent one -- the fix of fifteen resolutions before it -- was never reached."""
+    probes = 1 + tasks.ENGINE_WAIT // tasks.ENGINE_POLL
+    spawn = FakeSpawn(UNABLE, *[NO_VERSION] * probes)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and sum(instant.slept) == tasks.ENGINE_WAIT
+    assert lines[-1] == "error: the Docker engine did not answer"
+
+
+# Docker Desktop's monitor logging its backend's answer to `docker desktop status`, as it
+# did on 2026-10-12 at 02:33 UTC, cut to the fields read.
+STOPPED_REASON = (
+    r"engine linux/wsl failed to start: getting WSL provisioner: listing WSL distros: "
+    r"DockerDesktop/Wsl/CommandTimedOut: c:\windows\system32\wsl.exe -l -v --all: exit status 1"
+)
+
+
+def state_line(state, reason=""):
+    payload = {"docker": state, "dockerAPI": "running", "state": state, "stopReason": reason}
+    return (
+        "[2026-10-13T02:33:04.447794700Z] [02:33:04.447794700Z][main.ipc              ] "
+        "(79fc0c5f-0) ea34ab33-BackendAPI S->C 67501fa1-docker-desktop-cli GET "
+        f"/backend/state (0s): {json.dumps(payload)}"
+    )
+
+
+def desktop_logs(tmp_path, *lines):
+    logs = tmp_path / "docker-logs"
+    logs.mkdir()
+    (logs / tasks.MONITOR_LOG).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return logs
+
+
+def test_stop_reason_reads_the_latest_logged_state(tmp_path):
+    asked = "... S<-C 67501fa1-docker-desktop-cli GET /backend/state"
+    logs = desktop_logs(
+        tmp_path, "[x] returning engine error:", asked, state_line("stopped", STOPPED_REASON)
+    )
+    assert tasks.stop_reason(logs) == STOPPED_REASON
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [state_line("stopped", STOPPED_REASON), state_line("running")],
+        [state_line("stopped")],
+        ["[x] returning engine error:"],
+        [state_line("stopped", STOPPED_REASON).replace("(0s): {", "(0s): {broken")],
+    ],
+    ids=["recovered-since", "no-reason", "no-state-logged", "unreadable"],
+)
+def test_stop_reason_says_nothing_but_the_latest_states_reason(tmp_path, lines):
+    assert tasks.stop_reason(desktop_logs(tmp_path, *lines)) == ""
+
+
+def test_stop_reason_of_a_missing_log_is_nothing(tmp_path):
+    assert tasks.stop_reason(tmp_path / "absent") == ""
+
+
+def test_a_silent_engines_fire_says_docker_desktops_reason_beside_the_cause(
+    tmp_path, monkeypatch, instant
+):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    logs = desktop_logs(tmp_path, state_line("stopped", STOPPED_REASON))
+    status = (0, '{"SessionID": "x", "Status": "stopped"}')
+    spawn = FakeSpawn(UNABLE, *SILENT_THROUGH_WAIT, status)
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn, desktop_logs=logs)
+    assert spawn.calls[-1][0] == list(tasks.DESKTOP_STATUS), "asked, so the state is today's"
+    assert lines[-2] == f"Docker Desktop says its engine stopped: {STOPPED_REASON}"
+    assert log_wrap.failure_cause("\n".join(lines)) == "error: the Docker engine did not answer"
+
+
+def test_desktop_said_is_nothing_for_an_answering_engine_or_no_logs(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    logs = desktop_logs(tmp_path, state_line("stopped", STOPPED_REASON))
+    spawn = FakeSpawn()
+    assert tasks.desktop_said(ENGINE_UP, tmp_path, spawn, logs) == []
+    assert tasks.desktop_said(SILENT, tmp_path, spawn, None) == []
+    assert spawn.calls == [], "Docker Desktop is not asked either"
+
+
+def test_desktop_stopped_is_never_asked_off_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "posix")
+    spawn = FakeSpawn()
+    logs = desktop_logs(tmp_path, state_line("stopped", STOPPED_REASON))
+    assert tasks.desktop_stopped(tmp_path, spawn, logs) == "" and spawn.calls == []
 
 
 def test_await_engine_stops_asking_once_it_answers(tmp_path, instant):
@@ -533,11 +636,7 @@ def test_a_need_that_timed_out_with_the_engine_answering_says_the_service_stalle
     spawn = FakeSpawn(TIMED_OUT, (0, "28.4.0\n"), (0, healthy))
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
     assert code == tasks.TIMED_OUT and len(spawn.calls) == 3
-    assert spawn.calls[1] == (
-        ["docker", "info", "--format", "{{.ServerVersion}}"],
-        "social-scraper",
-        tasks.PROBE,
-    )
+    assert spawn.calls[1] == (list(tasks.ENGINE_PROBE), "social-scraper", tasks.PROBE)
     assert spawn.calls[2][0] == ["docker", "compose", "ps", "--all", "db"]
     assert not any("Docker Desktop running" in line for line in lines), lines
     assert any("server 28.4.0" in line for line in lines), lines

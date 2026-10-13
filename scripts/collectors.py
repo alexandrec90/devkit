@@ -186,6 +186,11 @@ ENGINE_POLL = 15
 # repeated every pass.
 DESKTOP_TIMEOUT = 30
 DESKTOP_IMAGE = "Docker Desktop.exe"
+# What Docker Desktop's stop reason says of an engine that died starting rather than one a
+# person stopped (`Docker.stop_reason`). 2026-10-12: status `stopped`, reason `engine
+# linux/wsl failed to start: ... wsl.exe -l -v --all: ... CommandTimedOut` -- read as
+# "quit by a person", so nothing revived it under social-scraper's fires (08ec2a47).
+FAILED_TO_START = "failed to start"
 RESTART_TIMEOUT = 600
 RESTART_EVERY = 3600
 RESTARTED = Path("logs/collectors.engine-restart.json")
@@ -433,6 +438,13 @@ class Docker:
         if said is not None:
             return said == "running"
         return self.desktop_process()
+
+    def stop_reason(self) -> str:
+        """Docker Desktop's own reason its engine is down (`collector_tasks.stop_reason`),
+        read after `desktop_running` has asked its status; "" for none, and off Windows."""
+        if os.name != "nt":
+            return ""
+        return collector_tasks.stop_reason(docker_memory.log_dir())
 
     def desktop_process(self) -> bool:
         """Whether `DESKTOP_IMAGE` is running on this machine; never off Windows."""
@@ -1010,8 +1022,10 @@ def revive_engine(
     Only a *wedged* engine is restarted: Docker Desktop says `running` and its engine
     does not answer for `WEDGE_CONFIRM` more seconds -- one that answers in that time was
     slow, not wedged. A Desktop that is not running was most likely quit by a person, and
-    a timer does not start it behind their back; the answer then says so. A restart is
-    made once per `RESTART_EVERY`; `clock` is now, as a POSIX time.
+    a timer does not start it behind their back; the answer then says so. Unless Desktop
+    itself says its engine `FAILED_TO_START` (`Docker.stop_reason`): that is a stop nobody
+    asked for, and is revived like a wedge. A restart is made once per `RESTART_EVERY`;
+    `clock` is now, as a POSIX time.
 
     Nor is it restarted while a scheduled collector's run is in flight (`busy`, from
     `scheduled_in_flight`) and the wedge is new: its services may outlive a silent engine
@@ -1038,13 +1052,17 @@ def revive_engine(
         )
         cause = f"{NOT_ANSWERING} while Docker Desktop installs an update"
         return held(report, restarts, clock, why, cause)
+    wedged = "docker is not answering though Docker Desktop says it is running"
     if not docker.desktop_running():
-        return None, "docker is not answering and Docker Desktop is not running -- start it"
+        stopped = docker.stop_reason()
+        if FAILED_TO_START not in stopped.lower():
+            return None, "docker is not answering and Docker Desktop is not running -- start it"
+        report.say(f"Docker Desktop says its engine stopped: {stopped}")
+        wedged = "docker is not answering: Docker Desktop's engine failed to start"
     containers = wait_for_engine(docker, ENGINE_STARTUP - WEDGE_CONFIRM)
     if containers is not None:
         report.say("docker was slow to answer, not wedged -- it answered when asked again")
         return containers, ""
-    wedged = "docker is not answering though Docker Desktop says it is running"
     last = last_restart(restarts)
     if last is not None and 0 <= clock - last < RESTART_EVERY:
         report.say(
@@ -1124,6 +1142,41 @@ def reclaim_vm_memory(docker: Docker, report: Report) -> None:
         report.say(f"the VM's file cache was not dropped: {first_line(out) or 'no output'}")
 
 
+def needs_engine(chosen: Sequence[Target]) -> bool:
+    """Whether this machine needs Docker's engine answering for what it runs: a container
+    collector assigned `run`, or a scheduled one whose command `needs` compose services.
+
+    The second is no less a need for keeping nothing up itself: on 2026-10-12 a pass whose
+    only container collector was `stop` read a dead engine as "nothing here can be
+    running", 0 failures, while every fire of social-scraper failed on it (08ec2a47)."""
+    return any(
+        t.mode == config.RUN and (t.collector.needs or not t.collector.scheduled) for t in chosen
+    )
+
+
+def reach_engine(
+    docker: Docker, report: Report, awake: float | None, needed: bool
+) -> list[Container] | None:
+    """The engine's containers, once `wait_for_engine` has given it `awake` to start; an
+    engine silent past that is `revive_engine`'s where `needed` and `docker.restarts` is
+    set. None when it does not answer, failed where `needed` and said where not."""
+    containers = wait_for_engine(docker, awake)
+    why = "docker is not answering -- is Docker Desktop running?"
+    if containers is None and needed and docker.restarts is not None:
+        short = docker.memory_evidence(_clock() - docker_memory.OOM_LOOKBACK)
+        if short:
+            report.say(f"  {short}")
+            report.fail(SHORT_OF_MEMORY)
+        busy = docker.holds() if docker.holds else ()
+        containers, why = revive_engine(docker, report, docker.restarts, _clock(), busy)
+    if containers is None:
+        if not needed:
+            report.say("docker is not answering, so nothing here can be running")
+        elif why:
+            report.fail(why)
+    return containers
+
+
 def maintain(
     chosen: Sequence[Target],
     docker: Docker,
@@ -1133,7 +1186,8 @@ def maintain(
     awake: float | None = None,
 ) -> None:
     """One pass over the assigned *container* collectors, recording health verdicts into
-    `health`. The scheduled ones are `maintain_scheduled`'s, and need no docker. `awake`
+    `health`. The scheduled ones in `chosen` are `maintain_scheduled`'s, and count here
+    only for the engine their `needs` run in (`needs_engine`). `awake`
     is how long the machine has been up, which `wait_for_engine` gives Docker to start;
     an engine silent past that is `revive_engine`'s where `docker.restarts` is set, held
     for whatever `docker.holds` names for up to `BUSY_HOLD`. A held restart fails nothing until `HOLD_LIMIT`.
@@ -1143,29 +1197,18 @@ def maintain(
     has the limits of what it keeps up checked (`check_memory`). An answering engine's
     VM also has its file cache dropped (`reclaim_vm_memory`), by the scheduled pass
     alone -- the one that carries `docker.restarts`."""
-    if not chosen:
+    mine = [t for t in chosen if not t.collector.scheduled]
+    needed = needs_engine(chosen)
+    if not mine and not needed:
         return
-    containers = wait_for_engine(docker, awake)
-    running = any(t.mode == config.RUN for t in chosen)
-    why = "docker is not answering -- is Docker Desktop running?"
-    if containers is None and running and docker.restarts is not None:
-        short = docker.memory_evidence(_clock() - docker_memory.OOM_LOOKBACK)
-        if short:
-            report.say(f"  {short}")
-            report.fail(SHORT_OF_MEMORY)
-        busy = docker.holds() if docker.holds else ()
-        containers, why = revive_engine(docker, report, docker.restarts, _clock(), busy)
+    containers = reach_engine(docker, report, awake, needed)
     if containers is None:
-        if not running:
-            report.say("docker is not answering, so nothing here can be running")
-        elif why:
-            report.fail(why)
         return
     if docker.restarts is not None:
         release_hold(docker.restarts)
         reclaim_vm_memory(docker, report)
-    check_memory(chosen, containers, docker, report)
-    for target in chosen:
+    check_memory(mine, containers, docker, report)
+    for target in mine:
         if target.mode == config.RUN:
             last = health.get(target.collector.project, {})
             record = keep_running(target, containers, docker, report, last, git)
@@ -1856,7 +1899,11 @@ def reassign(args: argparse.Namespace, base: Path, collectors, report: Report) -
 
 
 def fire(
-    name: str, base: Path, now: _dt.datetime, spawner: collector_tasks.Spawner | None = None
+    name: str,
+    base: Path,
+    now: _dt.datetime,
+    spawner: collector_tasks.Spawner | None = None,
+    desktop_logs: Path | None = None,
 ) -> int:
     """`fire <name>`: what a scheduled collector's task runs. Exits with the command's code.
 
@@ -1864,6 +1911,8 @@ def fire(
     records a run's start before its command runs (`collector_tasks.start_path`). A
     task left behind on a machine no longer assigned `run` -- the pass that deletes it has
     not come round yet -- does nothing and says so, rather than running a second writer.
+    `desktop_logs` is where Docker Desktop's own logs are read for why a silent engine
+    stopped (`collector_tasks.stop_reason`); the command line passes this machine's.
     """
     collectors, _notes = config.declared(base)
     collector = next((c for c in collectors if c.project == name and c.scheduled), None)
@@ -1877,7 +1926,11 @@ def fire(
         start = now.astimezone().isoformat(timespec="seconds")
         write_file(base / collector_tasks.start_path(name), start + "\n")
         code, lines = collector_tasks.fire(
-            collector, checkout, spawner or collector_tasks.spawn, fired=now
+            collector,
+            checkout,
+            spawner or collector_tasks.spawn,
+            fired=now,
+            desktop_logs=desktop_logs,
         )
     text = collector_tasks.render(name, code, lines, now)
     write_file(base / collector_tasks.log_path(name), text)
@@ -1929,7 +1982,10 @@ def single(
         return 2
     if args.mode == ONCE:
         return run_once(args.projects[0], base, run, streamer)
-    return fire(args.projects[0], base, now, spawner)
+    # This machine's Docker Desktop logs go with this machine's docker: a spawner a test
+    # hands in answers for an engine those logs know nothing about.
+    logs = docker_memory.log_dir() if spawner is None else None
+    return fire(args.projects[0], base, now, spawner, logs)
 
 
 def apply_verb(
@@ -2066,7 +2122,7 @@ def act(
     since = machine_clock.awake_since()
     awake = None if since is None else _time.time() - since
     with acting(base / IN_PASS, in_containers):
-        maintain(in_containers, engine, report, health, awake=awake)
+        maintain(chosen, engine, report, health, awake=awake)
     write_file(base / HEALTH, json.dumps(health, indent=2, sort_keys=True) + "\n")
 
 

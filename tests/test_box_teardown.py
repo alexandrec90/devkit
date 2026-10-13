@@ -392,6 +392,9 @@ def test_engine_unreachable_reads_each_platforms_spelling_and_nothing_else():
     assert box_teardown.engine_unreachable(
         "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
     )
+    assert box_teardown.engine_unreachable(
+        "Error response from daemon: Docker Desktop is unable to start"
+    ), "08ec2a47: Desktop's API proxy answering for an engine that never started"
     assert not box_teardown.engine_unreachable("Error response from daemon: volume is in use")
     assert not box_teardown.engine_unreachable("")
 

@@ -45,6 +45,8 @@ class FakeDocker:
         self.built_at = built
         self.started_at = started
         self.desktop = False
+        # Docker Desktop's own reason its engine is down: none, as for a Desktop quit.
+        self.stopped = ""
         self.update = False
         self.restarts = None
         self.holds = None
@@ -82,6 +84,9 @@ class FakeDocker:
 
     def updating(self):
         return self.update
+
+    def stop_reason(self):
+        return self.stopped
 
     def restart_desktop(self):
         self.calls.append(("restart",))
@@ -865,6 +870,112 @@ def test_a_silent_engine_fails_a_run_machine_but_not_a_stop_machine(tmp_path):
     report = collectors.Report()
     collectors.maintain([target(tmp_path, mode=STOP)], FakeDocker(None), report, {})
     assert report.failures == 0
+
+
+def test_a_scheduled_collectors_needs_make_a_silent_engine_this_passs_to_fail(tmp_path):
+    """08ec2a47: the only container collector here was `stop`, so the pass said "nothing
+    here can be running" with 0 failures, while every social-scraper fire failed on the
+    engine its `needs` run in."""
+    scraper = scheduled(tmp_path)
+    report = collectors.Report()
+    collectors.maintain([target(tmp_path, mode=STOP), scraper], FakeDocker(None), report, {})
+    assert report.failures == 1 and "Docker Desktop" in report.lines[0]
+
+    report = collectors.Report()
+    collectors.maintain([scraper], FakeDocker(None), report, {})
+    assert report.failures == 1, "no container collector at all is no reason to look away"
+
+    report, docker = collectors.Report(), FakeDocker(None)
+    collectors.maintain([scheduled(tmp_path, needs=())], docker, report, {})
+    assert report.failures == 0 and docker.calls == [], "nothing here needs the engine"
+
+
+def scheduled(tmp_path, mode=RUN, needs=("db",)):
+    collector = config.Collector("social-scraper", command=("uv",), minutes=30, needs=needs)
+    return collectors.Target(collector, mode, target(tmp_path).checkout)
+
+
+def test_needs_engine_counts_a_run_container_or_a_scheduled_runs_needs(tmp_path):
+    assert collectors.needs_engine([target(tmp_path)])
+    assert collectors.needs_engine([scheduled(tmp_path)])
+    assert not collectors.needs_engine([target(tmp_path, mode=STOP)])
+    assert not collectors.needs_engine([scheduled(tmp_path, mode=STOP)])
+    assert not collectors.needs_engine([scheduled(tmp_path, needs=())])
+    assert not collectors.needs_engine([])
+
+
+def test_reach_engine_fails_a_silent_engine_only_where_it_is_needed(tmp_path):
+    report = collectors.Report()
+    assert collectors.reach_engine(FakeDocker([]), report, None, True) == []
+    assert collectors.reach_engine(FakeDocker(None), report, None, False) is None
+    assert report.failures == 0 and "nothing here can be running" in report.lines[-1]
+    assert collectors.reach_engine(FakeDocker(None), report, None, True) is None
+    assert report.failures == 1
+
+
+def test_a_scheduled_collector_is_never_kept_up_as_a_container(tmp_path):
+    """`act` hands `maintain` every target, for the engine; only containers are acted on."""
+    docker, report = FakeDocker([]), collectors.Report()
+    collectors.maintain([scheduled(tmp_path)], docker, report, {})
+    assert docker.calls == [("ps",)] and report.failures == 0
+
+
+def test_act_hands_maintain_the_scheduled_targets_too(tmp_path, monkeypatch):
+    root = devkit_home(tmp_path, monkeypatch, {})
+    seen: list[list] = []
+    monkeypatch.setattr(collectors, "maintain_scheduled", lambda *a, **k: None)
+    monkeypatch.setattr(collectors, "maintain", lambda chosen, *a, **k: seen.append(chosen))
+    chosen = [target(tmp_path), scheduled(tmp_path)]
+    collectors.act(chosen, root, FakeDocker([]), collectors.Report(), run=lambda *a: None)
+    assert seen == [chosen]
+
+
+WSL_HUNG = (
+    r"engine linux/wsl failed to start: getting WSL provisioner: listing WSL distros: "
+    r"DockerDesktop/Wsl/CommandTimedOut: c:\windows\system32\wsl.exe -l -v --all: exit status 1"
+)
+
+
+def test_an_engine_docker_desktop_failed_to_start_is_revived_not_left_to_a_person(
+    tmp_path, instant
+):
+    """08ec2a47: Docker Desktop said `stopped`, its reason a hung `wsl.exe`. Nobody had
+    quit it, and "start it" would have waited for a person who was not coming."""
+    docker, report = Wedged(tmp_path / "restarts.json"), collectors.Report()
+    docker.desktop, docker.stopped = False, WSL_HUNG
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert ("restart",) in docker.calls and report.failures == 0
+    assert report.lines[0] == f"Docker Desktop says its engine stopped: {WSL_HUNG}"
+
+
+def test_a_failed_start_that_a_restart_cannot_mend_says_so(tmp_path, instant):
+    docker = Wedged(tmp_path / "restarts.json", revives=False)
+    docker.desktop, docker.stopped, report = False, WSL_HUNG, collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 1
+    assert report.lines[-1] == (
+        "docker is not answering: Docker Desktop's engine failed to start, "
+        "and a restart did not bring its engine back"
+    )
+
+
+def test_a_desktop_stopped_for_no_failure_is_still_left_to_a_person(tmp_path, instant):
+    docker, report = Wedged(tmp_path / "restarts.json"), collectors.Report()
+    docker.desktop, docker.stopped = False, "user requested"
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert ("restart",) not in docker.calls and "start it" in report.lines[-1]
+
+
+def test_docker_reads_desktops_stop_reason_only_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(collectors.os, "name", "posix")
+    assert collectors.Docker().stop_reason() == ""
+    monkeypatch.setattr(collectors.os, "name", "nt")
+    monkeypatch.setattr(collectors.docker_memory, "log_dir", lambda: tmp_path)
+    read: list[Path] = []
+    monkeypatch.setattr(
+        collectors.collector_tasks, "stop_reason", lambda logs: read.append(logs) or WSL_HUNG
+    )
+    assert collectors.Docker().stop_reason() == WSL_HUNG and read == [tmp_path]
 
 
 @pytest.fixture

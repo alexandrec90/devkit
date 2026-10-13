@@ -3678,11 +3678,12 @@ def docker_engine_down() -> str:
     instead, and the first pass with the engine up reaps it whole.
 
     "" too when docker is not installed: then there is no engine to wait for, and
-    `compose_down`'s own "not on PATH" is the report.
+    `compose_down`'s own "not on PATH" is the report. Asked as `collector_tasks.probe`
+    asks, and for its reason: `docker info --format` exits 0 over a stopped engine.
     """
     try:
         completed = subprocess.run(
-            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            ["docker", "version", "--format", "{{.Server.Version}}"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -3696,6 +3697,8 @@ def docker_engine_down() -> str:
     said = f"{completed.stderr or ''}\n{completed.stdout or ''}"
     if completed.returncode != 0 and daemon_down_note(said):
         return "Docker's engine is not running"
+    if completed.returncode == 0 and not (completed.stdout or "").strip():
+        return "Docker's engine named no server version"
     return ""
 
 
