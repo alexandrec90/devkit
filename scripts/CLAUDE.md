@@ -228,7 +228,11 @@ that hit a row was scoped to. That does not make every cause devkit's -- a
 **The ledger is also the fix pass's own sink** (`fix_findings.py`): every outcome it cannot
 turn green -- a step that raised, a fixer that died or gave up, transcript friction, a
 stale wait -- is a `fix-pass-finding` or `session-friction` there, and nothing it does
-ends at a person. Two consequences for a change here: a finding is filed only when no
+ends at a person. The one exception is a step no fixer can take -- an elevated command, a
+reboot: a job says so with `harness_triage.PERSON_STEP` before the step, its group
+awaits that person (`awaiting_person`), and `workspace-status.events_line` names it in
+the morning toast instead of the pass sending a fixer that can only re-check it
+(aa6a9022). Two consequences for a change here: a finding is filed only when no
 open one shares its signature, so the detail must be stable across recurrences (lead with
 the kind, keep shas and counts out). A scheduled job's `cause=` is held to the same: `log-wrap.py` reads it
 from the job's exception, `error:` line or logged error (`CAUSE_LINES`), never from a

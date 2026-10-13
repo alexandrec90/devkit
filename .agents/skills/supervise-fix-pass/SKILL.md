@@ -17,7 +17,8 @@ argument-hint: 'Optional: how many iterations (default 3), or "plan" to rehearse
 
 Devkit-only, like `/triage-harness`. The fix pass (`scripts/fix-pass.py`) holds one
 contract: **every observation ends green, in flight, or filed** on the harness-defect
-ledger -- nothing ends at a person, and no friction or wasted agent turn goes unrecorded.
+ledger -- nothing ends at a person but a step no fixer can take (`harness_triage.
+PERSON_STEP`), and no friction or wasted agent turn goes unrecorded.
 This skill is how that contract is checked against the real machine, and how the pass is
 repaired when it breaks it. You are the harness's own supervisor: **every defect you find
 is yours to fix in this worktree, now**, with a regression test. Filing is only for what

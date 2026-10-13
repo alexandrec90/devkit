@@ -847,11 +847,23 @@ def events_line(source: Path = SOURCE_ROOT) -> str:
     while it is, this machine reads only its own rows and writes where no other machine
     reads them. Not a filed failure -- a synced folder not mounted yet is the machine's
     state, which no fixer can change.
+
+    A group awaiting a person (`harness_triage.awaiting_person`) is named here with its
+    step rather than counted: the fix pass sends it no fixer, so this line -- and the
+    toast it rides in -- is what reaches the one person who can take it.
     """
     try:
-        count = len(_triage.open_items(_triage.load(source)))
+        items = _triage.open_items(_triage.load(source))
+        awaiting = _triage.awaiting_person(items)
     except Exception:
         return ""
+    count = sum(1 for item in items if item.signature not in awaiting)
+    person = [
+        f"a person's step is owed: {step} -- then retire it: python devkit/scripts/"
+        f"harness_triage.py --resolve-like {bucket[0].id} --note '<the step taken>'"
+        for _, bucket in _triage.groups(items)
+        if (step := awaiting.get(bucket[0].signature))
+    ]
     events = _triage.harness_events
     named = events.pool_named(source)
     pool = (
@@ -866,7 +878,7 @@ def events_line(source: Path = SOURCE_ROOT) -> str:
         if count
         else ""
     )
-    return "\n".join(line for line in (backlog, pool) if line)
+    return "\n".join(line for line in (*person, backlog, pool) if line)
 
 
 def publish_verdict(branch: str, default: str, canonical_dirty: bool) -> str:

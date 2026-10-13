@@ -1025,6 +1025,26 @@ def test_an_old_event_still_counts_until_someone_retires_it(tmp_path):
     assert "1 harness defect(s) open" in ws.events_line(source=tmp_path)
 
 
+def test_a_group_awaiting_a_person_is_named_with_its_step_not_counted(tmp_path):
+    """aa6a9022, 28a97046: the fix pass sends no fixer at a step only a person can take,
+    so this line, and the morning toast it rides in, is what reaches that person."""
+    step = harness_triage.PERSON_STEP
+    written = _ledger(
+        tmp_path,
+        (3600, "scheduled-job-failed", f"said=error: hung -- {step} reboot"),
+        (7200, "agent-report"),
+    )
+    line = ws.events_line(source=tmp_path)
+    ref = harness_triage.item_id(written[0])
+    assert line.splitlines()[0] == (
+        "a person's step is owed: reboot -- then retire it: python devkit/scripts/"
+        f"harness_triage.py --resolve-like {ref} --note '<the step taken>'"
+    )
+    assert "1 harness defect(s) open" in line, "the person's group is not a fixer's count"
+    assert ws.failure_kind(line.splitlines()[0]) == "", "never re-filed as a failure"
+    assert ws.toast_text(line)[1].startswith("a person's step is owed: reboot")
+
+
 def test_a_resolved_event_leaves_the_line(tmp_path):
     """And the other direction: the count falls only for a written-down reason."""
     written = _ledger(tmp_path, (3600, "agent-report"))
