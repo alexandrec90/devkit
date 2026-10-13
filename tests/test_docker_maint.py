@@ -881,6 +881,27 @@ def test_wsl_is_called_stuck_only_when_it_stays_pending_or_stays_silent(ask, why
     assert slept == ([docker_maint.collector_tasks.WSL_SETTLE] if pending else [])
 
 
+def test_ask_drops_wsl_nuls_and_reads_silence_and_absence_apart():
+    """`wsl.exe` prints UTF-16, so its text arrives NUL-padded; only a timeout is silence."""
+    nul = [sys.executable, "-c", "print('W\\x00S\\x00L\\x00')"]
+    assert docker_maint.ask(nul, 30) == (0, "WSL")
+    slow = [sys.executable, "-c", "import time; time.sleep(5)"]
+    assert docker_maint.ask(slow, 1)[0] == docker_maint.TIMED_OUT
+    assert docker_maint.ask(["no-such-binary-for-devkit"], 5)[0] == 127
+
+
+def test_the_service_state_is_read_off_sc_and_unknown_when_sc_fails():
+    assert docker_maint.wsl_service_state(FakeWsl("STOP_PENDING")) == "STOP_PENDING"
+    assert docker_maint.wsl_service_state(lambda cmd, timeout: (1060, "")) == ""
+
+
+def test_wsl_answers_unless_it_times_out():
+    """An exit code is WSL answering -- an error about no distro is still an answer."""
+    assert docker_maint.wsl_answers(FakeWsl("RUNNING"))
+    assert docker_maint.wsl_answers(lambda cmd, timeout: (1, "no distributions"))
+    assert not docker_maint.wsl_answers(FakeWsl("RUNNING", hung=True))
+
+
 def test_the_elevated_half_ends_the_service_then_finishes_the_update():
     """The update is the half that keeps it from recurring: the failed install that left
     the service stuck is what Windows Update would retry."""

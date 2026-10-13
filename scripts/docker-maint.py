@@ -922,7 +922,7 @@ def write_recover_log(lines: list[str], log: Path = RECOVER_LOG) -> None:
     log.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def print_indented(lines: list[str]) -> None:
+def _print_indented(lines: list[str]) -> None:
     print("\n".join(f"  {line}" for line in lines))
 
 
@@ -949,13 +949,13 @@ def generic_recover_wsl(
     if elevated():
         code, lines = elevated_recover()
         write_recover_log(lines)
-        print_indented(lines)
+        _print_indented(lines)
     else:
         print("  ending it needs an administrator -- accept the UAC prompt")
         RECOVER_LOG.unlink(missing_ok=True)
         code = run(elevated_argv(console_python(), Path(__file__).resolve()), timeout=900)
         if RECOVER_LOG.is_file():
-            print_indented(RECOVER_LOG.read_text(encoding="utf-8").splitlines())
+            _print_indented(RECOVER_LOG.read_text(encoding="utf-8").splitlines())
     if code:
         print(banner("WSL NOT RECOVERED"))
         print(f"  The elevated step exited {code} (a declined prompt does too); see {RECOVER_LOG}.")
