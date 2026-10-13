@@ -89,7 +89,15 @@ WSL_QUERY = ("sc.exe", "query", "WSLService")
 WSL_STOPPING = "STOP_PENDING"
 WSL_SETTLE = 30
 SERVICE_STATE = re.compile(r"^\s*STATE\s*:\s*\d+\s+(?P<state>\w+)", re.M)
-WSL_STUCK = "WSL's service is stuck stopping, so Docker's engine cannot start"
+# `harness_triage.PERSON_STEP`, which a test holds this to (`collectors` reuses it).
+# Spelled rather than imported, for the resident tray (`collectors.PERSON_STEP`). The
+# stuck service's cause carries it, so its ledger group awaits the person: 063598eb was
+# sent to a fixer, whose unelevated session can only re-check it.
+PERSON_STEP = "a person's step:"
+WSL_STUCK = (
+    "WSL's service is stuck stopping, so Docker's engine cannot start "
+    f"-- {PERSON_STEP} end WSLService from an elevated shell, or restart Windows"
+)
 WSL_STUCK_STEP = (
     "WSL's service has been stopping since before this run (WSLService STOP_PENDING), and "
     'only an administrator can end it: run `taskkill /F /FI "SERVICES eq WSLService"` '
