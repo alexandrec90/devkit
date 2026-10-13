@@ -86,6 +86,18 @@ SLEEP_GUARD = re.compile(r"<tool_use_error>Blocked: (?:sleep|Start-Sleep) \d+ fo
 # cost: one waiting nine seconds for a database out of recovery was filed as the eighth
 # recurrence of a group, at the cost of a devkit session (62606423).
 POLL_FLOOR = _dt.timedelta(seconds=10)
+# One short settle right before a session's first read of what a push started: in the
+# seconds after one GitHub has not attached the run yet, and the evidence file's answer
+# to that is to ask again. `sleep 20; gh run list --branch x` to find the run it then
+# watched in the background was that one ask, filed as the poll group's tenth recurrence
+# (27094d17). The engineering rule puts the waste at the *second* identical poll, so a
+# session is excused one settle and filed for the next.
+SETTLE = re.compile(
+    r"(?:^|&&|;)\s*sleep\s+(?P<seconds>\d+)\s*(?:&&|;)\s*"
+    r"gh\s+(?:pr\s+(?:checks|view)|run\s+(?:list|view|watch))\b",
+    re.M,
+)
+SETTLE_MAX = 30  # seconds: longer than a run takes to attach is a wait, not a settle
 # The rewrite a call that sets Git Bash's own conversion switches was measuring, beside the
 # setting that stops it: the probe that put `MSYS2_ARG_CONV_EXCL` in the agent env was
 # filed as the defect it measured (d71a2caf), as `BYTE_DUMP` is for a heredoc's probe.
@@ -605,6 +617,13 @@ def _command_classes(
         seen.add(root)
 
 
+def settles(command: str) -> bool:
+    """`command` is one `SETTLE`: a sleep of at most `SETTLE_MAX` seconds, then a `gh`
+    read of a PR's checks or runs."""
+    found = SETTLE.search(command)
+    return found is not None and int(found["seconds"]) <= SETTLE_MAX
+
+
 def _quoted(text: str, at: int) -> bool:
     """The match at `at` sits inside a string its line opened: a regex's source, a diff
     of the rule's prose, pytest echoing an assertion's operands. That quotes an error
@@ -731,6 +750,7 @@ class _Session:
     # retracts it when their next words take the rejection back (`RESUMED`).
     rejected: tuple[str, str] | None = None
     started: dict[str, str] = field(default_factory=dict)  # call id -> when it was made
+    settled: bool = False  # it spent the one `SETTLE` a session is excused
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -789,8 +809,12 @@ class _Session:
             # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes, and
             # a backgrounded one is a single call and its completion notice -- the shape
             # the engineering rule asks a long wait to take, not a loop of turns.
-            if not (cls == "poll" and (event.tool in WAIT_TOOLS or event.background)):
-                self.note(cls, what, event)
+            if cls == "poll" and (event.tool in WAIT_TOOLS or event.background):
+                continue
+            if cls == "poll" and not self.settled and settles(event.command):
+                self.settled = True
+                continue
+            self.note(cls, what, event)
 
     def say(self, event: Event) -> None:
         self.last_said = event

@@ -343,6 +343,28 @@ def test_the_prescribed_wait_and_a_sleep_in_source_text_are_not_polls():
     assert classes([call("sleep 120 && gh pr checks 5", "1")]) == ["poll"], "no --watch"
 
 
+def test_one_settle_before_reading_a_fresh_runs_is_the_ask_again_not_a_poll():
+    """27094d17: `sleep 20; gh run list --branch x` found the run a push had just started,
+    then watched it in the background -- one ask after a push's first seconds, which the
+    evidence file prescribes, filed as the poll group's tenth recurrence. The rule puts
+    the waste at the second identical poll, so the second settle is still filed."""
+    settle = (
+        "sleep 20; gh run list --repo alexandrec90/devkit --branch agent/collectors-oneoff-1013 "
+        "--limit 3 --json databaseId,status,name --jq '.[]|[.databaseId,.status,.name]|@tsv'"
+    )
+    assert classes([call(settle, "1")]) == []
+    assert classes([call(settle, "1"), call(settle, "2")]) == ["poll"], "the second is a poll"
+    for read in ("gh pr view 649 --json state", "gh run watch 3845", "gh pr checks 5"):
+        assert classes([call(f"sleep 15 && {read}", "1")]) == [], read
+    # Longer than a run takes to attach is a wait; and a settle before anything else is not
+    # one before reading a run.
+    assert classes([call("sleep 31; gh run list --branch x", "1")]) == ["poll"]
+    assert classes([call("sleep 20; tail -5 logs/run.out", "1")]) == ["poll"]
+    assert sf.settles("cd x && sleep 30 && gh run view 1 --log-failed")
+    assert not sf.settles("sleep 20; gh pr create --fill"), "creating is not reading a run"
+    assert not sf.settles("gh run list; sleep 20"), "the sleep must come before the read"
+
+
 def test_a_backgrounded_wait_is_one_call_and_its_notice_not_a_poll():
     """The supervisor's `until [ -f done ]; do sleep 60; done` on a detached run, and a
     fixer's one `sleep 25; claude agents` probe, both run in the background: one call and
