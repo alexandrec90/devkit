@@ -207,6 +207,18 @@ RESTARTED = Path("logs/collectors.engine-restart.json")
 # `timed out after` read as a distro name would have earned it a `--terminate` instead.
 DOCKER_DISTRO = "docker-desktop"
 WSL_TIMEOUT = 120
+# How long `wsl --list` may take before WSL itself is called hung (`Docker.wsl_answers`),
+# which no restart of Desktop or reset of its VM reaches: every one of them goes through
+# the WSL service. 2026-10-12 23:45 local: `WslService` sat in `StopPending`, the pass
+# waited out the engine, a restart and both `wsl` calls of `reset_vm` at their full
+# timeouts, and ran 35 minutes on a 15-minute schedule, so the 00:00 fire was skipped
+# (5b71506f) -- to fail on "a restart did not bring its engine back" at the end.
+WSL_PROBE_TIMEOUT = 60
+WSL_HUNG = (
+    f"docker is not answering: WSL itself does not answer (`wsl --list` ran past "
+    f"{WSL_PROBE_TIMEOUT}s), and no restart of Docker Desktop or its VM reaches a hung WSL "
+    f"-- restart WslService from an elevated prompt, or reboot"
+)
 DESKTOP_STOP_TIMEOUT = 120
 # Recorded in `RESTARTED` as `VM_RESET_AT`, so a VM is reset once per restart: a pass
 # inside a restart's `RESTART_EVERY` that finds the engine silent still resets the VM
@@ -306,6 +318,9 @@ def first_line(text: str, limit: int = 100) -> str:
     return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
+TIMED_OUT = collector_tasks.TIMED_OUT
+
+
 def spawn(argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[int, str]:
     """`(exit code, stdout+stderr)`. A spawn that could not happen is a code, not a raise."""
     try:
@@ -323,7 +338,7 @@ def spawn(argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[i
     except FileNotFoundError:
         return 127, f"{argv[0]} is not on PATH"
     except subprocess.TimeoutExpired:
-        return 124, f"timed out after {timeout}s"
+        return TIMED_OUT, f"timed out after {timeout}s"
     except OSError as exc:
         return 126, str(exc)
     return done.returncode, "\n".join(p for p in (done.stdout, done.stderr) if p).strip()
@@ -355,7 +370,32 @@ def desktop_status(text: str) -> str | None:
     return status if isinstance(status, str) else None
 
 
-class Docker:
+class WslProbes:
+    """What `Docker` asks of WSL under its engine, which no restart of Docker Desktop
+    reaches: a service stuck stopping (`wsl_stuck`), or a WSL that does not answer at all
+    (`wsl_answers`). Both go through the subclass's `run`."""
+
+    def run(self, argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[int, str]:
+        raise NotImplementedError
+
+    def wsl_stuck(self) -> bool:
+        """Whether WSL's service is stuck stopping (`collector_tasks.wsl_stuck`), which no
+        restart of Docker Desktop can mend; never off Windows."""
+        if os.name != "nt":
+            return False
+        query = list(collector_tasks.WSL_QUERY)
+        return collector_tasks.wsl_stuck(lambda: self.run(query, DESKTOP_TIMEOUT), _time.sleep)
+
+    def wsl_answers(self) -> bool:
+        """Whether WSL lists its distros within `WSL_PROBE_TIMEOUT`; always off Windows.
+        Only a timeout is silence: an exit code is WSL answering."""
+        if os.name != "nt":
+            return True
+        code, out = self.run(["wsl", "--list", "--quiet"], WSL_PROBE_TIMEOUT)
+        return not (code == TIMED_OUT and out.startswith("timed out"))
+
+
+class Docker(WslProbes):
     """Everything that touches the engine: one captured, window-less spawn per call.
     `restarts` is where `revive_engine` records a restart of Docker Desktop; None, as
     for the tray, makes none. `holds` names the runs a restart would cut short now
@@ -448,14 +488,6 @@ class Docker:
         if os.name != "nt":
             return ""
         return collector_tasks.stop_reason(docker_memory.log_dir())
-
-    def wsl_stuck(self) -> bool:
-        """Whether WSL's service is stuck stopping (`collector_tasks.wsl_stuck`), which no
-        restart of Docker Desktop can mend; never off Windows."""
-        if os.name != "nt":
-            return False
-        query = list(collector_tasks.WSL_QUERY)
-        return collector_tasks.wsl_stuck(lambda: self.run(query, DESKTOP_TIMEOUT), _time.sleep)
 
     def desktop_process(self) -> bool:
         """Whether `DESKTOP_IMAGE` is running on this machine; never off Windows."""
@@ -1026,6 +1058,28 @@ def revive_vm_once(
     return revive_vm(docker, report)
 
 
+def engine_down(
+    docker: Docker, report: Report, busy: Sequence[str] = ()
+) -> tuple[str, str, Sequence[str]]:
+    """`(how the silent engine is down, why no revival is tried, the runs a restart is
+    held for)`; the second is "" when `revive_engine` should go on to try one. A Desktop
+    not running for no failure is a person's to start, and a hung WSL is a person's to
+    restart (`WSL_HUNG`). An engine that failed to start is held for no run in `busy`."""
+    wedged = "docker is not answering though Docker Desktop says it is running"
+    if not docker.desktop_running():
+        stopped = docker.stop_reason()
+        if FAILED_TO_START not in stopped.lower():
+            return (
+                wedged,
+                "docker is not answering and Docker Desktop is not running -- start it",
+                busy,
+            )
+        report.say(f"Docker Desktop says its engine stopped: {stopped}")
+        wedged = "docker is not answering: Docker Desktop's engine failed to start"
+        busy = ()
+    return wedged, "" if docker.wsl_answers() else WSL_HUNG, busy
+
+
 def revive_engine(
     docker: Docker, report: Report, restarts: Path, clock: float, busy: Sequence[str] = ()
 ) -> tuple[list[Container] | None, str]:
@@ -1050,6 +1104,10 @@ def revive_engine(
     install short, and the installer may have closed the app it reads as quit. That is
     held, asked first, and fails nothing until it has lasted `HOLD_LIMIT` (3012d246).
 
+    Nor when WSL itself does not answer (`Docker.wsl_answers`): every step of a revival
+    goes through it, so each waits out its timeout and the pass outlives its schedule to
+    fail anyway (5b71506f). That fails at once on `WSL_HUNG`, a person's step.
+
     A restart that leaves the engine silent goes on to reset the VM under it
     (`revive_vm`), in the same pass and under the same `RESTART_EVERY` record. A pass
     inside that hour that finds it silent again resets the VM if nothing has since the
@@ -1063,14 +1121,9 @@ def revive_engine(
         )
         cause = f"{NOT_ANSWERING} while Docker Desktop installs an update"
         return held(report, restarts, clock, why, cause)
-    wedged = "docker is not answering though Docker Desktop says it is running"
-    if not docker.desktop_running():
-        stopped = docker.stop_reason()
-        if FAILED_TO_START not in stopped.lower():
-            return None, "docker is not answering and Docker Desktop is not running -- start it"
-        report.say(f"Docker Desktop says its engine stopped: {stopped}")
-        wedged = "docker is not answering: Docker Desktop's engine failed to start"
-        busy = ()
+    wedged, refused, busy = engine_down(docker, report, busy)
+    if refused:
+        return None, refused
     containers = wait_for_engine(docker, ENGINE_STARTUP - WEDGE_CONFIRM)
     if containers is not None:
         report.say("docker was slow to answer, not wedged -- it answered when asked again")
@@ -1175,7 +1228,8 @@ def reach_engine(
 
     Not revived on a WSL service stuck stopping (`Docker.wsl_stuck`): the engine cannot
     start on it, and a restart and VM reset only spend half an hour of timeouts, running
-    into the next pass (24907f2a). The failure says what only an administrator can do."""
+    into the next pass (24907f2a). The failure says what only an administrator can do.
+    A WSL that hangs on a service not stuck stopping is `revive_engine`'s `WSL_HUNG`."""
     containers = wait_for_engine(docker, awake)
     why = "docker is not answering -- is Docker Desktop running?"
     if containers is None and needed and docker.restarts is not None:

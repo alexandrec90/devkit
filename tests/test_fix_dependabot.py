@@ -338,13 +338,84 @@ def test_answered_since_needs_a_package_entry_and_a_run_time():
     assert fd.ran_on({}) == "run on an unknown commit at an unknown time"
 
 
-def test_the_reads_answer_empty_on_a_gh_that_cannot():
+def test_the_reads_of_what_is_wrong_answer_empty_on_a_gh_that_cannot():
     def broken(*args):
         return subprocess.CompletedProcess(args, 1, "", "offline")
 
     assert fd.update_runs(broken) == [] and fd.open_alerts(broken) == []
-    assert fd.open_prs(broken) == [] and fd.failed_log(broken, {"databaseId": 1}) == ""
-    assert fd.merged_prs(broken) == []
+    assert fd.failed_log(broken, {"databaseId": 1}) == ""
+
+
+def test_the_reads_of_what_answers_it_say_none_on_a_gh_that_cannot():
+    """Read as empty, they call every failure unanswered (793d4a3d)."""
+
+    def broken(*args):
+        return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
+
+    def garbled(*args):
+        return subprocess.CompletedProcess(args, 0, "{}", "")
+
+    assert fd.open_prs(broken) is None and fd.merged_prs(broken) is None
+    assert fd.open_prs(garbled) is None and fd.merged_prs(garbled) is None
+    gh, _ = gh_world(prs=[PR_50, "not a row"], merged=[])
+    assert fd.open_prs(gh) == [PR_50] and fd.merged_prs(gh) == []
+
+
+def failing_read(gh, read: tuple[str, ...]):
+    """`gh`, with the one call opening with `read` failing as an outage does."""
+
+    def flaky(*args):
+        if args[: len(read)] == read:
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 502: Bad Gateway")
+        return gh(*args)
+
+    return flaky
+
+
+def test_a_handled_error_is_held_when_the_merged_prs_cannot_be_read(tmp_path, monkeypatch):
+    """793d4a3d: data-lake's run on d32d4d5 read as answered by #70 at 03:00 and 04:00,
+    and the 03:30 pass, whose merged-PR read came back empty, sent a fixer at it."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([data_lake_run()], logs={"7": HANDLED_LOG}, merged=[PR_50])
+    flaky = failing_read(gh, ("pr", "list", "--state", "merged"))
+    failure, note = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, flaky)
+    assert failure is None
+    assert note == (
+        f"data-lake -- Dependabot Updates: uv in /. failed (run on 135bfa8 at {RAN}), "
+        f"and {fd.UNREAD}"
+    )
+
+
+def test_an_unread_merge_list_holds_only_the_handled_errors():
+    """An error naming no package is not one a merge is matched against, so it is sent."""
+    both = HANDLED_LOG + "x ERROR <job_1> Something else broke\n"
+    gh, _ = gh_world([data_lake_run()], logs={"7": both})
+    failing, counted, notes = fd.read_runs(failing_read(gh, ("pr", "list", "--state", "merged")))
+    assert [(r["databaseId"], said) for r, said in failing] == [(7, ["run Something else broke"])]
+    assert [r["databaseId"] for r in counted] == [7] and notes == []
+
+
+def test_alerts_are_held_when_the_open_prs_cannot_be_read(tmp_path, monkeypatch):
+    """Read as no PR, every alert is unanswered, though Dependabot's own PR may name it."""
+    checkout = project(tmp_path, monkeypatch)
+    pr = {"headRefName": "dependabot/uv/urllib3-2.8.0", "title": "", "body": ""}
+    gh, _ = gh_world([], [alert("urllib3", "2.8.0")], [pr])
+    flaky = failing_read(gh, ("pr", "list", "--state", "open"))
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, flaky)
+    assert failure is None
+    assert note == (
+        "ibkr_trader -- Dependabot Updates: the open PRs could not be read, so its alerts wait"
+    )
+
+
+def test_a_failing_job_is_still_sent_when_only_the_open_prs_cannot_be_read(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    runs = [run("uv in /.", "failure", 3)]
+    gh, _ = gh_world(runs, [alert("urllib3", "2.8.0")])
+    flaky = failing_read(gh, ("pr", "list", "--state", "open"))
+    failure, note = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, flaky)
+    assert failure is not None and failure.signature == ("run uv in /.: failed",)
+    assert note.endswith("the open PRs could not be read, so its alerts wait")
 
 
 def test_evidence_text_names_every_job_and_alert():
