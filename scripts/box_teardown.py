@@ -413,6 +413,9 @@ DAEMON_DOWN_SIGNS = (
     # pipe spelled URL-encoded (2026-10-08, six hours of it). Only the ping: a 500 on any
     # other route is the engine answering about one request.
     "dockerdesktoplinuxengine/_ping",
+    # Docker Desktop's backend answering for an engine it could not start (2026-10-12,
+    # WSL hung under it: 08ec2a47). The API proxy answers, so no connect error is said.
+    "docker desktop is unable to start",
 )
 
 

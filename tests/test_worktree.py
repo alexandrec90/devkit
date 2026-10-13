@@ -4347,6 +4347,14 @@ def test_reap_vacated_asks_the_engine_only_about_a_box_with_a_stack(tmp_path, mo
             "Docker's engine is not running",
         ),
         (subprocess.CompletedProcess([], 0, "28.3.2\n", ""), ""),
+        # 08ec2a47, 2026-10-12: WSL hung under Docker Desktop, whose API proxy answered.
+        (
+            subprocess.CompletedProcess(
+                [], 1, "", "Error response from daemon: Docker Desktop is unable to start"
+            ),
+            "Docker's engine is not running",
+        ),
+        (subprocess.CompletedProcess([], 0, "\n", ""), "Docker's engine named no server version"),
         (subprocess.CompletedProcess([], 1, "", "permission denied"), ""),
         (FileNotFoundError("docker"), ""),
         (subprocess.TimeoutExpired("docker", 60), "Docker's engine did not answer in 60s"),
@@ -4354,15 +4362,19 @@ def test_reap_vacated_asks_the_engine_only_about_a_box_with_a_stack(tmp_path, mo
 )
 def test_docker_engine_down_reads_what_docker_info_says(monkeypatch, outcome, expected):
     """The 2026-10-01 run's own stderr is the first case. An error that is not the engine
-    is no reason to wait, and no docker at all leaves `compose_down` to say so."""
+    is no reason to wait, and no docker at all leaves `compose_down` to say so. Asked
+    with `docker version`: `docker info --format` exits 0 over a stopped engine."""
+    asked: list[list[str]] = []
 
-    def run(*_a, **_k):
+    def run(argv, *_a, **_k):
+        asked.append(list(argv))
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
     monkeypatch.setattr(worktree.subprocess, "run", run)
     assert REAL_DOCKER_ENGINE_DOWN() == expected
+    assert asked == [["docker", "version", "--format", "{{.Server.Version}}"]]
 
 
 def test_reconcile_never_reaps_a_box_holding_work(workspace, monkeypatch):

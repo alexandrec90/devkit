@@ -33,7 +33,9 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import io
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,8 +60,25 @@ FIRE_TIMEOUT = 55 * 60
 NEEDS_TIMEOUT = 600
 SCHTASKS_TIMEOUT = 60
 # The re-ask after a `compose up` failed (`needs_failed`): an engine that answers at
-# all answers `docker info` in seconds.
+# all answers `docker version` in seconds.
 PROBE = 30
+# Whether the engine answers, as the server's version. `docker version`, not `docker
+# info --format`: info renders its template over a server error and exits 0 with an empty
+# version, so on 2026-10-12, with Docker Desktop "unable to start", every fire read its
+# engine as answering, never waited for it, and filed "compose up failed for db"
+# (08ec2a47, after fifteen resolutions whose silent-engine branch could not be reached).
+ENGINE_PROBE = ("docker", "version", "--format", "{{.Server.Version}}")
+# Docker Desktop's own account of an engine it stopped. `docker desktop status` prints
+# only `stopped`; the backend's answer to it, which its monitor logs whole, carries the
+# reason. 2026-10-12: `engine linux/wsl failed to start: ... wsl.exe -l -v --all: ...
+# CommandTimedOut` -- WSL itself was hung, which no `docker` command says. So the status
+# is asked first, and its logged answer read straight after.
+DESKTOP_STATUS = ("docker", "desktop", "status", "--format", "json")
+MONITOR_LOG = "monitor.log"
+STATE_ANSWER = re.compile(r"S->C \S+ GET /backend/state \([^)]*\): (?P<state>\{.*\})\s*$")
+# How much of the monitor log's end is read for that answer: it rotates at 1 MB, and the
+# answer to a status asked a moment ago is among its last lines.
+MONITOR_TAIL = 256 * 1024
 # How long a fire whose `compose up` failed or timed out on a silent engine waits for it, and how
 # often it asks, before trying once more (`start_needs`). The collectors pass restarts a
 # wedged Docker Desktop (`collectors.revive_engine`), which took four to five minutes on
@@ -361,8 +380,60 @@ def resolve(argv: Sequence[str], which: Callable[[str], str | None] | None = Non
 
 
 def probe(checkout: Path, run: Spawner) -> tuple[int, str]:
-    """`docker info`'s `(exit code, server version)`: whether the engine answers at all."""
-    return run(["docker", "info", "--format", "{{.ServerVersion}}"], checkout, PROBE)
+    """`ENGINE_PROBE`'s `(exit code, server version)`: whether the engine answers at all.
+
+    An exit 0 that names no version is no answer either, whatever the CLI's exit code
+    says: that is the shape `docker info --format` gave a stopped engine (08ec2a47).
+    """
+    code, out = run(list(ENGINE_PROBE), checkout, PROBE)
+    if code == 0 and not out.strip():
+        return 1, "the engine named no server version"
+    return code, out
+
+
+def stop_reason(logs: Path) -> str:
+    """Why Docker Desktop's last logged state (`STATE_ANSWER`, in the monitor log under
+    `logs`) says its engine is down; "" when that state is running or gives no reason,
+    when no state is logged, or when the log cannot be read. Only the latest answer
+    counts, so a reason from a stop since recovered is never read as today's."""
+    try:
+        with (logs / MONITOR_LOG).open("rb") as handle:
+            handle.seek(max(0, handle.seek(0, os.SEEK_END) - MONITOR_TAIL))
+            tail = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in reversed(tail.splitlines()):
+        hit = STATE_ANSWER.search(line)
+        if hit is None:
+            continue
+        try:
+            state = json.loads(hit["state"])
+        except ValueError:
+            return ""
+        if not isinstance(state, dict) or state.get("state") == "running":
+            return ""
+        reason = state.get("stopReason")
+        return reason.strip() if isinstance(reason, str) else ""
+    return ""
+
+
+def desktop_stopped(checkout: Path, run: Spawner, logs: Path) -> str:
+    """`stop_reason` for a state asked for now (`DESKTOP_STATUS`); never off Windows."""
+    if os.name != "nt":
+        return ""
+    run(list(DESKTOP_STATUS), checkout, PROBE)
+    return stop_reason(logs)
+
+
+def desktop_said(
+    engine: tuple[int, str], checkout: Path, run: Spawner, logs: Path | None
+) -> list[str]:
+    """The line giving Docker Desktop's reason (`desktop_stopped`) for a silent `engine`,
+    said beside the cause `needs_failed` ends on; none where it answers or `logs` is None."""
+    if engine[0] == 0 or logs is None:
+        return []
+    stopped = desktop_stopped(checkout, run, logs)
+    return [f"Docker Desktop says its engine stopped: {stopped}"] if stopped else []
 
 
 def updater_listed(listing: str) -> bool:
@@ -444,7 +515,7 @@ def needs_failed(
     if status != 0:
         return [
             *lines,
-            f"`docker info` did not answer either (exit {status}): {first(answer)}",
+            f"`docker version` did not answer either (exit {status}): {first(answer)}",
             "error: the Docker engine did not answer",
         ]
     if code != TIMED_OUT:
@@ -468,13 +539,16 @@ def fire(
     checkout: Path,
     run: Spawner = spawn,
     fired: _dt.datetime | None = None,
+    desktop_logs: Path | None = None,
 ) -> tuple[int, list[str]]:
     """Run the collector once. `(exit code, log lines)`; the code is the command's own.
 
     The command is told when the scheduler fired (`FIRED_AT`) -- `fired`, now when None
     -- which is taken before the `needs` come up, since they are part of the cycle. The
     command's bound is what is left of `FIRE_TIMEOUT` once they are up, so a start that
-    waited out an engine restart still ends inside the task's `TIME_LIMIT`.
+    waited out an engine restart still ends inside the task's `TIME_LIMIT`. A silent
+    engine's log carries Docker Desktop's reason (`stop_reason`) from `desktop_logs`,
+    where one is given.
 
     A `needs` that cannot start because Docker Desktop is installing an update
     (`desktop_updating`) skips this run, exit 0: the update is Docker's maintenance, the
@@ -497,8 +571,9 @@ def fire(
                     f"Docker Desktop is installing an update, so {names} cannot start: "
                     "this run is skipped, and the next fire runs on the updated engine",
                 ]
-            failed = needs_failed(collector.needs, checkout, code, out, run, engine)
-            return code, [*lines, *failed]
+            *failed, cause = needs_failed(collector.needs, checkout, code, out, run, engine)
+            said = desktop_said(engine, checkout, run, desktop_logs)
+            return code, [*lines, *failed, *said, cause]
         lines.append(f"started: {', '.join(collector.needs)}")
     left = FIRE_TIMEOUT - int(_time.monotonic() - began)
     code, out = run(resolve(collector.command), checkout, left, stamp)
