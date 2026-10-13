@@ -1504,6 +1504,39 @@ def test_a_step_that_lost_a_race_for_a_ref_is_run_once_more():
     assert sweep.apply_plan("proj", Path("."), PLAN, git=lock, pause=paused.append).ok
 
 
+SCHANNEL = (
+    "fatal: unable to access 'https://github.com/alexandrec90/ibkr_trader.git/': "
+    "schannel: failed to receive handshake, SSL/TLS connection failed"
+)
+
+
+def test_a_step_that_failed_on_the_network_is_asked_again():
+    """f1373302: the scheduled reconcile's fetch broke off in a TLS handshake and the
+    run said the state needed a human; the same fetch went through minutes later."""
+    paused: list[float] = []
+    git = RacedGit("fetch", SCHANNEL)
+    plan = sweep.Plan(
+        steps=(("fetch", "--prune", "origin"), ("merge", "--ff-only", "origin/main")), anchor=""
+    )
+    result = sweep.apply_plan("proj", Path("."), plan, git=git, pause=paused.append)
+    assert result.ok
+    assert git.calls.count(("fetch", "--prune", "origin")) == 2
+    assert paused == [sweep.NETWORK_PAUSE]
+
+
+def test_a_network_that_stays_down_fails_after_every_retry():
+    paused: list[float] = []
+    calls: list[tuple[str, ...]] = []
+
+    def down(*args: str):
+        calls.append(args)
+        return subprocess.CompletedProcess(["git", *args], 128, "", SCHANNEL)
+
+    assert sweep.run_step(down, ("fetch",), paused.append).returncode == 128
+    assert len(calls) == 1 + sweep.NETWORK_RETRIES
+    assert paused == [sweep.NETWORK_PAUSE] * sweep.NETWORK_RETRIES
+
+
 def test_any_other_refusal_is_not_retried():
     paused: list[float] = []
     git = FakeGit(fail_on="merge")
@@ -1685,6 +1718,8 @@ def test_a_failed_pr_creation_is_reported_not_swallowed():
         ),
         ("gh: not authenticated", False),
         ("! [rejected] x -> x (non-fast-forward)", False),
+        # f1373302: Windows' schannel on a fetch that broke off mid-handshake.
+        (SCHANNEL, True),
     ],
 )
 def test_transient_tells_githubs_failure_from_a_refusal(said, transient):
