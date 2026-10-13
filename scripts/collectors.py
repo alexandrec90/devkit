@@ -226,10 +226,11 @@ WSL_STUCK = ("STOP_PENDING", "START_PENDING")
 # Its step is marked `PERSON_STEP`, so its ledger group awaits the person rather than a
 # fixer, whose unelevated session cannot restart a service (aa6a9022).
 WSL_PROBE_TIMEOUT = 60
-# `harness_triage.PERSON_STEP`, which a test holds this to. Spelled rather than imported:
-# the resident tray imports this module, and `install-tray.TRAY_MODULES` would have to
-# watch `harness_triage` and everything it imports for edits.
-PERSON_STEP = "a person's step:"
+# `harness_triage.PERSON_STEP`, which a test holds this to. Taken from `collector_tasks`
+# rather than imported from `harness_triage`: the resident tray imports this module, and
+# `install-tray.TRAY_MODULES` would have to watch `harness_triage` and everything it
+# imports for edits.
+PERSON_STEP = collector_tasks.PERSON_STEP
 WSL_HUNG = (
     f"docker is not answering: WSL itself does not answer (`wsl --list` ran past "
     f"{WSL_PROBE_TIMEOUT}s), and no restart of Docker Desktop or its VM reaches a hung WSL "

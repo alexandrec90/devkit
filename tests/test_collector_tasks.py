@@ -646,7 +646,27 @@ def test_a_fire_on_a_wsl_service_stuck_stopping_names_it_and_what_ends_it(
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
     assert code == 1 and spawn.wsl_asked == 2
     assert lines[-2] == tasks.WSL_STUCK_STEP and "elevated" in lines[-2]
-    assert log_wrap.failure_cause("\n".join(lines)) == f"error: {tasks.WSL_STUCK}"
+    assert log_wrap.cause_said("\n".join(lines)) == f"error: {tasks.WSL_STUCK}"
+
+
+def test_a_fire_on_a_wsl_service_stuck_stopping_reaches_the_ledger_as_a_persons_step(
+    tmp_path, monkeypatch, instant
+):
+    """063598eb: the stuck service's fire was filed with no `PERSON_STEP`, so the pass
+    sent a fixer at a service only an administrator can end. The line `log-wrap.py`
+    files, read back by `harness_triage`, has its group await the person instead."""
+    triage = load_script("scripts/harness_triage.py")
+    assert tasks.PERSON_STEP == triage.PERSON_STEP, "spelled twice, held equal here"
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(UNABLE, *SILENT_THROUGH_WAIT, wsl=(WSL_STOPPING,))
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    output = "\n".join(lines)
+    cause, said = log_wrap.failure_cause(output), log_wrap.cause_said(output)
+    row = triage.read_items(
+        "2026-10-13T07:36:33+00:00\tevent=scheduled-job-failed\tproject=devkit"
+        f"\tcause={cause}\tsaid={said}"
+    )[0]
+    assert triage.person_step(row) == "end WSLService from an elevated shell, or restart Windows"
 
 
 def test_a_fire_on_a_running_wsl_service_still_blames_the_engine(tmp_path, monkeypatch, instant):
