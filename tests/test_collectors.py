@@ -13,6 +13,7 @@ decide whether a machine ingests at all:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime as dt
 import functools
 import json
@@ -33,6 +34,12 @@ RUN, STOP = config.RUN, config.STOP
 
 def box(service="app", state="running", workdir="C:/ws/ibkr_trader", cid="c1", status="Up 2h"):
     return collectors.Container(cid, workdir, service, state, status)
+
+
+def one_off(workdir="C:/ws/ibkr_trader", cid="r1", state="running", status="Up 3 minutes"):
+    """A `docker compose run app ...` container: the service's own labels, and compose's
+    `oneoff=True` -- ibkr_trader's `app-run-ca6ee26ce94e` refetching, 2026-10-13."""
+    return collectors.Container(cid, workdir, "app", state, status, "True")
 
 
 class FakeDocker:
@@ -175,6 +182,92 @@ def test_ps_rows_are_parsed_and_foreign_containers_skipped():
     assert collectors.parse_ps(text) == [
         collectors.Container("c1", "C:\\ws\\ibkr_trader", "app", "running", "Up 3 hours")
     ]
+
+
+def test_ps_rows_carry_composes_oneoff_label_and_a_row_without_it_is_a_service():
+    """Compose labels a `compose run` container `oneoff=True` and a service's `False`; an
+    empty label (a compose that wrote none) and a row with no such column read as a
+    service's, as every container did before the label was asked for."""
+    text = (
+        "c1\tC:\\ws\\ibkr_trader\tapp\trunning\tUp 16 hours\tFalse\n"
+        "r1\tC:\\ws\\ibkr_trader\tapp\trunning\tUp 3 minutes\tTrue\n"
+        "c2\tC:\\ws\\ibkr_trader\tdb\trunning\tUp 16 hours\t\n"
+        "c3\tC:\\ws\\ibkr_trader\tredis\trunning\tUp 16 hours\n"
+    )
+    parsed = collectors.parse_ps(text)
+    assert [(c.id, c.one_off) for c in parsed] == [
+        ("c1", False),
+        ("r1", True),
+        ("c2", False),
+        ("c3", False),
+    ]
+    assert parsed[1] == one_off("C:\\ws\\ibkr_trader")
+
+
+def test_ps_asks_for_the_oneoff_label_in_the_column_the_parse_reads_it_from():
+    columns = collectors.PS_FORMAT.split("\t")
+    assert columns[-1] == '{{.Label "com.docker.compose.oneoff"}}'
+    row = "\t".join(["c1", "C:/ws/ibkr_trader", "app", "running", "Up 2h", "True"])
+    assert len(columns) == len(row.split("\t")) and collectors.parse_ps(row)[0].one_off
+
+
+def test_find_takes_the_service_over_a_newer_running_one_off():
+    """2026-10-13, desktop-ml5f3pj: `status` said ibkr_trader's `app` was "Up 3 minutes",
+    the age of a `compose run app` refetch, while `app-1` had been up 16 hours. `docker ps`
+    lists newest first, so the run came first and `find` took it."""
+    service = box(status="Up 16 hours")
+    assert collectors.find([one_off(), service], Path("C:/ws/ibkr_trader"), "app") == service
+
+
+def test_find_takes_a_stopped_service_over_a_running_one_off_and_never_the_run_alone():
+    stopped = box(state="exited", status="Exited (0) 2 hours ago")
+    assert collectors.find([one_off(), stopped], Path("C:/ws/ibkr_trader"), "app") == stopped
+    assert collectors.find([one_off()], Path("C:/ws/ibkr_trader"), "app") is None
+
+
+def test_keep_running_judges_the_service_and_never_a_one_off_beside_it(tmp_path):
+    """The image whose age decides a redeploy, and the container the health command runs
+    in, are the service's: a refetch run is neither the collector's code nor its jobs."""
+    run = one_off(str(tmp_path / "ibkr_trader"))
+    docker = FakeDocker([run, ours(tmp_path, status="Up 16 hours")], built=1000.0)
+    record = collectors.keep_running(
+        target(tmp_path), docker.containers, docker, collectors.Report(), {}, FakeGit(("a", 500.0))
+    )
+    named = {call[1] for call in docker.calls if call[0] in ("built", "started", "health")}
+    assert named == {"c1"} and record is not None and record["container"] == "c1"
+
+
+def test_keep_running_starts_a_service_whose_only_running_container_is_a_one_off(tmp_path):
+    run = one_off(str(tmp_path / "ibkr_trader"))
+    docker = FakeDocker([run, ours(tmp_path, state="exited", status="Exited (0)")])
+    collectors.keep_running(target(tmp_path), docker.containers, docker, collectors.Report())
+    assert docker.calls == [("up", "ibkr_trader", "app")]
+
+
+def test_the_tray_does_not_read_a_one_off_run_as_the_collector_up(tmp_path):
+    run = one_off(str(tmp_path / "ibkr_trader"))
+    stopped = ours(tmp_path, state="exited", status="Exited (0) 2 hours ago")
+    assert collectors.row(target(tmp_path), [run, stopped], {}) == (
+        collectors.FAIL,
+        "not running (Exited (0) 2 hours ago)",
+    )
+    assert collectors.row(target(tmp_path, mode=STOP), [run], {})[0] == collectors.OK
+
+
+def test_keep_stopped_stops_the_service_and_leaves_a_one_off_run_to_whoever_ran_it(tmp_path):
+    """A `stop` machine stops the collector; a `compose run` is a person's command, which
+    a pass every 15 minutes must not kill mid-refetch in its place."""
+    run = one_off(str(tmp_path / "ibkr_trader"))
+    docker = FakeDocker([run, ours(tmp_path)])
+    collectors.keep_stopped(
+        target(tmp_path, mode=STOP), docker.containers, docker, collectors.Report()
+    )
+    assert docker.calls == [("stop", "c1")]
+    docker = FakeDocker([run])
+    collectors.keep_stopped(
+        target(tmp_path, mode=STOP), docker.containers, docker, collectors.Report()
+    )
+    assert docker.calls == []
 
 
 def test_a_container_is_matched_on_its_directory_caselessly_and_across_slashes():
@@ -1729,6 +1822,16 @@ def test_kept_up_pairs_each_running_container_with_its_collectors_project(tmp_pa
     ]
 
 
+def test_a_one_off_run_is_budgeted_though_it_is_not_the_service(tmp_path):
+    """`find` skips a `compose run`; the memory budget does not, as it holds the VM's
+    memory beside the service it was run from."""
+    app, run = ours(tmp_path, cid="c1"), one_off(str(tmp_path / "ibkr_trader"))
+    assert collectors.kept_up([target(tmp_path)], [run, app]) == [
+        ("ibkr_trader", run),
+        ("ibkr_trader", app),
+    ]
+
+
 def test_check_memory_with_nothing_kept_up_asks_nothing(tmp_path):
     docker, report = FakeDocker([]), collectors.Report()
     collectors.check_memory([target(tmp_path)], [], docker, report)
@@ -2547,6 +2650,15 @@ def test_status_names_an_engine_it_could_not_ask(tmp_path):
     assert report.lines == ["ibkr_trader: assigned `run` -- `app` docker not answering"]
 
 
+def test_status_reports_the_services_own_age_not_a_one_off_runs(tmp_path):
+    """2026-10-13: "`app` Up 3 minutes" was a refetch's age; `app-1` was up 16 hours."""
+    chosen = [target(tmp_path)]
+    containers = [one_off(str(tmp_path / "ibkr_trader")), ours(tmp_path, status="Up 16 hours")]
+    report = collectors.Report()
+    collectors.status([chosen[0].collector], chosen, FakeDocker(containers), report)
+    assert report.lines == ["ibkr_trader: assigned `run` -- `app` Up 16 hours"]
+
+
 def test_status_with_nothing_declared_says_where_to_declare_it():
     report = collectors.Report()
     collectors.status([], [], FakeDocker(), report)
@@ -2966,7 +3078,7 @@ class Moving(FakeDocker):
 
     def stop(self, container):
         self.containers = [
-            collectors.Container(c.id, c.workdir, c.service, "exited", "Exited (0)")
+            dataclasses.replace(c, state="exited", status="Exited (0)")
             if c.id == container.id
             else c
             for c in self.containers
@@ -3628,6 +3740,23 @@ def test_handed_off_assigns_stop_records_the_host_and_stops_the_project(tmp_path
         "ibkr_trader": {"to": OTHER, "at": 7.0}
     }
     assert here.docker.calls == [("ps",), ("stop", "c1"), ("stop", "c2")]
+
+
+def test_move_stops_the_service_for_the_export_not_a_one_off_run_beside_it(tmp_path, monkeypatch):
+    """Stopping the refetch run in `app`'s place would leave `app` writing to the db the
+    export is dumping. Once handed off, the whole project goes, the run included: this
+    machine is giving the project up, and a run left writing here writes to a copy no
+    longer the one that is kept."""
+    run = one_off(str(tmp_path / "ibkr_trader"))
+    here = here_at(tmp_path, monkeypatch, {"ibkr_trader": RUN}, Moving([run, *stack(tmp_path)]))
+    here.handoffs = FakeHandoff(here.docker.calls)
+    [ibkr] = [c for c in declared_here(here) if c.project == "ibkr_trader"]
+    collectors.move_one(ibkr, OTHER, here)
+    calls = here.docker.calls
+    assert calls[:2] == [("ps",), ("stop", "c1")], "the export runs with `app` stopped"
+    assert calls[2][:2] == ("handoff", "export")
+    assert calls[3:] == [("ps",), ("stop", "r1"), ("stop", "c2")]
+    assert here.report.failures == 0
 
 
 def test_pick_up_returns_the_assignment_to_act_on(tmp_path, monkeypatch):

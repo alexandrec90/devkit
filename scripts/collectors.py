@@ -133,9 +133,11 @@ STARTING = "being started by the collectors pass"
 # `tests/test_scheduled_jobs.py`. Zero off Windows, where the flag does not exist.
 NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# The oneoff label is last, so a compose that writes none leaves the column empty.
 PS_FORMAT = (
     '{{.ID}}\t{{.Label "com.docker.compose.project.working_dir"}}\t'
-    '{{.Label "com.docker.compose.service"}}\t{{.State}}\t{{.Status}}'
+    '{{.Label "com.docker.compose.service"}}\t{{.State}}\t{{.Status}}\t'
+    '{{.Label "com.docker.compose.oneoff"}}'
 )
 
 # Seconds. `up` is long because the first one on a machine builds the image.
@@ -301,18 +303,28 @@ class Container:
     service: str
     state: str
     status: str
+    # Compose's `com.docker.compose.oneoff` label: "True" on a `compose run` container,
+    # "False" on a service's, "" where compose wrote none.
+    oneoff: str = ""
 
     @property
     def running(self) -> bool:
         return self.state == "running"
 
+    @property
+    def one_off(self) -> bool:
+        """A `docker compose run <service> ...` container: it carries the service's labels,
+        so only this one tells it from the service's own. A missing label is a service's."""
+        return self.oneoff.lower() == "true"
+
 
 def parse_ps(text: str) -> list[Container]:
-    """`docker ps -a --format PS_FORMAT` rows; a container compose did not make is skipped."""
+    """`docker ps -a --format PS_FORMAT` rows; a container compose did not make is skipped.
+    A row without the oneoff column reads as a service's, as an empty label does."""
     found = []
     for line in text.splitlines():
         parts = [part.strip() for part in line.split("\t")]
-        if len(parts) == 5 and parts[0] and parts[1] and parts[2]:
+        if len(parts) in (5, 6) and parts[0] and parts[1] and parts[2]:
             found.append(Container(*parts))
     return found
 
@@ -330,9 +342,17 @@ def find(containers: Sequence[Container], checkout: Path, service: str) -> Conta
     """The service's container for this checkout -- a running one over a stopped one.
 
     Matched on the working directory rather than the compose project name: a box of the
-    same project runs its own stack under its own name, and it is not the collector.
+    same project runs its own stack under its own name, and it is not the collector. A
+    `compose run` of the service is not it either, though it carries the same labels:
+    2026-10-13 a refetch run, listed first as the newest, was read as ibkr_trader's `app`
+    -- its age in `status`, and the container `move` would have stopped for the export
+    while `app` went on writing to the db.
     """
-    mine = [c for c in containers if c.service == service and same_dir(c.workdir, checkout)]
+    mine = [
+        c
+        for c in containers
+        if c.service == service and not c.one_off and same_dir(c.workdir, checkout)
+    ]
     return next((c for c in mine if c.running), mine[0] if mine else None)
 
 
@@ -1215,7 +1235,9 @@ def kept_up(
 ) -> list[tuple[str, Container]]:
     """`(project, container)` for every running container this machine keeps up: one
     whose compose working directory is the checkout of a collector it runs -- the
-    collector's own service and whatever it brings up beside it, such as its db."""
+    collector's own service and whatever it brings up beside it, such as its db. A
+    `compose run` there counts too: it is not the service (`find`), but it holds the
+    VM's memory all the same, under the service's limit."""
     runs = [t for t in chosen if t.mode == config.RUN]
     return [
         (t.collector.project, c)
@@ -1650,8 +1672,10 @@ def stop_service(collector: config.Collector, here: Here) -> str:
 def handed_off(collector: config.Collector, dest: str, here: Here) -> None:
     """After an export that succeeded: this machine `stop`s it, remembers where it went
     (`handoff.OUTGOING`, which `follow_handoffs` reads), and stops every other container
-    the project runs here -- its db, and anything behind a profile -- to give the memory
-    back. `docker stop`, never `down`: the volumes hold the data, should it come back."""
+    the project runs here -- its db, anything behind a profile, and a `compose run` of it
+    too, unlike `find`: this machine is giving the project up, and a run left going here
+    writes to data no longer the copy that is kept. `docker stop`, never `down`: the
+    volumes hold the data, should it come back."""
     name = collector.project
     set_mode(here, name, config.STOP)
     handoff.record_outgoing(here.outgoing, name, dest, _clock())
