@@ -1169,10 +1169,7 @@ def test_a_step_only_a_person_can_take_reaches_the_ledger_marked_as_theirs(said)
         f"2026-10-13T06:01:04+00:00\tevent=scheduled-job-failed\tproject=devkit\tsaid={line}"
     )[0]
     step = triage.person_step(row)
-    assert step and step in {
-        "restart WslService from an elevated prompt, or reboot",
-        "start Docker Desktop",
-    }
+    assert step and step in {collectors.collector_tasks.WSL_REMEDY, "start Docker Desktop"}
 
 
 def test_engine_down_asks_wsl_only_of_an_engine_a_revival_would_try():

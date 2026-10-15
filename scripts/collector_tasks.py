@@ -94,14 +94,20 @@ SERVICE_STATE = re.compile(r"^\s*STATE\s*:\s*\d+\s+(?P<state>\w+)", re.M)
 # stuck service's cause carries it, so its ledger group awaits the person: 063598eb was
 # sent to a fixer, whose unelevated session can only re-check it.
 PERSON_STEP = "a person's step:"
+# The one remedy for a stuck or hung WSL service, named wherever a job finds one
+# (`collectors` too): the workspace task that ends it through a UAC prompt, finishes the
+# WSL update whose failed install left it stuck, and restarts Docker's engine.
+WSL_REMEDY = (
+    'run "Docker: Recover Stuck WSL" (`docker-maint.py recover-wsl`, elevated through one '
+    "UAC prompt), or reboot"
+)
 WSL_STUCK = (
     "WSL's service is stuck stopping, so Docker's engine cannot start "
-    f"-- {PERSON_STEP} end WSLService from an elevated shell, or restart Windows"
+    f"-- {PERSON_STEP} {WSL_REMEDY}"
 )
 WSL_STUCK_STEP = (
     "WSL's service has been stopping since before this run (WSLService STOP_PENDING), and "
-    'only an administrator can end it: run `taskkill /F /FI "SERVICES eq WSLService"` '
-    "from an elevated shell, or restart Windows"
+    f"only an administrator can end it: {WSL_REMEDY}"
 )
 # How long a fire whose `compose up` failed or timed out on a silent engine waits for it, and how
 # often it asks, before trying once more (`start_needs`). The collectors pass restarts a

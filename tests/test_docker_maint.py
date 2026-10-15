@@ -830,3 +830,155 @@ def test_a_service_that_will_not_start_warns_but_does_not_raise(monkeypatch, cap
     monkeypatch.setattr(docker_maint, "run", lambda *a, **kw: 5)
     docker_maint.start_docker_service()
     assert "[warn]" in capsys.readouterr().out
+
+
+# --- recover-wsl ------------------------------------------------------------
+# 2026-10-13: Windows Update's WSL MSI could not stop `WSLService` (Error 1921), left it
+# STOP_PENDING, and every `wsl.exe` call hung until a person ended it from an admin prompt.
+
+
+def sc_query(state: str) -> str:
+    return f"\r\nSERVICE_NAME: WSLService \r\n        STATE              : 3  {state}  \r\n"
+
+
+class FakeWsl:
+    """Answers `ask` like the machine: `sc query` reads off `states` (the last repeats),
+    `wsl --list` times out while `hung`, and every argv is recorded."""
+
+    def __init__(self, *states: str, hung: bool = False, killable: bool = True) -> None:
+        self.states, self.hung, self.killable = list(states), hung, killable
+        self.asked: list[list[str]] = []
+
+    def __call__(self, cmd, timeout):
+        self.asked.append(list(cmd))
+        if cmd[0] == "sc.exe":
+            state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+            return 0, sc_query(state)
+        if cmd[:2] == ["wsl", "--list"]:
+            return (docker_maint.TIMED_OUT, "timed out after 60s") if self.hung else (0, "")
+        if cmd == docker_maint.WSL_KILL:
+            self.hung = self.hung and not self.killable
+            return 0, "SUCCESS: The process with PID 3980 has been terminated."
+        return 0, "Updating Windows Subsystem for Linux"
+
+
+@pytest.mark.parametrize(
+    ("ask", "why"),
+    [
+        (FakeWsl("RUNNING"), ""),
+        (FakeWsl("START_PENDING", "RUNNING"), ""),
+        (FakeWsl("STOP_PENDING"), "WSLService is stuck in STOP_PENDING"),
+        (FakeWsl("RUNNING", hung=True), "`wsl --list` does not answer"),
+    ],
+    ids=["healthy", "starting", "stuck-stopping", "hung-running"],
+)
+def test_wsl_is_called_stuck_only_when_it_stays_pending_or_stays_silent(ask, why):
+    """A service caught mid-start is not stuck: it is asked again after the settle."""
+    pending = ask.states[0].endswith("_PENDING")
+    slept: list[float] = []
+    said = docker_maint.wsl_stuck(ask, slept.append)
+    assert (why in said) if why else said == ""
+    assert slept == ([docker_maint.collector_tasks.WSL_SETTLE] if pending else [])
+
+
+def test_ask_drops_wsl_nuls_and_reads_silence_and_absence_apart():
+    """`wsl.exe` prints UTF-16, so its text arrives NUL-padded; only a timeout is silence."""
+    nul = [sys.executable, "-c", "print('W\\x00S\\x00L\\x00')"]
+    assert docker_maint.ask(nul, 30) == (0, "WSL")
+    slow = [sys.executable, "-c", "import time; time.sleep(5)"]
+    assert docker_maint.ask(slow, 1)[0] == docker_maint.TIMED_OUT
+    assert docker_maint.ask(["no-such-binary-for-devkit"], 5)[0] == 127
+
+
+def test_the_service_state_is_read_off_sc_and_unknown_when_sc_fails():
+    assert docker_maint.wsl_service_state(FakeWsl("STOP_PENDING")) == "STOP_PENDING"
+    assert docker_maint.wsl_service_state(lambda cmd, timeout: (1060, "")) == ""
+
+
+def test_wsl_answers_unless_it_times_out():
+    """An exit code is WSL answering -- an error about no distro is still an answer."""
+    assert docker_maint.wsl_answers(FakeWsl("RUNNING"))
+    assert docker_maint.wsl_answers(lambda cmd, timeout: (1, "no distributions"))
+    assert not docker_maint.wsl_answers(FakeWsl("RUNNING", hung=True))
+
+
+def test_the_elevated_half_ends_the_service_then_finishes_the_update():
+    """The update is the half that keeps it from recurring: the failed install that left
+    the service stuck is what Windows Update would retry."""
+    ask = FakeWsl("STOP_PENDING", "STOP_PENDING", "RUNNING", hung=True)
+    code, lines = docker_maint.elevated_recover(ask, lambda s: None)
+    assert code == 0
+    assert ask.asked.index(docker_maint.WSL_KILL) < ask.asked.index(["wsl", "--update"])
+    assert "WSLService after the kill: RUNNING" in lines
+    assert lines[-1] == "wsl --list answers"
+
+
+def test_the_elevated_half_fails_when_wsl_still_does_not_answer():
+    ask = FakeWsl("STOPPED", hung=True, killable=False)
+    code, lines = docker_maint.elevated_recover(ask, lambda s: None)
+    assert code == 1 and lines[-1] == "wsl --list still does not answer"
+
+
+def test_the_uac_command_reaches_the_elevated_half_and_returns_its_code(tmp_path):
+    """Quoted for PowerShell: a path with a space or an apostrophe still lands whole."""
+    script = tmp_path / "it's here" / "docker-maint.py"
+    argv = docker_maint.elevated_argv(r"C:\Program Files\Python\python.exe", script)
+    command = argv[-1]
+    assert argv[0] == "powershell" and "-Verb RunAs" in command and "-Wait" in command
+    assert "'C:\\Program Files\\Python\\python.exe'" in command
+    assert f"recover-wsl {docker_maint.ELEVATED_STEP}" in command
+    assert str(script).replace("'", "''") in command
+    assert command.endswith("exit $p.ExitCode")
+
+
+def test_a_healthy_wsl_is_left_alone(monkeypatch, commands):
+    monkeypatch.setattr(docker_maint, "wsl_stuck", lambda: "")
+    monkeypatch.setattr(docker_maint, "docker_info_ok", lambda: True)
+    assert docker_maint.generic_recover_wsl([], elevated=lambda: False) == 0
+    assert commands == [], "nothing killed, nothing restarted"
+
+
+def test_a_stuck_wsl_unelevated_goes_through_uac_then_restarts_docker(
+    monkeypatch, commands, tmp_path
+):
+    log = tmp_path / "wsl-recover.log"
+    monkeypatch.setattr(docker_maint, "RECOVER_LOG", log)
+    monkeypatch.setattr(docker_maint, "wsl_stuck", lambda: "WSLService is stuck in STOP_PENDING")
+    stages: list[str] = []
+    monkeypatch.setattr(docker_maint, "stop_docker", lambda: stages.append("stop"))
+    monkeypatch.setattr(docker_maint, "start_docker", lambda elevated: stages.append("start"))
+    monkeypatch.setattr(docker_maint, "poll_engine", lambda timeout: True)
+    monkeypatch.setattr(
+        docker_maint, "elevated_recover", lambda: pytest.fail("the unelevated half must not kill")
+    )
+    assert docker_maint.generic_recover_wsl([], elevated=lambda: False) == 0
+    assert commands[0][0] == "powershell" and "RunAs" in commands[0][-1]
+    assert stages == ["stop", "start"]
+
+
+def test_a_declined_prompt_restarts_nothing(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(docker_maint, "RECOVER_LOG", tmp_path / "wsl-recover.log")
+    monkeypatch.setattr(docker_maint, "wsl_stuck", lambda: "WSLService is stuck in STOP_PENDING")
+    monkeypatch.setattr(docker_maint, "run", lambda cmd, **kw: 1)
+    monkeypatch.setattr(docker_maint, "stop_docker", lambda: pytest.fail("restarted anyway"))
+    assert docker_maint.generic_recover_wsl([], elevated=lambda: False) == 1
+    assert "WSL NOT RECOVERED" in capsys.readouterr().out
+
+
+def test_the_elevated_step_writes_its_record(monkeypatch, tmp_path):
+    log = tmp_path / "logs" / "wsl-recover.log"
+    monkeypatch.setattr(docker_maint, "RECOVER_LOG", log)
+    monkeypatch.setattr(docker_maint, "elevated_recover", lambda: (0, ["one", "two"]))
+    write = docker_maint.write_recover_log
+    monkeypatch.setattr(docker_maint, "write_recover_log", lambda lines: write(lines, log))
+    assert docker_maint.generic_recover_wsl([docker_maint.ELEVATED_STEP]) == 0
+    assert log.read_text(encoding="utf-8") == "one\ntwo\n"
+
+
+@pytest.mark.parametrize(
+    ("elevated", "first"), [(False, "Docker Desktop.exe"), (True, "explorer.exe")]
+)
+def test_docker_desktop_never_inherits_an_elevated_token(tmp_path, elevated, first):
+    """2026-10-13: relaunched from an admin prompt, the whole backend ran elevated."""
+    argv = docker_maint.desktop_launch(tmp_path / "Docker Desktop.exe", elevated)
+    assert argv[0].endswith(first) and argv[-1].endswith("Docker Desktop.exe")
