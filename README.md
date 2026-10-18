@@ -993,8 +993,10 @@ container and trusted for its exit code.
 "devkit.collectors": {
   "ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"],
                    "handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"] },
-  "sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"] },
-  "social-scraper": { "command": ["uv", "run", "social-scraper", "scrape"], "minutes": 30, "needs": ["db"] }
+  "sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"],
+                      "handoff": ["uv", "run", "python", "scripts/handoff.py"] },
+  "social-scraper": { "command": ["uv", "run", "social-scraper", "scrape"], "minutes": 30, "needs": ["db"],
+                      "handoff": ["uv", "run", "python", "scripts/handoff.py"] }
 }
 ```
 
@@ -1038,14 +1040,19 @@ python scripts/collectors.py move ibkr_trader --to desktop-ml5f3pj
 ```
 
 That needs a `handoff` beside the collector: the project's own command that carries its
-data through a store both machines reach (ibkr_trader's dumps its database to R2), since
+data through a store both machines reach (ibkr_trader's dumps its database to its S3-compatible archive store), since
 devkit is stdlib only and reaches neither. `move` stops the collector's service, runs
 `<handoff> export --from <this PC> --to <host>` from the project's checkout, and on success
 sets this PC to `stop` and stops the project's other containers (`docker stop`, never
 `down`; the volumes stay). The other PC's next pass, within 15 minutes if it is on, finds the
 handoff with `<handoff> pending --host <itself>`, runs `<handoff> import`, sets itself to
 `run` and starts it as `run-here` would — whether it was set to `stop` or never assigned.
-An export that fails starts the service again and changes nothing; an import that fails
+A scheduled collector (`command`) moves the same way. In place of stopping a service,
+`move` waits for a scrape already running to finish (up to the task's one-hour limit,
+and it refuses rather than end one still going then), removes the task, and leaves the
+compose services it `needs` up, since the export dumps that db. The receiving pass
+registers the task once its import is done.
+An export that fails starts the service, or registers the task, again and changes nothing; an import that fails
 fails that pass and is tried again on the next one. Until the other PC has taken it over
 nothing runs the collector, so this PC keeps asking, and its pass fails once that is
 overdue. A machine is named as the ledger names it (`$DEVKIT_HOST`, else its hostname, in
@@ -1058,7 +1065,7 @@ devkit keeps no list of the workspace's machines, and the picker cannot ask for 
 
 While `move` exports, it holds the collectors pass lock (`PASS_LOCK` in
 `scripts/collectors.py`), waiting for it as `run-here` does. A scheduled pass meanwhile stands down rather than restarting the
-service under the dump, and the tray keeps the row green. The receiving pass runs its import
+service under the dump, a scheduled collector's fire runs nothing, and the tray keeps the row green. The receiving pass runs its import
 under its own lock, whose bound allows for the restore, so two imports never overlap.
 
 `devkit-collectors` is registered everywhere and acts only on the assignment. It starts a

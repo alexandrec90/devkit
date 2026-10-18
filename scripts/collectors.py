@@ -32,10 +32,12 @@ takes them by name.
 
 **Moving one is a command on one machine** (`move`), for a collector that declares a
 `handoff` (`collector_handoff` owns the contract). Typed on the machine that runs it, it
-stops the collector's service, has the project export its data addressed to HOST, sets
-this machine to `stop` and stops the project's other containers. HOST takes it over on
-its next pass, with nobody at it (`pick_up`): it imports the data, sets itself to `run`
-and starts it as `run-here` would. Without a `handoff` a move is `stop-here` on one
+stops the collector -- a container's service, or a scheduled one's task once its run in
+flight has finished, its `needs` left up for the dump (`stop_service`) -- has the project
+export its data addressed to HOST, sets this machine to `stop` and stops the project's
+other containers. HOST takes it over on its next pass, with nobody at it (`pick_up`): it
+imports the data, sets itself to `run` and starts it as `run-here` would -- for a
+scheduled one, registers its task. Without a `handoff` a move is `stop-here` on one
 machine and `run-here` on the other, and the data stays where it was. The sending machine
 keeps asking whether HOST has taken it over, and fails its pass once that is overdue
 (`follow_handoffs`): until then nothing runs the collector, and no row on either machine
@@ -43,7 +45,7 @@ would otherwise say so.
 
 **One actor at a time** (`PASS_LOCK`). `move` holds the lock a pass holds, for its whole
 export, so a scheduled pass meanwhile stands down rather than restarting the service
-`move` stopped for the dump; and the pickup runs inside `maintain`, under that pass's lock,
+`move` stopped for the dump, and a scheduled collector's fire runs nothing; and the pickup runs inside `maintain`, under that pass's lock,
 whose bound allows for the restore (`pass_bound`).
 
 **Started, and redeployed onto merged code -- only merged code.** A pass that finds the
@@ -158,21 +160,45 @@ TARGET_BOUND = (
     3 * INSPECT_TIMEOUT + 6 * GIT_TIMEOUT + 2 * EXPORT_TIMEOUT + UP_TIMEOUT + HEALTH_TIMEOUT
 )
 # The longest one handoff pickup can hold a pass (`take_over`): asking, stopping the
-# service, the restore. A pass's `PASS_LOCK` allows each it may make this long
+# collector, the restore. A pass's `PASS_LOCK` allows each it may make this long
 # (`pass_bound`), so no stale-lock takeover starts a second pass mid-restore; and the
 # scheduled task's time limit covers one plus a target's `TARGET_BOUND`
 # (`tests/test_install_collectors.py`), since a pass killed mid-restore would leave the
 # marker unimported for every later pass to start the restore again.
-PICKUP_BOUND = handoff.PENDING_TIMEOUT + PS_TIMEOUT + STOP_TIMEOUT + handoff.IMPORT_TIMEOUT
+#
+# Stopping it is a container's `ps` and `stop`, or a scheduled collector's three
+# `schtasks` calls: is a run in flight, is the task registered, delete it (`stop_task`).
+SCHTASKS_TIMEOUT = collector_tasks.SCHTASKS_TIMEOUT
+PICKUP_BOUND = (
+    handoff.PENDING_TIMEOUT
+    + max(PS_TIMEOUT + STOP_TIMEOUT, 3 * SCHTASKS_TIMEOUT)
+    + handoff.IMPORT_TIMEOUT
+)
 # How long `move` holds `PASS_LOCK` for each collector it hands off (`move_one`): stopping
 # it, the export, and either starting it again or stopping the rest.
 MOVE_BOUND = PS_TIMEOUT + STOP_TIMEOUT + handoff.EXPORT_TIMEOUT + UP_TIMEOUT + 2 * PS_TIMEOUT
+# How long a scheduled collector's run in flight is waited out before `move` exports
+# (`stop_task`): its task's `collector_tasks.TIME_LIMIT`, an hour, which a test holds this
+# to. The fire ends its own command at `FIRE_TIMEOUT`, and the scheduler kills the task at
+# its limit, so a run still reported going past this is not one that will end -- and the
+# move is refused rather than the run ended (`stop_task` says why). A scrape is normally
+# minutes, so the wait is normally minutes too.
+RUN_WAIT = 60 * 60
+# Seconds between `stop_task`'s looks at a run in flight: one `schtasks /Query` each.
+TASK_POLL = 30
+# `MOVE_BOUND` for a scheduled collector: the wait and its last look, the task removed,
+# the export, then either the task registered again (`keep_registered`'s queries and its
+# `/Create`) or the project's containers stopped. Nine `schtasks` calls at most.
+SCHEDULED_MOVE_BOUND = (
+    RUN_WAIT + TASK_POLL + 9 * SCHTASKS_TIMEOUT + handoff.EXPORT_TIMEOUT + 2 * PS_TIMEOUT
+)
 # How long after a `move` the receiving machine may take before the sender's pass fails on
 # it (`follow_handoffs`): two of its passes, 15 minutes apart, and the restore.
 HANDOFF_GRACE = 2 * 15 * 60 + PICKUP_BOUND
 # What `move` writes into `PASS_LOCK` beside `{started_at, until}`: who holds it and for
 # which collectors, so the tray keeps those rows green for the hour a move stops them
-# (`move_holding`). A pass writes neither; `IN_PASS` speaks for it.
+# (`move_holding`), and a scheduled collector's fire runs nothing meanwhile (`fire`). A
+# pass writes neither; `IN_PASS` speaks for it.
 HOLDER, PROJECTS = "holder", "projects"
 # How long after the machine boots or wakes a silent engine is Docker Desktop still
 # starting rather than down (`wait_for_engine`), and how often it is asked meanwhile.
@@ -1534,7 +1560,7 @@ def write_file(path: Path, text: str) -> None:
 class Here:
     """This machine, as a handoff acts on it: its devkit checkout (`base`), the directory
     its project checkouts sit in, its name (`handoff.this_host`), and what it spawns
-    through."""
+    through -- `tasks` for the scheduler, and `sleep` between `stop_task`'s looks."""
 
     base: Path
     workspace: Path
@@ -1542,6 +1568,8 @@ class Here:
     docker: Docker
     handoffs: handoff.Handoff
     report: Report
+    tasks: collector_tasks.Runner = collector_tasks.run_argv
+    sleep: Callable[[float], None] = _time.sleep
 
     def checkout(self, collector: config.Collector) -> Path:
         return self.workspace / collector.project
@@ -1616,22 +1644,26 @@ def move_refused(dest: str, projects: Sequence[str], unknown: Sequence[str], thi
 
 
 def move_one(collector: config.Collector, dest: str, here: Here) -> None:
-    """Stop the collector's service, have the project export its data for `dest`, then
-    set this machine to `stop` and stop the rest of the project here (`handed_off`). An
-    export that fails starts the service again and leaves the assignment `run`.
+    """Stop the collector (`stop_service`), have the project export its data for `dest`,
+    then set this machine to `stop` and stop the rest of the project here (`handed_off`).
+    An export that fails starts it again -- the service, or a scheduled one's task -- and
+    leaves the assignment `run`.
 
     `PASS_LOCK` is held throughout, waited for as a verb waits for it: a scheduled pass
-    meanwhile stands down rather than restarting the service under the dump. The lock
-    names this move and the collector (`move_holding`), so the tray keeps its row green."""
-    name, service = collector.project, collector.service
+    meanwhile stands down rather than restarting the service or re-registering the task
+    under the dump. The lock names this move and the collector (`move_holding`), so the
+    tray keeps its row green and a scheduled collector's fire runs nothing (`fire`)."""
+    name = collector.project
     checkout = here.checkout(collector)
     holder = {HOLDER: f"`collectors.py move` to {dest}", PROJECTS: [name]}
-    with one_pass(here.base / PASS_LOCK, MOVE_BOUND, wait=True, extra=holder) as had:
+    with one_pass(here.base / PASS_LOCK, move_bound(collector), wait=True, extra=holder) as had:
         if not had:
             here.report.fail(f"{name}: not moved -- {STOOD_DOWN}")
             return
         if why := stop_service(collector, here):
-            here.report.fail(f"{name}: not moved -- `{service}` could not be stopped first: {why}")
+            here.report.fail(
+                f"{name}: not moved -- {stopped_part(collector)} could not be stopped first: {why}"
+            )
             return
         print(
             f"collectors: exporting {name}'s data for {dest}, for up to "
@@ -1642,23 +1674,54 @@ def move_one(collector: config.Collector, dest: str, here: Here) -> None:
         if said.code == 0:
             handed_off(collector, dest, here)
             return
-        ok, out = here.docker.up(checkout, service)
-        again = (
-            f"`{service}` is started again"
-            if ok
-            else f"`{service}` could NOT be started again ({first_line(out) or 'no output'})"
-        )
         here.report.fail(
             f"{name}: not moved -- the handoff export failed ({said.summary()}); see "
-            f"{checkout / handoff.PROJECT_LOG}. {again}, and this machine still runs it"
+            f"{checkout / handoff.PROJECT_LOG}. {restart(collector, here)}, and this machine "
+            "still runs it"
         )
 
 
-def stop_service(collector: config.Collector, here: Here) -> str:
+def move_bound(collector: config.Collector) -> float:
+    """How long `move_one` holds `PASS_LOCK` for `collector`."""
+    return SCHEDULED_MOVE_BOUND if collector.scheduled else MOVE_BOUND
+
+
+def stopped_part(collector: config.Collector) -> str:
+    """What `stop_service` stops of `collector`, as a move's lines name it."""
+    if collector.scheduled:
+        return f"its scheduled task `{collector_tasks.task_name(collector)}`"
+    return f"`{collector.service}`"
+
+
+def restart(collector: config.Collector, here: Here) -> str:
+    """Undo `stop_service` after a failed export -- start the service, or register the
+    scheduled task again -- and say how that went."""
+    part = stopped_part(collector)
+    if collector.scheduled:
+        registered = Report()
+        python = collector_tasks.interpreter()
+        collector_tasks.keep_registered(collector, here.base, python, here.tasks, registered)
+        if not registered.failures:
+            return f"{part} is registered again"
+        why = registered.cause.removeprefix(f"{collector_tasks.task_name(collector)}: ")
+        return f"{part} could NOT be registered again ({why})"
+    ok, out = here.docker.up(here.checkout(collector), collector.service)
+    if ok:
+        return f"{part} is started again"
+    return f"{part} could NOT be started again ({first_line(out) or 'no output'})"
+
+
+def stop_service(collector: config.Collector, here: Here, wait: float = RUN_WAIT) -> str:
     """Stop the collector's own container, leaving the rest of its project up; "" once it
     is not running, else why it could not be stopped. `docker stop` by container, as
     `keep_stopped` does: ibkr_trader's `app` sits behind a compose profile, which naming it
-    activates for `up` but which `compose stop` is not to be trusted with."""
+    activates for `up` but which `compose stop` is not to be trusted with.
+
+    A scheduled collector has no container of its own: its task is what stops
+    (`stop_task`), with a run in flight waited out for up to `wait` seconds, and the
+    compose services it `needs` stay up -- the export dumps its db."""
+    if collector.scheduled:
+        return stop_task(collector, here, wait)
     containers = here.docker.ps()
     if containers is None:
         return "docker is not answering"
@@ -1669,13 +1732,54 @@ def stop_service(collector: config.Collector, here: Here) -> str:
     return "" if ok else f"`docker stop` said {first_line(out) or 'nothing'}"
 
 
+def stop_task(collector: config.Collector, here: Here, wait: float) -> str:
+    """Stop a scheduled collector for a handoff: wait for a run in flight to finish, for
+    up to `wait` seconds, then remove its task. "" once it is removed, else why not.
+
+    The wait comes first because a task deleted mid-run keeps running unseen: the
+    scheduler then answers nothing about it (`devkit_schtasks._clear_unsecured`). No new
+    run can start behind the wait, since a fire stands down while a `move` holds
+    `PASS_LOCK` for it (`fire`), and a receiver is not `run` for it, which a fire also
+    reads as "nothing to run".
+
+    A run still going at the bound is **not ended** -- the move is refused instead, with
+    the task left registered. `RUN_WAIT` is the task's own time limit, so a run past it
+    is one neither the fire's timeout nor the scheduler could end; `schtasks /End` ends
+    only the process the scheduler started, not the `uv`, interpreter and Chrome under it
+    (`collector_tasks.kill_tree`), which would go on writing to the db being dumped. An
+    export that misses rows is a worse failure than a move to try again."""
+    name = collector_tasks.task_name(collector)
+    deadline, told = _clock() + wait, False
+    while collector_tasks.running(name, here.tasks):
+        if _clock() >= deadline:
+            after = f" after {int(wait // 60)} minutes" if wait else ""
+            return (
+                f"its scheduled run is still going{after}, and is not ended under the "
+                f"handoff -- let it finish, or end it (`schtasks /End /TN {name}` and the "
+                "Chrome it drives), then try again"
+            )
+        if not told:
+            print(
+                f"collectors: waiting for {name}'s scheduled run to finish first, for up "
+                f"to {int(wait // 60)} minutes",
+                flush=True,
+            )
+            told = True
+        here.sleep(TASK_POLL)
+    removed = Report()
+    collector_tasks.keep_removed(name, here.tasks, removed)
+    return removed.cause.removeprefix(f"{name}: ")
+
+
 def handed_off(collector: config.Collector, dest: str, here: Here) -> None:
     """After an export that succeeded: this machine `stop`s it, remembers where it went
     (`handoff.OUTGOING`, which `follow_handoffs` reads), and stops every other container
     the project runs here -- its db, anything behind a profile, and a `compose run` of it
     too, unlike `find`: this machine is giving the project up, and a run left going here
     writes to data no longer the copy that is kept. `docker stop`, never `down`: the
-    volumes hold the data, should it come back."""
+    volumes hold the data, should it come back. A scheduled collector's task, which
+    `stop_task` removed for the export, is made sure gone, as the next pass would: a
+    `stop` machine keeps none (`maintain_scheduled`)."""
     name = collector.project
     set_mode(here, name, config.STOP)
     handoff.record_outgoing(here.outgoing, name, dest, _clock())
@@ -1683,6 +1787,8 @@ def handed_off(collector: config.Collector, dest: str, here: Here) -> None:
         f"{name}: handed off to {dest}, and set to `stop` here. {dest} takes it over on its "
         "next collectors pass -- within 15 minutes, if it is on; `collectors.py` here says when"
     )
+    if collector.scheduled:
+        collector_tasks.keep_removed(collector_tasks.task_name(collector), here.tasks, here.report)
     containers = here.docker.ps()
     if containers is None:
         here.report.fail(
@@ -1704,7 +1810,8 @@ def pick_up(
 ) -> dict[str, str]:
     """Take over each collector handed to this machine (`take_over`), before the pass acts
     on its assignment; returns the assignment to act on, so one taken over is started this
-    same pass through `keep_running`, settle and all, as `run-here` would start it.
+    same pass through `keep_running`, settle and all, as `run-here` would start it -- or,
+    scheduled, has its task registered by `maintain_scheduled`.
 
     Asked for every collector with a `handoff` this machine is not set to `run`: set to
     `stop`, **or not assigned at all**. A marker addressed to this machine by name is as
@@ -1738,10 +1845,12 @@ def take_over(collector: config.Collector, here: Here) -> bool:
         here.report.say(f"{name}: could not ask whether a handoff waits ({pending.said.summary()})")
     if pending.state != handoff.WAITING:
         return False
-    if why := stop_service(collector, here):
+    # A scheduled run in flight is not waited for: a fire on a machine not `run` for it
+    # runs nothing and ends in seconds, so the next pass finds it done.
+    if why := stop_service(collector, here, wait=0):
         here.report.say(
-            f"{name}: {pending.source} handed it here, but `{collector.service}` could not be "
-            f"stopped for the import: {why} -- the next pass tries again"
+            f"{name}: {pending.source} handed it here, but {stopped_part(collector)} could not "
+            f"be stopped for the import: {why} -- the next pass tries again"
         )
         return False
     said = here.handoffs.restore(collector, checkout, here.name)
@@ -1894,21 +2003,28 @@ def scheduled_tasks(root: Path = REPO_ROOT) -> dict[str, str]:
 
     The tray asks the scheduler about these beside devkit's own jobs, in the same query,
     and judges them the same way (`schedule_health.problems`). A `stop` one is not here:
-    its task is deleted, and `tray_rows` reports it.
+    its task is deleted, and `tray_rows` reports it. Nor is one a live `move` holds
+    (`move_holding`): its task is deleted for the export while the assignment is still
+    `run`, and a task missing then is the move at work, not a defect for the tray to show
+    red or the fix pass to file (`fix_loop.unscheduled`). `tray_rows` reports that too.
     """
     _collectors, chosen = assigned(root)
+    if not any(t.collector.scheduled and t.mode == config.RUN for t in chosen):
+        return {}
+    moving = move_holding(config.home(root) / PASS_LOCK, _clock())
     return {
         collector_tasks.task_name(t.collector): collector_tasks.log_path(
             collector_tasks.task_name(t.collector)
         ).as_posix()
         for t in chosen
-        if t.collector.scheduled and t.mode == config.RUN
+        if t.collector.scheduled and t.mode == config.RUN and t.collector.project not in moving
     }
 
 
 def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tuple[str, str, str]]:
     """`(row name, level, detail)` per collector assigned to this machine, except the
-    scheduled ones it runs, which are scheduler rows (`scheduled_tasks`). Never raises.
+    scheduled ones it runs, which are scheduler rows (`scheduled_tasks`) unless a `move`
+    holds one (`scheduled_row`). Never raises.
 
     Empty on a machine assigned nothing, **without asking docker**: a laptop sharing the
     workspace sees no rows and pays no spawn.
@@ -1929,13 +2045,13 @@ def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tupl
         for name, mode in sorted(assignment.items())
         if name not in {c.project for c in collectors}
     ]
+    clock = _clock()
+    sent = handoff.load_outgoing(base / handoff.OUTGOING)
+    moving = move_holding(base / PASS_LOCK, clock)
     if chosen:
         containers = (docker or Docker(TRAY_PS_TIMEOUT)).ps()
         health = load_health(base / HEALTH)
-        clock = _clock()
         busy = in_pass(base / IN_PASS, clock)
-        sent = handoff.load_outgoing(base / handoff.OUTGOING)
-        moving = move_holding(base / PASS_LOCK, clock)
         rows += [
             (
                 ROW_PREFIX + t.collector.project,
@@ -1943,12 +2059,22 @@ def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tupl
             )
             for t in chosen
         ]
-    rows += [
-        (ROW_PREFIX + t.collector.project, OK, "off on this machine (by choice)")
+    return rows + [
+        scheduled_row(t, holding(t, moving, sent))
         for t in scheduled
-        if t.mode == config.STOP
+        if t.mode == config.STOP or t.collector.project in moving
     ]
-    return rows
+
+
+def scheduled_row(target: Target, held: str) -> tuple[str, str, str]:
+    """`tray_rows`' row for a scheduled collector that is no scheduler row: a `stop` one,
+    green, saying where it was handed off to if it was; and a `run` one a `move` holds,
+    whose task that move removed for the export (`scheduled_tasks`) -- green, as `row`
+    keeps a container a move stopped."""
+    name = ROW_PREFIX + target.collector.project
+    if target.mode == config.STOP:
+        return name, OK, held or "off on this machine (by choice)"
+    return name, OK, f"{held} is acting on it (its scheduled task is removed for the export)"
 
 
 # --- the command line --------------------------------------------------------------
@@ -2049,16 +2175,21 @@ def fire(
     records a run's start before its command runs (`collector_tasks.start_path`). A
     task left behind on a machine no longer assigned `run` -- the pass that deletes it has
     not come round yet -- does nothing and says so, rather than running a second writer.
+    So does one while a `move` holds `PASS_LOCK` for it (`move_holding`): the export is
+    dumping its db, and `stop_task` waits only for the run that began before the move.
     `desktop_logs` is where Docker Desktop's own logs are read for why a silent engine
     stopped (`collector_tasks.stop_reason`); the command line passes this machine's.
     """
     collectors, _notes = config.declared(base)
     collector = next((c for c in collectors if c.project == name and c.scheduled), None)
     assignment = config.load_assignment(base / config.ASSIGNMENT)
+    moving = move_holding(base / PASS_LOCK, _clock()).get(name, "")
     if collector is None:
         code, lines = 2, [f"`{config.SETTING}` declares no scheduled collector `{name}`"]
     elif assignment.get(name) != config.RUN:
         code, lines = 0, ["not assigned `run` on this machine -- nothing run"]
+    elif moving:
+        code, lines = 0, [f"{moving} is handing it to another machine -- nothing run"]
     else:
         checkout = sweep.default_workspace(base).parent / collector.project
         start = now.astimezone().isoformat(timespec="seconds")
@@ -2087,11 +2218,15 @@ def run_once(
 
     Refused while the scheduled task is running, for the reason `collector_tasks.running`
     gives; the scheduler cannot refuse it, because a run by hand is not one of its fires.
+    And while a `move` holds it, for `fire`'s reason.
     """
     collectors, _notes = config.declared(base)
     collector = next((c for c in collectors if c.project == name and c.scheduled), None)
     if collector is None:
         print(f"collectors: `{config.SETTING}` declares no scheduled collector `{name}`")
+        return 2
+    if moving := move_holding(base / PASS_LOCK, _clock()).get(name, ""):
+        print(f"collectors: {moving} is handing {name} to another machine -- not run")
         return 2
     task = collector_tasks.task_name(collector)
     if collector_tasks.running(task, run):
@@ -2186,7 +2321,9 @@ def main(
         return scheduled_in_flight(targets(collectors, now_assigned, workspace), run)
 
     engine = docker or Docker(restarts=base / RESTARTED, holds=in_flight)
-    here = Here(base, workspace, handoff.this_host(), engine, handoffs or handoff.Handoff(), report)
+    here = Here(
+        base, workspace, handoff.this_host(), engine, handoffs or handoff.Handoff(), report, run
+    )
     if args.mode == MOVE:
         move(args.projects, args.to, collectors, assignment, here)
     elif args.mode == "status":
@@ -2202,15 +2339,16 @@ def pass_bound(
 ) -> float:
     """How long a pass acting on `assignment` may hold `PASS_LOCK`: a `TARGET_BOUND` for
     each container collector it may act on, and -- for a `maintain`, which `picks_up` --
-    a `PICKUP_BOUND` and a `pending` for each it may take over, counting one it is not yet
-    assigned among the targets. A lock that expired mid-restore would let the next pass
-    break it and start a second restore into the same database."""
+    a `PICKUP_BOUND` and a `pending` for each it may take over of either kind, counting a
+    container one it is not yet assigned among the targets. A lock that expired
+    mid-restore would let the next pass break it and start a second restore into the same
+    database."""
     containers = [c for c in collectors if not c.scheduled]
     takers = [
-        c for c in containers if picks_up and c.handoff and assignment.get(c.project) != config.RUN
+        c for c in collectors if picks_up and c.handoff and assignment.get(c.project) != config.RUN
     ]
     acted_on = {c.project for c in containers if c.project in assignment}
-    acted_on |= {c.project for c in takers}
+    acted_on |= {c.project for c in takers if not c.scheduled}
     pickups = len(takers) * (PICKUP_BOUND + handoff.PENDING_TIMEOUT)
     return PS_TIMEOUT + max(1, len(acted_on)) * TARGET_BOUND + pickups
 
