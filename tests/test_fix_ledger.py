@@ -311,6 +311,27 @@ def test_a_session_a_restart_took_frees_its_key_and_spends_no_attempt(tmp_path):
     assert not fix_ledger.mark_interrupted(path, "never-sent", "stopped by a restart")
 
 
+def test_a_send_taken_back_comes_off_the_daily_cap_too(tmp_path):
+    """social-scraper #90 and #91's fixers were both refused at login on 2026-10-18: their
+    sends came back to `attempts` but stayed in `sent_since`, and the Dependabot cap held
+    both PRs -- every Dependabot red on the machine -- for the rest of the day."""
+    path = tmp_path / "dispatch.json"
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    key = fix_ledger.decision_key(decision)
+    day = NOW - _dt.timedelta(hours=24)
+    fix_ledger.record(path, key, "n", NOW - _dt.timedelta(hours=8), source=fix_plan.DEPENDABOT)
+    fix_ledger.record(path, key, "n", NOW, source=fix_plan.DEPENDABOT)
+    assert fix_ledger.sent_since(fix_ledger.read_ledger(path), fix_plan.DEPENDABOT, day) == 2
+    assert fix_ledger.mark_interrupted(path, key, "logged out")
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.sent_since(ledger, fix_plan.DEPENDABOT, day) == 1, "the earlier send stands"
+    assert fix_ledger.sends(ledger[key]) == 1
+    unsourced = "pr:carameli:7:abc:d:dispatch"
+    fix_ledger.record(path, unsourced, "n", NOW)
+    assert fix_ledger.mark_interrupted(path, unsourced, "logged out"), "no `at` to take from"
+    assert "at" not in fix_ledger.read_ledger(path)[unsourced]
+
+
 def test_since_makes_everything_before_a_resolved_escalation_history(tmp_path):
     """Once the devkit session resolves what a problem was escalated as, the problem
     starts over: its sessions, its block and its in-flight entry are all before it."""

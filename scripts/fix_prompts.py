@@ -35,6 +35,7 @@ from fix_plan import (
     UNFETCHABLE_ENTRY,
     Failure,
     describe,
+    is_runner_side,
     is_unstarted,
     name_of,
 )
@@ -178,6 +179,14 @@ def _logs(failure: Failure) -> str:
             "never acquired, or the job's `runs-on` or `if:` never let it start. The pass "
             f"re-runs such a run once before sending anyone; read the run's annotations at "
             f"{where} first, and fix the workflow if they name it. {LINUX}"
+        )
+    if is_runner_side(failure.signature):
+        return (
+            "Every job that failed did so in a step of the runner's own (`Set up job`, "
+            "`Initialize containers`), before any step of the workflow ran: an action or a "
+            "service image it could not fetch. The pass re-runs such a run once before "
+            f"sending anyone, so this one failed twice; read its log at {where} first, and "
+            f"fix the workflow if a reference in it is wrong. {LINUX}"
         )
     return f"No artifact came down from the run; read it at {where} first. {LINUX}"
 

@@ -121,10 +121,11 @@ def run_jobs(gh: Gh, run_id: str) -> list[dict]:
 
 
 def run_attempt(gh: Gh, run_id: str, sig: tuple[str, ...]) -> int:
-    """The run's attempt when `sig` is jobs that never started a step, which is when the
-    plan re-runs it once (`fix_plan.reruns_in_place`); 0 otherwise, or when `gh` cannot say.
+    """The run's attempt when `sig` is jobs none of whose workflow steps ran, which is
+    when the plan re-runs it once (`fix_plan.reruns_in_place`); 0 otherwise, or when `gh`
+    cannot say.
     """
-    if not run_id or not fix_plan.is_unstarted(sig):
+    if not run_id or not fix_plan.is_runner_side(sig):
         return 0
     viewed = gh_json(gh("run", "view", str(run_id), "--json", "attempt"))
     try:

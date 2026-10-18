@@ -391,11 +391,8 @@ def last_spoke(path: Path) -> _dt.datetime | None:
     tree as busy for `QUIET_AFTER`. Only the file's tail is read; a tail holding no dated
     record (one enormous last line) falls back to the mtime, which errs towards busy.
     """
-    try:
-        with path.open("rb") as handle:
-            handle.seek(max(0, path.stat().st_size - TAIL_BYTES))
-            tail = handle.read().decode("utf-8", errors="replace")
-    except OSError:
+    tail = _tail(path)
+    if tail is None:
         return None
     for line in reversed(tail.splitlines()):
         try:
@@ -409,6 +406,37 @@ def last_spoke(path: Path) -> _dt.datetime | None:
 
 
 TAIL_BYTES = 256 * 1024
+
+
+def _tail(path: Path) -> str | None:
+    """The last `TAIL_BYTES` of a transcript, decoded; None when it cannot be read."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - TAIL_BYTES))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+# What Claude Code stamps on the synthetic reply it writes in place of a model's when
+# the account's login has lapsed: `Login expired · Please run /login`, with no model
+# call behind it. Both of social-scraper #90's and #91's fixers ended on one at their
+# first turn on 2026-10-18, and spent the day's Dependabot cap doing it.
+AUTH_FAILED = "authentication_failed"
+
+
+def logged_out(path: Path) -> bool:
+    """Whether the transcript's last assistant record is Claude Code's auth-failure
+    reply (`AUTH_FAILED`): the session ended because nobody was logged in."""
+    tail = _tail(path)
+    for line in reversed((tail or "").splitlines()):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "assistant":
+            return bool(record.get("isApiErrorMessage")) and record.get("error") == AUTH_FAILED
+    return False
 
 
 def newest_transcript(tree: Path, projects_root: Path | None = None) -> Path | None:
@@ -513,7 +541,10 @@ NO_OUTCOME = "ended without an outcome"
 # `fixer-no-outcome` defects (4dc413a1, 9201a08f, e2feebab) and two of them spent their
 # PRs' one blind attempt, escalating #480 and #482 as `blind-evidence`.
 INTERRUPTED = "stopped by a restart"
-DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED)
+# Refused at its first turn because Claude Code's login had lapsed (`logged_out`): like
+# a restart, nothing the session did, so its send is taken back.
+LOGGED_OUT = "logged out"
+DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED, LOGGED_OUT)
 
 
 def booted_at(now: _dt.datetime | None = None) -> _dt.datetime | None:
@@ -566,8 +597,9 @@ def session_state(
 
     `DONE` once it left an intent or a report and has no background task still out,
     `WORKING` while its transcript moves (or it is still inside `START_GRACE`), one of
-    `DEAD` otherwise: `INTERRUPTED` when the machine started (`booted`, from `booted_at`)
-    after the session was last heard from, with no wait. `""` for a tree with no
+    `DEAD` otherwise: `LOGGED_OUT` when its last reply was the login's refusal, and
+    `INTERRUPTED` when the machine started (`booted`, from `booted_at`) after the session
+    was last heard from, with no wait. `""` for a tree with no
     stamp, one already judged dead, or a session this cannot see -- only Claude Code
     keeps a transcript here, and a Codex tab is watched by the person who opened it.
     """
@@ -586,10 +618,18 @@ def session_state(
     if any((_mtime(tree / name) or sent) > sent for name in OUTCOME_FILES):
         return _with_outcome(transcript, now), str(transcript or "")
     touched = last_spoke(transcript) if transcript else None
-    if touched is None or touched < sent:
+    if transcript is None or touched is None or touched < sent:
         return _unheard(tree, sent, now, booted), ""
+    return _heard(transcript, touched, now, booted), str(transcript)
+
+
+def _heard(
+    transcript: Path, touched: _dt.datetime, now: _dt.datetime, booted: _dt.datetime | None
+) -> str:
+    """The state of a session that has spoken since it was sent, and left no outcome."""
+    # Judged at once rather than after `QUIET_AFTER`: the session is over on that reply.
+    if logged_out(transcript):
+        return LOGGED_OUT
     if _restarted(touched, booted, now):
-        return INTERRUPTED, str(transcript)
-    if now - touched > QUIET_AFTER:
-        return NO_OUTCOME, str(transcript)
-    return WORKING, str(transcript)
+        return INTERRUPTED
+    return NO_OUTCOME if now - touched > QUIET_AFTER else WORKING

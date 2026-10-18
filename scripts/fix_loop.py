@@ -295,6 +295,13 @@ def _judge_session(
     return running or live is not None
 
 
+# What a fixer refused at login is filed as, and the step that ends it. Only a person can
+# log Claude Code in, so its group awaits them (`harness_triage.awaiting_person`) and the
+# morning toast names it; every re-send until then dies free (`mark_interrupted`).
+LOGGED_OUT = "Claude Code's login has lapsed, so every fixer the pass sends ends at its first turn"
+LOGIN_STEP = f"{triage.PERSON_STEP} run `/login` in any Claude Code session on this machine"
+
+
 def judge_dead(
     ctx: Context,
     tree: fix_reports.Tree,
@@ -303,16 +310,23 @@ def judge_dead(
     transcript: str,
     journal: fix_findings.Journal,
 ) -> list[str]:
-    """Free a dead session's dispatch, and file it unless a restart killed it; the lines
-    for the record."""
+    """Free a dead session's dispatch, and file it unless a restart killed it -- a lapsed
+    login is filed once, for a person, and not as the fixer's; the lines for the record."""
     key = str(tree.stamp.get("key", ""))
     if ctx.writes:
         fix_reports.note_on_stamp(tree.path, "dead", state)
-    if state == fix_reports.INTERRUPTED:
-        # The machine went down under it: no defect to file and no attempt spent, only
+    if state in (fix_reports.INTERRUPTED, fix_reports.LOGGED_OUT):
+        # The machine went down under it, or nobody was logged in: no attempt spent, only
         # a re-send, which finds a PR's tree as the session left it.
         if ctx.writes:
             fix_ledger.mark_interrupted(ctx.ledger_path, key, state)
+        if state == fix_reports.LOGGED_OUT:
+            # One group for the machine, not one per tree: it is the login, and a person's.
+            journal.add(
+                Finding(
+                    "fixer-logged-out", "devkit", LOGGED_OUT, evidence=transcript, said=LOGIN_STEP
+                )
+            )
         return [f"{where} -- {state}; sent again"]
     # No key: a dead session is re-sent at once, not parked behind the finding. One
     # that never started is cited by what its launcher said, when it left a record.

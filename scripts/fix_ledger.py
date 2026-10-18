@@ -262,16 +262,24 @@ def mark_dead(path: Path, key: str, reason: str) -> bool:
 
 
 def mark_interrupted(path: Path, key: str, reason: str) -> bool:
-    """The session sent under `key` was killed by the machine restarting.
+    """The session sent under `key` died of something outside it: the machine restarting,
+    or a login that had lapsed.
 
     Frees the key as `mark_dead` does, and takes the send back: nothing a fixer did is
     measured by a power-off, and counted, it spent a blind problem's one attempt and
-    escalated two conflicts (#480, #482) nobody had tried. Returns whether one was marked.
+    escalated two conflicts (#480, #482) nobody had tried. The send's stamp in `at` goes
+    too, or the daily cap (`sent_since`) still counts it: social-scraper #90 and #91's
+    fixers, both refused at login, held every Dependabot send for a day. Returns whether
+    one was marked.
     """
     if not _mark(path, key, "dead", reason):
         return False
     ledger = read_ledger(path)
-    ledger[key]["sent"] = max(0, sends(ledger[key]) - 1)
+    entry = ledger[key]
+    entry["sent"] = max(0, sends(entry) - 1)
+    stamps = entry.get("at")
+    if isinstance(stamps, list) and stamps and stamps[-1] == entry.get("when"):
+        stamps.pop()  # `record` appends the send's `when` last
     _write(path, ledger)
     return True
 
