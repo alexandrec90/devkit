@@ -1106,6 +1106,12 @@ def runner_defaults_targeted(cwd: str, workspace_root: Path, project: str) -> bo
     return False
 
 
+def runs_suite_bare(tree: Path) -> bool:
+    """`tree` has a `RUNNER`, and run bare it is the whole suite: what the fix pass tells
+    a fixer in that tree as a fact (`fix_prompts.for_runner`). No runner is not one."""
+    return (tree / RUNNER).is_file() and not runner_defaults_targeted(str(tree), tree, "")
+
+
 def task_branch(cwd: str, runner=sweep.run_windowless) -> str:
     """The branch the session's tree is on, when it is a task branch; "" otherwise.
 

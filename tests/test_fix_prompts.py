@@ -633,6 +633,21 @@ def test_every_prompt_says_a_runner_that_runs_the_suite_bare_is_given_files():
         assert "a whole test directory is the gate's to run" in text
 
 
+def test_a_tree_whose_runner_runs_the_suite_bare_is_told_so_as_a_fact():
+    """028caaaf, recurring after 27a0245d's conditional: carameli's fixer ran --help and
+    the bare runner in one call, reading "where its --help says so" as "run it". In such
+    a tree the sentence is a fact with no condition left to check; elsewhere it stands."""
+    for text in every_prompt():
+        told = fix_prompts.for_runner(text, suite_bare=True)
+        assert "with no arguments picks the tests" not in told
+        assert "where its --help says so" not in told
+        assert "runs the whole suite, so never run it bare" in told
+        assert "the contract tests that read every module" in told
+        assert told.endswith(fix_prompts.STOP)
+        assert fix_prompts.for_runner(text, suite_bare=False) == text
+    assert fix_prompts.RUNNER_SENTENCE in fix_prompts.FINISH
+
+
 def test_a_prompt_names_the_log_that_came_down_when_no_junit_report_failed(tmp_path):
     """8f622cc6: devkit's suite reports only in `test-failures.log`, and a fixer told to
     read `failures.txt` first went looking for a file nothing had written."""
