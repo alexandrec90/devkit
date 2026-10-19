@@ -4136,3 +4136,88 @@ def test_a_scheduled_collector_handed_off_from_here_says_where_it_went(tmp_path,
     )
     [(_name, level, detail)] = collectors.tray_rows(docker=FakeDocker([]))
     assert level == collectors.OK and detail.startswith(f"handed off to {OTHER}")
+
+
+# --- the scheduled-move pieces, each on its own ------------------------------------------
+
+SCRAPER = config.Collector("social-scraper", command=("uv",), minutes=30, handoff=("uv",))
+IBKR = config.Collector("ibkr_trader", "app", handoff=tuple(HANDOFF))
+
+
+def test_move_bound_is_the_scheduled_bound_only_for_a_scheduled_collector():
+    assert collectors.move_bound(SCRAPER) == collectors.SCHEDULED_MOVE_BOUND
+    assert collectors.move_bound(IBKR) == collectors.MOVE_BOUND
+    assert collectors.SCHEDULED_MOVE_BOUND > collectors.MOVE_BOUND
+
+
+def test_stopped_part_names_the_task_of_a_scheduled_collector_and_the_service_otherwise():
+    assert collectors.stopped_part(SCRAPER) == "its scheduled task `social-scraper`"
+    assert collectors.stopped_part(IBKR) == "`app`"
+
+
+def test_stop_task_removes_an_idle_task_without_waiting(tmp_path, monkeypatch):
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler()
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, schtasks)
+    here.sleep, slept = ticking(monkeypatch, 0.0)
+    assert collectors.stop_task(scraper, here, collectors.RUN_WAIT) == ""
+    assert slept == [] and not schtasks.registered
+
+
+def test_stop_task_with_no_wait_refuses_a_run_in_flight_at_once(tmp_path, monkeypatch):
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler(runs=1)
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, schtasks)
+    here.sleep, slept = ticking(monkeypatch, 0.0)
+    said = collectors.stop_task(scraper, here, 0)
+    assert said.startswith("its scheduled run is still going, and is not ended")
+    assert "after" not in said and "`schtasks /End /TN social-scraper`" in said
+    assert slept == [] and schtasks.registered and "/Delete" not in schtasks.verbs()
+
+
+def test_restart_registers_a_scheduled_collectors_task_again(tmp_path, monkeypatch):
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler(registered=False)
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, schtasks)
+    assert (
+        collectors.restart(scraper, here)
+        == "its scheduled task `social-scraper` is registered again"
+    )
+    assert schtasks.registered and docker.calls == [], "no `docker compose up` for a task"
+
+
+@pytest.mark.parametrize(
+    ("up_ok", "said"),
+    [
+        (True, "`app` is started again"),
+        (False, "`app` could NOT be started again (Error response from daemon: no space)"),
+    ],
+)
+def test_restart_starts_a_services_collector_again(tmp_path, up_ok, said):
+    docker = FakeDocker([], up_ok=up_ok)
+    here = collectors.Here(
+        tmp_path, tmp_path, THIS, docker, FakeHandoff(docker.calls), collectors.Report()
+    )
+    assert collectors.restart(IBKR, here) == said
+    assert docker.calls == [("up", "ibkr_trader", "app")]
+
+
+def test_scheduled_row_is_green_for_a_stopped_collector_and_one_a_move_holds(tmp_path):
+    name = collectors.ROW_PREFIX + "social-scraper"
+    stopped = collectors.Target(SCRAPER, STOP, tmp_path)
+    assert collectors.scheduled_row(stopped, "") == (
+        name,
+        collectors.OK,
+        "off on this machine (by choice)",
+    )
+    assert collectors.scheduled_row(stopped, f"handed off to {OTHER}") == (
+        name,
+        collectors.OK,
+        f"handed off to {OTHER}",
+    )
+    held = collectors.Target(SCRAPER, RUN, tmp_path)
+    assert collectors.scheduled_row(held, "`collectors.py move`") == (
+        name,
+        collectors.OK,
+        "`collectors.py move` is acting on it (its scheduled task is removed for the export)",
+    )
