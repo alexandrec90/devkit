@@ -186,8 +186,9 @@ def covered(
         f"it merged at {merge.merged_at}, after this row's run began"
     )
     found = []
+    repo = target(merge.url)[0]
     for item in triage.open_items(items):
-        when, began = _moment(item.stamp), ran_from(item)
+        when, began = _moment(item.stamp), ran_from(item, repo)
         if item.signature != head.signature or when is None or began is None:
             continue
         if start < when and began < end:
@@ -195,12 +196,21 @@ def covered(
     return found
 
 
-def ran_from(item: triage.Item) -> _dt.datetime | None:
-    """When the run a row reports began: its `started=` (`log-wrap.record_failure`), else
-    its stamp. A scheduled job ran the code on disk when it started, so a run spanning a
-    merge failed on the code before it -- 1fad5675, a scrape begun four minutes before
-    social-scraper #68 merged and filed nine minutes after."""
-    return _moment(item.fields.get("started", "")) or _moment(item.stamp)
+def ran_from(item: triage.Item, repo: str = "") -> _dt.datetime | None:
+    """How old the code was that the run a row reports ran: its `started=`
+    (`log-wrap.record_failure`), else its stamp -- or, where the merge is `repo`'s and
+    `repo` is the checkout the row ran from, its `head_at=` when that is earlier.
+
+    A scheduled job ran the code on disk when it started, so a run spanning a merge
+    failed on the code before it -- 1fad5675, a scrape begun four minutes before
+    social-scraper #68 merged and filed nine minutes after. And the code on disk is the
+    checkout's, which has the merge only once it pulls: d7b9c8c4, a reconcile begun five
+    minutes after devkit #659 merged, from a checkout still two commits behind it.
+    `head_at` dates only the row's own checkout, so a merge in another repo (a project
+    fix for a `collectors.py fire` row filed from devkit) is never judged by it."""
+    began = _moment(item.fields.get("started", "")) or _moment(item.stamp)
+    head = _moment(item.fields.get("head_at", "")) if repo and repo == item.project else None
+    return min(began, head) if began and head else began
 
 
 def verify(
