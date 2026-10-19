@@ -100,8 +100,25 @@ def test_the_workspace_declares_a_handoff_for_every_collector():
     by_name = {c.project: c.handoff for c in found}
     plain = ("uv", "run", "python", "scripts/handoff.py")
     assert by_name["social-scraper"] == plain, "boto3 is a core dependency there"
-    assert by_name["sports_betting"] == plain, "boto3 is a core dependency there too"
     assert all(by_name.values()), [name for name, argv in by_name.items() if not argv]
+
+
+def test_the_workspace_s_sports_betting_handoff_brings_the_sibling_data_lake():
+    """7fb217a7: its pyproject declares data-lake in no form, so a hand install into the
+    venv was the only thing holding the store's import up -- missing on the second PC,
+    and removed by any `uv sync`, so `pending` exited 2 there on every pass."""
+    found, _notes = config.parse_setting(
+        (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
+    )
+    [sports] = [c for c in found if c.project == "sports_betting"]
+    assert sports.handoff == (
+        "uv",
+        "run",
+        "--with-editable",
+        "../data-lake[archive]",
+        "python",
+        "scripts/handoff.py",
+    )
 
 
 def test_the_workspace_declares_ibkr_trader_s_handoff_with_the_extra_boto3_needs():

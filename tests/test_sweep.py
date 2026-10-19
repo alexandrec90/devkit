@@ -1122,6 +1122,83 @@ def test_sync_skips_the_fetch_when_asked():
     assert not any(step[0] == "fetch" for step in steps)
 
 
+def test_sync_restores_a_phantom_before_the_checkout_and_the_merge():
+    """Ten scheduled reconciles failed on ibkr_trader in a row: its nightly job rewrote
+    `tickers.txt` with CRLF endings, the checkout read as clean, and `merge --ff-only`
+    refused over the file anyway."""
+    state = on_feature(ahead=0, unpushed=0, phantom_dirty=1, phantom_files=("tickers.txt",))
+    steps = sweep.sync_plan(state, sweep.SPENT).steps
+    restore = ("checkout", "--", "tickers.txt")
+    assert steps.index(restore) < steps.index(("checkout", "main"))
+    assert steps.index(restore) < steps.index(("merge", "--ff-only", "origin/main"))
+
+
+def test_sync_restores_nothing_on_a_checkout_with_no_phantom():
+    steps = sweep.sync_plan(on_default(behind=2), sweep.NEEDS_PULL).steps
+    assert not any(step[:2] == ("checkout", "--") for step in steps)
+
+
+def test_only_an_unstaged_phantom_is_restorable():
+    """A staged phantom's index entry is the one copy of something; a real edit and an
+    untracked file are work. Only the ` M` line no diff backs is safe to restore."""
+    porcelain = " M tickers.txt\nMM staged.txt\n M app.py\n?? new.txt\n"
+    kept = sweep.real_changes(porcelain, ["app.py"])
+    assert sweep.restorable_phantoms(porcelain, kept) == ("tickers.txt",)
+
+
+def test_inspect_names_the_restorable_phantom(tmp_path):
+    state = inspect_with(
+        tmp_path,
+        {
+            **INSPECT_REPLIES,
+            ("status", "--porcelain"): " M tickers.txt\n M app.py\n",
+            ("diff", "--name-only", "HEAD"): "app.py",
+        },
+    )
+    assert state.phantom_files == ("tickers.txt",)
+
+
+def test_inspect_restores_nothing_when_the_diff_could_not_run(tmp_path):
+    """Fails towards keeping work: with no diff every porcelain path is real."""
+    state = inspect_with(tmp_path, {**INSPECT_REPLIES, ("status", "--porcelain"): " M a.txt\n"})
+    assert state.phantom_files == ()
+
+
+def test_the_sync_plan_merges_over_a_crlf_rewrite_in_a_real_repo(tmp_path):
+    """The reconcile failure end to end: git refuses the fast-forward over a file whose
+    only change is its line endings, and the plan's steps get it through losslessly."""
+    upstream, clone = tmp_path / "up", tmp_path / "co"
+    upstream.mkdir()
+
+    def git(where: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(where), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    git(upstream, "init", "-q", "-b", "main")
+    (upstream / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    (upstream / "t.txt").write_bytes(b"A\nB\nC\n")
+    git(upstream, "add", "-A")
+    git(upstream, "commit", "-q", "-m", "one")
+    git(tmp_path, "clone", "-q", str(upstream), str(clone))
+    (upstream / "t.txt").write_bytes(b"A\nB\nD\n")
+    git(upstream, "commit", "-q", "-am", "two")
+    git(clone, "fetch", "-q", "origin")
+    (clone / "t.txt").write_bytes(b"A\r\nB\r\nC\r\n")
+
+    state = sweep.inspect("co", clone, fetch=False)
+    assert (state.dirty, state.phantom_files) == (0, ("t.txt",))
+    refused = git(clone, "merge", "--ff-only", "origin/main")
+    assert "would be overwritten by merge" in refused.stderr
+
+    for step in sweep.sync_plan(state, sweep.NEEDS_PULL, fetch=False).steps:
+        assert git(clone, *step).returncode == 0, step
+    assert (clone / "t.txt").read_bytes() == b"A\nB\nD\n"
+
+
 # --- the "nothing stranded" contract ----------------------------------------
 
 ALL_VERDICTS = {

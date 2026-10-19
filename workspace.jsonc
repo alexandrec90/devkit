@@ -2855,13 +2855,16 @@
 				"buildsFrom": ["data-lake"],
 				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"]
 			},
-			// `handoff`: as ibkr_trader's. boto3 is a core dependency here; the data-lake
-			// store it imports lazily is installed into the venv by hand, which `uv run`
-			// keeps -- it syncs inexactly unless told `--exact`.
+			// `handoff`: as ibkr_trader's. The data-lake store it imports lazily is declared
+			// in no form (its pyproject says why), so the argv brings the sibling itself:
+			// a hand install into the venv was missing on the second PC, and every `uv
+			// sync` removes one, so `pending` exited 2 there on every pass.
 			"sports_betting": {
 				"service": "collector",
 				"health": ["sports-betting", "health", "--quiet"],
-				"handoff": ["uv", "run", "python", "scripts/handoff.py"]
+				"handoff": [
+					"uv", "run", "--with-editable", "../data-lake[archive]", "python", "scripts/handoff.py"
+				]
 			},
 			// On the host, not in a container: it drives the installed Chrome with the
 			// browser profiles in its checkout. `handoff`: dumps its `db` through the

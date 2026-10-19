@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator
@@ -98,6 +99,17 @@ SETTLE = re.compile(
     re.M,
 )
 SETTLE_MAX = 30  # seconds: longer than a run takes to attach is a wait, not a settle
+# A pause between the *different* runs of one experiment re-reads nothing: `for S in
+# "set a" "set b"; do restart; run "$S"; sleep 20; done` paces three measurements, each
+# its own work, where a poll asks one question again. A session comparing a database's
+# peak memory across three settings was filed as the poll group's eleventh recurrence
+# (52b90be8). Only a `for` over literal items its body uses: a counter, a `$(seq)` or a
+# `{1..n}` is the same check repeated, and an until or while loop is a poll by shape.
+SHELL_KEYWORD = re.compile(r"(?<![\w$./-])(?:for|while|until|do|done)(?![\w./-])")
+KEYWORD_POSITION = re.compile(r"(?:[;&|(\n]|\b(?:do|then|else))\Z")
+QUOTED_RUN = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+FOR_HEADER = re.compile(r"for\s+(?P<var>\w+)\s+in\s+(?P<words>.*?)[\s;]*$", re.S)
+GENERATED_WORDS = re.compile(r"\$\(|`|\{[^}]*\.\.[^}]*\}|\$\w")
 # The rewrite a call that sets Git Bash's own conversion switches was measuring, beside the
 # setting that stops it: the probe that put `MSYS2_ARG_CONV_EXCL` in the agent env was
 # filed as the defect it measured (d71a2caf), as `BYTE_DUMP` is for a heredoc's probe.
@@ -624,6 +636,63 @@ def settles(command: str) -> bool:
     return found is not None and int(found["seconds"]) <= SETTLE_MAX
 
 
+def _loops(command: str) -> list[tuple[int, int, int, str]]:
+    """Each shell loop in `command` as `(start, body, end, keyword)`, nested ones included.
+
+    Quoted text is blanked first, length kept, so a `do` in a query or a message is not
+    the shell's and the offsets still index `command`.
+    """
+    masked = QUOTED_RUN.sub(lambda m: m[0][0] + "_" * (len(m[0]) - 2) + m[0][-1], command)
+    opened: list[tuple[int, int, str]] = []
+    loops: list[tuple[int, int, int, str]] = []
+    for found in SHELL_KEYWORD.finditer(masked):
+        word = found[0]
+        before = masked[max(0, found.start() - 8) : found.start()].rstrip(" \t")
+        if before and not KEYWORD_POSITION.search(before):
+            continue  # `echo waiting for it` opens no loop
+        if word in {"for", "while", "until"}:
+            opened.append((found.start(), -1, word))
+        elif word == "do" and opened and opened[-1][1] < 0:
+            start, _, kind = opened.pop()
+            opened.append((start, found.end(), kind))
+        elif word == "done" and opened and opened[-1][1] >= 0:
+            start, body, kind = opened.pop()
+            loops.append((start, body, found.start(), kind))
+    return loops
+
+
+def _distinct_runs(header: str, body: str) -> bool:
+    """`for VAR in WORDS; do BODY` runs different work each pass: WORDS are two or more
+    literal items, not all numbers, and BODY uses VAR."""
+    head = FOR_HEADER.match(header)
+    if head is None or GENERATED_WORDS.search(head["words"]):
+        return False
+    try:
+        items = shlex.split(head["words"])
+    except ValueError:
+        return False
+    if len(set(items)) < 2 or all(item.isdigit() for item in items):
+        return False
+    return re.search(rf"\$\{{?{head['var']}\b", body) is not None
+
+
+def paced(command: str) -> bool:
+    """Every poll-shaped wait in `command` paces distinct runs -- see `SHELL_KEYWORD`."""
+    loops = _loops(command)
+    waits = list(dict(COMMAND_PATTERNS)["poll"].finditer(command))
+    for found in waits:
+        at = found.start() + found[0].find("sleep")
+        if not found[0].lstrip(";&| \t\n").startswith("sleep"):
+            return False  # an until-loop
+        enclosing = [loop for loop in loops if loop[1] <= at < loop[2]]
+        if not enclosing:
+            return False
+        start, body, end, kind = max(enclosing)
+        if kind != "for" or not _distinct_runs(command[start : body - 2], command[body:end]):
+            return False
+    return bool(waits)
+
+
 def _quoted(text: str, at: int) -> bool:
     """The match at `at` sits inside a string its line opened: a regex's source, a diff
     of the rule's prose, pytest echoing an assertion's operands. That quotes an error
@@ -810,6 +879,8 @@ class _Session:
             # a backgrounded one is a single call and its completion notice -- the shape
             # the engineering rule asks a long wait to take, not a loop of turns.
             if cls == "poll" and (event.tool in WAIT_TOOLS or event.background):
+                continue
+            if cls == "poll" and paced(event.command):
                 continue
             if cls == "poll" and not self.settled and settles(event.command):
                 self.settled = True

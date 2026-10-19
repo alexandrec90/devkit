@@ -247,6 +247,37 @@ def test_name_compose_project_reports_a_write_and_is_silent_on_a_rerun(tmp_path)
     assert wt_env.name_compose_project(tree, checkout) == ""
 
 
+def test_a_compose_file_that_pins_its_name_keeps_every_worktree_on_one_stack(tmp_path):
+    """244b4d87: ibkr_trader pins `name: ibkr_trader` so every worktree reaches the one
+    database. `COMPOSE_PROJECT_NAME` outranks that pin, so writing it started a second,
+    empty Postgres on the same host port; the tree is left to the project's own name."""
+    checkout = _repo(tmp_path / "ibkr_trader")
+    (checkout / "docker-compose.yml").write_text(
+        "# shared infra\n\nname: ibkr_trader\n\nservices:\n  db:\n    image: x\n",
+        encoding="utf-8",
+    )
+    _git(checkout, "commit", "-qam", "pin")
+    tree = _worktree(checkout, tmp_path / "wt")
+    said = wt_env.name_compose_project(tree, checkout)
+    assert "shares that stack" in said and "ibkr_trader" in said
+    assert not (tree / ".env").exists()
+
+
+@pytest.mark.parametrize(
+    ("text", "pinned"),
+    [
+        ("name: ibkr_trader\nservices: {}\n", "ibkr_trader"),
+        ('name: "quoted"  # why\n', "quoted"),
+        ("name: ${STACK:-x}\n", "${STACK:-x}"),
+        ("services:\n  db:\n    name: not-top-level\n", ""),  # a key inside a service
+        ("services: {}\n# name: commented\n", ""),
+    ],
+)
+def test_only_a_top_level_name_is_a_pin(tmp_path, text, pinned):
+    (tmp_path / "compose.yaml").write_text(text, encoding="utf-8")
+    assert wt_env.pinned_name(tmp_path) == pinned
+
+
 # --- the worktree's own interpreter -------------------------------------------
 # A `claude --worktree` tree starts with no `.venv`, so every test run in it borrows the
 # checkout's interpreter. The agent hooks that used to close that gap are the ones

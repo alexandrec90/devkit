@@ -381,6 +381,45 @@ def test_a_backgrounded_wait_is_one_call_and_its_notice_not_a_poll():
     assert classes([call(loop, "1")]) == ["poll"], "in the foreground it holds the turn"
 
 
+def test_a_pause_between_distinct_runs_is_not_a_poll():
+    """52b90be8, the poll group's eleventh recurrence: a session restarted a database once
+    per setting, measured its peak memory and paused 20 s before the next -- three
+    different runs, none re-reading what the last one read. The transcript's command:"""
+    experiment = (
+        'cd /c/Users/alexa/vs-code/ibkr_trader && Q="select b.ts::date as d, count(*) as n '
+        "from price_bars b where bar_size='1 day' group by 1 order by n desc limit 10;\"; "
+        'for S in "set timescaledb.enable_chunkwise_aggregation=off" '
+        '"set max_parallel_workers_per_gather=0" "set max_parallel_workers_per_gather=2"; '
+        "do docker compose restart db >/dev/null 2>&1; sleep 6; (for i in $(seq 1 30); do "
+        "docker stats --no-stream --format '{{.MemUsage}}' ibkr_trader-db-1; done > "
+        "$CLAUDE_JOB_DIR/tmp/m.txt &); docker compose exec -T db psql -U trader -d ibkr_trader "
+        '-At -c "$S" -c "$Q" >/dev/null; sleep 1; echo "$S: $(sort -h $CLAUDE_JOB_DIR/tmp/m.txt '
+        '| head -1) .. $(sort -h $CLAUDE_JOB_DIR/tmp/m.txt | tail -1)"; sleep 20; done'
+    )
+    assert classes([call(experiment, "1")]) == []
+    assert classes([call('for p in a b; do run "$p"; sleep 15; done', "1")]) == []
+    assert sf.paced(experiment)
+    assert not sf.paced("for p in a b; do run $p; done"), "no wait at all is nothing to excuse"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "for i in 1 2 3; do gh run view 9; sleep 30; done",  # a counter repeats one check
+        "for i in $(seq 1 9); do gh pr checks $i; sleep 30; done",
+        "for i in {1..9}; do gh pr checks $i; sleep 30; done",
+        "for p in a b; do gh run view 9; sleep 30; done",  # the body never uses the item
+        "for p in a a; do run $p; sleep 30; done",  # one item, twice
+        "for p in a b; do run $p; done; sleep 30; tail -5 run.out",  # the sleep is outside
+        'for p in a b; do until [ -f "$p" ]; do date; sleep 30; done; done',  # a poll inside
+        "while true; do gh run view 9; sleep 30; done",
+        "echo waiting for it; sleep 30; tail -5 run.out",  # a `for` in no command position
+    ],
+)
+def test_a_wait_in_a_loop_that_repeats_one_check_is_still_a_poll(command):
+    assert classes([call(command, "1")]) == ["poll"], command
+
+
 def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
     """e1043d81 came back after five resolutions, each excusing one more shape of wait,
     because only a CI gate's wait was written down: a rescue session waited on its own
@@ -590,6 +629,10 @@ def test_the_rule_names_the_spelling_that_avoids_the_error_the_detector_files():
     )
     assert "feature/x:./.devkit.toml" in rule and "`ambiguous argument`" in rule
     assert "`MSYS2_ARG_CONV_EXCL`" in rule and "`origin/`" in rule
+    # c74f75ca: the same rewrite turned `docker compose exec -T db sh /tmp/probe.sh` into a
+    # Windows temp path, and the setting cannot exempt `/tmp/` without breaking every
+    # native program handed one; the rule names the per-command switch instead.
+    assert "`docker exec` with `MSYS_NO_PATHCONV=1`" in " ".join(rule.split())
     # Described there, not quoted: instruction files carry no backslashed paths.
     assert sf._result_class("ambiguous argument 'origin\\main;.devkit.toml'")[0] == "environment"
 
