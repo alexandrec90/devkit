@@ -2,18 +2,19 @@
 """A collector's handoff: the project's own command that carries its data to another machine.
 
 devkit is stdlib only, so it can neither reach the store the data travels through
-(ibkr_trader's is a Cloudflare R2 bucket) nor dump and restore a project's database. The
+(the S3-compatible archive store a project's `.env` names) nor dump and restore a project's database. The
 data half of `collectors.py move` is therefore the project's: an argv prefix it declares
 as `handoff` beside the collector (`collectors_config.Collector.handoff`), run on the host
 from the project's checkout -- where its scheduled `command` collectors run -- with one
 verb appended:
 
     <handoff> export --from A --to B   # dump, upload, address a marker to B; devkit has
-                                       # stopped the collector's service first
+                                       # stopped the collector first: its service, or a
+                                       # scheduled one's task, `needs` left up
     <handoff> pending --host B         # the marker addressed to B and not yet imported,
                                        # as JSON on stdout, or nothing at all
     <handoff> import --host B          # download, verify, restore, mark it imported; the
-                                       # service is left stopped for devkit to start
+                                       # collector is left stopped for devkit to start
 
 Exit 0 is success, 1 failure, and 2 "cannot tell" -- the store could not be read, which
 only `pending` answers. The project writes its own account of each run to `PROJECT_LOG`
