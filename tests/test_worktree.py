@@ -473,10 +473,42 @@ def test_a_project_with_no_templates_gets_exactly_what_it_got_before():
 
 
 def test_render_env_appends_so_the_managed_keys_win():
-    """Compose's dotenv parser takes the last assignment, which is why nothing above is edited."""
     rendered = worktree.render_env("DB_HOST_PORT=5432\nSECRET=keepme\n", {"DB_HOST_PORT": "5435"})
     assert rendered.index("SECRET=keepme") < rendered.index("DB_HOST_PORT=5435")
-    assert "DB_HOST_PORT=5432" in rendered
+    assert f"{worktree.OVERRIDDEN}DB_HOST_PORT=5432" in rendered
+
+
+def _assigned_keys(text: str) -> list[str]:
+    return [
+        line.split("=", 1)[0].removeprefix("export ").strip()
+        for line in text.splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    ]
+
+
+def test_render_env_assigns_no_key_twice():
+    """5f01977b: a social-scraper box's seeded `.env` set COMPOSE_PROJECT_NAME,
+    DATABASE_URL and DB_HOST_PORT, the block set them again, and dotenv-linter's
+    DuplicatedKey failed `lint-all` in every box cut that way."""
+    source = (
+        "COMPOSE_PROJECT_NAME=social-scraper\nexport DB_HOST_PORT=5432\n"
+        "DATABASE_URL=postgresql://u@127.0.0.1:5432/db\n# DB_HOST_PORT=1 is a comment\n"
+        "SECRET=keepme\n"
+    )
+    managed = {
+        "COMPOSE_PROJECT_NAME": "social-scraper--handoff-1018",
+        "DB_HOST_PORT": "5435",
+        "DATABASE_URL": "postgresql://u@127.0.0.1:5435/db",
+    }
+    rendered = worktree.render_env(source, managed)
+    keys = _assigned_keys(rendered)
+    assert sorted(keys) == sorted({*managed, "SECRET"}), keys
+    assert "# DB_HOST_PORT=1 is a comment" in rendered, "a comment is left as it was"
+    assert worktree.dotenv_assignments(rendered)["DB_HOST_PORT"] == "5432", "the seeded value"
+    # A re-render once the block no longer sets a key gives the seeded line back.
+    again = worktree.render_env(rendered, {"COMPOSE_PROJECT_NAME": "x"})
+    assert "export DB_HOST_PORT=5432\n" in again and worktree.OVERRIDDEN + "export" not in again
+    assert worktree.render_env(rendered, managed) == rendered
 
 
 def test_render_env_is_idempotent():

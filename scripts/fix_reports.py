@@ -394,7 +394,7 @@ def last_spoke(path: Path) -> _dt.datetime | None:
     tail = _tail(path)
     if tail is None:
         return None
-    for line in reversed(tail.splitlines()):
+    for line in reversed(tail):
         try:
             record = json.loads(line)
             when = _dt.datetime.fromisoformat(str(record["timestamp"]).replace("Z", "+00:00"))
@@ -408,34 +408,34 @@ def last_spoke(path: Path) -> _dt.datetime | None:
 TAIL_BYTES = 256 * 1024
 
 
-def _tail(path: Path) -> str | None:
-    """The last `TAIL_BYTES` of a transcript, decoded; None when it cannot be read."""
+def _tail(path: Path) -> list[str] | None:
+    """The lines in a transcript's last `TAIL_BYTES`, or None where it cannot be read."""
     try:
         with path.open("rb") as handle:
             handle.seek(max(0, path.stat().st_size - TAIL_BYTES))
-            return handle.read().decode("utf-8", errors="replace")
+            return handle.read().decode("utf-8", errors="replace").splitlines()
     except OSError:
         return None
 
 
-# What Claude Code stamps on the synthetic reply it writes in place of a model's when
-# the account's login has lapsed: `Login expired · Please run /login`, with no model
-# call behind it. Both of social-scraper #90's and #91's fixers ended on one at their
-# first turn on 2026-10-18, and spent the day's Dependabot cap doing it.
-AUTH_FAILED = "authentication_failed"
+# What Claude Code puts on the reply it writes for a session whose stored login the API
+# refused, a reply reading "Login expired" and asking for /login. On 2026-10-18 five dispatched fixers in a
+# row said that and nothing else, and each was filed as a dead fixer of its own -- the
+# ledger ones naming their fresh branch, so three groups -- whose own fixer then died the
+# same way (2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40). social-scraper #90's and
+# #91's sends also spent the day's Dependabot cap doing it.
+LOGIN_REFUSED = "authentication_failed"
 
 
-def logged_out(path: Path) -> bool:
-    """Whether the transcript's last assistant record is Claude Code's auth-failure
-    reply (`AUTH_FAILED`): the session ended because nobody was logged in."""
-    tail = _tail(path)
-    for line in reversed((tail or "").splitlines()):
+def login_refused(path: Path) -> bool:
+    """Whether a transcript's last reply is Claude Code saying its login was refused."""
+    for line in reversed(_tail(path) or []):
         try:
             record = json.loads(line)
         except ValueError:
             continue
         if isinstance(record, dict) and record.get("type") == "assistant":
-            return bool(record.get("isApiErrorMessage")) and record.get("error") == AUTH_FAILED
+            return bool(record.get("isApiErrorMessage")) and record.get("error") == LOGIN_REFUSED
     return False
 
 
@@ -541,7 +541,7 @@ NO_OUTCOME = "ended without an outcome"
 # `fixer-no-outcome` defects (4dc413a1, 9201a08f, e2feebab) and two of them spent their
 # PRs' one blind attempt, escalating #480 and #482 as `blind-evidence`.
 INTERRUPTED = "stopped by a restart"
-# Refused at its first turn because Claude Code's login had lapsed (`logged_out`): like
+# Refused at its first turn because Claude Code's login had lapsed (`login_refused`): like
 # a restart, nothing the session did, so its send is taken back.
 LOGGED_OUT = "logged out"
 DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED, LOGGED_OUT)
@@ -628,7 +628,7 @@ def _heard(
 ) -> str:
     """The state of a session that has spoken since it was sent, and left no outcome."""
     # Judged at once rather than after `QUIET_AFTER`: the session is over on that reply.
-    if logged_out(transcript):
+    if login_refused(transcript):
         return LOGGED_OUT
     if _restarted(touched, booted, now):
         return INTERRUPTED

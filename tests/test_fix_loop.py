@@ -418,21 +418,60 @@ def test_a_session_refused_at_login_is_sent_again_and_filed_once_for_a_person(ct
     with log.open("a", encoding="utf-8") as handle:
         handle.write(
             f'{{"type": "assistant", "timestamp": "{sent.isoformat()}", '
-            f'"error": "{fix_reports.AUTH_FAILED}", "isApiErrorMessage": true}}\n'
+            f'"error": "{fix_reports.LOGIN_REFUSED}", "isApiErrorMessage": true}}\n'
         )
     closed, journal = close(ctx)
     assert closed.lines == ["carameli agent/x-0919 -- logged out; sent again"]
     [found] = journal.findings
     assert (found.kind, found.project, found.detail) == (
-        "fixer-logged-out",
+        "fixer-login-refused",
         "devkit",
-        fix_loop.LOGGED_OUT,
+        fix_loop.LOGIN_DETAIL,
     )
-    assert found.said == fix_loop.LOGIN_STEP and found.evidence == str(log)
-    assert dict(found.fields())["said"].startswith(triage.PERSON_STEP)
+    assert found.evidence == str(log)
     entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
     assert entry["dead"] == fix_reports.LOGGED_OUT and fix_ledger.sends(entry) == 0
     assert fix_ledger.sent_since(fix_ledger.read_ledger(ctx.ledger_path), "dependabot", sent) == 0
+
+
+def test_a_session_whose_login_was_refused_is_one_group_awaiting_a_person(ctx, monkeypatch):
+    """2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40: on 2026-10-18 five fixers in two
+    projects each replied "Login expired" and nothing else. Each was filed as a dead
+    fixer naming its tree, so five groups, and the sweep sent at the first died the same
+    way and became the next. The login is the machine's: one group, which a person owns."""
+    refused = json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": (NOW - _dt.timedelta(hours=3)).isoformat(),
+            "error": fix_reports.LOGIN_REFUSED,
+            "isApiErrorMessage": True,
+        }
+    )
+    found = []
+    for branch in ("agent/fix-harness-ledger-1018-2", "agent/fix-harness-ledger-1018-3"):
+        fix_ledger.record(ctx.ledger_path, KEY, "n", NOW - _dt.timedelta(hours=5))
+        path = tree(
+            ctx,
+            monkeypatch,
+            sent=NOW - _dt.timedelta(hours=5),
+            transcript_age=_dt.timedelta(hours=3),
+            branch=branch,
+        )
+        log = fix_reports.transcript_dir(path) / "s.jsonl"
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(refused + "\n")
+        closed, journal = close(ctx)
+        [one] = journal.findings
+        found.append(one)
+        assert closed.lines == [f"carameli {branch} -- {fix_reports.LOGGED_OUT}; sent again"]
+        entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+        assert entry["dead"] and fix_ledger.sends(entry) == 0, "no attempt spent"
+    assert found[0].detail == found[1].detail and found[0].project == "devkit"
+    assert found[0].kind == "fixer-login-refused" and found[0].evidence == str(log)
+    line = fix_findings.harness_events.event_line("0", found[0].event, found[0].fields())
+    row = triage.parse_line(line)
+    assert triage.person_step(row) == "run `claude auth login` on this machine"
+    assert triage.awaiting_person([row]) == {row.signature: triage.person_step(row)}
 
 
 def test_judging_a_dead_session_in_plan_mode_files_it_and_writes_nothing(ctx, monkeypatch):

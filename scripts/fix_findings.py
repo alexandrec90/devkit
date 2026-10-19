@@ -76,9 +76,6 @@ class Finding:
     command: str = ""
     event: str = FINDING
     agent: str = ""  # the runtime a harvested transcript ran under; "" for the pass
-    # What the run said, where it names a step only a person can take
-    # (`harness_triage.PERSON_STEP`): its group then awaits that person, not a fixer.
-    said: str = ""
     # A branch whose merge settles it: the finding is filed already resolved against it,
     # and `fix_verify` reopens it if that branch never lands. Not a ledger field.
     settles_with: str = ""
@@ -106,7 +103,6 @@ class Finding:
             ("evidence", self.evidence),
             ("command", self.command),
             ("agent", self.agent),
-            ("said", self.said),
         )
 
 

@@ -294,7 +294,7 @@ def test_a_session_sent_just_before_a_restart_never_spoke_and_was_stopped_by_it(
 
 def _reply(when: _dt.datetime, error: str = "") -> str:
     """An assistant record as Claude Code writes one; with `error`, its synthetic API-error
-    reply -- `Login expired - Please run /login` is `fix_reports.AUTH_FAILED`."""
+    reply -- `Login expired - Please run /login` is `fix_reports.LOGIN_REFUSED`."""
     failed = f', "error": "{error}", "isApiErrorMessage": true' if error else ""
     return f'{{"type": "assistant", "timestamp": "{when.isoformat()}"{failed}}}\n'
 
@@ -307,27 +307,15 @@ def test_a_session_refused_at_login_is_logged_out_without_waiting_out_the_quiet(
     projects = tmp_path / "projects"
     tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
     log = _transcript(projects, tree, _dt.timedelta(minutes=9), now)
-    assert not fix_reports.logged_out(log), "no reply yet"
+    assert not fix_reports.login_refused(log), "no reply yet"
     with log.open("a", encoding="utf-8") as handle:
-        handle.write(_reply(now - _dt.timedelta(minutes=9), fix_reports.AUTH_FAILED))
+        handle.write(_reply(now - _dt.timedelta(minutes=9), fix_reports.LOGIN_REFUSED))
         handle.write('{"type": "cost-state"}\n')
-    assert fix_reports.logged_out(log)
+    assert fix_reports.login_refused(log)
     assert fix_reports.session_state(tree, now, projects) == (fix_reports.LOGGED_OUT, str(log))
     assert fix_reports.LOGGED_OUT in fix_reports.DEAD
     (tree / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
     assert fix_reports.session_state(tree, now, projects)[0] == fix_reports.DONE, "an outcome wins"
-
-
-def test_only_a_last_reply_refused_at_login_is_logged_out(tmp_path):
-    """A session that logged in again and went on replied since; another API error -- a
-    rate limit -- is not the login; and an unreadable transcript says nothing."""
-    now = _dt.datetime.now(_dt.UTC)
-    log = tmp_path / "s.jsonl"
-    log.write_text(_reply(now, fix_reports.AUTH_FAILED) + _reply(now), encoding="utf-8")
-    assert not fix_reports.logged_out(log)
-    log.write_text(_reply(now, "rate_limit"), encoding="utf-8")
-    assert not fix_reports.logged_out(log)
-    assert not fix_reports.logged_out(tmp_path / "missing.jsonl")
 
 
 def test_the_boot_is_read_off_the_machine_and_unknown_where_it_cannot_be(monkeypatch):
@@ -457,6 +445,46 @@ def test_the_last_record_is_found_past_a_line_split_by_the_read_window(tmp_path,
     monkeypatch.setattr(fix_reports, "TAIL_BYTES", 10_000)
     assert fix_reports.last_spoke(path) == now
     assert fix_reports.last_spoke(tmp_path / "missing.jsonl") is None
+
+
+# The record Claude Code wrote as each of 2026-10-18's five dead fixers' only reply.
+REFUSED_REPLY = json.dumps(
+    {
+        "type": "assistant",
+        "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Login expired"}]},
+        "error": fix_reports.LOGIN_REFUSED,
+        "isApiErrorMessage": True,
+    }
+)
+
+
+def test_a_transcript_whose_last_reply_is_a_refused_login_says_so(tmp_path):
+    """2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40: each read as a fixer that died."""
+    path = tmp_path / "s.jsonl"
+    path.write_text(
+        '{"type": "user", "message": {"content": "fix it"}}\n'
+        f"{REFUSED_REPLY}\n"
+        '{"type": "system", "subtype": "turn_duration"}\n{"type": "last-prompt"}\nnot json\n',
+        encoding="utf-8",
+    )
+    assert fix_reports.login_refused(path)
+
+
+def test_a_refused_login_the_session_got_past_or_another_api_error_is_not_one(tmp_path):
+    later = tmp_path / "later.jsonl"
+    reply = '{"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}}'
+    later.write_text(f"{REFUSED_REPLY}\n{reply}\n", encoding="utf-8")
+    assert not fix_reports.login_refused(later), "only the last reply speaks"
+    other = tmp_path / "other.jsonl"
+    other.write_text(
+        json.dumps({"type": "assistant", "error": "rate_limit", "isApiErrorMessage": True}),
+        encoding="utf-8",
+    )
+    assert not fix_reports.login_refused(other)
+    silent = tmp_path / "silent.jsonl"
+    silent.write_text('{"type": "user"}\n', encoding="utf-8")
+    assert not fix_reports.login_refused(silent)
+    assert not fix_reports.login_refused(tmp_path / "missing.jsonl")
 
 
 def test_a_session_judged_once_or_one_that_leaves_no_transcript_is_not_judged(tmp_path):

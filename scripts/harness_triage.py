@@ -331,8 +331,9 @@ def person_step(item: Item) -> str:
     """The step a row's run said only a person can take (`PERSON_STEP`), or "".
 
     Read off `said` before `cause`: `cause` is cut at `log-wrap.CAUSE_WIDTH`, and the step
-    comes last on its line, after what went wrong."""
-    for name in ("said", "cause"):
+    comes last on its line, after what went wrong. A pass finding has neither and says it
+    in its `detail` (`fix_loop.LOGIN_DETAIL`)."""
+    for name in ("said", "cause", "detail"):
         text = item.fields.get(name, "")
         if PERSON_STEP in text:
             return text.split(PERSON_STEP, 1)[1].strip(" -")
