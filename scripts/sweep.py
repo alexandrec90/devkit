@@ -420,6 +420,9 @@ class State:
     # box this file calls clean is one git refuses to remove. See
     # `worktree.reap_plan`, which is the only reader.
     phantom_dirty: int = 0
+    # The unstaged (` M`) half of those phantoms, by path: what `sync_plan` restores
+    # before its merge, which git refuses over them as it does over a real edit.
+    phantom_files: tuple[str, ...] = ()
     behind: int = 0
     ahead: int = 0
     upstream: str = ""
@@ -693,6 +696,24 @@ def real_changes(porcelain: str, diffed: Iterable[str]) -> tuple[str, ...]:
     """
     keep = {_unquote(path) for path in diffed if path.strip()} | untracked_paths(porcelain)
     return tuple(path for path in parse_porcelain(porcelain) if path in keep)
+
+
+def restorable_phantoms(porcelain: str, kept: Iterable[str]) -> tuple[str, ...]:
+    """The phantoms `real_changes` dropped that `git checkout -- <path>` loses nothing on.
+
+    Only a ` M` line qualifies: the index matches HEAD and the working file differs from
+    it in bytes git's own filters erase, so restoring it from the index rewrites the line
+    endings and nothing else. A staged phantom (`MM`, `M `) is left alone, because the
+    index is then the one copy of something.
+
+    `merge --ff-only` refuses over these exactly as over a real edit -- "Your local
+    changes to the following files would be overwritten by merge" -- so a checkout this
+    file calls clean was one the scheduled reconcile failed to sync on every run, ten in
+    a row on ibkr_trader, whose nightly job rewrote `tickers.txt` with CRLF endings.
+    """
+    kept_set = set(kept)
+    lines = [line for line in porcelain.splitlines() if line.startswith(" M ")]
+    return tuple(path for path in parse_porcelain("\n".join(lines)) if path not in kept_set)
 
 
 def parse_worktree_branches(text: str) -> tuple[str, ...]:
@@ -1179,22 +1200,37 @@ def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
     steps: list[tuple[str, ...]] = []
     if fetch:
         steps.append(("fetch", "--prune", "origin"))
+    if state.phantom_files:
+        # Before the checkout and the merge, either of which git refuses over them --
+        # see `restorable_phantoms` for why this discards nothing.
+        steps.append(("checkout", "--", *state.phantom_files))
     if state.branch != home:
         steps.append(("checkout", home))
     # Unconditional: `behind` was measured against the *old* HEAD, so after a
     # checkout it says nothing about where `home` sits. `--ff-only` makes an
     # already-current branch a no-op and a diverged one an error, never a merge.
     steps.append(("merge", "--ff-only", f"origin/{state.default_branch}"))
+    steps += _reap_steps(state, verdict, home)
 
-    # Everything merged, plus the spent branch we are standing on (trivially
-    # merged, so `-d` takes it). Never `home` itself, and never `-D`: an unmerged
-    # branch surviving this is the correct outcome, not a failure to force past.
-    #
-    # Never a branch a *sibling* worktree is on either. Reaping is repo-wide while
-    # a checkout is per-worktree, so `carameli-b` sees the branch `carameli` is
-    # working on, merged into origin/master, and reads it as abandoned. Git would
-    # refuse the delete, but a plan that proposes it is a plan that reports a
-    # failure on a healthy workspace -- and the dry run stops being trustworthy.
+    # Only linked worktrees need the record: a primary can always fall back to the
+    # default branch, so storing it there would just be a value that can go stale.
+    return Plan(steps=tuple(steps), anchor=home if state.linked else "")
+
+
+def _reap_steps(state: State, verdict: str, home: str) -> list[tuple[str, ...]]:
+    """`sync_plan`'s branch deletes, run once the checkout stands on `home`.
+
+    Everything merged, plus the spent branch we are standing on (trivially
+    merged, so `-d` takes it). Never `home` itself, and never `-D`: an unmerged
+    branch surviving this is the correct outcome, not a failure to force past.
+
+    Never a branch a *sibling* worktree is on either. Reaping is repo-wide while
+    a checkout is per-worktree, so `carameli-b` sees the branch `carameli` is
+    working on, merged into origin/master, and reads it as abandoned. Git would
+    refuse the delete, but a plan that proposes it is a plan that reports a
+    failure on a healthy workspace -- and the dry run stops being trustworthy.
+    """
+    steps: list[tuple[str, ...]] = []
     live_elsewhere = {b for b in state.worktree_branches if b != state.branch}
     doomed: list[str] = []
     for candidate in (*state.merged_task_branches, state.branch if verdict == SPENT else ""):
@@ -1222,10 +1258,7 @@ def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
         if branch in state.ahead_of_upstream:
             steps.append(("branch", "--unset-upstream", branch))
         steps.append(("branch", "-d", branch))
-
-    # Only linked worktrees need the record: a primary can always fall back to the
-    # default branch, so storing it there would just be a value that can go stale.
-    return Plan(steps=tuple(steps), anchor=home if state.linked else "")
+    return steps
 
 
 def dedupe_branch_names(pairs: list[tuple[State, Plan]]) -> list[Plan]:
@@ -1471,6 +1504,21 @@ def has_open_pr(gh: Git, branch: str) -> bool:
     return isinstance(payload, list) and bool(payload)
 
 
+def _dirty_files(git: Git, porcelain: str) -> tuple[str, ...]:
+    """`porcelain`'s paths that hold work, for `inspect`.
+
+    Only asks git for a diff when status claims there is one -- and only trusts the
+    answer when the call succeeded, so a checkout with no HEAD keeps every path. See
+    `real_changes` for what the two commands disagree about and what that cost.
+    """
+    dirty_files = parse_porcelain(porcelain)
+    if dirty_files:
+        diff = git("diff", "--name-only", "HEAD")
+        if diff.returncode == 0:
+            dirty_files = real_changes(porcelain, (diff.stdout or "").splitlines())
+    return dirty_files
+
+
 def inspect(
     name: str,
     path: Path,
@@ -1491,15 +1539,7 @@ def inspect(
     default_branch = tb.detect_default_branch(git, fallback="")
     branch = _out(git("branch", "--show-current"))
     porcelain = git("status", "--porcelain").stdout or ""
-    dirty_files = parse_porcelain(porcelain)
-    if dirty_files:
-        # Only ask git for a diff when status claims there is one -- and only trust the
-        # answer when the call succeeded, so a checkout with no HEAD keeps every path.
-        # See `real_changes` for what the two commands disagree about and what that
-        # disagreement cost.
-        diff = git("diff", "--name-only", "HEAD")
-        if diff.returncode == 0:
-            dirty_files = real_changes(porcelain, (diff.stdout or "").splitlines())
+    dirty_files = _dirty_files(git, porcelain)
 
     behind = ahead = 0
     if default_branch:
@@ -1587,6 +1627,7 @@ def inspect(
         dirty=len(dirty_files),
         dirty_files=dirty_files,
         phantom_dirty=len(parse_porcelain(porcelain)) - len(dirty_files),
+        phantom_files=restorable_phantoms(porcelain, dirty_files),
         behind=behind,
         ahead=ahead,
         upstream=upstream,

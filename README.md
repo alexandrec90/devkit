@@ -994,7 +994,8 @@ container and trusted for its exit code.
   "ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"],
                    "handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"] },
   "sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"],
-                      "handoff": ["uv", "run", "python", "scripts/handoff.py"] },
+                      "handoff": ["uv", "run", "--with-editable", "../data-lake[archive]",
+                                  "python", "scripts/handoff.py"] },
   "social-scraper": { "command": ["uv", "run", "social-scraper", "scrape"], "minutes": 30, "needs": ["db"],
                       "handoff": ["uv", "run", "python", "scripts/handoff.py"] }
 }

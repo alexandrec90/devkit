@@ -242,6 +242,28 @@ def has_compose_file(root: Path) -> bool:
     return any((root / name).is_file() for name in COMPOSE_FILES)
 
 
+# A top-level `name:` in a compose file, which only a mapping key at column 0 can be.
+PINNED_NAME = re.compile(r"^name[ \t]*:[ \t]*[\"']?(?P<name>[^\s\"'#]+)", re.M)
+
+
+def pinned_name(root: Path) -> str:
+    """The project name the tree's compose file pins, or "" when it pins none.
+
+    A pin is the project saying every tree shares one stack -- ibkr_trader's says so, so
+    that a worktree reaches the one database rather than starting an empty second one on
+    the same host port. `COMPOSE_PROJECT_NAME` outranks `name:`, so writing ours over it
+    starts exactly that second stack (244b4d87).
+    """
+    for name in COMPOSE_FILES:
+        try:
+            found = PINNED_NAME.search((root / name).read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if found:
+            return found["name"]
+    return ""
+
+
 def _git(root: Path, *args: str, env: Mapping[str, str] | None = None, timeout: float = 10) -> str:
     """Run git in `root` and return stripped stdout; "" on any failure.
 
@@ -315,6 +337,8 @@ def name_compose_project(here: Path, checkout: Path) -> str:
     # nothing either way, so stdout cannot tell the two answers apart.
     if not ignores_env(here):
         return ""
+    if pinned := pinned_name(here):
+        return f"devkit: compose pins `name: {pinned}`, so this worktree shares that stack"
     name = compose_project(checkout.name, here.name)
     target = here / ENV_FILE
     try:
