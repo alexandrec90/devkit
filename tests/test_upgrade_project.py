@@ -1835,11 +1835,22 @@ def test_the_gap_is_reported_once_for_the_run_before_any_box(tmp_path, capsys, m
         (tmp_path / name).mkdir()
         (tmp_path / name / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli", "ibkr_trader")
-    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
     assert capsys.readouterr().err.count("enforce-capped-bash.py") == 1
 
 
-def test_the_undelivered_release_reaches_the_artifact_and_the_exit_code(
+def _owed_release_run(tmp_path, monkeypatch, *selection: str) -> int:
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(up, "unreleased_vendored_changes", lambda *_a: ["scripts/hooks/hook.py"])
+    stamps_on_main(monkeypatch)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+    return up.main([*selection, "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)])
+
+
+def test_the_undelivered_release_reaches_the_artifact_and_a_named_runs_exit_code(
     tmp_path, capsys, monkeypatch
 ):
     """The gap this script exists to report was the one thing it reported *only* to
@@ -1848,19 +1859,32 @@ def test_the_undelivered_release_reaches_the_artifact_and_the_exit_code(
     the fix you merged" was an exit code of 0 beside a log saying the run was clean.
 
     Reverting either half fails here: drop the outcome and the artifact is empty, drop
-    the exit code and `schedule_health` never surfaces the log at session start."""
-    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
-    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
-    monkeypatch.setattr(up, "unreleased_vendored_changes", lambda *_a: ["scripts/hooks/hook.py"])
-    stamps_on_main(monkeypatch)
-    (tmp_path / "carameli").mkdir()
-    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
-    ws = workspace(tmp_path, "carameli")
-
-    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+    the exit code and the person who named a checkout is not told to cut a release."""
+    assert _owed_release_run(tmp_path, monkeypatch, "carameli") == 1
     written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
     assert "scripts/hooks/hook.py" in written
     assert up.RELEASE_TASK in written
+
+
+def test_the_unattended_pass_records_the_owed_release_but_does_not_fail_on_it(
+    tmp_path, capsys, monkeypatch
+):
+    """The regression (ledger 619cf2dd): the 03:00 `--all` run exited 1 on the owed
+    release ninety seconds before the fix pass, which cuts it, opened the release PR --
+    and the ledger sent a fixer at a release already cut. The artifact keeps the line."""
+    assert _owed_release_run(tmp_path, monkeypatch, "--all") == 0
+    written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
+    assert "scripts/hooks/hook.py" in written
+    assert up.owes_only_a_release(written)
+
+
+def test_the_run_code_spares_only_the_owed_release_and_only_unattended():
+    owed = up.Outcome(up.RELEASE_SCOPED, 1, "cut a release")
+    assert up.run_code([owed], unattended=True) == 0
+    assert up.run_code([owed], unattended=False) == 1
+    assert up.run_code([owed, up.Outcome("carameli", 2, "x")], unattended=True) == 2
+    assert up.run_code([up.Outcome(up.RUN_SCOPED, 2, "x")], unattended=True) == 2
+    assert up.run_code([], unattended=True) == 0
 
 
 def test_a_run_level_outcome_is_not_offered_as_a_retry_target():
