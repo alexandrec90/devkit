@@ -398,11 +398,16 @@ def reapable(
     return pr_merged and not holds_uncommitted and verdict in MERGE_CAN_BE_STALE_ABOUT
 
 
-# Marks the block `new` writes into a box's `.env`. Docker Compose's dotenv parser
-# takes the LAST assignment of a key, so appending is what lets the block win over a
-# seeded copy of the project's own `.env` without editing the lines it came with.
+# Marks the block `new` writes into a box's `.env`, after a seeded copy of the project's
+# own `.env`.
 MANAGED_BEGIN = "# --- devkit worktree: managed block (rewritten on every spawn) ---"
 MANAGED_END = "# --- end devkit worktree block ---"
+# What a seeded assignment of a key the block also sets is commented out under. Compose's
+# last-wins parser made the duplicate harmless to compose, but not to dotenv-linter, which
+# fails a duplicated key, so every box's `lint-all` was red on a `.env` the session never
+# touched (social-scraper, 5f01977b). Taken back off on a re-read (`_unmanaged_lines`),
+# so a re-render restores the line once the block stops setting its key.
+OVERRIDDEN = "# devkit worktree: set in the managed block below: "
 
 # --- reconcile ---------------------------------------------------------------
 # What `reconcile` decides to do with one box. Four, because they are the four
@@ -1077,7 +1082,8 @@ def managed_env(
 
 
 def _unmanaged_lines(text: str) -> list[str]:
-    """`text`'s lines outside any managed block -- what the source checkout itself chose."""
+    """`text`'s lines outside any managed block -- what the source checkout itself chose,
+    with any line `render_env` commented out (`OVERRIDDEN`) restored."""
     kept: list[str] = []
     skipping = False
     for line in text.splitlines():
@@ -1086,7 +1092,7 @@ def _unmanaged_lines(text: str) -> list[str]:
         elif line.strip() == MANAGED_END:
             skipping = False
         elif not skipping:
-            kept.append(line)
+            kept.append(line.removeprefix(OVERRIDDEN))
     return kept
 
 
@@ -1165,10 +1171,13 @@ def render_env(source: str, managed: Mapping[str, str]) -> str:
     A fresh worktree checks out **tracked files only**, so a project whose stack reads
     a gitignored `.env` gets none and its compose run fails on missing variables. The
     fix is to seed a copy of the source checkout's file and then override the handful
-    of keys that must differ — which works because compose's dotenv parser takes the
-    last assignment of a duplicated key, so nothing in the seeded half needs editing.
+    of keys that must differ. A seeded line assigning one of those is commented out
+    (`OVERRIDDEN`) rather than left as a second assignment of the key.
     """
-    kept = _unmanaged_lines(source)
+    kept = [
+        f"{OVERRIDDEN}{line}" if _assigns(line, managed) else line
+        for line in _unmanaged_lines(source)
+    ]
     while kept and not kept[-1].strip():
         kept.pop()
     block = [
@@ -1177,6 +1186,12 @@ def render_env(source: str, managed: Mapping[str, str]) -> str:
         MANAGED_END,
     ]
     return "\n".join([*kept, "", *block]) + "\n"
+
+
+def _assigns(line: str, keys: Mapping[str, str]) -> bool:
+    """Whether `line` is a dotenv assignment of one of `keys`."""
+    match = _ASSIGNMENT.match(line)
+    return match is not None and not line.lstrip().startswith("#") and match.group(1) in keys
 
 
 def venv_python(windows: bool) -> str:

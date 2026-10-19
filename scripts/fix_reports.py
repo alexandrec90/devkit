@@ -391,13 +391,10 @@ def last_spoke(path: Path) -> _dt.datetime | None:
     tree as busy for `QUIET_AFTER`. Only the file's tail is read; a tail holding no dated
     record (one enormous last line) falls back to the mtime, which errs towards busy.
     """
-    try:
-        with path.open("rb") as handle:
-            handle.seek(max(0, path.stat().st_size - TAIL_BYTES))
-            tail = handle.read().decode("utf-8", errors="replace")
-    except OSError:
+    tail = _tail(path)
+    if tail is None:
         return None
-    for line in reversed(tail.splitlines()):
+    for line in reversed(tail):
         try:
             record = json.loads(line)
             when = _dt.datetime.fromisoformat(str(record["timestamp"]).replace("Z", "+00:00"))
@@ -409,6 +406,36 @@ def last_spoke(path: Path) -> _dt.datetime | None:
 
 
 TAIL_BYTES = 256 * 1024
+
+
+def _tail(path: Path) -> list[str] | None:
+    """The lines in a transcript's last `TAIL_BYTES`, or None where it cannot be read."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - TAIL_BYTES))
+            return handle.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+
+
+# What Claude Code puts on the reply it writes for a session whose stored login the API
+# refused, a reply reading "Login expired" and asking for /login. On 2026-10-18 five dispatched fixers in a
+# row said that and nothing else, and each was filed as a dead fixer of its own -- the
+# ledger ones naming their fresh branch, so three groups -- whose own fixer then died the
+# same way (2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40).
+LOGIN_REFUSED = "authentication_failed"
+
+
+def login_refused(path: Path) -> bool:
+    """Whether a transcript's last reply is Claude Code saying its login was refused."""
+    for line in reversed(_tail(path) or []):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "assistant":
+            return bool(record.get("isApiErrorMessage")) and record.get("error") == LOGIN_REFUSED
+    return False
 
 
 def newest_transcript(tree: Path, projects_root: Path | None = None) -> Path | None:
