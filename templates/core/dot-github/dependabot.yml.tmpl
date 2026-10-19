@@ -14,6 +14,9 @@
 # a grouped patch bump rewrote a library's `pandas>=2.2` as `pandas>=3.0.6`, and a
 # project depending on that library, whose other dependencies needed `pandas<3`, went
 # red on its own main. A floor says what the code needs; the lock says what was tested.
+# `lockfile-only`, not `increase-if-necessary`: under that one the uv updater still
+# rewrote `pyarrow>=17` as `pyarrow>=26.0.0`, a release the floor already allowed. The
+# cost is that a deliberate `<N` cap is never widened by the bot; that is a person's call.
 version: 2
 updates:
   - package-ecosystem: uv
@@ -22,7 +25,7 @@ updates:
       interval: weekly
     assignees:
       - {{ github_owner }}
-    versioning-strategy: increase-if-necessary
+    versioning-strategy: lockfile-only
     groups:
       minor-and-patch:
         update-types:
