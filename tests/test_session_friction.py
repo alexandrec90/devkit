@@ -1313,6 +1313,22 @@ def test_a_bare_run_tests_is_whole_only_where_the_runner_defaults_to_the_suite(t
     )
 
 
+def test_runs_suite_bare_is_a_tree_whose_own_runner_has_no_targeted_default(tmp_path):
+    """028caaaf: what the fix pass tells a fixer as a fact of its tree. A runner taking
+    `--all` is targeted bare, one without is the suite, and no runner is neither."""
+    targeted, whole, none = tmp_path / "devkit", tmp_path / "carameli", tmp_path / "bare"
+    for tree in (targeted, whole, none):
+        (tree / "scripts").mkdir(parents=True)
+    (targeted / sf.RUNNER).write_text(
+        'parser.add_argument("--all", action="store_true")\n', encoding="utf-8"
+    )
+    (whole / sf.RUNNER).write_text("subprocess.run(['pytest'])\n", encoding="utf-8")
+    assert not sf.runs_suite_bare(targeted)
+    assert sf.runs_suite_bare(whole)
+    assert not sf.runs_suite_bare(none), "nothing to run bare"
+    assert not sf.runs_suite_bare(REPO_ROOT), "devkit's own runner is targeted"
+
+
 def test_the_machines_python_in_a_tree_with_its_own_venv_is_no_missing_environment(tmp_path):
     """The supervisor of 2026-10-01 filed against itself: it ran pytest on the machine's
     python in a tree whose `.venv` was there all along. A tree with no `.venv` of its own
