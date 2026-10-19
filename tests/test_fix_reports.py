@@ -292,6 +292,32 @@ def test_a_session_sent_just_before_a_restart_never_spoke_and_was_stopped_by_it(
     assert fix_reports.session_state(tree, now, projects, booted)[0] == fix_reports.NEVER_STARTED
 
 
+def _reply(when: _dt.datetime, error: str = "") -> str:
+    """An assistant record as Claude Code writes one; with `error`, its synthetic API-error
+    reply -- `Login expired - Please run /login` is `fix_reports.LOGIN_REFUSED`."""
+    failed = f', "error": "{error}", "isApiErrorMessage": true' if error else ""
+    return f'{{"type": "assistant", "timestamp": "{when.isoformat()}"{failed}}}\n'
+
+
+def test_a_session_refused_at_login_is_logged_out_without_waiting_out_the_quiet(tmp_path):
+    """social-scraper #90 and #91's fixers each ended at their first turn on 2026-10-18 on
+    Claude Code's `Login expired` reply, and were judged by silence: working for 90
+    minutes, then filed as fixers that ended without an outcome."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=9), now)
+    assert not fix_reports.login_refused(log), "no reply yet"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(_reply(now - _dt.timedelta(minutes=9), fix_reports.LOGIN_REFUSED))
+        handle.write('{"type": "cost-state"}\n')
+    assert fix_reports.login_refused(log)
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.LOGGED_OUT, str(log))
+    assert fix_reports.LOGGED_OUT in fix_reports.DEAD
+    (tree / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    assert fix_reports.session_state(tree, now, projects)[0] == fix_reports.DONE, "an outcome wins"
+
+
 def test_the_boot_is_read_off_the_machine_and_unknown_where_it_cannot_be(monkeypatch):
     now = _dt.datetime.now(_dt.UTC)
     booted = fix_reports.booted_at(now)

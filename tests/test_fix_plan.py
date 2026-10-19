@@ -156,6 +156,35 @@ def test_a_second_attempt_no_runner_started_gets_its_fixer():
     assert not fix_plan.reruns_in_place(failure(signature=UNACQUIRED_SIG, run_id=""))
 
 
+# social-scraper #90's PR Gate run 39137365237: public ECR answered the postgres service
+# image's pull with `toomanyrequests`, so `Tests` failed before any step of the workflow.
+SERVICE_PULL_SIG = ("Tests / Initialize containers",)
+
+
+def test_a_job_red_in_the_runners_own_setup_ran_no_workflow_step():
+    assert fix_plan.is_runner_side(SERVICE_PULL_SIG)
+    assert fix_plan.is_runner_side(("Drift / Set up job", *UNACQUIRED_SIG))
+    assert all(fix_plan.is_runner_side((f"x / {step}",)) for step in fix_plan.RUNNER_STEPS)
+    assert not fix_plan.is_unstarted(SERVICE_PULL_SIG), "it did start a step: the runner's"
+    assert not fix_plan.is_runner_side(("Tests / Initialize containers", "Lint / Ruff"))
+    assert not fix_plan.is_runner_side(("Tests",)), "a job with no step named is not known"
+    assert not fix_plan.is_runner_side(())
+
+
+def test_a_first_attempt_red_in_the_runners_setup_is_re_run_in_place_not_fixed():
+    """#90 and #91 were each sent a fixer, which could only have found the registry's
+    refusal; `gh run rerun --failed` asks the registry again and costs no session."""
+    pulled = failure(signature=SERVICE_PULL_SIG, run_id="39137365237", attempt=1)
+    [decision] = fix_plan.plan([pulled], "v0-11-21", PREFIXES)
+    assert decision.action == fix_plan.RERUN and fix_plan.reruns_in_place(pulled)
+    assert "the runner never set it up, so run 39137365237's failed jobs are re-run once" in (
+        decision.note
+    )
+    again = failure(signature=SERVICE_PULL_SIG, run_id="39137365237", attempt=2)
+    [decision] = fix_plan.plan([again], "v0-11-21", PREFIXES)
+    assert decision.action == fix_plan.DISPATCH, "twice is a workflow naming what cannot be had"
+
+
 def test_the_artifact_wins_over_the_steps_and_a_conflict_comes_first():
     jobs = [{"name": "Tests", "conclusion": "failure", "steps": [SET_UP]}]
     assert fix_plan.signature(True, [SUMMARY], jobs) == (

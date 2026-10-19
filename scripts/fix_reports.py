@@ -422,7 +422,8 @@ def _tail(path: Path) -> list[str] | None:
 # refused, a reply reading "Login expired" and asking for /login. On 2026-10-18 five dispatched fixers in a
 # row said that and nothing else, and each was filed as a dead fixer of its own -- the
 # ledger ones naming their fresh branch, so three groups -- whose own fixer then died the
-# same way (2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40).
+# same way (2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40). social-scraper #90's and
+# #91's sends also spent the day's Dependabot cap doing it.
 LOGIN_REFUSED = "authentication_failed"
 
 
@@ -540,7 +541,10 @@ NO_OUTCOME = "ended without an outcome"
 # `fixer-no-outcome` defects (4dc413a1, 9201a08f, e2feebab) and two of them spent their
 # PRs' one blind attempt, escalating #480 and #482 as `blind-evidence`.
 INTERRUPTED = "stopped by a restart"
-DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED)
+# Refused at its first turn because Claude Code's login had lapsed (`login_refused`): like
+# a restart, nothing the session did, so its send is taken back.
+LOGGED_OUT = "logged out"
+DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED, LOGGED_OUT)
 
 
 def booted_at(now: _dt.datetime | None = None) -> _dt.datetime | None:
@@ -593,8 +597,9 @@ def session_state(
 
     `DONE` once it left an intent or a report and has no background task still out,
     `WORKING` while its transcript moves (or it is still inside `START_GRACE`), one of
-    `DEAD` otherwise: `INTERRUPTED` when the machine started (`booted`, from `booted_at`)
-    after the session was last heard from, with no wait. `""` for a tree with no
+    `DEAD` otherwise: `LOGGED_OUT` when its last reply was the login's refusal, and
+    `INTERRUPTED` when the machine started (`booted`, from `booted_at`) after the session
+    was last heard from, with no wait. `""` for a tree with no
     stamp, one already judged dead, or a session this cannot see -- only Claude Code
     keeps a transcript here, and a Codex tab is watched by the person who opened it.
     """
@@ -613,10 +618,18 @@ def session_state(
     if any((_mtime(tree / name) or sent) > sent for name in OUTCOME_FILES):
         return _with_outcome(transcript, now), str(transcript or "")
     touched = last_spoke(transcript) if transcript else None
-    if touched is None or touched < sent:
+    if transcript is None or touched is None or touched < sent:
         return _unheard(tree, sent, now, booted), ""
+    return _heard(transcript, touched, now, booted), str(transcript)
+
+
+def _heard(
+    transcript: Path, touched: _dt.datetime, now: _dt.datetime, booted: _dt.datetime | None
+) -> str:
+    """The state of a session that has spoken since it was sent, and left no outcome."""
+    # Judged at once rather than after `QUIET_AFTER`: the session is over on that reply.
+    if login_refused(transcript):
+        return LOGGED_OUT
     if _restarted(touched, booted, now):
-        return INTERRUPTED, str(transcript)
-    if now - touched > QUIET_AFTER:
-        return NO_OUTCOME, str(transcript)
-    return WORKING, str(transcript)
+        return INTERRUPTED
+    return NO_OUTCOME if now - touched > QUIET_AFTER else WORKING

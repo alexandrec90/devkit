@@ -295,9 +295,9 @@ def _judge_session(
     return running or live is not None
 
 
-LOGIN_REFUSED = "its Claude Code login was refused"
 # Stable across every tree it hits, and naming the step no fixer can take, so its group
-# awaits a person (`triage.awaiting_person`) instead of being sent a fixer that dies too.
+# awaits a person (`triage.awaiting_person`) instead of being sent a fixer that dies too;
+# every re-send until then dies free (`mark_interrupted`).
 LOGIN_DETAIL = (
     "dispatched sessions end at their first reply, Claude Code's stored login refused "
     f"-- {triage.PERSON_STEP} run `claude auth login` on this machine"
@@ -312,24 +312,21 @@ def judge_dead(
     transcript: str,
     journal: fix_findings.Journal,
 ) -> list[str]:
-    """Free a dead session's dispatch, and file it unless a restart killed it; the lines
-    for the record."""
+    """Free a dead session's dispatch, and file it unless a restart killed it -- a lapsed
+    login is filed once, for a person, and not as the fixer's; the lines for the record."""
     key = str(tree.stamp.get("key", ""))
     if ctx.writes:
         fix_reports.note_on_stamp(tree.path, "dead", state)
-    if state == fix_reports.INTERRUPTED:
-        # The machine went down under it: no defect to file and no attempt spent, only
+    if state in (fix_reports.INTERRUPTED, fix_reports.LOGGED_OUT):
+        # The machine went down under it, or nobody was logged in: no attempt spent, only
         # a re-send, which finds a PR's tree as the session left it.
         if ctx.writes:
             fix_ledger.mark_interrupted(ctx.ledger_path, key, state)
+        if state == fix_reports.LOGGED_OUT:
+            # The machine's login, not the fixer: one group whichever tree it hit, awaiting
+            # a person -- the re-send is what shows the login is back.
+            journal.add(Finding("fixer-login-refused", "devkit", LOGIN_DETAIL, evidence=transcript))
         return [f"{where} -- {state}; sent again"]
-    if transcript and fix_reports.login_refused(Path(transcript)):
-        # The machine's login, not the fixer: one group whichever tree it hit, awaiting a
-        # person, and no attempt spent -- the re-send is what shows the login is back.
-        if ctx.writes:
-            fix_ledger.mark_interrupted(ctx.ledger_path, key, LOGIN_REFUSED)
-        journal.add(Finding("fixer-login-refused", "devkit", LOGIN_DETAIL, evidence=transcript))
-        return [f"{where} -- {LOGIN_REFUSED}; sent again"]
     # No key: a dead session is re-sent at once, not parked behind the finding. One
     # that never started is cited by what its launcher said, when it left a record.
     # A launcher's answer is the signature, and the branch -- new every dispatch --

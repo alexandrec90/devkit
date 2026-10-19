@@ -351,7 +351,7 @@ def rerun_workflow(failure: fix_plan.Failure, root: Path) -> int:
     and it is a failure at the tip with its fixer. The plan makes this only for a
     workflow that takes `workflow_dispatch`, so a refusal here is worth reporting.
 
-    A run whose jobs never started a step is re-run in place instead
+    A run whose jobs never started a workflow step is re-run in place instead
     (`fix_plan.reruns_in_place`): its failed and cancelled jobs, on the same commit,
     which is what the PR's checks or the branch's verdict read next pass. So is a gate
     whose red jobs GitHub said it never gave a runner (`lost_runs`), every run of it.
@@ -371,7 +371,7 @@ def rerun_workflow(failure: fix_plan.Failure, root: Path) -> int:
         print(f"  {name}: {what} failed: {why[-1] if why else '?'}", file=sys.stderr)
         return EXIT_FAILED
     if in_place:
-        print(f"  {name}: run {failure.run_id}'s jobs never started a step; re-ran them")
+        print(f"  {name}: run {failure.run_id}'s jobs never started a workflow step; re-ran them")
     else:
         print(f"  {name}: {failure.workflow} re-run on origin/{failure.base} at {failure.tip[:9]}")
     return EXIT_OK

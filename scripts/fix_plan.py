@@ -198,7 +198,7 @@ class Failure:
     # (`gate_evidence.runner_lost`), set only when that is every run read. Such a run is
     # re-run (`gh run rerun --failed`), not fixed: nothing in the code made it red.
     lost_runs: tuple[str, ...] = ()
-    # The run's attempt, read only when its signature `is_unstarted`; 0 when not read.
+    # The run's attempt, read only when its signature `is_runner_side`; 0 when not read.
     attempt: int = 0
 
 
@@ -261,6 +261,21 @@ def is_unstarted(sig: tuple[str, ...]) -> bool:
     """Every entry is a job that never started a step: a runner never acquired, or a
     `runs-on`/`if:` that never let it start -- nothing a session can read code for."""
     return bool(sig) and all(entry.endswith(UNSTARTED) for entry in sig)
+
+
+# The steps GitHub's runner runs before any the workflow names: a job red in one of them
+# failed to be stood up, which no line of the repo took part in. social-scraper #90 and
+# #91 were each red on `Tests / Initialize containers` alone -- public ECR answered the
+# postgres service image's pull with `toomanyrequests` -- and each was sent a fixer.
+RUNNER_STEPS = ("Set up job", "Initialize containers")
+
+
+def is_runner_side(sig: tuple[str, ...]) -> bool:
+    """Every entry is a job none of whose workflow steps ran: one that never started a
+    step (`is_unstarted`), or one that failed in a step of the runner's (`RUNNER_STEPS`)."""
+    return bool(sig) and all(
+        entry.endswith(UNSTARTED) or entry.rpartition(" / ")[2] in RUNNER_STEPS for entry in sig
+    )
 
 
 def signature(conflicted: bool, texts: Iterable[str], jobs: Iterable[dict]) -> tuple[str, ...]:
@@ -491,8 +506,9 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     before any session goes. ibkr_trader's Nightly was fixed on main an hour after its
     run went red, and the fixer sent at that run spent its session finding out (85219e18).
 
-    A run whose first attempt failed only on jobs that never started a step is re-run
-    in place, once: that is a runner GitHub never handed out, not code. A second attempt
+    A run whose first attempt failed only on jobs that never started a step, or that
+    failed in the runner's own setup (`is_runner_side`), is re-run in place, once: that
+    is a runner GitHub never handed out or a registry that refused a pull, not code. A second attempt
     the same way is no longer luck, and its fixer goes, told the job never started --
     unless GitHub's annotations say outright that no runner took them (`lost_runs`),
     which is re-run at any attempt. Both come after the hold: a re-run under a red base
@@ -520,9 +536,16 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
         why = "GitHub never gave its red jobs a runner: re-running them"
         return Decision(RERUN, f"{describe(failure)}; {why}", (failure,))
     if reruns_in_place(failure) and failure.attempt == 1:
-        why = f"no runner started it, so run {failure.run_id}'s failed jobs are re-run once"
-        return Decision(RERUN, f"{describe(failure)}; {why}", (failure,))
+        return Decision(RERUN, f"{describe(failure)}; {_in_place_note(failure)}", (failure,))
     return None
+
+
+def _in_place_note(failure: Failure) -> str:
+    """Why a runner-side failure (`is_runner_side`) is re-run in place rather than fixed."""
+    how = (
+        "no runner started it" if is_unstarted(failure.signature) else "the runner never set it up"
+    )
+    return f"{how}, so run {failure.run_id}'s failed jobs are re-run once"
 
 
 def reruns_at_tip(failure: Failure) -> bool:
@@ -537,7 +560,7 @@ def reruns_at_tip(failure: Failure) -> bool:
 def reruns_in_place(failure: Failure) -> bool:
     """A `RERUN` of this failure re-runs its own run's failed jobs (`gh run rerun
     --failed`) rather than dispatching its workflow at the tip."""
-    return bool(failure.run_id) and is_unstarted(failure.signature) and not reruns_at_tip(failure)
+    return bool(failure.run_id) and is_runner_side(failure.signature) and not reruns_at_tip(failure)
 
 
 def tip_note(failure: Failure, what: str) -> str:

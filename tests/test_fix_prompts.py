@@ -407,6 +407,16 @@ def test_a_prompt_says_when_the_failed_job_never_started_a_step():
     assert "No artifact came down" not in text
 
 
+def test_a_prompt_says_when_the_failed_job_died_in_the_runners_own_setup():
+    """social-scraper #90's `Tests / Initialize containers`: a fixer told only that no
+    artifact came down is not told that no step of the workflow ever ran."""
+    sig = ("Tests / Initialize containers",)
+    text = fix_prompts.pr_prompt(failure(evidence="", url="u/90", signature=sig))
+    assert "before any step of the workflow ran" in text
+    assert "so this one failed twice; read its log at u/90" in text
+    assert "No artifact came down" not in text
+
+
 def test_the_resolver_leaves_the_merge_for_the_pass_to_commit():
     """The first resolver the pass sent used --no-verify on its merge commit and flagged
     it itself. Now it commits nothing: the pass concludes the merge with the hooks

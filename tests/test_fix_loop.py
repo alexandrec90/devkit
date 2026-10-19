@@ -407,6 +407,33 @@ def test_a_session_the_machine_restarted_under_is_sent_again_not_filed(ctx, monk
     assert entry["dead"] == fix_reports.INTERRUPTED and fix_ledger.sends(entry) == 0
 
 
+def test_a_session_refused_at_login_is_sent_again_and_filed_once_for_a_person(ctx, monkeypatch):
+    """social-scraper #90 and #91's fixers each ended at their first turn on 2026-10-18 on
+    `Login expired`, were filed as two fixers that ended without an outcome, and their
+    sends spent the day's Dependabot cap. A lapsed login is the machine's, and a person's."""
+    sent = NOW - _dt.timedelta(minutes=10)
+    fix_ledger.record(ctx.ledger_path, KEY, "n", sent, source="dependabot")
+    path = tree(ctx, monkeypatch, sent=sent, transcript_age=_dt.timedelta(minutes=9))
+    log = fix_reports.transcript_dir(path) / "s.jsonl"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f'{{"type": "assistant", "timestamp": "{sent.isoformat()}", '
+            f'"error": "{fix_reports.LOGIN_REFUSED}", "isApiErrorMessage": true}}\n'
+        )
+    closed, journal = close(ctx)
+    assert closed.lines == ["carameli agent/x-0919 -- logged out; sent again"]
+    [found] = journal.findings
+    assert (found.kind, found.project, found.detail) == (
+        "fixer-login-refused",
+        "devkit",
+        fix_loop.LOGIN_DETAIL,
+    )
+    assert found.evidence == str(log)
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.LOGGED_OUT and fix_ledger.sends(entry) == 0
+    assert fix_ledger.sent_since(fix_ledger.read_ledger(ctx.ledger_path), "dependabot", sent) == 0
+
+
 def test_a_session_whose_login_was_refused_is_one_group_awaiting_a_person(ctx, monkeypatch):
     """2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40: on 2026-10-18 five fixers in two
     projects each replied "Login expired" and nothing else. Each was filed as a dead
@@ -436,7 +463,7 @@ def test_a_session_whose_login_was_refused_is_one_group_awaiting_a_person(ctx, m
         closed, journal = close(ctx)
         [one] = journal.findings
         found.append(one)
-        assert closed.lines == [f"carameli {branch} -- {fix_loop.LOGIN_REFUSED}; sent again"]
+        assert closed.lines == [f"carameli {branch} -- {fix_reports.LOGGED_OUT}; sent again"]
         entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
         assert entry["dead"] and fix_ledger.sends(entry) == 0, "no attempt spent"
     assert found[0].detail == found[1].detail and found[0].project == "devkit"

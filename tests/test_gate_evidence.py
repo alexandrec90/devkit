@@ -589,12 +589,13 @@ def test_a_run_whose_jobs_never_started_is_read_with_its_attempt(monkeypatch, tm
     assert decision.action == fix_plan.RERUN
 
 
-def test_the_attempt_is_asked_for_only_of_an_unstarted_signature():
+def test_the_attempt_is_asked_for_only_of_a_runner_side_signature():
     gh = table({("run", "view", "7", "--json", "attempt"): {"attempt": 2}})
     assert ev.run_attempt(gh, "7", ("Drift (never started a step)",)) == 2
+    assert ev.run_attempt(gh, "7", ("Tests / Initialize containers",)) == 2
     assert ev.run_attempt(gh, "7", ("Tests / Suite",)) == 0
     assert ev.run_attempt(gh, "", ("Drift (never started a step)",)) == 0
-    assert len(gh.calls) == 1
+    assert len(gh.calls) == 2
     for said in ({"attempt": "x"}, [], "not json"):
         assert (
             ev.run_attempt(table({("run", "view"): said}), "7", ("J (never started a step)",)) == 0

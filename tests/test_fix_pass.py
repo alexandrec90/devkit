@@ -1124,7 +1124,8 @@ def test_a_run_whose_jobs_never_started_is_re_run_in_place_and_no_session(
     decision = fix_plan.Decision(fix_plan.RERUN, "n", (pr,))
     assert fix_pass.fix_send.dispatch(decision, tmp_path, "claude") == 0
     assert calls == [("carameli", ("run", "rerun", "37363944090", "--failed"))]
-    assert "carameli #412: run 37363944090's jobs never started a step" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "carameli #412: run 37363944090's jobs never started a workflow step" in out
     old = failure(signature=sig, run_id="5", attempt=1)
     assert fix_pass.fix_prs.rerun_workflow(old, tmp_path) == fix_pass.EXIT_FAILED
     assert "run rerun failed: HTTP 403: run too old" in capsys.readouterr().err
