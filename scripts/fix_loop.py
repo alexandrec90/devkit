@@ -295,6 +295,15 @@ def _judge_session(
     return running or live is not None
 
 
+LOGIN_REFUSED = "its Claude Code login was refused"
+# Stable across every tree it hits, and naming the step no fixer can take, so its group
+# awaits a person (`triage.awaiting_person`) instead of being sent a fixer that dies too.
+LOGIN_DETAIL = (
+    "dispatched sessions end at their first reply, Claude Code's stored login refused "
+    f"-- {triage.PERSON_STEP} run `claude auth login` on this machine"
+)
+
+
 def judge_dead(
     ctx: Context,
     tree: fix_reports.Tree,
@@ -314,6 +323,13 @@ def judge_dead(
         if ctx.writes:
             fix_ledger.mark_interrupted(ctx.ledger_path, key, state)
         return [f"{where} -- {state}; sent again"]
+    if transcript and fix_reports.login_refused(Path(transcript)):
+        # The machine's login, not the fixer: one group whichever tree it hit, awaiting a
+        # person, and no attempt spent -- the re-send is what shows the login is back.
+        if ctx.writes:
+            fix_ledger.mark_interrupted(ctx.ledger_path, key, LOGIN_REFUSED)
+        journal.add(Finding("fixer-login-refused", "devkit", LOGIN_DETAIL, evidence=transcript))
+        return [f"{where} -- {LOGIN_REFUSED}; sent again"]
     # No key: a dead session is re-sent at once, not parked behind the finding. One
     # that never started is cited by what its launcher said, when it left a record.
     # A launcher's answer is the signature, and the branch -- new every dispatch --

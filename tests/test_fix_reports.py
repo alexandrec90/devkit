@@ -421,6 +421,46 @@ def test_the_last_record_is_found_past_a_line_split_by_the_read_window(tmp_path,
     assert fix_reports.last_spoke(tmp_path / "missing.jsonl") is None
 
 
+# The record Claude Code wrote as each of 2026-10-18's five dead fixers' only reply.
+REFUSED_REPLY = json.dumps(
+    {
+        "type": "assistant",
+        "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Login expired"}]},
+        "error": fix_reports.LOGIN_REFUSED,
+        "isApiErrorMessage": True,
+    }
+)
+
+
+def test_a_transcript_whose_last_reply_is_a_refused_login_says_so(tmp_path):
+    """2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40: each read as a fixer that died."""
+    path = tmp_path / "s.jsonl"
+    path.write_text(
+        '{"type": "user", "message": {"content": "fix it"}}\n'
+        f"{REFUSED_REPLY}\n"
+        '{"type": "system", "subtype": "turn_duration"}\n{"type": "last-prompt"}\nnot json\n',
+        encoding="utf-8",
+    )
+    assert fix_reports.login_refused(path)
+
+
+def test_a_refused_login_the_session_got_past_or_another_api_error_is_not_one(tmp_path):
+    later = tmp_path / "later.jsonl"
+    reply = '{"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}}'
+    later.write_text(f"{REFUSED_REPLY}\n{reply}\n", encoding="utf-8")
+    assert not fix_reports.login_refused(later), "only the last reply speaks"
+    other = tmp_path / "other.jsonl"
+    other.write_text(
+        json.dumps({"type": "assistant", "error": "rate_limit", "isApiErrorMessage": True}),
+        encoding="utf-8",
+    )
+    assert not fix_reports.login_refused(other)
+    silent = tmp_path / "silent.jsonl"
+    silent.write_text('{"type": "user"}\n', encoding="utf-8")
+    assert not fix_reports.login_refused(silent)
+    assert not fix_reports.login_refused(tmp_path / "missing.jsonl")
+
+
 def test_a_session_judged_once_or_one_that_leaves_no_transcript_is_not_judged(tmp_path):
     now = _dt.datetime.now(_dt.UTC)
     tree = _stamped(tmp_path / "t", now - _dt.timedelta(hours=4), agent="codex")
