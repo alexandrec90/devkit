@@ -86,12 +86,13 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
 {{#postgres}}
-    # ECR Public's mirror of the Docker Official Images, not Docker Hub: a hosted runner
-    # pulls Hub anonymously on a shared IP, and `toomanyrequests` fails the job before a
-    # test runs (social-scraper, 2026-10-09). tests/test_workflow_images.py in devkit.
+    # Google's mirror of the Docker Official Images, not Docker Hub or ECR Public: a
+    # hosted runner pulls anonymously on a shared IP, and both answer `toomanyrequests`
+    # once strangers spend its quota, failing the job before a test runs (social-scraper,
+    # 2026-10-09 and 2026-10-18). tests/test_workflow_images.py in devkit.
     services:
       db:
-        image: public.ecr.aws/docker/library/postgres:18
+        image: mirror.gcr.io/library/postgres:18
         env:
           POSTGRES_USER: {{ db_user }}
           POSTGRES_PASSWORD: {{ db_password }} # pragma: allowlist secret
@@ -105,7 +106,7 @@ jobs:
           --health-retries 5
 {{#redis}}
       redis:
-        image: public.ecr.aws/docker/library/redis:7
+        image: mirror.gcr.io/library/redis:7
         ports:
           - 6379:6379
         options: >-
