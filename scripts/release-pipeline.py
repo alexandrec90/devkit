@@ -951,17 +951,18 @@ def adoption_outcome(version: str, scope: str, code: int, artifact: str) -> int:
     adoption is untagged by construction. On 2026-10-11 #629 merged while v0.11.62 was
     cut, every consumer's adoption PR opened, and the run was filed as a failed
     scheduled job anyway. The next `--if-needed` run cuts the release that change
-    needs, so the warning is said and the run succeeds.
+    needs, so the warning is said and the run succeeds. An `--all` adoption already
+    exits 0 on it (`upgrade-project.run_code`), so the artifact is read whatever the code.
     """
-    if code == 0:
-        _say(f"{version} released and up for adoption everywhere.")
-        return 0
-    if upgrade_module().owes_only_a_release(artifact):
+    if code in (0, 1) and upgrade_module().owes_only_a_release(artifact):
         _say(
             f"{version} released and up for adoption everywhere. Main moved on while it "
             "was cut, so it carries vendored changes no tag delivers yet (logs/upgrade.log "
             "names them); the next `--if-needed` run releases them."
         )
+        return 0
+    if code == 0:
+        _say(f"{version} released and up for adoption everywhere.")
         return 0
     # Not a release failure: the release is cut and tagged. Adoption is a separate
     # per-consumer act with its own artifact, and `logs/upgrade.log` says which.

@@ -378,6 +378,13 @@ def test_main_moving_on_during_the_release_is_not_a_failed_release(capsys):
     assert "next `--if-needed` run" in out.out
 
 
+def test_an_all_adoption_that_exits_0_on_the_owed_release_still_says_so(capsys):
+    """`--all` spares the owed release its exit 1 (`upgrade-project.run_code`), so the
+    note has to come from the artifact, not from the code."""
+    assert rp.adoption_outcome("v0.11.62", "--all", 0, _owed_artifact()) == 0
+    assert "next `--if-needed` run" in capsys.readouterr().out
+
+
 def test_a_checkout_that_failed_beside_the_owed_release_still_stops(capsys):
     failed = up.Outcome("carameli", 2, "upgrade: carameli -- pushed, but the PR failed")
     assert rp.adoption_outcome("v0.11.62", "--all", 2, _owed_artifact(failed)) == 1

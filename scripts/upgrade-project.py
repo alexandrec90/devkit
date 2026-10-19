@@ -1027,7 +1027,8 @@ def owes_only_a_release(body: str) -> bool:
     """Is the one thing this artifact holds against its run the `(release)` warning?
 
     That is every checkout adopted, and devkit main carrying vendored changes the tag
-    does not. Exit 1 is right for the run a person started, but not for the one
+    does not. Exit 1 is right for the run a person started (an `--all` run exits 0 on
+    it, `run_code`), but not for the one
     `release-pipeline.py` starts: there it means main moved on while the release was
     being cut (#629 merged during v0.11.62's), and the next `--if-needed` run cuts the
     release it owes. Read off the artifact because the exit code alone cannot tell
@@ -1049,8 +1050,24 @@ def write_artifact(root: Path, body: str) -> Path | None:
     return path
 
 
-def _finish(tag: str, dry_run: bool, outcomes: list[Outcome]) -> int:
-    """Write the artifact, then return the worst code across the run.
+def run_code(outcomes: list[Outcome], unattended: bool) -> int:
+    """The run's exit code: the worst outcome's, but for an owed release when unattended.
+
+    **The unattended pass does not own the owed release.** Exit 1 on `(release)` is a
+    person's cue to cut one, and right for a run a person started. On `--all` the fix
+    pass reads that same predicate every half hour and cuts the release itself
+    (`fix_release.cut_release`), and files it once a wait stalls (`fix_stall`) -- so
+    the scheduled run's exit 1 was a second, slower report of a job already started.
+    On 2026-10-19 the 03:00 run exited 1 ninety seconds before the pass opened the
+    release PR, and the ledger sent a fixer at a release that was already cut (ledger
+    619cf2dd). The line still reaches `logs/upgrade.log`; only the code is spared.
+    """
+    counted = [o for o in outcomes if not (unattended and o.name == RELEASE_SCOPED)]
+    return max((outcome.code for outcome in counted), default=0)
+
+
+def _finish(tag: str, dry_run: bool, outcomes: list[Outcome], unattended: bool = False) -> int:
+    """Write the artifact, then return the run's code -- `run_code` says which.
 
     Every exit from `main` goes through here, including the ones that never reach a
     project: "devkit has no tags" and "that checkout is not in the workspace" are the
@@ -1076,7 +1093,7 @@ def _finish(tag: str, dry_run: bool, outcomes: list[Outcome]) -> int:
             f"upgrade: clean -- every selected checkout is on devkit {tag}; "
             f"nothing needs a human, so {ARTIFACT.as_posix()} is empty."
         )
-    return max((outcome.code for outcome in outcomes), default=0)
+    return run_code(outcomes, unattended)
 
 
 class _ReportingParser(argparse.ArgumentParser):
@@ -1175,7 +1192,8 @@ def main(argv: list[str] | None = None) -> int:
     def stopped(code: int, message: str, tag: str = "(none resolved)") -> int:
         """A run-level failure: reported once, and to the artifact like any other."""
         print(message, file=sys.stderr)
-        return _finish(tag, args.dry_run, [*preflight, Outcome(RUN_SCOPED, code, message)])
+        outcomes = [*preflight, Outcome(RUN_SCOPED, code, message)]
+        return _finish(tag, args.dry_run, outcomes, args.every)
 
     if not args.workspace.is_file():
         return stopped(2, f"upgrade: no workspace file at {args.workspace}")
@@ -1205,15 +1223,12 @@ def main(argv: list[str] | None = None) -> int:
     # project, and a reader who came here for a specific vendored fix needs to know the
     # tag does not carry it *before* reading four green adoption lines.
     #
-    # **Carried into the artifact, and exit 1 with it.** For months this printed to
-    # stderr and stopped there, which made it the one actionable sentence this script
+    # **Carried into the artifact, and exit 1 with it but on `--all` (`run_code`).** It
+    # once printed to stderr and stopped there, the one actionable sentence this script
     # produces that nothing could act on: the nightly pass runs under `pythonw`, whose
     # stderr goes nowhere at all, so the machine's whole record of "every consumer is
-    # about to adopt a release missing the fix you merged" was an exit code of 0 beside
-    # an empty log saying the run was clean. It was, of the checkouts -- and that is
-    # precisely the reading that made the gap invisible. Exit 1 is the needs-a-human
-    # code, and now that the human step is one task, this is a signal with a click
-    # behind it rather than a chore.
+    # about to adopt a release missing the fix you merged" was an empty log saying the
+    # run was clean. Exit 1 is the needs-a-human code; the human step is one task.
     if warning := unreleased_line(unreleased_vendored_changes(args.devkit, tag), tag):
         print(warning, file=sys.stderr)
         preflight.append(Outcome(RELEASE_SCOPED, 1, warning))
@@ -1247,12 +1262,12 @@ def main(argv: list[str] | None = None) -> int:
     if not todo:
         # Still written -- as an empty file when nothing needs a human, clearing
         # whatever the last run left.
-        return _finish(tag, args.dry_run, preflight)
+        return _finish(tag, args.dry_run, preflight, args.every)
 
     if args.dry_run:
         outcomes = [upgrade_one(name, root / name, tag) for name in todo]
         print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
-        return _finish(tag, args.dry_run, preflight + outcomes)
+        return _finish(tag, args.dry_run, preflight + outcomes, args.every)
 
     # One worktree for the whole run: every project adopts the same revision, and
     # it is materialised only once something is actually going to be pulled.
@@ -1263,7 +1278,7 @@ def main(argv: list[str] | None = None) -> int:
             ]
     except RuntimeError as exc:
         return stopped(2, f"upgrade: could not check devkit out at {tag}: {exc}", tag)
-    return _finish(tag, args.dry_run, preflight + outcomes)
+    return _finish(tag, args.dry_run, preflight + outcomes, args.every)
 
 
 def release_tags(devkit: Path) -> list[str]:
