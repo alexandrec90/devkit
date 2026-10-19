@@ -160,6 +160,27 @@ def test_a_run_begun_before_the_merge_is_covered_though_filed_after_it(tmp_path)
     assert "after this row's run began" in note
 
 
+def test_a_run_from_a_checkout_without_the_merge_is_covered_though_begun_after_it(tmp_path):
+    """d7b9c8c4: devkit #659 merged at 05:10Z; the Worktree Reconcile begun at 05:15Z ran
+    from a devkit checkout two commits behind it and failed as #659 had stopped it
+    failing. Its `head_at=` says the code predates the merge -- for devkit's merge only."""
+    first = finding(10)
+    head = triage.item_id(first)
+    behind = f"{finding(1)}\tstarted={at(2.5)}\thead_at={at(6)}"
+    pulled = f"{finding(1 / 2)}\tstarted={at(2)}\thead_at={at(3)}"
+    lines = items(first, resolution("agent/x", days_ago=8 / 24, ref=head), behind, pulled)
+    merge = fix_verify.Pr(fix_verify.LANDED, at(3), "https://github.com/o/devkit/pull/659")
+    [(row, _, _)] = fix_verify.verify(lines, lambda *_: [merge], tmp_path / "a", NOW).covered
+    assert row == triage.item_id(behind), "a checkout at the merge commit has the fix"
+    elsewhere = fix_verify.Pr(fix_verify.LANDED, at(3), "https://github.com/o/carameli/pull/9")
+    assert fix_verify.verify(lines, lambda *_: [elsewhere], tmp_path / "b", NOW).covered == []
+    assert fix_verify.ran_from(lines[2]) == _dt.datetime.fromisoformat(at(2.5)), "no repo"
+    assert fix_verify.ran_from(lines[2], "carameli") == _dt.datetime.fromisoformat(at(2.5))
+    assert fix_verify.ran_from(lines[2], "devkit") == _dt.datetime.fromisoformat(at(6))
+    unreadable = items(f"{finding(1)}\tstarted={at(2.5)}\thead_at=never")[0]
+    assert fix_verify.ran_from(unreadable, "devkit") == _dt.datetime.fromisoformat(at(2.5))
+
+
 def test_an_unreadable_start_falls_back_to_when_the_row_was_filed(tmp_path):
     first = finding(10)
     garbled = f"{finding(1)}\tstarted=not a time"
