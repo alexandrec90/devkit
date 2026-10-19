@@ -44,6 +44,26 @@ from harness_triage import ARTIFACT as _TRIAGE_ARTIFACT
 from junit_report import READABLE
 from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_state
 
+# What FINISH says of `run-tests.py` run bare, true of a tree whose runner picks the tests
+# for what changed (devkit's) and conditional for any other tree the session cuts.
+RUNNER_SENTENCE = (
+    "python scripts/run-tests.py with no arguments picks the "
+    "tests for what changed where its --help says so, as devkit's does, adding the "
+    "contract tests that read every module, which no changed file names. A runner that "
+    "runs the whole suite bare is given the test files for what you changed instead: "
+    "a whole suite or a whole test directory is the gate's to run, not yours. "
+)
+
+# What replaces it in a tree whose runner runs the whole suite bare (`for_runner`). The
+# conditional alone did not hold: carameli's fixer read --help and ran the runner bare
+# in one call, its prompt's "where its --help says so" taken for "run it" (028caaaf).
+SUITE_RUNNER_SENTENCE = (
+    "In this tree python scripts/run-tests.py with no arguments runs the whole suite, so "
+    "never run it bare or on a whole test directory: give it the test files for what "
+    "you changed, and the contract tests that read every module, which no changed file "
+    "names -- a whole suite is the gate's to run, not yours. "
+)
+
 # How every prompt's body ends. The ship skill is the finish line and the blocked file
 # is the only other way out, for the blockers `STOP` names right after it; both are
 # files, so the pass reads the outcome without a session. Nothing to change is still an
@@ -61,11 +81,8 @@ FINISH = (
     "commit hooks' and the gate's, not a gap to fill by hand -- and the ratchets the gate "
     "runs -- python scripts/hooks/structure_check.py, python scripts/hooks/untested_symbols.py "
     "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
-    "-- in every tree you changed. python scripts/run-tests.py with no arguments picks the "
-    "tests for what changed where its --help says so, as devkit's does, adding the "
-    "contract tests that read every module, which no changed file names. A runner that "
-    "runs the whole suite bare is given the test files for what you changed instead: "
-    "a whole suite or a whole test directory is the gate's to run, not yours. "
+    "-- in every tree you changed. "
+    f"{RUNNER_SENTENCE}"
     "Then ship it with the ship skill and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. A failure "
     "already fixed where this tree was cut, with nothing left to change, ships the same "
@@ -153,6 +170,14 @@ ROLE = (
 def _framed(body: str) -> str:
     """The body between the role that opens every prompt and the exit that closes it."""
     return f"{ROLE} {body} {STOP}"
+
+
+def for_runner(prompt: str, suite_bare: bool) -> str:
+    """`prompt` for a tree whose runner runs the whole suite bare (`suite_bare`): the
+    runner sentence said as a fact of that tree, not as a condition its session checks."""
+    if not suite_bare:
+        return prompt
+    return prompt.replace(RUNNER_SENTENCE.strip(), SUITE_RUNNER_SENTENCE.strip())
 
 
 def _ids(sig: tuple[str, ...]) -> str:

@@ -72,6 +72,36 @@ def test_a_container_collector_may_declare_its_handoff():
 def test_no_handoff_is_a_collector_moved_by_hand():
     found, _ = config.parse_setting(workspace({config.SETTING: {"p": {"service": "s"}}}))
     assert found[0].handoff == ()
+    found, _ = config.parse_setting(
+        workspace({config.SETTING: {"p": {"command": ["x"], "minutes": 5}}})
+    )
+    assert found[0].handoff == ()
+
+
+def test_a_scheduled_collector_may_declare_its_handoff():
+    """Every collector must be movable between the two PCs, social-scraper included: its
+    task is removed for the export rather than a service stopped (`collectors.stop_task`)."""
+    handoff = ["uv", "run", "python", "scripts/handoff.py"]
+    entry = {"command": ["uv", "run", "s"], "minutes": 30, "needs": ["db"], "handoff": handoff}
+    found, notes = config.parse_setting(workspace({config.SETTING: {"s": entry}}))
+    assert notes == []
+    assert found == [
+        config.Collector(
+            "s", command=("uv", "run", "s"), minutes=30, needs=("db",), handoff=tuple(handoff)
+        )
+    ]
+
+
+def test_the_workspace_declares_a_handoff_for_every_collector():
+    """The user may keep neither PC, so each collector has to be movable, data and all."""
+    found, _notes = config.parse_setting(
+        (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
+    )
+    by_name = {c.project: c.handoff for c in found}
+    plain = ("uv", "run", "python", "scripts/handoff.py")
+    assert by_name["social-scraper"] == plain, "boto3 is a core dependency there"
+    assert by_name["sports_betting"] == plain, "boto3 is a core dependency there too"
+    assert all(by_name.values()), [name for name, argv in by_name.items() if not argv]
 
 
 def test_the_workspace_declares_ibkr_trader_s_handoff_with_the_extra_boto3_needs():
@@ -110,7 +140,8 @@ def test_no_setting_declares_nothing_and_says_nothing():
         ({"service": "app", "handoff": "uv run python scripts/handoff.py"}, "list of strings"),
         ({"service": "app", "handoff": ["uv", ""]}, "list of strings"),
         ({"service": "app", "handoff": ["uv", 3]}, "list of strings"),
-        ({"command": ["uv"], "minutes": 30, "handoff": ["uv"]}, "for a `service` collector"),
+        ({"command": ["uv"], "minutes": 30, "handoff": "uv run x"}, "list of strings"),
+        ({"command": ["uv"], "minutes": 30, "handoff": ["uv", ""]}, "list of strings"),
     ],
 )
 def test_a_malformed_entry_is_a_note_not_silence(entry, reason):

@@ -773,6 +773,26 @@ def test_open_session_is_the_one_place_a_mode_becomes_a_tab_or_a_background(monk
     assert opened == [("tab", "codex", "t"), ("bg", "claude", "p")]
 
 
+def test_open_session_tells_a_tree_whose_runner_runs_the_suite_bare_so(monkeypatch, tmp_path):
+    """028caaaf: the conditional runner sentence reached carameli's fixer unchanged and it
+    ran the whole suite; the one place every prompt passes says it as that tree's fact."""
+    sent = []
+    monkeypatch.setattr(
+        fix_prs.agent_tabs,
+        "launch_background",
+        lambda launch, tree, prompt, off, run: sent.append(prompt) or 0,
+    )
+    prompt = fix_prs.tab_safe(fix_prs.fix_prompts.pr_prompt(failure()))
+    runner = tmp_path / "scripts" / "run-tests.py"
+    runner.parent.mkdir()
+    runner.write_text("subprocess.run(['pytest'])\n", encoding="utf-8")
+    fix_prs.open_session(agent_models.Launch("claude-bg"), tmp_path, "agent/x", prompt, "t")
+    runner.write_text('parser.add_argument("--all")\n', encoding="utf-8")
+    fix_prs.open_session(agent_models.Launch("claude-bg"), tmp_path, "agent/x", prompt, "t")
+    assert "runs the whole suite, so never run it bare" in sent[0]
+    assert sent[1] == prompt
+
+
 def test_the_model_and_effort_reach_both_modes_and_neither_invents_a_default(monkeypatch, tmp_path):
     """One pick, two ways of opening, the same flags -- and nothing when nothing was picked.
 

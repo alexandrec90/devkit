@@ -15,10 +15,10 @@ Two answers from two places, and the split between them is the whole design:
   workstation does nothing until someone assigns it.
 
 Moving a collector between machines is one command on the machine that runs it,
-`collectors.py move <project> --to <host>`, for a collector that declares a `handoff`
-(`Collector.handoff`): its data goes with it, and the other machine takes it over on its
-next pass. One without a `handoff` moves by hand -- `stop-here` on the one and `run-here`
-on the other -- and moves no data. The mechanism is in `collectors.py`; this module only
+`collectors.py move <project> --to <host>`, for a collector of either kind that declares
+a `handoff` (`Collector.handoff`): its data goes with it, and the other machine takes it
+over on its next pass. One without a `handoff` moves by hand -- `stop-here` on the one
+and `run-here` on the other -- and moves no data. The mechanism is in `collectors.py`; this module only
 reads and writes the two answers, and spawns nothing.
 """
 
@@ -91,11 +91,13 @@ class Collector:
     project's own PR gate pins is built at that pin instead of its HEAD
     (`collectors.source_heads`, 8e3c4a67).
 
-    `handoff` is a container collector's argv prefix for the project's own command that
-    carries its data between machines (`collector_handoff`), run on the host from the
-    project's checkout with a verb appended: `export --from A --to B`, `pending --host H`,
-    `import --host H`. Empty means the collector moves by hand and its data stays where
-    it is. A `command` collector takes none: it has no service to stop for the export.
+    `handoff` is the argv prefix of the project's own command that carries its data
+    between machines (`collector_handoff`), run on the host from the project's checkout
+    with a verb appended: `export --from A --to B`, `pending --host H`, `import --host H`.
+    Empty means the collector moves by hand and its data stays where it is. Either kind
+    takes one: for the export a container collector has its service stopped, a scheduled
+    one its task removed and any run in flight waited out, its `needs` left up for the
+    dump (`collectors.stop_service`).
     """
 
     project: str
@@ -137,11 +139,6 @@ def _scheduled_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     """A `command` entry, or `None` and the reason it was refused."""
     if "service" in raw:
         return None, f"{project}: has both `service` and `command` -- a collector is one kind"
-    if "handoff" in raw:
-        return None, (
-            f"{project}: `handoff` is for a `service` collector -- a `command` one has no "
-            "service to stop while its data moves"
-        )
     command = _argv(raw["command"])
     if not command:
         return None, f"{project}: `command` must be a non-empty list of strings (argv)"
@@ -152,11 +149,14 @@ def _scheduled_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     needs = _argv(raw.get("needs", []))
     if needs is None:
         return None, f"{project}: `needs` must be a list of compose service names"
+    handoff = _argv(raw.get("handoff", []))
+    if handoff is None:
+        return None, f"{project}: `handoff` must be a list of strings (argv, not a shell line)"
     if project.startswith(DEVKIT_PREFIX):
         # The task is named after the collector, and `devkit-` is devkit's own jobs'
         # namespace: `schedule_health` and the fix pass would report it as a devkit job.
         return None, f"{project}: a collector's name may not start with `{DEVKIT_PREFIX}`"
-    return Collector(project, command=command, minutes=minutes, needs=needs), ""
+    return Collector(project, command=command, minutes=minutes, needs=needs, handoff=handoff), ""
 
 
 def _entry(project: str, raw: object) -> tuple[Collector | None, str]:

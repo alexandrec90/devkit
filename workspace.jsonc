@@ -2847,7 +2847,7 @@
 		"devkit.collectors": {
 			// `buildsFrom`: its image copies the sibling data-lake checkout in, so a merge
 			// there redeploys it as one in ibkr_trader does. `handoff`: the project's own
-			// command that carries its database through R2 for `collectors.py move`
+			// command that carries its database through its archive store for `collectors.py move`
 			// (`collector_handoff`); `--extra archive` because boto3 comes only with it.
 			"ibkr_trader": {
 				"service": "app",
@@ -2855,10 +2855,23 @@
 				"buildsFrom": ["data-lake"],
 				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"]
 			},
-			"sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"] },
+			// `handoff`: as ibkr_trader's. boto3 is a core dependency here; the data-lake
+			// store it imports lazily is installed into the venv by hand, which `uv run`
+			// keeps -- it syncs inexactly unless told `--exact`.
+			"sports_betting": {
+				"service": "collector",
+				"health": ["sports-betting", "health", "--quiet"],
+				"handoff": ["uv", "run", "python", "scripts/handoff.py"]
+			},
 			// On the host, not in a container: it drives the installed Chrome with the
-			// browser profiles in its checkout.
-			"social-scraper": { "command": ["uv", "run", "social-scraper", "scrape"], "minutes": 30, "needs": ["db"] }
+			// browser profiles in its checkout. `handoff`: dumps its `db` through the
+			// archive store; boto3 is a core dependency, so no extra.
+			"social-scraper": {
+				"command": ["uv", "run", "social-scraper", "scrape"],
+				"minutes": 30,
+				"needs": ["db"],
+				"handoff": ["uv", "run", "python", "scripts/handoff.py"]
+			}
 		},
 		// Options an installer should keep, keyed by installer file name. The daily
 		// `devkit-installers` pass (`installers.py`) re-registers a scheduled job from

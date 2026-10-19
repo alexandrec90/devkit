@@ -3825,3 +3825,399 @@ def test_refusal_is_empty_for_a_collector_that_can_move(tmp_path):
     (tmp_path / "ibkr_trader" / ".git").mkdir(parents=True)
     ibkr = config.Collector("ibkr_trader", "app", handoff=tuple(HANDOFF))
     assert collectors.refusal(ibkr, {"ibkr_trader": RUN}, here) == ""
+
+
+# --- moving a scheduled collector: its task, not a service ------------------------------
+
+
+class Scheduler(FakeSchtasks):
+    """A scheduler whose task is mid-run for its first `runs` status queries. Logs each
+    status answer and each `/Create` / `/Delete` into `log`, which a test shares with
+    docker's calls when the order between them is the property."""
+
+    def __init__(self, registered=True, runs=0, log=None, create_ok=True):
+        super().__init__(registered)
+        self.runs = runs
+        self.log = [] if log is None else log
+        self.create_ok = create_ok
+
+    def __call__(self, argv):
+        argv = list(argv)
+        if argv[:2] == ["schtasks", "/Query"] and "CSV" in argv:
+            self.calls.append(argv)
+            going, self.runs = self.runs > 0, self.runs - 1
+            self.log.append(("running?", going))
+            status = "Running" if going else "Ready"
+            return subprocess.CompletedProcess(
+                argv, 0, f'"\\social-scraper","N/A","{status}"\n', ""
+            )
+        if argv[0] == "schtasks" and argv[1] in ("/Create", "/Delete"):
+            self.log.append(("task", argv[1]))
+            if argv[1] == "/Create" and not self.create_ok:
+                self.calls.append(argv)
+                return subprocess.CompletedProcess(argv, 1, "", "ERROR: Access is denied.")
+        return super().__call__(argv)
+
+
+SCRAPER_SETTING = {
+    # No handoff here, so a pass asks the store about social-scraper alone.
+    "ibkr_trader": {"service": "app", "health": ["h"]},
+    "social-scraper": {
+        "command": ["uv", "run", "social-scraper", "scrape"],
+        "minutes": 30,
+        "needs": ["db"],
+        "handoff": HANDOFF,
+    },
+}
+
+
+def scraper_handoff_home(tmp_path, monkeypatch, assignment=None):
+    monkeypatch.setenv("DEVKIT_HOST", THIS.upper())
+    root = devkit_home(tmp_path, monkeypatch, assignment, SCRAPER_SETTING)
+    (tmp_path / "social-scraper" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(collectors.collector_tasks, "interpreter", lambda: PYTHONW)
+    return root
+
+
+def scraper_db(tmp_path, state="running"):
+    return project(tmp_path, "c9", "db", state, name="social-scraper")
+
+
+def ticking(monkeypatch, start):
+    """A clock `sleep` moves on, and the sleeps it was asked for."""
+    now, slept = [start], []
+    monkeypatch.setattr(collectors, "_clock", lambda: now[0])
+
+    def sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+
+    return sleep, slept
+
+
+def scraper_here(tmp_path, monkeypatch, assignment, docker, schtasks, handoffs=None):
+    root = scraper_handoff_home(tmp_path, monkeypatch, assignment)
+    here = collectors.Here(
+        root, tmp_path, THIS, docker, handoffs or FakeHandoff(docker.calls), collectors.Report()
+    )
+    here.tasks = schtasks
+    [scraper] = [c for c in declared_here(here) if c.project == "social-scraper"]
+    return here, scraper
+
+
+def test_the_run_wait_is_the_scheduled_tasks_own_time_limit():
+    """Past it the scheduler has killed the run itself, so a run still going is not one
+    that will end -- the reason `stop_task` refuses rather than waits on."""
+    assert collectors.collector_tasks.TIME_LIMIT == f"PT{collectors.RUN_WAIT // 3600}H"
+    assert collectors.RUN_WAIT > collectors.collector_tasks.FIRE_TIMEOUT
+    assert collectors.SCHEDULED_MOVE_BOUND > collectors.RUN_WAIT + collectors.handoff.EXPORT_TIMEOUT
+
+
+def test_a_scheduled_move_waits_out_its_run_removes_its_task_and_keeps_its_db_up(
+    tmp_path, monkeypatch
+):
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler(runs=2, log=docker.calls)
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, schtasks)
+    here.sleep, slept = ticking(monkeypatch, 5_000.0)
+    locks = []
+
+    def export(flags):
+        lock = json.loads((here.base / collectors.PASS_LOCK).read_text(encoding="utf-8"))
+        locks.append(lock[collectors.UNTIL])
+        return Said(0)
+
+    here.handoffs = FakeHandoff(docker.calls, export=export)
+    collectors.move_one(scraper, OTHER, here)
+    assert docker.calls == [
+        ("running?", True),
+        ("running?", True),
+        ("running?", False),
+        ("task", "/Delete"),
+        (
+            "handoff",
+            "export",
+            ("--from", THIS, "--to", OTHER),
+            "social-scraper",
+            collectors.handoff.EXPORT_TIMEOUT,
+            True,
+        ),
+        ("ps",),
+        ("stop", "c9"),
+    ], "the run finishes, the task goes, the db is dumped up and only then stopped"
+    assert slept == [collectors.TASK_POLL, collectors.TASK_POLL]
+    assert locks == [5_000.0 + collectors.SCHEDULED_MOVE_BOUND]
+    assert config.load_assignment(here.assignment) == {"social-scraper": STOP}
+    assert collectors.handoff.load_outgoing(here.outgoing) == {
+        "social-scraper": {"to": OTHER, "at": 5_000.0 + 2 * collectors.TASK_POLL}
+    }
+    assert here.report.failures == 0 and not schtasks.registered
+
+
+def test_a_scheduled_run_still_going_at_the_bound_refuses_the_move_and_ends_nothing(
+    tmp_path, monkeypatch
+):
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler(runs=10**6)
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, schtasks)
+    here.sleep, slept = ticking(monkeypatch, 5_000.0)
+    collectors.move_one(scraper, OTHER, here)
+    assert len(slept) == collectors.RUN_WAIT // collectors.TASK_POLL
+    assert here.handoffs.log == [] and docker.calls == [], "no export, and the db untouched"
+    assert "/Delete" not in schtasks.verbs() and "/End" not in schtasks.verbs()
+    assert schtasks.registered, "the task stays, so the collector goes on running here"
+    assert config.load_assignment(here.assignment) == {"social-scraper": RUN}
+    assert here.report.cause.startswith(
+        "social-scraper: not moved -- its scheduled task `social-scraper` could not be "
+        "stopped first: its scheduled run is still going after 60 minutes"
+    )
+
+
+def test_a_failed_scheduled_export_registers_its_task_again_and_starts_nothing(
+    tmp_path, monkeypatch
+):
+    root = scraper_handoff_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler(log=docker.calls)
+    handoffs = FakeHandoff(docker.calls, export=Said(1, "", "pg_dump: connection refused"))
+    assert (
+        collectors.main(
+            ["move", "social-scraper", "--to", OTHER], docker, run=schtasks, handoffs=handoffs
+        )
+        == 2
+    )
+    assert [c[:2] for c in docker.calls] == [
+        ("running?", False),
+        ("task", "/Delete"),
+        ("handoff", "export"),
+        ("task", "/Create"),
+    ], "no `docker compose up`: a scheduled collector has no service to start"
+    assert schtasks.registered
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"social-scraper": RUN}
+    assert collectors.handoff.load_outgoing(root / collectors.handoff.OUTGOING) == {}
+    text = artifact(root)
+    assert "export failed (exit 1: pg_dump: connection refused)" in text
+    assert "its scheduled task `social-scraper` is registered again, and this machine" in text
+
+
+def test_a_failed_scheduled_export_whose_task_will_not_register_says_both(tmp_path, monkeypatch):
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler(create_ok=False)
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, schtasks)
+    here.handoffs = FakeHandoff(export=Said(1))
+    collectors.move_one(scraper, OTHER, here)
+    assert "`social-scraper` could NOT be registered again (could not register" in (
+        here.report.cause
+    )
+
+
+def test_a_scheduled_task_that_cannot_be_removed_exports_nothing(tmp_path, monkeypatch):
+    class Refusing(Scheduler):
+        def __call__(self, argv):
+            if list(argv)[:2] == ["schtasks", "/Delete"]:
+                return subprocess.CompletedProcess(list(argv), 1, "", "ERROR: Access is denied.")
+            return super().__call__(argv)
+
+    docker = Moving([scraper_db(tmp_path)])
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, Refusing())
+    collectors.move_one(scraper, OTHER, here)
+    assert here.handoffs.log == []
+    assert here.report.cause.endswith(
+        "could not be stopped first: could not remove its scheduled task -- ERROR: Access is denied."
+    )
+
+
+def test_a_fire_while_a_move_holds_the_collector_runs_nothing(tmp_path, monkeypatch):
+    """`stop_task` waits only for the run begun before the move: one the scheduler
+    starts behind that wait, before the task is deleted, must not write into the dump."""
+    root = scraper_handoff_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    at(monkeypatch, 1_000.0)
+    holder = {
+        collectors.HOLDER: f"`collectors.py move` to {OTHER}",
+        collectors.PROJECTS: ["social-scraper"],
+    }
+    assert collectors.take_lock(root / collectors.PASS_LOCK, 2_000.0, 1_000.0, holder)
+
+    def spawner(argv, cwd, timeout, env=None):
+        raise AssertionError("ran under a move's export")
+
+    assert collectors.main(["fire", "social-scraper"], spawner=spawner) == 0
+    log = (root / collectors.collector_tasks.log_path("social-scraper")).read_text(encoding="utf-8")
+    assert "is handing it to another machine -- nothing run" in log
+
+    def streamer(argv, cwd):
+        raise AssertionError("ran by hand under a move's export")
+
+    assert collectors.run_once("social-scraper", root, FakeSchtasks(), streamer) == 2
+
+
+def test_a_fire_beside_a_pass_holding_the_lock_still_runs(tmp_path, monkeypatch):
+    root = scraper_handoff_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    at(monkeypatch, 1_000.0)
+    assert collectors.take_lock(root / collectors.PASS_LOCK, 2_000.0, 1_000.0)
+    assert collectors.main(["fire", "social-scraper"], spawner=lambda *a, **k: (0, "ok")) == 0
+
+
+@pytest.mark.parametrize("assignment", [{"social-scraper": STOP}, {}])
+def test_a_pass_takes_over_a_scheduled_collector_and_registers_its_task_that_pass(
+    tmp_path, monkeypatch, assignment
+):
+    root = scraper_handoff_home(tmp_path, monkeypatch, assignment)
+    docker = FakeDocker([])
+    schtasks = Scheduler(registered=False, log=docker.calls)
+    handoffs = FakeHandoff(
+        docker.calls,
+        pending=lambda flags: Said(0, MARKER) if THIS in flags else Said(0),
+    )
+    assert collectors.main(["maintain"], docker=docker, run=schtasks, handoffs=handoffs) == 0
+    steps = [c[:2] for c in docker.calls if c[:2] != ("handoff", "pending")]
+    assert steps[:3] == [("running?", False), ("handoff", "import"), ("task", "/Create")]
+    assert not any(c[0] == "up" for c in docker.calls), "its fire starts the db it needs"
+    assert config.load_assignment(root / config.ASSIGNMENT)["social-scraper"] == RUN
+    assert f"social-scraper: taken over from {OTHER}" in artifact(root)
+
+
+def test_a_scheduled_run_going_on_the_receiver_leaves_the_import_for_the_next_pass(
+    tmp_path, monkeypatch
+):
+    root = scraper_handoff_home(tmp_path, monkeypatch, {"social-scraper": STOP})
+    schtasks = Scheduler(runs=1)
+    handoffs = FakeHandoff(pending=lambda flags: Said(0, MARKER) if THIS in flags else Said(0))
+    collectors.main(["maintain"], docker=FakeDocker([]), run=schtasks, handoffs=handoffs)
+    assert "import" not in [c[1] for c in handoffs.log]
+    assert config.load_assignment(root / config.ASSIGNMENT) == {"social-scraper": STOP}
+    assert (
+        "its scheduled task `social-scraper` could not be stopped for the import: its "
+        "scheduled run is still going"
+    ) in artifact(root)
+    assert "the next pass tries again" in artifact(root)
+
+
+def test_a_maintain_pass_allows_for_taking_over_a_scheduled_collector(tmp_path):
+    scraper = config.Collector("social-scraper", command=("uv",), minutes=30, handoff=("uv",))
+    base = collectors.PS_TIMEOUT
+    assert collectors.pass_bound([scraper], {}, picks_up=True) == (
+        base + collectors.TARGET_BOUND + collectors.PICKUP_BOUND + 120
+    )
+    assert collectors.pass_bound([scraper], {"social-scraper": RUN}, picks_up=True) == (
+        base + collectors.TARGET_BOUND
+    )
+    assert collectors.PICKUP_BOUND >= (
+        collectors.handoff.PENDING_TIMEOUT
+        + 3 * collectors.SCHTASKS_TIMEOUT
+        + collectors.handoff.IMPORT_TIMEOUT
+    )
+
+
+def test_a_scheduled_collector_a_move_holds_is_no_scheduler_row_but_a_green_one(
+    tmp_path, monkeypatch
+):
+    """Its task is deleted for the export while it is still `run` here: the tray and the
+    fix pass (`fix_loop.unscheduled`) would read the missing task as a defect."""
+    root = scraper_handoff_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    at(monkeypatch, 1_000.0)
+    assert collectors.scheduled_tasks() == {"social-scraper": "logs/collector-social-scraper.log"}
+    assert collectors.tray_rows(docker=FakeDocker([])) == []
+    holder = {
+        collectors.HOLDER: f"`collectors.py move` to {OTHER}",
+        collectors.PROJECTS: ["social-scraper"],
+    }
+    assert collectors.take_lock(root / collectors.PASS_LOCK, 2_000.0, 1_000.0, holder)
+    assert collectors.scheduled_tasks() == {}
+    [(name, level, detail)] = collectors.tray_rows(docker=FakeDocker([]))
+    assert (name, level) == ("collector: social-scraper", collectors.OK)
+    assert detail.startswith(f"`collectors.py move` to {OTHER} is acting on it")
+
+
+def test_a_scheduled_collector_handed_off_from_here_says_where_it_went(tmp_path, monkeypatch):
+    root = scraper_handoff_home(tmp_path, monkeypatch, {"social-scraper": STOP})
+    collectors.handoff.record_outgoing(
+        root / collectors.handoff.OUTGOING, "social-scraper", OTHER, 0.0
+    )
+    [(_name, level, detail)] = collectors.tray_rows(docker=FakeDocker([]))
+    assert level == collectors.OK and detail.startswith(f"handed off to {OTHER}")
+
+
+# --- the scheduled-move pieces, each on its own ------------------------------------------
+
+SCRAPER = config.Collector("social-scraper", command=("uv",), minutes=30, handoff=("uv",))
+IBKR = config.Collector("ibkr_trader", "app", handoff=tuple(HANDOFF))
+
+
+def test_move_bound_is_the_scheduled_bound_only_for_a_scheduled_collector():
+    assert collectors.move_bound(SCRAPER) == collectors.SCHEDULED_MOVE_BOUND
+    assert collectors.move_bound(IBKR) == collectors.MOVE_BOUND
+    assert collectors.SCHEDULED_MOVE_BOUND > collectors.MOVE_BOUND
+
+
+def test_stopped_part_names_the_task_of_a_scheduled_collector_and_the_service_otherwise():
+    assert collectors.stopped_part(SCRAPER) == "its scheduled task `social-scraper`"
+    assert collectors.stopped_part(IBKR) == "`app`"
+
+
+def test_stop_task_removes_an_idle_task_without_waiting(tmp_path, monkeypatch):
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler()
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, schtasks)
+    here.sleep, slept = ticking(monkeypatch, 0.0)
+    assert collectors.stop_task(scraper, here, collectors.RUN_WAIT) == ""
+    assert slept == [] and not schtasks.registered
+
+
+def test_stop_task_with_no_wait_refuses_a_run_in_flight_at_once(tmp_path, monkeypatch):
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler(runs=1)
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, schtasks)
+    here.sleep, slept = ticking(monkeypatch, 0.0)
+    said = collectors.stop_task(scraper, here, 0)
+    assert said.startswith("its scheduled run is still going, and is not ended")
+    assert "after" not in said and "`schtasks /End /TN social-scraper`" in said
+    assert slept == [] and schtasks.registered and "/Delete" not in schtasks.verbs()
+
+
+def test_restart_registers_a_scheduled_collectors_task_again(tmp_path, monkeypatch):
+    docker = Moving([scraper_db(tmp_path)])
+    schtasks = Scheduler(registered=False)
+    here, scraper = scraper_here(tmp_path, monkeypatch, {"social-scraper": RUN}, docker, schtasks)
+    assert (
+        collectors.restart(scraper, here)
+        == "its scheduled task `social-scraper` is registered again"
+    )
+    assert schtasks.registered and docker.calls == [], "no `docker compose up` for a task"
+
+
+@pytest.mark.parametrize(
+    ("up_ok", "said"),
+    [
+        (True, "`app` is started again"),
+        (False, "`app` could NOT be started again (Error response from daemon: no space)"),
+    ],
+)
+def test_restart_starts_a_services_collector_again(tmp_path, up_ok, said):
+    docker = FakeDocker([], up_ok=up_ok)
+    here = collectors.Here(
+        tmp_path, tmp_path, THIS, docker, FakeHandoff(docker.calls), collectors.Report()
+    )
+    assert collectors.restart(IBKR, here) == said
+    assert docker.calls == [("up", "ibkr_trader", "app")]
+
+
+def test_scheduled_row_is_green_for_a_stopped_collector_and_one_a_move_holds(tmp_path):
+    name = collectors.ROW_PREFIX + "social-scraper"
+    stopped = collectors.Target(SCRAPER, STOP, tmp_path)
+    assert collectors.scheduled_row(stopped, "") == (
+        name,
+        collectors.OK,
+        "off on this machine (by choice)",
+    )
+    assert collectors.scheduled_row(stopped, f"handed off to {OTHER}") == (
+        name,
+        collectors.OK,
+        f"handed off to {OTHER}",
+    )
+    held = collectors.Target(SCRAPER, RUN, tmp_path)
+    assert collectors.scheduled_row(held, "`collectors.py move`") == (
+        name,
+        collectors.OK,
+        "`collectors.py move` is acting on it (its scheduled task is removed for the export)",
+    )
