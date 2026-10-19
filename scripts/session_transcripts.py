@@ -73,7 +73,15 @@ def _text(content: object) -> str:
     return str(content or "")
 
 
+# The records that are the conversation. Claude Code also writes each message it sends the
+# API again, as an `api-request-blob` with the same content blocks (from 2026-10-18): read
+# as events, every call and every failure counted twice.
+CONVERSATION = ("user", "assistant")
+
+
 def claude_events(row: dict, line: int) -> Iterator[Event]:
+    if row.get("type") not in CONVERSATION:
+        return
     message = _dict(row.get("message"))
     # A compaction summary and a harness-injected row are typed `user` but are not the user.
     spoken = row.get("type") == "user" and not (row.get("isMeta") or row.get("isCompactSummary"))

@@ -1313,6 +1313,42 @@ def test_a_bare_run_tests_is_whole_only_where_the_runner_defaults_to_the_suite(t
     )
 
 
+def test_an_api_request_blob_is_not_a_second_call_or_result():
+    """Supervision 2026-10-18: Claude Code began writing each message it sends the API
+    again as an `api-request-blob` row, content blocks and all. Read as events, devkit
+    #655's fixer made 15 calls where it made 10, its audit lines showed every call twice,
+    and a refused call would have been two failures to the detectors."""
+    grep = {
+        "type": "tool_use",
+        "id": "toolu_grep",
+        "name": "Grep",
+        "input": {"pattern": "never started a (workflow )?step", "output_mode": "content"},
+    }
+    refused = {
+        "type": "tool_result",
+        "tool_use_id": "toolu_grep",
+        "content": "No matches found",
+        "is_error": True,
+    }
+
+    def blob(role: str, block: dict) -> dict:
+        return {
+            "type": "api-request-blob",
+            "sessionId": "9219d84f-945a-4dee-9f37-8a249947d619",
+            "hash": "36af883c",
+            "message": {"role": role, "content": [block]},
+        }
+
+    rows = (
+        (1, {"type": "assistant", "message": {"role": "assistant", "content": [grep]}}),
+        (2, blob("assistant", grep)),
+        (3, {"type": "user", "message": {"role": "user", "content": [refused]}}),
+        (4, blob("user", refused)),
+    )
+    events = st.events(Path("s.jsonl"), rows)
+    assert [(e.kind, e.line) for e in events] == [("call", 1), ("result", 3)]
+
+
 def test_runs_suite_bare_is_a_tree_whose_own_runner_has_no_targeted_default(tmp_path):
     """028caaaf: what the fix pass tells a fixer as a fact of its tree. A runner taking
     `--all` is targeted bare, one without is the suite, and no runner is neither."""

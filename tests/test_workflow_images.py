@@ -1,12 +1,15 @@
-"""CI container images must not come from Docker Hub anonymously.
+"""CI container images must not come from a registry whose anonymous quota is per IP.
 
-A GitHub-hosted runner pulls from Docker Hub unauthenticated, on a shared IP, so the pull
-budget is spent by strangers: social-scraper's PR gate went red on `main` (2026-10-09)
-with `toomanyrequests` pulling `postgres:18` for its service container, before a single
-test ran -- and that block was rendered from devkit's `pr-gate.yml.tmpl` (536d3de4), so
-every generated project with a database carried the same failure. Naming a registry host
--- ECR Public's mirror of the Docker Official Images, `public.ecr.aws/docker/library/...`
--- takes the pull off that budget.
+A GitHub-hosted runner pulls unauthenticated, on a shared IP, so the pull budget is spent
+by strangers: social-scraper's PR gate went red on `main` (2026-10-09) with
+`toomanyrequests` pulling `postgres:18` from Docker Hub for its service container, before
+a single test ran -- and that block was rendered from devkit's `pr-gate.yml.tmpl`
+(536d3de4), so every generated project with a database carried the same failure.
+
+ECR Public, the first replacement, has the same shape: social-scraper #90's gate failed
+every attempt over eight hours on 2026-10-18 with `toomanyrequests: Data limit exceeded`
+pulling `public.ecr.aws/docker/library/postgres:18`. `mirror.gcr.io`, Google's
+pull-through cache of the Docker Official Images, is what the templates name now.
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ WORKFLOWS = [
     *sorted((ROOT / "templates").glob("**/dot-github/workflows/*.y*ml*")),
 ]
 HUB = (None, "docker.io", "registry-1.docker.io", "index.docker.io")
+# Registries that refuse an anonymous pull once the shared runner IP spends its quota.
+PER_IP_QUOTA = (*HUB, "public.ecr.aws")
 
 _IMAGE = re.compile(r"^\s*(?:-\s*)?image:\s*['\"]?([^'\"\s#]+)", re.MULTILINE)
 
@@ -70,6 +75,10 @@ def test_the_rendered_workflows_name_images():
     assert "templates/core/dot-github/workflows/nightly.yml.tmpl" in names
 
 
-def test_no_workflow_pulls_from_docker_hub():
-    hub = [f"{name}: {image}" for name, image in workflow_images() if registry_host(image) in HUB]
-    assert not hub, f"pulled anonymously from Docker Hub in CI: {hub}"
+def test_no_workflow_pulls_from_a_per_ip_quota():
+    quota = [
+        f"{name}: {image}"
+        for name, image in workflow_images()
+        if registry_host(image) in PER_IP_QUOTA
+    ]
+    assert not quota, f"pulled anonymously from a per-IP quota in CI: {quota}"
