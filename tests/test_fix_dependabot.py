@@ -48,7 +48,10 @@ def alert(package: str, patched: str | None, created: str = OLD, number: int = 1
         "number": number,
         "created_at": created,
         "html_url": f"https://github.com/o/r/security/dependabot/{number}",
-        "dependency": {"package": {"ecosystem": "pip", "name": package}},
+        "dependency": {
+            "package": {"ecosystem": "pip", "name": package},
+            "manifest_path": "uv.lock",
+        },
         "security_vulnerability": {
             "first_patched_version": {"identifier": patched} if patched else None
         },
@@ -196,7 +199,22 @@ def project(tmp_path: Path, monkeypatch) -> Path:
         encoding="utf-8",
     )
     monkeypatch.setattr(fd.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+    monkeypatch.setattr(fd.sweep, "git_for", lambda _path: git_world())
     return checkout
+
+
+def git_world(files: dict[str, str] | None = None, asked: list | None = None):
+    """A fake `git` whose `origin/main` holds `files`; the default holds none, so every
+    alert is read as no lock answers it."""
+
+    def git(*args):
+        if asked is not None:
+            asked.append(args)
+        if args[0] == "show" and (text := (files or {}).get(args[1])) is not None:
+            return subprocess.CompletedProcess(args, 0, text, "")
+        return subprocess.CompletedProcess(args, 0 if args[0] == "fetch" else 128, "", "")
+
+    return git
 
 
 def test_alerts_and_a_failing_job_are_one_failure_with_its_evidence_on_disk(tmp_path, monkeypatch):
@@ -437,3 +455,114 @@ def test_collect_reads_every_registered_checkout_and_skips_a_missing_one(tmp_pat
         workspace, ["ibkr_trader", "absent"], NOW, gh_for=lambda d: gh if d == checkout else None
     )
     assert [f.project for f in failures] == ["ibkr_trader"] and notes == []
+
+
+UV_LOCK = """version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "certifi"
+version = "2026.10.19"
+
+[[package]]
+name = "Pillow"
+version = "13.0.0"
+
+[[package]]
+name = "numpy"
+version = "2.3.0"
+
+[[package]]
+name = "numpy"
+version = "1.26.4"
+"""
+
+
+def test_locked_versions_reads_every_package_table_and_nothing_else():
+    locked = fd.locked_versions(UV_LOCK)
+    assert locked["certifi"] == ["2026.10.19"] and locked["pillow"] == ["13.0.0"]
+    assert locked["numpy"] == ["2.3.0", "1.26.4"], "a forked resolution locks it twice"
+    assert fd.locked_versions("not = [toml") == {}
+    assert fd.locked_versions('[tool.uv.sources]\nx = { path = "../x" }\n') == {}
+
+
+@pytest.mark.parametrize(
+    ("version", "floor", "expected"),
+    [
+        ("13.0.0", "13.0.0", True),
+        ("13.1", "13.0.0", True),
+        ("2026.10.19", "2026.10.19", True),
+        ("12.3.0", "13.0.0", False),
+        ("13.0.0rc1", "13.0.0", False),
+        ("13.0.0", "13.0.0rc1", True),
+        ("13.0.0.post1", "13.0.0", True),
+        ("13.0.0", "13.0.0.post1", False),
+        ("13.0.0rc2", "13.0.0rc1", False),
+        ("", "13.0.0", False),
+    ],
+)
+def test_at_least_answers_false_whenever_it_is_unsure(version, floor, expected):
+    assert fd.at_least(version, floor) is expected
+
+
+def test_an_alert_is_patched_on_base_only_where_every_lock_of_it_is_past_the_fix():
+    locks = {"uv.lock": fd.locked_versions(UV_LOCK)}
+    assert fd.patched_on_base(alert("certifi", "2026.10.19"), locks)
+    assert fd.patched_on_base(alert("pillow", "13.0.0"), locks), "names compare normalized"
+    assert not fd.patched_on_base(alert("numpy", "2.0.0"), locks), "1.26.4 is locked too"
+    assert not fd.patched_on_base(alert("urllib3", "2.8.0"), locks), "not locked at all"
+    assert not fd.patched_on_base(alert("certifi", None), locks), "no fix exists yet"
+    assert not fd.patched_on_base(alert("certifi", "2026.10.19"), {}), "no lock read"
+    assert fd.manifest_of(alert("certifi", "1")) == "uv.lock" and fd.manifest_of({}) == ""
+    kept = [alert("urllib3", "2.8.0")]
+    assert fd.unlanded("p", "main", kept, locks) == (kept, ""), "nothing landed, no line"
+
+
+IBKR_ALERTS = [alert("certifi", "2026.10.19", number=51), alert("Pillow", "13.0.0", number=52)]
+
+
+def test_alerts_a_merged_bump_already_answered_send_no_fixer(tmp_path, monkeypatch):
+    """3090c3ed: ibkr_trader's #138 bumped certifi and pillow in uv.lock at 09:02, the
+    alerts stayed open until Dependabot rescanned, and the 15:00 pass sent a fixer at
+    them that found nothing left to bump."""
+    checkout = project(tmp_path, monkeypatch)
+    runs = [run("uv in /. for certifi", "failure", 9)]
+    gh, asked = gh_world(runs, IBKR_ALERTS, logs={"9": UNFETCHABLE_LOG})
+    looked: list = []
+    git = git_world({"origin/main:uv.lock": UV_LOCK}, looked)
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, gh, git)
+    assert failure is None
+    assert "cannot fetch the path dependency data-lake" in note
+    assert note.endswith(
+        "ibkr_trader -- Dependabot Updates: origin/main already locks certifi, pillow past "
+        "its open alerts, which close when Dependabot rescans"
+    )
+    assert looked[0] == ("fetch", "--quiet", "origin", "main"), "read off a fresh tip"
+    assert not [a for a in asked if a[:2] == ("pr", "list")], "nothing left to answer"
+
+
+def test_only_the_alerts_the_base_has_not_answered_are_sent(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    alerts = [*IBKR_ALERTS, alert("urllib3", "2.8.0", number=53)]
+    gh, _ = gh_world([], alerts)
+    git = git_world({"origin/main:uv.lock": UV_LOCK})
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, gh, git)
+    assert failure is not None
+    assert failure.signature == (f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0",)
+    text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
+    assert "urllib3: bump to 2.8.0" in text and "certifi" not in text
+    assert note.endswith(
+        "already locks certifi, pillow past its open alerts, which close when Dependabot rescans"
+    )
+
+
+def test_an_alert_whose_lock_cannot_be_read_is_sent_as_before(tmp_path, monkeypatch):
+    """A lock `git` cannot show answers nothing: an alert wrongly kept costs a fixer,
+    one wrongly dropped is a hole nobody is sent at."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([], IBKR_ALERTS)
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, gh, git_world())
+    assert note == ""
+    assert failure is not None and len(failure.signature) == 2
+    assert fd.base_locks(git_world(), "main", []) == {}
+    assert fd.base_locks(git_world(), "main", [{"dependency": {}}]) == {}, "no file named"

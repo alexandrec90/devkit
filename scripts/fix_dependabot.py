@@ -16,7 +16,9 @@ Three of Dependabot's outputs are read here, per project:
   (`answered_since`);
 - **its open alerts that no open PR answers**, once Dependabot has had `ALERT_GRACE` to
   open one -- matched by the package's name in a PR's title, branch or body, so a
-  fixer's hand bump answers it as well as Dependabot's own PR would;
+  fixer's hand bump answers it as well as Dependabot's own PR would -- less an alert
+  the base's lockfile already locks past (`patched_on_base`), which stays open until
+  Dependabot rescans;
 - **its red PRs** are not read here: `broken_pr_menu.scan` already lists every open PR,
   and `fix_plan.is_dependabot` is how the budget tells one from the rest.
 
@@ -40,6 +42,7 @@ from __future__ import annotations
 import datetime as _dt
 import re
 import sys
+import tomllib
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from pathlib import Path
@@ -78,6 +81,7 @@ _HANDLED = re.compile(r"Handled error whilst updating ([^:]+): (\w+)")
 _HANDLED_ENTRY = re.compile(r"run ([^\s:]+): (\w+)")
 _UNFETCHABLE = re.compile(r"path based dependencies could not be retrieved: (.+?) at \S+")
 _QUOTED = re.compile(r'"([^"]+)"')
+_RELEASE = re.compile(r"\d+(?:\.\d+)*")
 _REASON_LIMIT = 160
 
 Gh = Callable[..., object]
@@ -224,6 +228,62 @@ def package_of(alert: dict) -> str:
     return _norm(package.get("name", "")) if isinstance(package, dict) else ""
 
 
+def manifest_of(alert: dict) -> str:
+    """The file the alert was raised on (`uv.lock`), as the repository spells it."""
+    dependency = alert.get("dependency")
+    path = dependency.get("manifest_path") if isinstance(dependency, dict) else None
+    return str(path or "")
+
+
+def locked_versions(text: str) -> dict[str, list[str]]:
+    """`package -> every version locked`, from a TOML lockfile's `[[package]]` tables
+    (`uv.lock`, `poetry.lock`); empty for any other text. A forked resolution can lock
+    one package twice, so every version is kept."""
+    try:
+        packages = tomllib.loads(text).get("package")
+    except tomllib.TOMLDecodeError:
+        return {}
+    locked: dict[str, list[str]] = {}
+    for row in packages if isinstance(packages, list) else []:
+        if isinstance(row, dict) and row.get("name") and row.get("version"):
+            locked.setdefault(_norm(row["name"]), []).append(str(row["version"]))
+    return locked
+
+
+def patched_on_base(alert: dict, locks: dict[str, dict[str, list[str]]]) -> bool:
+    """Whether the base's copy of the alert's lockfile locks its package, every time, at
+    or past the patched version.
+
+    An alert stays open until Dependabot rescans, hours after the bump that answers it
+    has merged. ibkr_trader's #138 put certifi and pillow past ten alerts at 09:02, and
+    the pass sent a fixer at the same ten alerts six hours later, which found the lock
+    already bumped (3090c3ed).
+    """
+    versions = locks.get(manifest_of(alert), {}).get(package_of(alert), [])
+    patched = _patched(alert)
+    return bool(versions and patched) and all(at_least(v, patched) for v in versions)
+
+
+def at_least(version: str, floor: str) -> bool:
+    """Whether `version` is `floor` or later, by release number; a pre-release of the
+    floor's own release (`13.0.0rc1` against `13.0.0`) is not, a post-release is.
+    Unsure answers False: an alert wrongly kept costs a fixer, one wrongly dropped a hole."""
+    got, want = _RELEASE.match(version.strip()), _RELEASE.match(floor.strip())
+    if not got or not want:
+        return False
+    have, need = (tuple(int(n) for n in m.group().split(".")) for m in (got, want))
+    width = max(len(have), len(need))
+    have, need = have + (0,) * (width - len(have)), need + (0,) * (width - len(need))
+    if have != need:
+        return have > need
+    suffix, wanted = (
+        text.strip()[m.end() :].lstrip(".-_").lower() for text, m in ((version, got), (floor, want))
+    )
+    if suffix == wanted:
+        return True
+    return (not suffix or suffix.startswith("post")) and not wanted.startswith("post")
+
+
 def unanswered(alerts: Iterable[dict], prs: Iterable[dict], now: _dt.datetime) -> dict[str, str]:
     """`package -> the version that fixes every open alert on it`, for the packages no
     open PR names, among alerts older than `ALERT_GRACE` with a patched version at all."""
@@ -303,6 +363,39 @@ def merged_prs(gh: Gh) -> list[dict] | None:
     """The newest merged PRs; None where `gh` cannot say."""
     return _answered(
         gh("pr", "list", "--state", "merged", "--limit", str(MERGED_LIMIT), "--json", MERGED_FIELDS)
+    )
+
+
+def base_locks(git: Gh, base: str, alerts: Iterable[dict]) -> dict[str, dict[str, list[str]]]:
+    """`lockfile -> locked_versions` on `origin/<base>`, for every file an alert names.
+
+    The base is fetched first; a fetch that fails leaves an older tip, which can only
+    lock less, so the read goes ahead. A file `git` cannot show is left out, and its
+    alerts are read as before.
+    """
+    manifests = sorted({path for alert in alerts if (path := manifest_of(alert))})
+    if not manifests:
+        return {}
+    git("fetch", "--quiet", "origin", base)
+    locks = {}
+    for path in manifests:
+        shown = git("show", f"origin/{base}:{path}")
+        if getattr(shown, "returncode", 1) == 0:
+            locks[path] = locked_versions(str(getattr(shown, "stdout", "") or ""))
+    return locks
+
+
+def unlanded(
+    project: str, base: str, alerts: list[dict], locks: dict[str, dict[str, list[str]]]
+) -> tuple[list[dict], str]:
+    """`(the alerts the base's lock has not answered, a line for the record naming the
+    packages it has)`; the line is "" when it answered none."""
+    landed = sorted({package_of(a) for a in alerts if patched_on_base(a, locks)})
+    if not landed:
+        return alerts, ""
+    return [a for a in alerts if not patched_on_base(a, locks)], (
+        f"{project} -- {WORKFLOW}: origin/{base} already locks {', '.join(landed)} "
+        "past its open alerts, which close when Dependabot rescans"
     )
 
 
@@ -408,17 +501,26 @@ def _alerts_page(alerts: list[dict]) -> str:
 
 
 def read_project(
-    project: str, project_dir: Path, root: Path, now: _dt.datetime, gh: Gh
+    project: str,
+    project_dir: Path,
+    root: Path,
+    now: _dt.datetime,
+    gh: Gh,
+    git: sweep.Git | None = None,
 ) -> tuple[fix_plan.Failure | None, str]:
     """`(failure, note)`: a failure when a session has something to do, a line for the
     record when Dependabot is red on what no session can change or a merge has answered
-    since its run, neither when green."""
+    since its run or alert, neither when green."""
+    git = git or sweep.git_for(project_dir)
     failing, failing_runs, answered = read_runs(gh)
     stale = "; ".join(f"{project} -- {WORKFLOW}: {line}" for line in answered)
     errors = [e for _, run_said in failing for e in run_said] or [
         f"run {update_job(run)}: failed" for run, _ in failing
     ]
     alerts = open_alerts(gh)
+    base = tb.detect_default_branch(git, fallback="main")
+    alerts, rescan = unlanded(project, base, alerts, base_locks(git, base, alerts))
+    stale = "; ".join(filter(None, [stale, rescan]))
     prs = open_prs(gh) if alerts else []
     if prs is None:
         # Read as no PR, every alert is unanswered, and an open PR may answer each one.
@@ -430,18 +532,19 @@ def read_project(
         return None, stale
     names = unfetchable(sig)
     if not actionable(sig):
-        return None, (
+        unfetched = (
             f"{project} -- {WORKFLOW} fails only because it cannot fetch the path "
-            f"dependency {', '.join(names)}, and every alert has a PR: nothing to send. "
-            f"A source Dependabot can fetch for it would turn it green."
+            f"dependency {', '.join(names)}, and every alert has a PR or a merged bump: "
+            f"nothing to send. A source Dependabot can fetch for it would turn it green."
         )
+        return None, "; ".join(filter(None, [unfetched, rescan]))
     failure = fix_plan.Failure(
         kind=fix_plan.DEPENDABOT,
         project=project,
         number=0,
         title=_title(project, wanted, len(failing_runs)),
         url=str(failing_runs[0].get("url", "")) if failing_runs else _alerts_page(alerts),
-        base=tb.detect_default_branch(sweep.git_for(project_dir), fallback="main"),
+        base=base,
         workflow=WORKFLOW,
         signature=sig,
     )
