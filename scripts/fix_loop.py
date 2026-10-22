@@ -95,8 +95,9 @@ class Closed:
     # two sessions at one backlog was a waste the ledger alone could not see.
     harness_busy: str = ""
     # problem -> the tree its latest fixer worked in, which is where an escalation of
-    # that problem sends the devkit session to take it over.
+    # that problem sends the devkit session to take it over, and when it was stamped.
     trees: dict[str, str] = field(default_factory=dict)
+    stamped: dict[str, str] = field(default_factory=dict)
     # (project, branch) -> a tree some session other than the pass's is working in. A
     # fixer is never sent in beside it: the first supervised run sent one into the tree
     # an interactive session was editing, which only went well because it sat idle.
@@ -114,6 +115,20 @@ class Closed:
     # Each devkit PR still carrying a fix to consumers, as `(number, body)` (`devkit_fixes`):
     # a consumer failure one names waits for it rather than for a second devkit session.
     devkit_fixes: tuple[tuple[int, str], ...] = ()
+
+    def keep_tree(self, problem: str, path: str, when: str) -> None:
+        """Remember `path` for `problem` unless a tree stamped later already is: trees are
+        read in no order of age, and the last read used to win."""
+        if problem not in self.trees or fix_findings.after(self.stamped.get(problem, ""), when):
+            self.trees[problem] = path
+            self.stamped[problem] = when
+
+    def tree_after(self, problem: str, since: str) -> str:
+        """The tree `problem`'s latest fixer worked in, when it was stamped after `since`;
+        "" otherwise. An escalation named a 10-05 tree that worked a runner outage for
+        the 10-22 failure that shared its problem key (a0fb253d)."""
+        tree = self.trees.get(problem, "")
+        return tree if tree and fix_findings.after(since, self.stamped.get(problem, "")) else ""
 
 
 def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
@@ -150,7 +165,7 @@ def _one_tree(
     problem = str(tree.stamp.get("problem", ""))
     key = str(tree.stamp.get("key", ""))
     if problem:
-        closed.trees[problem] = str(tree.path)
+        closed.keep_tree(problem, str(tree.path), str(tree.stamp.get("when", "")))
     # Judged before anything is filed away: a filed report is still the session's outcome.
     at_work = _judge_session(ctx, tree, where, journal, closed)
     if waits := fix_reports.waits_on(tree.path):

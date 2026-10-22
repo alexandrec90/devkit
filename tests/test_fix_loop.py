@@ -123,6 +123,22 @@ def test_a_blocked_report_is_marked_filed_with_its_problem_and_read_once(ctx, mo
     assert closed.trees == {"problem-1": str(path)}
 
 
+def test_an_escalation_names_the_newest_tree_and_only_one_after_its_cutoff():
+    """a0fb253d: the 10-22 escalation named a 10-05 tree that worked an unrelated runner
+    outage under the same problem key."""
+    closed = fix_loop.Closed()
+    closed.keep_tree("p", "C:/t/new", "2026-10-22T15:30:00+00:00")
+    closed.keep_tree("p", "C:/t/old", "2026-10-05T20:00:04+00:00")
+    assert closed.trees == {"p": "C:/t/new"}, "read in no order: the later stamp wins"
+    assert closed.tree_after("p", "2026-10-19T13:01:11Z") == "C:/t/new"
+    assert closed.tree_after("p", "2026-10-22T16:00:00+00:00") == ""
+    assert closed.tree_after("p", "") == "C:/t/new"
+    assert closed.tree_after("other", "") == ""
+    closed.keep_tree("q", "C:/t/unstamped", "")
+    assert closed.tree_after("q", "") == "C:/t/unstamped"
+    assert closed.tree_after("q", "2026-10-01T00:00:00Z") == "", "no stamp, no claim it is recent"
+
+
 def test_a_report_that_waits_on_a_pr_is_marked_waiting_and_files_no_finding(ctx, monkeypatch):
     url = "https://github.com/alexandrec90/data-lake/pull/66"
     fix_ledger.record(ctx.ledger_path, KEY, "n", NOW)
