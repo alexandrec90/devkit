@@ -541,6 +541,27 @@ def test_a_release_commits_red_is_skipped_out_loud_and_any_other_red_main_is_sen
     )
 
 
+def test_an_unread_red_branch_is_skipped_out_loud_and_still_holds_its_prs():
+    """6a7d386f: carameli's master was red on `Lint / Lint`, every `gh` read of the run
+    failed, and the empty signature was escalated as blind-evidence with no session
+    sent. Unread is skipped, so nothing is spent, and its base is still red."""
+    unread = red_main(project="carameli", base="master", signature=(), unread=True)
+    held = failure(number=1, head="agent/a", base="master", signature=("tests/t.py::a",))
+    decisions = fix_plan.plan([unread, held], "v0-11-23", PREFIXES)
+    assert actions(decisions) == [
+        (fix_plan.SKIP, ["carameli#0"]),
+        (fix_plan.HOLD, ["carameli#1"]),
+    ]
+    assert decisions[0].note.startswith("unread: ") and "next pass" in decisions[0].note
+
+
+def test_a_signature_names_nothing_when_it_is_empty_or_a_conflict_alone():
+    assert fix_plan.names_nothing(())
+    assert fix_plan.names_nothing((fix_plan.CONFLICT,))
+    assert not fix_plan.names_nothing((fix_plan.CONFLICT, "Lint / Lint"))
+    assert not fix_plan.names_nothing(("Lint / Lint",))
+
+
 # --- a red default branch holds its own PRs -------------------------------------------
 
 

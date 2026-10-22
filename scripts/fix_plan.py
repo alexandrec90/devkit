@@ -200,6 +200,9 @@ class Failure:
     lost_runs: tuple[str, ...] = ()
     # The run's attempt, read only when its signature `is_runner_side`; 0 when not read.
     attempt: int = 0
+    # Red, and `gh` answered nothing for its run's jobs (`gate_evidence.reread`): a read
+    # that failed, not a run that names nothing, so it is skipped and read again.
+    unread: bool = False
 
 
 @dataclass(frozen=True)
@@ -284,6 +287,11 @@ def signature(conflicted: bool, texts: Iterable[str], jobs: Iterable[dict]) -> t
     fine = signature_from_logs(texts)
     parts.extend(fine or signature_from_jobs(jobs))
     return tuple(parts)
+
+
+def names_nothing(sig: tuple[str, ...]) -> bool:
+    """No test id, lint line or failed step in it: a conflict alone is no evidence."""
+    return not [entry for entry in sig if entry != CONFLICT]
 
 
 @functools.cache
@@ -419,7 +427,12 @@ def is_adoption(decision: Decision, prefixes: Iterable[str]) -> bool:
 
 
 def skip_reason(failure: Failure, latest_tag: str, prefixes: tuple[str, ...]) -> str:
-    """Why this failure gets no agent, or "" when it gets one. Three shapes, each said."""
+    """Why this failure gets no agent, or "" when it gets one. Four shapes, each said."""
+    if failure.unread:
+        return (
+            "unread: gh answered nothing for the red run's jobs this pass, which is not a "
+            "run that names nothing; the next pass reads it again rather than send one blind"
+        )
     on_branch = failure.kind in (PR, COMMIT)
     if on_branch and is_release(failure.head):
         return (
@@ -460,10 +473,9 @@ def plan(
     grouped: dict[tuple[str, ...], list[Failure]] = {}
     decisions: list[Decision] = []
     listed = list(failures)
+    # An unread branch is skipped and still red: its PRs stay held behind it.
     red_bases = {
-        (f.project, f.base)
-        for f in listed
-        if f.kind == BRANCH and not skip_reason(f, latest, prefixes)
+        (f.project, f.base) for f in listed if f.kind == BRANCH and not is_release_red(f.signature)
     }
     for failure in sorted(listed, key=lambda f: (f.kind, f.project, f.number)):
         if why := skip_reason(failure, latest, prefixes):
