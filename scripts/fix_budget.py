@@ -107,7 +107,7 @@ def budget(
         return Budget(False, f"already dispatched at {when}") if when else Budget(True)
     if escalated.open:
         return Budget(False, "escalated: the devkit session has it on the harness ledger")
-    since = escalated.resolved_at
+    since = since_for(decision, escalated)
     if (url := fix_ledger.waiting_on(decision, ledger, since)) and (
         state := pr_state(url)
     ) not in SETTLED:
@@ -126,6 +126,24 @@ def budget(
     if over := over_daily_cap(decision, ledger, now):
         return Budget(False, over)
     return Budget(True)
+
+
+def since_for(decision: fix_plan.Decision, escalated: fix_findings.Escalation) -> str:
+    """The stamp this problem's ledger entries count after: the later of its escalation's
+    resolution and the last time a branch under it passed its gate (`Failure.green_at`).
+
+    `fix_ledger.problem_key` drops the commit so a fixer that pushed and left the same
+    tests red is the same problem. On a default branch that also joined every failure
+    of one coarse signature for the life of the ledger: carameli master's pip-audit
+    `Lint / Lint` on 2026-10-22 was escalated fixers-exhausted with no fixer sent, its
+    two attempts spent on 09-29 and 10-06 at other lint failures, though master had
+    passed on 10-19 (430656bd). A branch that passed in between was fixed in between.
+    """
+    latest = escalated.resolved_at
+    for stamp in (f.green_at for f in decision.failures):
+        if stamp and fix_findings.after(latest, stamp):
+            latest = stamp
+    return latest
 
 
 # Dependabot sessions per rolling day, machine-wide: its runs, its unanswered alerts and

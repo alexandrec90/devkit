@@ -115,6 +115,54 @@ def test_a_changed_failure_is_progress_and_goes():
     assert go(fix_budget.budget(narrower, ledger_after(first, second), NOW))
 
 
+def _master(sha: str, green_at: str = "", signature=("Lint / Lint",)) -> fix_plan.Decision:
+    red = failure(
+        kind=fix_plan.BRANCH,
+        number=0,
+        head="",
+        base="master",
+        sha=sha,
+        reason="",
+        signature=signature,
+        green_at=green_at,
+    )
+    return decision(fix_plan.DISPATCH, red)
+
+
+def test_a_default_branch_that_passed_since_its_fixers_is_a_new_problem():
+    """430656bd: carameli master's pip-audit `Lint / Lint` on 2026-10-22 was escalated
+    fixers-exhausted with no fixer sent at it -- its two attempts were spent on 09-29
+    and 10-06 at other lint failures, and master had passed on 10-19 in between."""
+    first = _master("c9a75cce")
+    second = _master("6a53eac3")
+    ledger = ledger_after(first, second, when=NOW - _dt.timedelta(days=16))
+    passed = (NOW - _dt.timedelta(days=3)).isoformat()
+    assert go(fix_budget.budget(_master("65a79584", green_at=passed), ledger, NOW))
+    still = fix_budget.budget(_master("65a79584"), ledger, NOW)
+    assert still.finding and still.finding.kind == "fixers-exhausted", "never passed: the loop"
+    before = (NOW - _dt.timedelta(days=20)).isoformat()
+    assert not fix_budget.budget(_master("65a79584", green_at=before), ledger, NOW).go
+
+
+def test_a_blind_default_branch_after_a_pass_gets_its_one_session_again():
+    """a0fb253d: the 10-05 runner outage spent `branch:carameli:0:e3b0c44298fc:dispatch`'s
+    one blind attempt for the life of the ledger, though master passed on 10-06."""
+    ledger = ledger_after(_master("6a53eac3", signature=()), when=NOW - _dt.timedelta(days=17))
+    passed = (NOW - _dt.timedelta(days=16)).isoformat()
+    assert go(fix_budget.budget(_master("65a79584", passed, signature=()), ledger, NOW))
+
+
+def test_the_ledger_counts_after_the_later_of_a_resolution_and_a_pass():
+    resolved = "2026-10-20T00:00:00+00:00"
+    escalated = fix_findings.Escalation(False, resolved)
+    assert fix_budget.since_for(_master("a"), escalated) == resolved
+    later = "2026-10-21T08:00:00Z"
+    assert fix_budget.since_for(_master("a", green_at=later), escalated) == later
+    earlier = "2026-10-19T13:01:11Z"
+    assert fix_budget.since_for(_master("a", green_at=earlier), escalated) == resolved
+    assert fix_budget.since_for(_master("a"), fix_findings.NOT_ESCALATED) == ""
+
+
 def test_legacy_entries_count_against_their_problem():
     """Entries written before `problem` was kept are derived from their key."""
     first = decision(fix_plan.DISPATCH, failure(sha="a1"))

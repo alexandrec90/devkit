@@ -868,7 +868,7 @@ def test_the_newest_completed_run_at_the_tip_is_the_branchs_verdict(monkeypatch,
     assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (None, None)
 
 
-def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
+def branch_world(monkeypatch, conclusion: str, summary: str, tags: str, earlier=()):
     runs = [
         {
             "databaseId": 55,
@@ -877,7 +877,8 @@ def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
             "headSha": "fb17a310",
             "url": "u/55",
             "workflowName": "PR Gate",
-        }
+        },
+        *earlier,
     ]
 
     def gh(*args):
@@ -917,6 +918,32 @@ def test_a_red_default_branch_is_a_failure_with_its_run_downloaded(monkeypatch, 
     assert failure.workflow == "PR Gate" and failure.url == "u/55"
     assert failure.signature == ("tests/test_x.py::test_y",)
     assert Path(failure.evidence) == tmp_path / "ev" / "carameli-branch-main"
+    assert failure.green_at == "", "no run read passed"
+
+
+def test_a_red_default_branch_says_when_its_gate_last_passed(monkeypatch, tmp_path):
+    """430656bd: carameli master passed on 10-19 between the 10-06 lint failure and the
+    10-22 one, and the pass could not tell them apart."""
+    earlier = [
+        {"status": "completed", "conclusion": "failure", "createdAt": "2026-10-20T01:00:00Z"},
+        {"status": "completed", "conclusion": "success", "createdAt": "2026-10-19T13:01:11Z"},
+        {"status": "completed", "conclusion": "success", "createdAt": "2026-10-19T08:01:13Z"},
+    ]
+    branch_world(monkeypatch, "failure", SUMMARY, "", earlier)
+    _, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert failure is not None and failure.green_at == "2026-10-19T13:01:11Z"
+
+
+def test_the_last_green_is_the_newest_passing_run_or_nothing():
+    runs = [
+        {"conclusion": "failure", "createdAt": "c"},
+        {"conclusion": "SUCCESS", "createdAt": "b"},
+        {"conclusion": "success", "createdAt": "a"},
+    ]
+    assert ev.last_green(runs) == "b"
+    assert ev.last_green(runs[:1]) == ""
+    assert ev.last_green([]) == ""
+    assert ev.last_green([{"conclusion": "success"}]) == "", "a run listed without its time"
 
 
 def test_a_tagged_release_commits_red_is_green(monkeypatch, tmp_path):

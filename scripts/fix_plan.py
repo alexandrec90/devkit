@@ -194,6 +194,10 @@ class Failure:
     tip: str = ""
     tip_running: bool = False
     rerun_file: str = ""
+    # BRANCH only: when the gate last passed on the branch (`gate_evidence.last_green`),
+    # ISO, among the runs read; "" when none of them did. Sessions sent at this problem
+    # before then were at another failure that was fixed (`fix_budget.since`).
+    green_at: str = ""
     # PR or BRANCH: the runs read whose only red jobs GitHub never gave a runner
     # (`gate_evidence.runner_lost`), set only when that is every run read. Such a run is
     # re-run (`gh run rerun --failed`), not fixed: nothing in the code made it red.

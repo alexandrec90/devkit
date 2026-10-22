@@ -57,7 +57,7 @@ ISSUE_SUFFIX = reporter.issue_title("")
 # The run URL in that issue's facts table.
 RUN_URL = re.compile(r"/actions/runs/(\d+)")
 
-RUN_LIST_FIELDS = "databaseId,headSha,conclusion,status,url,workflowName"
+RUN_LIST_FIELDS = "databaseId,headSha,conclusion,status,url,workflowName,createdAt"
 RUN_VIEW_FIELDS = "jobs,conclusion,headSha,url"
 # The job conclusions whose own log `failed_job_logs` reads.
 FAILED_JOB = frozenset({"failure", "timed_out"})
@@ -361,6 +361,18 @@ def _tip_verdict(runs: list[dict], tip: str) -> tuple[bool | str | None, dict]:
     return (None, {}) if conclusion in NO_VERDICT else (False, run)
 
 
+def last_green(runs: list[dict]) -> str:
+    """When the newest run among `runs` that passed was started, ISO; "" when none did.
+
+    A failure on a default branch that has passed since a session was sent at the same
+    signature is a new failure, not that session's leftover (`fix_plan.Failure.green_at`).
+    """
+    for run in runs:
+        if str(run.get("conclusion", "")).lower() == "success":
+            return str(run.get("createdAt", "") or "")
+    return ""
+
+
 def run_ids_from_rollup(rollup: object) -> tuple[str, ...]:
     """The runs behind a PR's failing checks, off `statusCheckRollup`, deduped in order.
 
@@ -519,6 +531,7 @@ def read_default_branch(
         sha=str(run.get("headSha", "")),
         run_id=run_id,
         workflow=str(run.get("workflowName") or GATE_WORKFLOW),
+        green_at=last_green(runs),
     )
     where = root / evidence_slot(failure)
     texts, jobs = run_evidence(gh, run_id, where) if run_id else ([], [])

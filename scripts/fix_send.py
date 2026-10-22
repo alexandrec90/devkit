@@ -303,7 +303,8 @@ def send_all(
             decision, ledger, ctx.now, escalated, lambda url: _state(sweep.gh_for(ctx.root), url)
         )
         if verdict.finding and journal is not None:
-            journal.add(verdict.finding.at(closed.trees.get(problem, "")))
+            since = fix_budget.since_for(decision, escalated)
+            journal.add(verdict.finding.at(closed.tree_after(problem, since)))
         why = verdict.why if not verdict.go else _no_memory(decision, room)
         if why := why or _no_time(decision, left):
             capped.append((decision, why))
