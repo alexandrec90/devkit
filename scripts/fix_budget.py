@@ -41,10 +41,7 @@ DEVKIT = "devkit"
 
 def is_blind(decision: fix_plan.Decision) -> bool:
     """No failure under it has any evidence: no test id, no lint line, no failed step."""
-    return all(
-        not [entry for entry in f.signature if entry != fix_plan.CONFLICT]
-        for f in decision.failures
-    )
+    return all(fix_plan.names_nothing(f.signature) for f in decision.failures)
 
 
 @dataclass(frozen=True)

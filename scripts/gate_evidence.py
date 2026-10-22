@@ -112,12 +112,39 @@ def gate_run(gh: Gh, head: str, sha: str) -> dict:
 
 
 def run_jobs(gh: Gh, run_id: str) -> list[dict]:
-    """The run's jobs with their steps, for the coarse signature."""
+    """The run's jobs with their steps, for the coarse signature; empty when `gh` cannot say."""
+    return read_jobs(gh, run_id) or []
+
+
+def read_jobs(gh: Gh, run_id: str) -> list[dict] | None:
+    """`run_jobs`, but None when `gh` could not say -- which is not a run with no jobs."""
     viewed = gh_json(gh("run", "view", str(run_id), "--json", RUN_VIEW_FIELDS))
     if not isinstance(viewed, dict):
-        return []
+        return None
     jobs = viewed.get("jobs", [])
     return [job for job in jobs if isinstance(job, dict)] if isinstance(jobs, list) else []
+
+
+def reread(
+    gh: Gh, run_ids: list[str], conflicted: bool, texts: list[str]
+) -> tuple[tuple[str, ...], bool]:
+    """`(signature, unread)` for runs whose evidence named nothing: their jobs asked once
+    more, and `unread` when `gh` still answers nothing for one of them.
+
+    `run_evidence` takes a `gh` that failed for a run that said nothing, so a pass whose
+    reads all failed sent the failure out blind. carameli's PR Gate run 39800864308 was
+    red on `Lint / Lint` with its lint artifact up, and the 15:30 pass on 2026-10-22 read
+    it as naming nothing: the empty signature counted a 10-05 session at another blind
+    failure as its one attempt, and was escalated as `blind-evidence` with no session
+    sent (6a7d386f). Unread, the plan skips it and the next pass reads it again.
+    """
+    jobs: list[dict] = []
+    for run_id in run_ids:
+        found = read_jobs(gh, run_id)
+        if found is None:
+            return fix_plan.signature(conflicted, texts, jobs), not conflicted
+        jobs += found
+    return fix_plan.signature(conflicted, texts, jobs), False
 
 
 def run_attempt(gh: Gh, run_id: str, sig: tuple[str, ...]) -> int:
@@ -418,9 +445,13 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     texts, jobs, lost = read_runs(gh, run_ids, where)
     lost = () if conflicted else lost
     sig = lost_signature(lost) if lost else fix_plan.signature(conflicted, texts, jobs)
+    unread = False
+    if fix_plan.names_nothing(sig):
+        sig, unread = reread(gh, run_ids, conflicted, texts)
     return replace(
         failure,
         signature=sig,
+        unread=unread,
         run_id=run_ids[0],
         evidence=str(where) if texts else "",
         behind=behind,
@@ -496,9 +527,13 @@ def read_default_branch(
         return True, None
     if lost := runner_lost(gh, jobs):
         return False, replace(failure, signature=lost_signature(lost), lost_runs=(run_id,))
+    unread = False
+    if run_id and fix_plan.names_nothing(sig):
+        sig, unread = reread(gh, [run_id], False, texts)
     return False, replace(
         failure,
         signature=sig,
+        unread=unread,
         evidence=str(where) if texts else "",
         attempt=run_attempt(gh, run_id, sig),
     )
@@ -591,9 +626,13 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
     where = root / evidence_slot(failure)
     texts, jobs = run_evidence(gh, run_id, where)
     sig = fix_plan.signature(False, texts, jobs)
+    unread = False
+    if fix_plan.names_nothing(sig):
+        sig, unread = reread(gh, [run_id], False, texts)
     return replace(
         failure,
         signature=sig,
+        unread=unread,
         sha=str(red.get("headSha", "") or "") or run_head(gh, run_id),
         evidence=str(where) if texts else "",
         attempt=run_attempt(gh, run_id, sig),

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,26 @@ def test_the_jobs_come_with_their_steps():
     gh = table({("run", "view", "7"): {"jobs": jobs}})
     assert ev.run_jobs(gh, "7") == jobs
     assert ev.run_jobs(table({}), "7") == []
+
+
+def test_jobs_gh_could_not_read_are_none_and_a_run_with_none_is_empty():
+    assert ev.read_jobs(table({}), "7") is None
+    assert ev.read_jobs(table({("run", "view", "7"): {"jobs": []}}), "7") == []
+
+
+def test_reread_signs_by_every_runs_jobs_and_is_unread_when_one_says_nothing():
+    jobs = [
+        {
+            "name": "Lint",
+            "conclusion": "failure",
+            "steps": [{"name": "Lint", "conclusion": "failure"}],
+        }
+    ]
+    gh = table({("run", "view", "7"): {"jobs": jobs}})
+    assert ev.reread(gh, ["7"], False, []) == (("Lint / Lint",), False)
+    assert ev.reread(gh, ["7", "8"], False, []) == (("Lint / Lint",), True), "8 unread"
+    conflicted = (fix_plan.CONFLICT,)
+    assert ev.reread(table({}), ["7"], True, []) == (conflicted, False), "a conflict needs no run"
 
 
 def test_the_download_lands_under_dest_and_the_logs_are_read_back(tmp_path):
@@ -985,6 +1006,59 @@ def tip_world(monkeypatch, runs: list[dict], tip: str = "fb17a310"):
         lambda _p: lambda *a: subprocess.CompletedProcess(a, 0, f"{tip}\n", ""),
     )
     monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+
+
+RED_AT_TIP = [
+    {"databaseId": 7, "status": "completed", "conclusion": "failure", "headSha": "fb17a310"}
+]
+LINT_JOB = {
+    "name": "Lint",
+    "conclusion": "failure",
+    "steps": [
+        {"name": "Set up job", "conclusion": "success"},
+        {"name": "Lint", "conclusion": "failure"},
+    ],
+}
+
+
+def test_a_red_branch_gh_could_not_read_is_unread_not_blind(monkeypatch, tmp_path):
+    """6a7d386f: carameli's PR Gate run 39800864308 was red on `Lint / Lint` with its
+    lint artifact up, and every read of it failed in the 15:30 pass: the empty
+    signature was escalated as blind-evidence with no session sent at it."""
+    tip_world(monkeypatch, RED_AT_TIP)
+    green, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert green is False and failure is not None
+    assert failure.unread and failure.signature == ()
+    assert fix_plan.plan([failure], "", ())[0].action == fix_plan.SKIP
+
+
+def test_a_red_branch_whose_jobs_answer_when_asked_again_is_signed_by_them(monkeypatch, tmp_path):
+    """A read that failed once and answered the second time is evidence, not unread."""
+    tip_world(monkeypatch, RED_AT_TIP)
+    gh = ev.sweep.gh_for(tmp_path)
+    asked = {"jobs": 0}
+
+    def flaky(*args):
+        if args[:2] == ("run", "view") and "--json" in args:
+            asked["jobs"] += 1
+            if asked["jobs"] > 1:
+                return subprocess.CompletedProcess(args, 0, json.dumps({"jobs": [LINT_JOB]}), "")
+        return gh(*args)
+
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: flaky)
+    _green, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert failure is not None and not failure.unread
+    assert failure.signature == ("Lint / Lint",)
+
+
+def test_a_red_pr_gh_could_not_read_is_unread_unless_it_conflicts(monkeypatch, tmp_path):
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({("run", "list"): RED_AT_TIP}))
+    pr_at = ev.pr_failure("carameli", pr(headRefOid="fb17a310"))
+    failure = ev.read_pr(tmp_path, pr_at, tmp_path / "ev")
+    assert failure.unread and failure.signature == ()
+    conflicted = replace(pr_at, reason=fix_plan.CONFLICT)
+    failure = ev.read_pr(tmp_path, conflicted, tmp_path / "ev")
+    assert not failure.unread, "a conflict is decided without the gate"
 
 
 def test_a_gate_still_running_at_the_tip_is_running_not_unreadable(monkeypatch, tmp_path):
