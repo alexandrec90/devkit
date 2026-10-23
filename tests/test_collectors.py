@@ -2927,6 +2927,19 @@ def test_fire_logs_under_its_own_name_and_returns_the_commands_code(tmp_path, mo
     assert log.startswith("# collector social-scraper 2026-10-02T15:00:00 -- exit 3")
 
 
+def test_fire_keeps_a_passing_run_the_next_fire_overwrites(tmp_path, monkeypatch):
+    """ba74527c: a run that exited 0 on a rate-limit notice was overwritten by the next
+    fire, whose failure that notice explained, and nothing kept it."""
+    root = scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
+    first, second = dt.datetime(2026, 10, 23, 13, 0), dt.datetime(2026, 10, 23, 13, 30)
+    collectors.fire("social-scraper", root, first, lambda *a, **k: (0, "notice: rate limited"))
+    collectors.fire("social-scraper", root, second, lambda *a, **k: (1, "failed"))
+    kept = root / "logs" / collectors.collector_tasks.RUNS_DIR
+    earlier = (kept / "social-scraper-20261023-130000.log").read_text(encoding="utf-8")
+    assert "notice: rate limited" in earlier
+    assert (kept / "social-scraper-20261023-133000.log").exists()
+
+
 def test_fire_records_when_its_run_began_before_the_command_runs(tmp_path, monkeypatch):
     """4933b284: a run still going when the next fire was skipped had written nothing,
     since the log is written at the end, so the pass judged it by the skipped fire's

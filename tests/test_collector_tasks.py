@@ -1021,6 +1021,34 @@ def test_render_heads_the_log_with_the_name_time_and_exit():
 
     text = tasks.render("social-scraper", 3, ["a"], dt.datetime(2026, 10, 2, 14, 30))
     assert text.splitlines()[0] == "# collector social-scraper 2026-10-02T14:30:00 -- exit 3"
+    assert text.splitlines()[1] == "# earlier runs: logs/collector-runs/social-scraper-*.log"
+
+
+def test_each_fire_is_kept_under_its_own_stamp(tmp_path):
+    when = dt.datetime(2026, 10, 23, 13, 0, 1)
+    path = tasks.keep_run(tmp_path, "social-scraper", "rate limited\n", when)
+    assert path == tmp_path / "logs" / "collector-runs" / "social-scraper-20261023-130001.log"
+    assert path.read_text(encoding="utf-8") == "rate limited\n"
+    assert path.match(tasks.runs_glob("social-scraper"))
+
+
+def test_kept_fires_are_pruned_oldest_first_and_only_the_collectors_own(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks, "RUNS_KEEP", 2)
+    other = tasks.keep_run(tmp_path, "ibkr_trader", "x", dt.datetime(2026, 1, 1))
+    for hour in (9, 10, 11):
+        tasks.keep_run(tmp_path, "social-scraper", str(hour), dt.datetime(2026, 10, 23, hour))
+    kept = sorted(p.name for p in (tmp_path / "logs" / "collector-runs").iterdir())
+    assert kept == [
+        "ibkr_trader-20260101-000000.log",
+        "social-scraper-20261023-100000.log",
+        "social-scraper-20261023-110000.log",
+    ]
+    assert other is not None and other.exists()
+
+
+def test_a_kept_fire_that_cannot_be_written_is_none_not_a_raise(tmp_path):
+    (tmp_path / "logs").write_text("a file where the directory goes", encoding="utf-8")
+    assert tasks.keep_run(tmp_path, "social-scraper", "x", dt.datetime(2026, 10, 23)) is None
 
 
 def test_the_log_is_under_logs():

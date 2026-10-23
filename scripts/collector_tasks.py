@@ -21,7 +21,8 @@ clock is a task, and this module is everything about that task:
   read from the workspace file at fire time, so editing it needs no re-registration; the
   wrapper is what keeps the run window-less (`NO_WINDOW` on a console child -- see
   `scripts/windowless-jobs.md`), starts the compose services it `needs`, and writes
-  `logs/collector-<name>.log`, which `pythonw.exe` would otherwise send nowhere. It exits
+  `logs/collector-<name>.log`, which `pythonw.exe` would otherwise send nowhere, with a
+  copy of each run under `logs/collector-runs/` (`keep_run`). It exits
   with the command's own code, so the scheduler's `Last Result` is the project's verdict
   and the tray reads it through `schedule_health` like any other job.
 
@@ -193,6 +194,40 @@ def start_path(name: str) -> Path:
     its fix merged as that fix not holding (4933b284).
     """
     return Path(f"logs/collector-{name}.started")
+
+
+# Every fire's own log, kept beside the one `log_path` overwrites, `RUNS_KEEP` newest per
+# collector: two days of half-hourly fires. `log_path` holds only the latest run, and
+# log-wrap's kept copy only failures, so a run that exited 0 on a notice -- a rate limit
+# the next cycle failed on -- was gone by the time its failure was triaged, and 1f5d9e99's
+# cause had to be rebuilt from social-scraper's own `request_log` table (ba74527c).
+RUNS_DIR = "collector-runs"
+RUNS_KEEP = 96
+RUN_STAMP = "%Y%m%d-%H%M%S"
+
+
+def runs_glob(name: str) -> str:
+    """Where `name`'s earlier fires are kept, as a pattern relative to the devkit checkout."""
+    return f"logs/{RUNS_DIR}/{name}-*.log"
+
+
+def keep_run(root: Path, name: str, text: str, when: _dt.datetime) -> Path | None:
+    """Keep `text` as the fire at `when`'s own copy under `root/logs/RUNS_DIR`, and prune
+    `name`'s past `RUNS_KEEP`, oldest first by the stamp in the name; the copy's path, or
+    None when it could not be written. Best effort: the copy is evidence, never a reason
+    to change the fire's exit code."""
+    folder = root / "logs" / RUNS_DIR
+    mine = re.compile(rf"^{re.escape(name)}-\d{{8}}-\d{{6}}\.log$")
+    path = folder / f"{name}-{when.strftime(RUN_STAMP)}.log"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        copies = sorted(p.name for p in folder.iterdir() if mine.match(p.name))
+        for old in copies[:-RUNS_KEEP]:
+            (folder / old).unlink(missing_ok=True)
+    except OSError:
+        return None
+    return path
 
 
 def started_at(path: Path) -> _dt.datetime | None:
@@ -718,5 +753,7 @@ def run_once(collector: config.Collector, checkout: Path, run: Streamer = stream
 
 
 def render(name: str, code: int, lines: Sequence[str], when: _dt.datetime) -> str:
+    """The fire's log: its name, time and exit, then where its earlier runs are kept
+    (`keep_run`), since a failure's cause can be in the run before it."""
     head = f"# collector {name} {when.isoformat(timespec='seconds')} -- exit {code}"
-    return "\n".join([head, *lines, ""])
+    return "\n".join([head, f"# earlier runs: {runs_glob(name)}", *lines, ""])
