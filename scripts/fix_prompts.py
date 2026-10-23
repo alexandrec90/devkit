@@ -18,7 +18,7 @@ Stdlib only, no `gh`. Tested in `tests/test_fix_prompts.py`.
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -300,36 +300,46 @@ def _squashed_too(squashed: str, base: str) -> str:
     )
 
 
-def pr_prompt(
-    failure: Failure,
-    refusal: str = "",
-    left: str = "",
-    locked: dict[str, str] | None = None,
-    made: str = "",
-    squashed: str = "",
-) -> str:
+@dataclass(frozen=True)
+class TreeNotes:
+    """What `fix-prs.dispatch_pr` read off a PR's tree before its session opened.
+
+    `refusal` is the tree's `standing_refusal`, which the commit shape already is,
+    `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`),
+    `locked` is the tree's `fix_trees.locked_caches`, `made` is who made a reused
+    tree (`fix_trees.provenance`), `squashed` is a conflict's
+    `fix_trees.squashed_base`, and `lag` is a red PR's `fix_trees.base_lag`.
+    """
+
+    refusal: str = ""
+    left: str = ""
+    locked: dict[str, str] | None = None
+    made: str = ""
+    squashed: str = ""
+    lag: str = ""
+
+
+def pr_prompt(failure: Failure, tree: TreeNotes | None = None) -> str:
     """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
 
     Three shapes, one function, because the worktree and the finish line are the same
     and only the middle differs. The conflict prompt names no failure on purpose: the
     gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
-    `refusal` is the tree's `standing_refusal`, which the commit shape already is,
-    `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`),
-    `locked` is the tree's `fix_trees.locked_caches`, `made` is who made a reused
-    tree (`fix_trees.provenance`), and `squashed` is `fix_trees.squashed_base`.
+    `tree` is what the dispatch found in the worktree (`TreeNotes`).
     """
-    tree_notes = made + _refused_too(refusal) + _locked_too(locked)
+    tree = tree or TreeNotes()
+    tree_notes = tree.made + _refused_too(tree.refusal) + _locked_too(tree.locked)
     if CONFLICT in failure.signature:
         return _framed(
             f"PR #{failure.number} in {failure.project} has a merge conflict with "
             f"origin/{failure.base}. This worktree is checked out on its head branch "
-            f"{failure.head}.{_left_as_is(left, failure.head)}{_described(failure.number)} "
+            f"{failure.head}.{_left_as_is(tree.left, failure.head)}{_described(failure.number)} "
             f"Merge origin/{failure.base} in and resolve the conflicts so "
             "that both sides' intent survives -- git diff --check must find no conflict "
             "marker in any file, not only the code -- and leave the merge uncommitted: the fix "
             "pass concludes it with the hooks running, and whatever the gate says after "
             f"that is the next pass's business, not this session's."
-            f"{_squashed_too(squashed, failure.base)}{tree_notes} {FINISH}"
+            f"{_squashed_too(tree.squashed, failure.base)}{tree_notes} {FINISH}"
         )
     if failure.kind == COMMIT:
         return _framed(
@@ -337,13 +347,13 @@ def pr_prompt(
             f"{_ids(failure.signature)}. The pre-commit output is in {EVIDENCE_DIR}/ in this "
             "worktree, which is the worktree the change was made in, and the message it "
             f"was being shipped with is in {REFUSED_FILE.as_posix()} -- reuse it when it "
-            f"still fits. Fix what the output reports.{made}{_locked_too(locked)} {FINISH}"
+            f"still fits. Fix what the output reports.{tree.made}{_locked_too(tree.locked)} {FINISH}"
         )
     return _framed(
         f"PR #{failure.number} in {failure.project} against origin/{failure.base} is stuck: "
         f"{failure.reason}. Failing: {_ids(failure.signature)}. {_logs(failure)} "
         f"This worktree is checked out on the PR head branch {failure.head}"
-        + (f".{_left_as_is(left, failure.head)}" if left else ", already up to date with its base.")
+        + _head_state(tree, failure)
         + _described(failure.number)
         + " Fix what the gate is failing on, and nothing else about "
         f"the PR.{tree_notes} {FINISH}"
@@ -360,6 +370,23 @@ def _ledger_log(failure: Failure) -> str:
     slot = Path(failure.evidence).name if failure.evidence else ""
     where = f"{EVIDENCE_DIR}/{slot}/" if slot else f"{EVIDENCE_DIR}/*/"
     return f" The ledger groups are in {where}{TRIAGE_LOG} in this worktree."
+
+
+def _head_state(tree: TreeNotes, failure: Failure) -> str:
+    """What a red PR's tree holds against origin: left as is, behind its base, or neither.
+
+    "Already up to date with its base" is said only when nothing contradicts it: carameli
+    #474's fixer was told so while master held the very bump its gate wanted (8316e54f).
+    """
+    said = f".{_left_as_is(tree.left, failure.head)}" if tree.left else ""
+    if not tree.lag:
+        return said or ", already up to date with its base."
+    return (
+        f"{said or '.'} Its base has moved: {tree.lag}. git fetch origin {failure.base} and "
+        f"git merge origin/{failure.base} before anything else, then see whether the "
+        "failure still reproduces: a fix the base already carries is shipped as that "
+        "merge, not written a second time."
+    )
 
 
 def _left_as_is(left: str, head: str) -> str:

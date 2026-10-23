@@ -60,6 +60,7 @@ import fix_plan
 import fix_prompts
 import fix_reports
 from fix_trees import (
+    base_lag,
     cut_fresh_tree,
     cut_tree,
     existing_tree,
@@ -291,9 +292,14 @@ def dispatch_pr(
     refusal = fix_prompts.standing_refusal(tree)
     # Only this path reuses a tree, so only here can an elevated session's leftovers be.
     left = stale.removeprefix("left as is: ")
-    squashed = squashed_base(tree, failure.base) if fix_plan.CONFLICT in failure.signature else ""
+    conflicted = fix_plan.CONFLICT in failure.signature
+    squashed = squashed_base(tree, failure.base) if conflicted else ""
+    # The plan's `behind` is as old as the pass; a base can move before the tree opens.
+    red = failure.kind == fix_plan.PR and not conflicted
+    lag = base_lag(tree, failure.base) if red else ""
     locked = locked_caches(tree)
-    prompt = tab_safe(fix_prompts.pr_prompt(failure, refusal, left, locked, made, squashed))
+    notes = fix_prompts.TreeNotes(refusal, left, locked, made, squashed, lag)
+    prompt = tab_safe(fix_prompts.pr_prompt(failure, notes))
     return open_session(launch, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 

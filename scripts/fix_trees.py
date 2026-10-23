@@ -250,6 +250,24 @@ def squashed_base(tree: Path, base: str, git_for=sweep.git_for, gh_for=sweep.gh_
     return ""
 
 
+def base_lag(tree: Path, base: str, git_for=sweep.git_for) -> str:
+    """How far the tree's HEAD is behind a freshly fetched `origin/<base>`; "" only when
+    git says it carries the base's tip.
+
+    The plan reads `behind` once, at the start of the pass, and a base can move before
+    the tree opens: carameli #474's fixer was told its head was "already up to date with
+    its base" while master held the brotli bump that was the whole fix.
+    """
+    git = git_for(tree)
+    git("fetch", "--quiet", "origin", base)
+    counted = git("rev-list", "--count", f"HEAD..origin/{base}")
+    said = str(getattr(counted, "stdout", "") or "").strip()
+    if getattr(counted, "returncode", 1) != 0 or not said.isdigit():
+        return f"git could not say whether it carries origin/{base}"
+    n = int(said)
+    return f"origin/{base} has {n} commit{'s' * (n != 1)} it does not" if n else ""
+
+
 def cut_fresh_tree(
     project_dir: Path, branch: str, base: str, runner=sweep.run_windowless
 ) -> tuple[Path | None, str]:
