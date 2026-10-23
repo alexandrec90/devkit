@@ -275,7 +275,7 @@ def test_a_resolver_is_told_the_true_base_when_the_base_squashed_part_of_its_bra
     eight files add/add against a merge base older than both."""
     conflicted = failure(signature=(fix_plan.CONFLICT,))
     squashed = "#96 (head 70aa105, squashed as 1731e5e)"
-    text = fix_prompts.pr_prompt(conflicted, squashed=squashed)
+    text = fix_prompts.pr_prompt(conflicted, fix_prompts.TreeNotes(squashed=squashed))
     assert f"origin/main holds PR {squashed} as one commit" in text
     assert "squash commit as the true base" in text
     assert text.endswith(fix_prompts.STOP)
@@ -296,7 +296,7 @@ def test_a_pr_prompt_says_when_its_tree_holds_what_an_earlier_session_left():
     session and told nothing of it (f7167792); the pass knew, and only printed it."""
     left = "the tree has uncommitted changes"
     for red in (failure(), failure(signature=(fix_plan.CONFLICT,))):
-        text = fix_prompts.pr_prompt(red, "", left)
+        text = fix_prompts.pr_prompt(red, fix_prompts.TreeNotes(left=left))
         assert left in text and "git status" in text and "earlier session" in text
         assert f"git log origin/{red.head}..HEAD" in text
         # 5f5c4b3c: told only to look, a fixer worked on a base three merges behind.
@@ -304,6 +304,23 @@ def test_a_pr_prompt_says_when_its_tree_holds_what_an_earlier_session_left():
         assert "already up to date" not in text
     assert "earlier session" not in fix_prompts.pr_prompt(failure())
     assert "already up to date with its base" in fix_prompts.pr_prompt(failure())
+
+
+def test_a_red_pr_behind_its_base_is_told_to_merge_it_before_fixing_anything():
+    """carameli #474: "already up to date with its base" was said of a head master had
+    moved past with the very fix the gate wanted, and the fixer found it by hand. The
+    claim is made only when the dispatch checked it; otherwise the lag is said."""
+    lag = "origin/main has 2 commits it does not"
+    text = fix_prompts.pr_prompt(failure(), fix_prompts.TreeNotes(lag=lag))
+    assert "already up to date" not in text
+    assert lag in text and "git merge origin/main" in text
+    assert "a fix the base already carries" in text
+    left = "the tree has uncommitted changes"
+    both = fix_prompts.pr_prompt(failure(), fix_prompts.TreeNotes(left=left, lag=lag))
+    assert left in both and lag in both and "already up to date" not in both
+    conflicted = failure(signature=(fix_plan.CONFLICT,))
+    conflict = fix_prompts.pr_prompt(conflicted, fix_prompts.TreeNotes(lag=lag))
+    assert lag not in conflict, "a resolver is already told to merge the base"
 
 
 def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
@@ -324,12 +341,14 @@ def test_every_pr_shape_names_a_cache_an_elevated_session_locked_and_the_way_rou
         failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",)),
     )
     for red in shapes:
-        text = fix_prompts.pr_prompt(red, "", "", locked)
+        text = fix_prompts.pr_prompt(red, fix_prompts.TreeNotes(locked=locked))
         assert "An elevated session left .pytest_cache" in text
         assert "PYTEST_ADDOPTS=-p no:cacheprovider" in text
         assert text.endswith(fix_prompts.STOP)
         assert "elevated session" not in fix_prompts.pr_prompt(red)
-        assert "elevated session" not in fix_prompts.pr_prompt(red, "", "", {})
+        assert "elevated session" not in fix_prompts.pr_prompt(
+            red, fix_prompts.TreeNotes(locked={})
+        )
 
 
 def test_a_pr_prompt_quotes_a_refusal_already_standing_in_its_tree(tmp_path):
@@ -346,7 +365,7 @@ def test_a_pr_prompt_quotes_a_refusal_already_standing_in_its_tree(tmp_path):
     refusal = fix_prompts.standing_refusal(tmp_path)
     assert refusal.startswith("commit: ") and "detect-secrets" in refusal
     for red in (failure(), failure(signature=(fix_plan.CONFLICT,))):
-        text = fix_prompts.pr_prompt(red, refusal)
+        text = fix_prompts.pr_prompt(red, fix_prompts.TreeNotes(refusal=refusal))
         assert "refused" in text and ".secrets.baseline unstaged" in text
     assert "ship-state" not in fix_prompts.pr_prompt(failure())
     # A shipped state, no state, or an unreadable one: nothing to quote.
@@ -619,7 +638,7 @@ def test_who_made_a_reused_tree_reaches_every_pr_shape():
         failure(kind=fix_plan.COMMIT, number=0, signature=("commit refused",)),
     )
     for red in shapes:
-        assert made in fix_prompts.pr_prompt(red, made=made)
+        assert made in fix_prompts.pr_prompt(red, fix_prompts.TreeNotes(made=made))
         assert "not cut for you" not in fix_prompts.pr_prompt(red)
 
 

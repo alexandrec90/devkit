@@ -100,6 +100,12 @@ def no_provisioning(monkeypatch):
     monkeypatch.setattr(fix_prs, "provision_tree", lambda _tree: [])
 
 
+@pytest.fixture(autouse=True)
+def base_carried(monkeypatch):
+    """The base check is a fetch; a dispatch test's tree carries its base unless it says."""
+    monkeypatch.setattr(fix_prs, "base_lag", lambda _tree, _base: "")
+
+
 # --- what the agent is told -------------------------------------------------------
 
 
@@ -513,7 +519,8 @@ def test_a_reused_trees_locked_caches_reach_its_fixers_prompt(monkeypatch, root)
     opened = capture_sessions(monkeypatch)
     assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
     made = fix_trees.provenance(root / "carameli" / "t")
-    expected = fix_prs.fix_prompts.pr_prompt(failure(), "", "", locked, made)
+    notes = fix_prs.fix_prompts.TreeNotes(locked=locked, made=made)
+    expected = fix_prs.fix_prompts.pr_prompt(failure(), notes)
     assert opened[0]["prompt"] == fix_prs.tab_safe(expected)
 
 
@@ -1406,6 +1413,46 @@ def test_a_planned_pr_is_refreshed_before_its_fixer_opens_and_a_refused_commit_i
     assert "stale" in capsys.readouterr().out
 
 
+def test_base_lag_is_checked_at_dispatch_against_a_fresh_fetch_of_the_base(tmp_path):
+    """carameli #474's fixer was told its head was "already up to date with its base"
+    while master already held the brotli bump that was the whole fix: the plan read
+    `behind` once at the start of the pass, and nothing looked again when the tree
+    opened. "" only when git says the head carries the base's tip."""
+    calls: list[tuple[str, ...]] = []
+    counted = ("rev-list", "--count", "HEAD..origin/master")
+
+    def git_for(answer):
+        table = fake_git({counted: answer, ("fetch", "--quiet", "origin", "master"): (0, "")})
+        return lambda _tree: lambda *args: calls.append(args) or table(*args)
+
+    assert fix_trees.base_lag(tmp_path, "master", git_for((0, "0\n"))) == ""
+    assert calls == [("fetch", "--quiet", "origin", "master"), counted]
+    lag = fix_trees.base_lag(tmp_path, "master", git_for((0, "3\n")))
+    assert lag == "origin/master has 3 commits it does not"
+    one = fix_trees.base_lag(tmp_path, "master", git_for((0, "1\n")))
+    assert one == "origin/master has 1 commit it does not"
+    unknown = "git could not say whether it carries origin/master"
+    assert fix_trees.base_lag(tmp_path, "master", git_for((128, ""))) == unknown
+    assert fix_trees.base_lag(tmp_path, "master", git_for((0, "garbled"))) == unknown
+
+
+def test_a_red_prs_fixer_is_told_how_far_behind_its_base_the_tree_is(monkeypatch, root):
+    asked = []
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    lag = "origin/main has 2 commits it does not"
+    monkeypatch.setattr(fix_prs, "base_lag", lambda tree, base: asked.append(base) or lag)
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
+    assert asked == ["main"]
+    assert lag in opened[0]["prompt"]
+    assert "already up to date" not in opened[0]["prompt"]
+    refused = failure(kind=fix_plan.COMMIT, number=0, head="agent/i", signature=("x refused",))
+    assert fix_prs.dispatch_pr(refused, root, agent_models.Launch("claude")) == 0
+    assert asked == ["main"], "a refused commit is the session's own edits, not a PR head"
+
+
 def test_a_tree_left_as_is_is_named_in_its_fixers_prompt(monkeypatch, root):
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
     monkeypatch.setattr(
@@ -1416,7 +1463,8 @@ def test_a_tree_left_as_is_is_named_in_its_fixers_prompt(monkeypatch, root):
     assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
     left = "the tree has uncommitted changes"
     made = fix_trees.provenance(root / "carameli" / "t")
-    expected = fix_prs.fix_prompts.pr_prompt(failure(), "", left, None, made)
+    notes = fix_prs.fix_prompts.TreeNotes(left=left, made=made)
+    expected = fix_prs.fix_prompts.pr_prompt(failure(), notes)
     assert opened[0]["prompt"] == fix_prs.tab_safe(expected)
 
 
