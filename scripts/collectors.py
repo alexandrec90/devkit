@@ -2171,7 +2171,8 @@ def fire(
 ) -> int:
     """`fire <name>`: what a scheduled collector's task runs. Exits with the command's code.
 
-    Writes `logs/collector-<name>.log` and never `ARTIFACT`, which belongs to the pass, and
+    Writes `logs/collector-<name>.log` and never `ARTIFACT`, which belongs to the pass,
+    keeps a copy of every run, passing ones too (`collector_tasks.keep_run`), and
     records a run's start before its command runs (`collector_tasks.start_path`). A
     task left behind on a machine no longer assigned `run` -- the pass that deletes it has
     not come round yet -- does nothing and says so, rather than running a second writer.
@@ -2203,6 +2204,7 @@ def fire(
         )
     text = collector_tasks.render(name, code, lines, now)
     write_file(base / collector_tasks.log_path(name), text)
+    collector_tasks.keep_run(base, name, text, now)
     print(text, end="")
     return code
 
