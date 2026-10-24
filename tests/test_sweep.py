@@ -1585,6 +1585,10 @@ SCHANNEL = (
     "fatal: unable to access 'https://github.com/alexandrec90/ibkr_trader.git/': "
     "schannel: failed to receive handshake, SSL/TLS connection failed"
 )
+EMPTY_REPLY = (
+    "fatal: unable to access 'https://github.com/alexandrec90/roguelike.git/': "
+    "Empty reply from server"
+)
 
 
 def test_a_step_that_failed_on_the_network_is_asked_again():
@@ -1597,6 +1601,17 @@ def test_a_step_that_failed_on_the_network_is_asked_again():
     )
     result = sweep.apply_plan("proj", Path("."), plan, git=git, pause=paused.append)
     assert result.ok
+    assert git.calls.count(("fetch", "--prune", "origin")) == 2
+    assert paused == [sweep.NETWORK_PAUSE]
+
+
+def test_a_fetch_github_closed_without_answering_is_asked_again():
+    """ce9a7cce: the scheduled reconcile's fetch of roguelike got an empty reply and the
+    run said the state needed a human, without asking again."""
+    paused: list[float] = []
+    git = RacedGit("fetch", EMPTY_REPLY)
+    plan = sweep.Plan(steps=(("fetch", "--prune", "origin"),), anchor="")
+    assert sweep.apply_plan("proj", Path("."), plan, git=git, pause=paused.append).ok
     assert git.calls.count(("fetch", "--prune", "origin")) == 2
     assert paused == [sweep.NETWORK_PAUSE]
 
@@ -1797,6 +1812,11 @@ def test_a_failed_pr_creation_is_reported_not_swallowed():
         ("! [rejected] x -> x (non-fast-forward)", False),
         # f1373302: Windows' schannel on a fetch that broke off mid-handshake.
         (SCHANNEL, True),
+        # ce9a7cce: curl's words for a connection GitHub closed before answering, and
+        # for one dropped mid-read (curl 52 and 56).
+        (EMPTY_REPLY, True),
+        ("error: RPC failed; curl 56 Recv failure: Connection was reset", True),
+        ("fatal: unable to access 'https://github.com/o/r.git/': error: 403", False),
     ],
 )
 def test_transient_tells_githubs_failure_from_a_refusal(said, transient):
