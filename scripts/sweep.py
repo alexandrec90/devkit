@@ -1669,11 +1669,14 @@ def gh_for(path: Path) -> Git:
 # ref -- is the same answer every time. bc1ec6d1 (a dispatch), a0287c8b and 4d942641
 # (a ship's PR and push) each filed a minute's outage as a harness defect. A TLS handshake
 # that broke off is the network's too: f1373302, Windows' schannel on a reconcile fetch
-# that went through when run again minutes later.
+# that went through when run again minutes later. So is a connection GitHub closed with
+# no answer, or dropped mid-read -- curl's 52 and 56: ce9a7cce, roguelike's reconcile
+# fetch, never asked again because these words were missing here.
 _TRANSIENT = re.compile(
     r"\bHTTP 5\d\d\b|internal server error|bad gateway|service unavailable"
-    r"|timeout|timed out|error connecting|connection reset|could not resolve host"
-    r"|failed to receive handshake|SSL/TLS connection failed",
+    r"|timeout|timed out|error connecting|connection (?:was )?reset|could not resolve host"
+    r"|failed to receive handshake|SSL/TLS connection failed"
+    r"|empty reply from server|recv failure",
     re.I,
 )
 
