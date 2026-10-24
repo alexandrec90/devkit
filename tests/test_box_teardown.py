@@ -37,8 +37,9 @@ def test_parse_holders_drops_noise_and_never_names_this_process():
     """The rows are the kill list, so anything unparseable has to fall out of it -- and
     this process above all: `reconcile` runs the reap, and a python whose own executable
     is a box's `.venv` interpreter is exactly the shape the query looks for."""
-    text = f"4242|node\nAdd-Type warning\n{os.getpid()}|python\n|nameless\nxyz|node\n"
-    assert box_teardown.parse_holders(text) == [(4242, "node")]
+    other = os.getpid() + 1  # not a literal: a runner can hand this process any fixed pid
+    text = f"{other}|node\nAdd-Type warning\n{os.getpid()}|python\n|nameless\nxyz|node\n"
+    assert box_teardown.parse_holders(text) == [(other, "node")]
 
 
 def test_holders_are_empty_when_powershell_cannot_be_asked():
@@ -56,17 +57,18 @@ def test_evicting_holders_kills_each_process_tree():
     """`/T` is the load-bearing flag: on Windows the dev server is a `node` child of an
     `npm.cmd` wrapper, and killing the wrapper alone leaves the child holding the file."""
     calls: list[list[str]] = []
+    node, esbuild = os.getpid() + 1, os.getpid() + 2  # never this process, which is skipped
 
     def fake_run(cmd, **kwargs):
         calls.append(list(cmd))
         if cmd[0] == "powershell":
-            return subprocess.CompletedProcess(cmd, 0, "4242|node\n8484|esbuild\n", "")
+            return subprocess.CompletedProcess(cmd, 0, f"{node}|node\n{esbuild}|esbuild\n", "")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     killed = box_teardown.evict_box_holders(Path("C:/ws/.worktrees/demo--x-0806"), run=fake_run)
-    assert killed == ["node (4242)", "esbuild (8484)"]
-    assert ["taskkill", "/T", "/F", "/PID", "4242"] in calls
-    assert ["taskkill", "/T", "/F", "/PID", "8484"] in calls
+    assert killed == [f"node ({node})", f"esbuild ({esbuild})"]
+    assert ["taskkill", "/T", "/F", "/PID", str(node)] in calls
+    assert ["taskkill", "/T", "/F", "/PID", str(esbuild)] in calls
 
 
 def test_a_locked_file_no_longer_costs_the_rest_of_the_tree(tmp_path, monkeypatch):
