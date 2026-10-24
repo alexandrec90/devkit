@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -858,6 +859,111 @@ def test_a_tree_whose_every_change_already_landed_is_nothing_to_ship(tmp_path, m
     assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0, "nothing committed"
     assert not (repo / ship_intent.INTENT_FILE).exists()
     assert ship_intent.read_state(repo)["stage"] == ship_intent.EMPTY
+
+
+def _landed(tmp_path, branch: str) -> tuple[ship_intent.Intent, Path, Callable]:
+    """`_resolving`'s tree with a resolution the trunk already has, its intent written."""
+    repo, git = _resolving(tmp_path, "c")
+    (repo / "logs").mkdir()
+    (repo / ".git" / "info" / "exclude").write_text("logs/\n", encoding="utf-8")
+    (repo / ship_intent.INTENT_FILE).write_text("Took master\n\nIt landed.\n", "utf-8")
+    return ship_intent.Intent("r", repo, branch, "Took master", "It landed."), repo, git
+
+
+def _gh_with_pr(head: str, asked: list, close_code: int = 0):
+    """A `gh_for` whose open PR #476 has its head at `head`, recording every call."""
+
+    def gh_for(_tree):
+        def gh(*args):
+            asked.append(args)
+            if args[:2] == ("pr", "list"):
+                return subprocess.CompletedProcess(
+                    args, 0, f'[{{"number": 476, "headRefOid": "{head}"}}]', ""
+                )
+            return subprocess.CompletedProcess(
+                args, close_code, "", "" if not close_code else "HTTP 502"
+            )
+
+        return gh
+
+    return gh_for
+
+
+def test_a_dependabot_pr_whose_every_change_landed_is_closed_as_superseded(tmp_path):
+    """199602e6: carameli #476's resolver took `master`'s side everywhere, the pass set
+    the merge aside as empty, and the PR stayed open and conflicting until the next pass
+    escalated it as `blind-evidence`. Its head is the tree's, so it is closed."""
+    one, repo, git = _landed(tmp_path, "dependabot/npm_and_yarn/frontend/minor-and-patch")
+    asked: list = []
+    head = git("rev-parse", "HEAD").stdout.strip()
+    out = ship_intent.ship_one(
+        one, "py", "main", ship_intent.run_quiet, _gh_with_pr(head, asked), NOW
+    )
+    assert out.stage == ship_intent.EMPTY and out.detail.startswith("closed #476 as superseded")
+    close = [a for a in asked if a[:2] == ("pr", "close")]
+    assert close and close[0][2] == "476" and "already on `main`" in close[0][4]
+    assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0, "nothing committed"
+    assert ship_intent.read_state(repo)["stage"] == ship_intent.EMPTY
+
+
+def test_a_pr_from_a_tree_the_pass_cut_is_closed_too(tmp_path):
+    one, repo, git = _landed(tmp_path, "agent/took-master")
+    (repo / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
+    asked: list = []
+    head = git("rev-parse", "HEAD").stdout.strip()
+    out = ship_intent.ship_one(
+        one, "py", "main", ship_intent.run_quiet, _gh_with_pr(head, asked), NOW
+    )
+    assert out.detail.startswith("closed #476") and ("pr", "close") in [a[:2] for a in asked]
+
+
+def test_a_pr_github_holds_a_newer_head_for_is_left_open(tmp_path):
+    """Pushed to from elsewhere since the tree saw it: what it holds now was never read."""
+    one, _repo, _git = _landed(tmp_path, "dependabot/npm_and_yarn/x")
+    asked: list = []
+    out = ship_intent.ship_one(
+        one, "py", "main", ship_intent.run_quiet, _gh_with_pr("f" * 40, asked), NOW
+    )
+    assert out.stage == ship_intent.EMPTY and not out.detail.startswith("closed")
+    assert ("pr", "close") not in [a[:2] for a in asked]
+
+
+def test_a_persons_pr_is_not_closed_and_its_resolution_ships(tmp_path):
+    """Theirs to close: `_settled` hands it to the commit stage, which clears the conflict."""
+    one, repo, git = _landed(tmp_path, "feat")
+    asked: list = []
+    gh = _gh_with_pr(git("rev-parse", "HEAD").stdout.strip(), asked)(repo)
+    porcelain = git("status", "--porcelain").stdout
+    settled = ship_intent._settled(one, porcelain, "main", ship_intent.run_quiet, "w", gh)
+    assert settled is None and ("pr", "close") not in [a[:2] for a in asked]
+
+
+def test_a_close_github_refused_is_a_failure_the_next_pass_retries(tmp_path):
+    one, repo, git = _landed(tmp_path, "dependabot/npm_and_yarn/x")
+    head = git("rev-parse", "HEAD").stdout.strip()
+    gh_for = _gh_with_pr(head, [], close_code=1)
+    out = ship_intent.ship_one(one, "py", "main", ship_intent.run_quiet, gh_for, NOW)
+    assert out.stage in (ship_intent.FAILED, ship_intent.DEFERRED) and "close" in out.detail
+    assert (repo / ship_intent.INTENT_FILE).exists(), "kept for the retry"
+
+
+@pytest.mark.parametrize(
+    ("branch", "marked", "owned"),
+    [("dependabot/pip/x", False, True), ("agent/x", True, True), ("agent/x", False, False)],
+)
+def test_pass_owned_is_dependabots_branch_or_a_tree_the_pass_cut(tmp_path, branch, marked, owned):
+    one = replace(intent(tmp_path), branch=branch)
+    if marked:
+        (one.tree / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
+    assert ship_intent.pass_owned(one) is owned
+
+
+@pytest.mark.parametrize(
+    ("code", "out"), [(1, ""), (0, "not json"), (0, "{}"), (0, '[{"number": 3}]')]
+)
+def test_open_pr_at_head_is_empty_whenever_gh_cannot_name_one_at_this_head(code, out, tmp_path):
+    gh = lambda *args: subprocess.CompletedProcess(args, code, out, "")
+    assert ship_intent.open_pr_at_head(tmp_path, "b", Runner(), gh) == ""
 
 
 def test_a_resolution_the_trunk_does_not_have_is_still_shipped(tmp_path):
