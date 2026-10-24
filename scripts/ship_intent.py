@@ -17,7 +17,8 @@ recorded too, with the pre-commit output as evidence, so the pass can tell it fr
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do,
 and so does one over a tree with nothing changed or committed (`commits_ahead`), or
-whose every change is already on its base (`lands_nothing`).
+whose every change is already on its base (`lands_nothing`) -- which closes the open PR
+the tree heads as superseded, where the pass or Dependabot opened it (`_superseded`).
 
 **The intent is consumed.** Once shipped it becomes `logs/ship-intent.shipped.md`; once
 a fixer is sent at a refusal it becomes `logs/ship-intent.refused.md` (the pass does
@@ -475,10 +476,11 @@ def merging(tree: Path, runner: Runner) -> bool:
 
 
 def _settled(
-    intent: Intent, porcelain: str, base: str, runner: Runner, when: str, mid_merge: bool = False
+    intent: Intent, porcelain: str, base: str, runner: Runner, when: str, gh
 ) -> Outcome | None:
     """This pass's answer when nothing needs doing: shipped already, nothing to ship,
     or refused again. A merge in progress (`merging`) is never the first two."""
+    mid_merge = not porcelain.strip() and merging(intent.tree, runner)
     state = read_state(intent.tree)
     head = _shipped_head(intent.tree, state, porcelain, runner)
     if not mid_merge and already_shipped(intent, state, porcelain, head):
@@ -489,10 +491,66 @@ def _settled(
     refresh_base(intent.tree, base, runner)
     if not porcelain.strip() and not mid_merge and commits_ahead(intent.tree, base, runner) == 0:
         return _empty(intent, when, "nothing changed or committed: no PR to open; set aside")
-    if lands_nothing(intent.tree, base, runner):
-        why = f"every change in the tree is already on origin/{base}: no PR to open; set aside"
-        return _empty(intent, when, why)
+    if lands_nothing(intent.tree, base, runner) and (
+        superseded := _superseded(intent, base, runner, gh, when)
+    ):
+        return superseded
     return still_refused(intent, state, porcelain)
+
+
+# What a PR closed by `_superseded` is told, so whoever finds it closed knows why.
+SUPERSEDED_COMMENT = (
+    "Superseded: every change on this branch is already on `{base}`, so merging it would "
+    "change nothing. The fix pass resolved its conflict and found nothing left to land, "
+    "and closed it rather than leave it conflicting. Reopen it if that is wrong."
+)
+
+
+def _superseded(intent: Intent, base: str, runner: Runner, gh, when: str) -> Outcome | None:
+    """What a tree that lands nothing comes to: set aside, with the open PR it heads closed
+    where the pass may decide that PR's fate (`pass_owned`); None ships a person's as usual.
+
+    Set aside alone, the PR stayed open and as conflicting as before. carameli #476 was a
+    Dependabot bump whose every change had reached `master` by other PRs: its resolver
+    took `master`'s side and said so, the pass set the merge aside as `EMPTY`, and the
+    next pass found the same conflict, counted that resolver as its one attempt at a
+    problem with no failing id, and escalated it as `blind-evidence` (199602e6). A
+    person's PR is theirs to close, so their resolution is committed and pushed instead:
+    the conflict clears and the empty PR waits for them, as `labels_for` has it wait.
+    """
+    why = f"every change in the tree is already on origin/{base}: no PR to open; set aside"
+    number = open_pr_at_head(intent.tree, intent.branch, runner, gh)
+    if not number:
+        return _empty(intent, when, why)
+    if not pass_owned(intent):
+        return None
+    closed = gh("pr", "close", number, "--comment", SUPERSEDED_COMMENT.format(base=base))
+    if getattr(closed, "returncode", 1) != 0:
+        return _failed(intent, "close", _first(closed), when)
+    return _empty(intent, when, f"closed #{number} as superseded: {why}")
+
+
+def open_pr_at_head(tree: Path, branch: str, runner: Runner, gh) -> str:
+    """The number of the open PR `branch` heads at the tree's own HEAD; "" for none, for
+    one GitHub holds a head this tree has not seen, or when `gh` or git cannot say."""
+    listed = gh("pr", "list", "--head", branch, "--state", "open", "--json", "number,headRefOid")
+    if getattr(listed, "returncode", 1) != 0:
+        return ""
+    try:
+        rows = json.loads(listed.stdout or "[]")
+    except ValueError:
+        return ""
+    head = runner(["git", "rev-parse", "HEAD"], cwd=tree)
+    sha = (head.stdout or "").strip() if head.returncode == 0 else ""
+    for row in rows if isinstance(rows, list) and sha else []:
+        if isinstance(row, dict) and row.get("headRefOid") == sha and row.get("number"):
+            return str(row["number"])
+    return ""
+
+
+def pass_owned(intent: Intent) -> bool:
+    """A PR whose fate the pass decides: from a tree it cut (`labels_for`), or Dependabot's."""
+    return bool(labels_for(intent.tree)) or intent.branch.startswith(fix_plan.DEPENDABOT_BRANCH)
 
 
 def _empty(intent: Intent, when: str, why: str) -> Outcome:
@@ -965,8 +1023,7 @@ def ship_one(
         # intent over 19 modified files was set aside as already shipped.
         return Outcome(intent, FAILED, f"status: git could not read the tree: {_first(status)}")
     porcelain = status.stdout or ""
-    mid_merge = not porcelain.strip() and merging(tree, runner)
-    if settled := _settled(intent, porcelain, base, runner, when, mid_merge):
+    if settled := _settled(intent, porcelain, base, runner, when, gh_for(tree)):
         return settled
     if intent.adopt:
         adopted = adopt_name(intent, runner)
@@ -974,7 +1031,7 @@ def ship_one(
             _record_failure(intent, "rename", adopted, when)
             return Outcome(intent, FAILED, f"rename: {adopted}")
         intent = adopted
-    if porcelain.strip() or mid_merge:
+    if porcelain.strip() or merging(tree, runner):
         intent, step, output = _commit_carrying(intent, python, runner)
         if step:
             after = runner(["git", "status", "--porcelain"], cwd=tree).stdout or ""
