@@ -672,6 +672,8 @@ def test_a_tree_whose_runner_runs_the_suite_bare_is_told_so_as_a_fact():
         assert "where its --help says so" not in told
         assert "runs the whole suite, so never run it bare" in told
         assert "the contract tests that read every module" in told
+        # b8b42ded: the runner's --help listed no test paths, so the call is spelled.
+        assert "as its arguments, python scripts/run-tests.py tests/test_a.py" in told
         assert told.endswith(fix_prompts.STOP)
         assert fix_prompts.for_runner(text, suite_bare=False) == text
     assert fix_prompts.RUNNER_SENTENCE in fix_prompts.FINISH

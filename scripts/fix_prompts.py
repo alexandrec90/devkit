@@ -57,11 +57,14 @@ RUNNER_SENTENCE = (
 # What replaces it in a tree whose runner runs the whole suite bare (`for_runner`). The
 # conditional alone did not hold: carameli's fixer read --help and ran the runner bare
 # in one call, its prompt's "where its --help says so" taken for "run it" (028caaaf).
+# The call is spelled out: data-lake's fixer read its runner's --help, which listed no
+# test paths, and ran pytest by hand instead (b8b42ded).
 SUITE_RUNNER_SENTENCE = (
     "In this tree python scripts/run-tests.py with no arguments runs the whole suite, so "
     "never run it bare or on a whole test directory: give it the test files for what "
-    "you changed, and the contract tests that read every module, which no changed file "
-    "names -- a whole suite is the gate's to run, not yours. "
+    "you changed as its arguments, python scripts/run-tests.py tests/test_a.py "
+    "tests/test_b.py, whatever its --help lists, and the contract tests that read every "
+    "module, which no changed file names -- a whole suite is the gate's to run, not yours. "
 )
 
 # How every prompt's body ends. The ship skill is the finish line and the blocked file

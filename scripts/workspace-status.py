@@ -128,11 +128,13 @@ ARTIFACT = "logs/scheduled-workspace-status.log"
 # extension, Codex context or a terminal that elevates each breaks work outright), and:
 POLICY_DRIFTED = "branch policy drifted: "  # the installed hooks are not what was installed
 RETIRED_HOOKS = "settings wire retired hooks: "  # a hook entry spawning a deleted file
+GATE_UNREAD = "PR gates upload no failure log: "  # a red gate the pass cannot read
 RECONCILE_STOPPED = "unattended pass last ran "  # reconcile stopped, unexplained
 PUBLISH_REFUSED = "the live file carries edits devkit never wrote"  # needs a decision
 FAILURES: tuple[tuple[str, str], ...] = (
     ("branch-policy-drift", POLICY_DRIFTED),
     ("retired-hooks", RETIRED_HOOKS),
+    ("gate-uploads-no-log", GATE_UNREAD),
     ("reconcile-stopped", RECONCILE_STOPPED),
     ("workspace-publish-refused", PUBLISH_REFUSED),
 )
@@ -367,6 +369,49 @@ def retired_hooks_line(root: Path, names: list[str], source: Path = SOURCE_ROOT)
         f"{RETIRED_HOOKS}{', '.join(offenders)} "
         f"(fix: python devkit/scripts/sync-devkit.py --pull, from that checkout)"
     )
+
+
+# Each runner a PR gate may call, and the failure log it writes, which the fix pass reads
+# only when the gate uploads it (`gate_evidence.run_evidence`).
+GATE_FILE = Path(".github") / "workflows" / "pr-gate.yml"
+GATE_LOGS: tuple[tuple[str, str], ...] = (
+    ("scripts/run-tests.py", "logs/test-failures.log"),
+    ("scripts/lint-all.py", "logs/lint-errors.log"),
+)
+
+
+def gate_uploads_line(root: Path, names: list[str]) -> str:
+    """Checkouts whose PR gate runs a runner and never uploads its log; "" when none do.
+
+    A runner prints "FAILED - details in <its log>" and nothing more, so a gate that
+    does not upload that log hands the fix pass a job log naming no failing test.
+    data-lake's own gate was that shape, and its fixer re-ran the suite to find the name
+    (669db913). The template's gate uploads both, but a project's gate is its own after
+    generation and `--pull` never reads it, so the check is here. A gate that names the
+    log at all is taken to upload it: this is a text check, not a workflow parser.
+    """
+    offenders: list[str] = []
+    for name in names:
+        try:
+            text = (root / name / GATE_FILE).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        missing = [log for runner, log in GATE_LOGS if runner in text and log not in text]
+        if missing:
+            offenders.append(f"{name} ({', '.join(missing)})")
+    if not offenders:
+        return ""
+    return (
+        f"{GATE_UNREAD}{', '.join(offenders)} (fix: an `if: failure()` upload-artifact "
+        f"step for each, as devkit's templates/core/dot-github/workflows/pr-gate.yml.tmpl has)"
+    )
+
+
+def checkout_config_line(root: Path, names: list[str]) -> str:
+    """`retired_hooks_line` and `gate_uploads_line` as one half of `render`: both are a
+    checkout's own config that the harness cannot work with, each its own failure kind."""
+    found = (retired_hooks_line(root, names), gate_uploads_line(root, names))
+    return "\n".join(line for line in found if line)
 
 
 # The four box states `boxes_line` reports, in the order they are printed, each with the
@@ -1178,7 +1223,7 @@ def main(argv: list[str] | None = None) -> int:
             policy_line(latest=latest),
             adoption_line(root, names),
             boxes_line(box_survey(workspace)),
-            retired_hooks_line(root, names),
+            checkout_config_line(root, names),
             scheduler,
             schedule,
             events_line(),
