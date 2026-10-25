@@ -24,6 +24,7 @@ Usage:
     python scripts/run-tests.py             # the tests for what changed
     python scripts/run-tests.py --all       # the whole suite
     python scripts/run-tests.py --changed   # pytest's last-failed subset
+    python scripts/run-tests.py tests/test_a.py tests/test_b.py::test_c   # just these
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
+USAGE = "%(prog)s [-h] [--all | --changed] [test file or pytest argument ...]"
 
 # Where the whole suite is the point: CI, and the push gate that mirrors it (pre-commit
 # exports `PRE_COMMIT` into every hook's environment).
@@ -403,7 +405,10 @@ def with_basetemp(cmd: list[str], basetemp: str) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    # The usage line names the test files by hand: they reach pytest as unknown
+    # arguments, which argparse's own usage line leaves out, and a fixer told to pass
+    # test files read that line as "accepts no test paths" (b8b42ded).
+    parser = argparse.ArgumentParser(description=__doc__, usage=USAGE)
     parser.add_argument("--all", action="store_true", help="run the whole suite")
     parser.add_argument("--changed", action="store_true", help="run pytest's last-failed subset")
     args, extra = parser.parse_known_args(argv)

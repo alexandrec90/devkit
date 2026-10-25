@@ -234,6 +234,14 @@ def test_unknown_arguments_are_passed_through_as_pytest_targets(artifact, monkey
     assert seen[0][-3:] == ["tests/test_sweep.py", "-k", "reap"]
 
 
+def test_help_says_it_takes_test_files(capsys):
+    """b8b42ded: argparse's own usage line omits what reaches pytest unparsed, and a
+    fixer told to pass test files read "[-h] [--changed]" as "accepts no test paths"."""
+    with pytest.raises(SystemExit):
+        run_tests.main(["--help"])
+    assert "[--all | --changed] [test file or pytest argument ...]" in capsys.readouterr().out
+
+
 def test_it_runs_pytest_with_this_interpreter(artifact, monkeypatch):
     """A bare `python` takes the machine default, which in a box is not the box's venv."""
     seen = stub_pytest(monkeypatch, 0)

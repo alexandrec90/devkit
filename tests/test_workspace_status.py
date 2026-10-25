@@ -1404,6 +1404,57 @@ def test_a_retired_hook_still_wired_is_a_failure(tmp_path):
     assert ws.failure_kind(ws.retired_hooks_line(tmp_path, ["carameli"])) == "retired-hooks"
 
 
+def _gate(root: Path, name: str, text: str) -> None:
+    path = root / name / ws.GATE_FILE
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_a_gate_that_runs_a_runner_and_uploads_no_log_is_a_failure(tmp_path):
+    """669db913: data-lake's gate ran both runners and uploaded neither log, so the
+    pass's evidence ended at "details in logs/test-failures.log" with no test named."""
+    _gate(
+        tmp_path,
+        "data-lake",
+        "run: uv run python scripts/lint-all.py\nrun: uv run python scripts/run-tests.py\n",
+    )
+    line = ws.gate_uploads_line(tmp_path, ["data-lake"])
+    assert "data-lake (logs/test-failures.log, logs/lint-errors.log)" in line
+    assert ws.failure_kind(line) == "gate-uploads-no-log"
+
+
+def test_a_gate_uploading_its_logs_or_running_no_runner_is_not_reported(tmp_path):
+    _gate(
+        tmp_path, "uploads", "run: python scripts/run-tests.py\npath: |\n  logs/test-failures.log\n"
+    )
+    _gate(tmp_path, "no-runner", "run: npm test\n")
+    names = ["uploads", "no-runner", "no-gate", "missing-checkout"]
+    (tmp_path / "no-gate").mkdir()
+    assert ws.gate_uploads_line(tmp_path, names) == ""
+
+
+def test_only_the_runner_whose_log_is_missing_is_named(tmp_path):
+    _gate(tmp_path, "half", "scripts/run-tests.py logs/test-failures.log scripts/lint-all.py\n")
+    assert ws.gate_uploads_line(tmp_path, ["half"]).startswith(
+        f"{ws.GATE_UNREAD}half (logs/lint-errors.log) "
+    )
+
+
+def test_checkout_config_line_carries_both_kinds_one_per_line(tmp_path):
+    _wire(tmp_path, "carameli", 'python3 "x/scripts/hooks/branch-on-write.py"')
+    _gate(tmp_path, "data-lake", "run: python scripts/run-tests.py\n")
+    lines = ws.checkout_config_line(tmp_path, ["carameli", "data-lake"]).splitlines()
+    assert [ws.failure_kind(line) for line in lines] == ["retired-hooks", "gate-uploads-no-log"]
+    assert ws.checkout_config_line(tmp_path, ["neither"]) == ""
+
+
+def test_this_checkouts_own_gate_and_the_templates_upload_every_log():
+    assert ws.gate_uploads_line(REPO_ROOT.parent, [REPO_ROOT.name]) == ""
+    template = REPO_ROOT / "templates/core/dot-github/workflows/pr-gate.yml.tmpl"
+    text = template.read_text(encoding="utf-8")
+    assert all(runner in text and log in text for runner, log in ws.GATE_LOGS)
+
+
 def test_a_stopped_reconcile_pass_is_a_failure(tmp_path):
     _logged(tmp_path, 24 * 5)
     assert ws.failure_kind(ws.scheduler_line(tmp_path, now=NOW)) == "reconcile-stopped"

@@ -87,6 +87,14 @@ def run_in(runner, tmp_path, monkeypatch):
     return run
 
 
+def test_help_says_it_takes_test_files(runner, capsys):
+    """b8b42ded: a fixer told to pass test files read argparse's "[-h] [--changed]" as
+    "accepts no test paths"; the template's usage line names them like devkit's does."""
+    with pytest.raises(SystemExit):
+        runner.main(["--help"])
+    assert "[--all | --changed] [test file or pytest argument ...]" in capsys.readouterr().out
+
+
 def test_frontend_sources_are_the_scripts_under_src(runner):
     changed = ["src/game/map.ts", "src/ui/App.tsx", "src/style.css", "tests/test_x.py", "x.ts"]
     assert runner.frontend_sources(changed, "src/") == ["src/game/map.ts", "src/ui/App.tsx"]
