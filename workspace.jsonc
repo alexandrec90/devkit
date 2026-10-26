@@ -1634,6 +1634,7 @@
 							"label": "Tick jobs, or none for all",
 							"minCount": 0,
 							"options": [
+								"agent-env",
 								"docker-prune",
 								"docker-stop-idle",
 								"git-policy",

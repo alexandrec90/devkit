@@ -51,7 +51,7 @@ def source_of(name: str) -> str:
 
 def test_there_are_installers_to_hold_to_this():
     assert len(MODULES) >= 10, IDS
-    scheduleless = {"install-git-policy.py", "install-wt-profile.py"}
+    scheduleless = {"install-agent-env.py", "install-git-policy.py", "install-wt-profile.py"}
     assert {name for name, module in MODULES if not getattr(module, "TASK_NAME", "")} == (
         scheduleless
     ), "an installer that registers no job is a deliberate exception; name it here"

@@ -914,8 +914,12 @@ python scripts/install-installers-schedule.py --yes   # once per machine
 python scripts/installers.py                          # what is current, stale, or left alone
 ```
 
-Two of them register no scheduled job at all and are driven by this pass alone.
-`install-git-policy.py` is one; `install-wt-profile.py` is the other, and it registers the
+Three of them register no scheduled job at all and are driven by this pass alone.
+`install-agent-env.py` puts `project_settings.AGENT_ENV` in the user-level
+`~/.claude/settings.json`, adding only the keys missing there: a project's own settings
+carry it, but a session started at the workspace root loads no project's settings, and
+its Git Bash then mangles `git show origin/main:<path>`.
+`install-git-policy.py` is another; `install-wt-profile.py` is the third, and it registers the
 `Agent` Windows Terminal profile that every agent tab is opened under — without it a
 session is drawn as an ordinary shell, and the `+` beside one answers with the default
 profile in the default directory rather than another tab in that worktree.
