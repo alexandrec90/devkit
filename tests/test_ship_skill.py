@@ -9,7 +9,11 @@ several racing to write the one file the pass reads.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import ship_intent
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / ".claude" / "skills" / "ship" / "SKILL.md"
@@ -27,6 +31,18 @@ def _frontmatter() -> dict[str, str]:
 def test_an_unattended_session_can_invoke_ship():
     assert _frontmatter()["disable-model-invocation"] == "false"
     assert _frontmatter()["name"] == "ship"
+
+
+def test_ship_auto_writes_the_trailer_the_pass_labels_automerge():
+    """`/ship auto` reaches the skill as `$ARGUMENTS`, and the line it says to write is
+    the one `ship_intent.asks_automerge` reads; a drift on either side is a PR that
+    quietly waits for the review the person said to skip."""
+    text = SKILL.read_text(encoding="utf-8")
+    assert "$ARGUMENTS" in text
+    assert _frontmatter()["argument-hint"] == "'[auto]'"
+    assert "`Automerge: yes`" in text
+    assert ship_intent.asks_automerge("Because.\n\nAutomerge: yes")
+    assert "never add the line on your own judgement" in " ".join(text.split())
 
 
 def test_the_scope_rule_keeps_subagents_from_shipping():

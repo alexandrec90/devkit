@@ -508,6 +508,28 @@ def test_a_fixer_sent_at_a_feature_sessions_branch_leaves_it_unlabelled(tmp_path
     assert shipped_labels(tmp_path / "twice", monkeypatch, False, 2) == ()
 
 
+def test_a_person_who_shipped_with_auto_gets_the_label_and_keeps_the_trailer(tmp_path, monkeypatch):
+    """`/ship auto` ends the body with the trailer: the person said the PR needs no
+    review of theirs, and the PR body keeps the record of who said so."""
+    one = intent(tmp_path, body="Trivial rename.\n\nAutomerge: yes")
+    plans = capture_plans(monkeypatch)
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
+    assert plans[0].pr_labels == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert plans[0].pr_body.endswith("Automerge: yes")
+
+
+def test_only_the_trailer_as_the_last_line_asks_for_automerge(tmp_path):
+    """A body that explains the trailer, or says no, is not one that uses it."""
+    asks = ship_intent.asks_automerge
+    assert asks("Because.\n\nAutomerge: yes\n") and asks("Because.\n\n  automerge:YES  ")
+    assert not asks("Teach `/ship` the trailer:\n\nAutomerge: yes\n\nso a person can skip review.")
+    assert not asks("Because.\n\nAutomerge: no")
+    assert not asks("Because. Automerge: yes")
+    assert not asks("")
+    assert ship_intent.labels_for(tmp_path) == ()
+    assert ship_intent.labels_for(tmp_path, asked=True) == (ship_intent.sweep.AUTOMERGE_LABEL,)
+
+
 def test_the_commit_half_names_the_step_that_refused(tmp_path):
     one = intent(tmp_path)
     assert ship_intent.commit_intent(one, "py", Runner()) == ("", "")
