@@ -2877,10 +2877,13 @@
 		// and no COMPOSE_PROJECT_NAME, which only bites when two sessions run compose at
 		// the same time. Use `worktree.py new` for those; this is fine for everything
 		// else. Gitignored in each repo so the checkout does not read as dirty.
+		// `hosts`: this file is the same on every PC, and the phone needs one server per
+		// project, not one per project per machine -- so only desktop-b9fc8vp serves.
 		"devkit.remoteControl": {
 			"projects": "all",
 			"spawn": "worktree",
-			"permissionMode": "bypassPermissions"
+			"permissionMode": "bypassPermissions",
+			"hosts": "desktop-b9fc8vp"
 		},
 		// Ingestion that runs with nobody connected, kept going by `devkit-collectors` --
 		// see README, "Ingestion collectors". Declared here for every machine; RUN on none
