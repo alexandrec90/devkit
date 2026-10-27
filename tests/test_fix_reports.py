@@ -586,6 +586,32 @@ def test_a_line_about_claude_codes_worktree_guard_is_not_filed(tmp_path):
     )
 
 
+def test_a_line_about_the_powershell_tools_protected_path_check_is_not_filed(tmp_path):
+    """9a2a5478: Claude Code's PowerShell tool refused an `rm` inside `docker exec`'s
+    `sh -c` text as a host path. Nothing in devkit changes what it accepts, and
+    `.claude/rules/engineering.md` now names the spelling that passes it."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        '- PowerShell `docker exec ... mutmut-probe sh -c "rm -rf mutants; ..."` refused: '
+        "\"Remove-Item on system path '/work' is blocked. This path is protected from "
+        'removal." The `rm` ran inside a container, not on the host\n'
+        "- `run-tests.py --changed` skipped its only target\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "`run-tests.py --changed` skipped its only target",
+    )
+
+
+def test_the_rule_names_the_spelling_that_passes_both_tools():
+    """The filter above is only honest while the rule carries the way past the refusal."""
+    root = Path(__file__).resolve().parents[1]
+    rule = (root / ".claude/rules/engineering.md").read_text(encoding="utf-8")
+    row = next(line for line in rule.splitlines() if 'sh -c "' in line)
+    assert "either tool" in row and "script file" in row
+    assert '"protected" host path' in rule
+
+
 @pytest.mark.parametrize(
     ("line", "fixed"),
     [
