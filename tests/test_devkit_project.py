@@ -495,6 +495,9 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # and a strategy line-up to report on. `scripts/report-task.py` is the contract.
         "report",
         "strategy-lab",
+        # Born scoped, by capability: only ibkr_trader holds Questrade accounts and the
+        # forward snapshots a plan reads. `scripts/questrade-task.py` is the contract.
+        "questrade-plan",
     }
 
 
@@ -615,6 +618,59 @@ def test_the_report_actions_name_their_missing_script(tmp_path):
     for key, extra in (("report", ["results"]), ("strategy-lab", [])):
         with pytest.raises(ProjectError, match=r"scripts/report-task\.py"):
             plan_command(ACTIONS[key], tmp_path, extra)
+
+
+def test_the_questrade_plan_is_ibkr_scoped_and_fixes_the_plan_subcommand():
+    """The row is the `plan` subcommand alone; `check` is reachable from the CLI, and a
+    menu row for it would be a click standing in for a schedule."""
+    action = ACTIONS["questrade-plan"]
+    assert action.script == "scripts/questrade-task.py"
+    assert action.args == ("plan",)
+    assert action.projects == IBKR
+    assert action.owner == devkit_project.PROJECT
+    assert "questrade-plan" not in expected_actions("devkit")
+    assert not any(a.script == action.script and a.args == ("check",) for a in ACTIONS.values())
+
+
+def test_the_questrade_plan_carries_its_strategy_flag(tmp_path, canonical):
+    """`questrade-task.py plan` requires `--strategy`, so the task spells it from a picker
+    that always yields a real token."""
+    task = next(t for t in canonical["tasks"] if t["label"] == "Questrade: Recommend Orders")
+    args = [str(a) for a in task["args"]]
+    assert args[args.index("questrade-plan") + 1 :] == ["--strategy", "${input:questradeStrategy}"]
+    assert args[args.index("--project") + 1] == "${input:ibkrCheckout}"
+
+    checkout = tmp_path / "ibkr_trader"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "questrade-task.py").write_text("", encoding="utf-8")
+    tail = ["--strategy", "core_satellite"]
+    argv = plan_command(ACTIONS["questrade-plan"], checkout, tail)
+    assert argv[-5:] == ["python", "scripts/questrade-task.py", "plan", *tail]
+
+
+def test_the_questrade_strategy_picker_offers_the_whole_registry(canonical):
+    """ibkr_trader's `signals.portfolio.available()`, defaulting to `core_satellite`. A row
+    the registry lacks fails after the checkout question; a strategy the registry grew and
+    the picker lacks is unreachable by click."""
+    spec = next(i for i in canonical["inputs"] if i["id"] == "questradeStrategy")
+    assert _picker_values(spec) == {
+        "core_satellite",
+        "couch_potato",
+        "recent_momentum",
+        "steady_compounders",
+        "ml_lt_ridge",
+        "ml_lt",
+        "momentum_lt",
+        "equal_weight",
+        "buy_and_hold",
+    }
+    assert spec["default"] == "core_satellite"
+
+
+def test_the_questrade_plan_names_its_missing_script(tmp_path):
+    """An ibkr_trader checkout that predates the script is a conformance failure by name."""
+    with pytest.raises(ProjectError, match=r"scripts/questrade-task\.py"):
+        plan_command(ACTIONS["questrade-plan"], tmp_path, ["--strategy", "core_satellite"])
 
 
 def test_the_host_preview_pair_is_one_script_told_apart_by_a_flag():

@@ -87,7 +87,7 @@
 	// keeps its project-specific script and gains a picker over the two checkouts that
 	// can actually run it — which is all the `--project` argument ever was.
 	// `devkit_project.py`'s `Action.projects` is the enforcement: `test-target`, `e2e`
-	// and `ngrok` are defined for the carameli pair only, the five IBKR actions for the
+	// and `ngrok` are defined for the carameli pair only, the IBKR actions for the
 	// ibkr_trader pair only, and the dispatcher refuses any other checkout BY NAME
 	// instead of falling through to "does not implement this action", which reads like
 	// an invitation to go implement it.
@@ -1158,6 +1158,33 @@
 				},
 				"problemMatcher": []
 			},
+			// Advisory: the Questrade client is GET-only. The single-use token lives in the
+			// main checkout's .env, so a worktree checkout fails naming QUESTRADE_TOKEN.
+			{
+				"label": "Questrade: Recommend Orders",
+				"detail": "Recommend laddered limit orders for every Questrade account from the chosen strategy's latest forward snapshot. Advisory only: nothing is sent to Questrade. Needs the db container and QUESTRADE_TOKEN in the checkout's .env; writes reports/questrade-plan.csv.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"questrade-plan",
+					"--strategy",
+					"${input:questradeStrategy}"
+				],
+				"icon": {
+					"id": "credit-card",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
 			// --- scoped: social-scraper -------------------------------------------
 			// One checkout, so `--project` is spelled out rather than asked.
 			{
@@ -2137,6 +2164,26 @@
 					}
 				],
 				"default": "sp500"
+			},
+			{
+				// The whole strategy registry (ibkr_trader's `signals.portfolio.available()`),
+				// wider than `btStrategy`'s allocators: a plan reads a forward snapshot any
+				// registered strategy writes.
+				"id": "questradeStrategy",
+				"type": "pickString",
+				"description": "Strategy whose latest forward snapshot the orders should follow",
+				"options": [
+					"core_satellite",
+					"couch_potato",
+					"recent_momentum",
+					"steady_compounders",
+					"ml_lt_ridge",
+					"ml_lt",
+					"momentum_lt",
+					"equal_weight",
+					"buy_and_hold"
+				],
+				"default": "core_satellite"
 			},
 			{
 				"id": "newProjectName",

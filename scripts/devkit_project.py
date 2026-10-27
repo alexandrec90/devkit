@@ -387,6 +387,12 @@ ACTIONS: dict[str, Action] = {
     "strategy-lab": Action(
         "scripts/report-task.py", "Report: Run Strategy Lab", ("lab",), projects=IBKR
     ),
+    # Advisory only: the Questrade client is GET-only, so the plan is a CSV and nothing is
+    # sent. Its sibling `check` subcommand gets no row -- `plan` already reads every
+    # account, and keeping the token alive is a schedule's job, not a click's.
+    "questrade-plan": Action(
+        "scripts/questrade-task.py", "Questrade: Recommend Orders", ("plan",), projects=IBKR
+    ),
     # --- scoped to social-scraper ---
     #
     # Signing in once in a visible browser, so the platform's persistent profile under
