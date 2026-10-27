@@ -67,10 +67,11 @@ REASON_LIMIT = 400
 # A launch's diagnosis is a status page, not a line: `claude daemon status` is ~800 chars.
 DIAGNOSIS_LIMIT = 2000
 
-# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words.
+# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words, and
+# of its PowerShell tool's protected-path check (9a2a5478: an `rm` inside `docker exec`).
 CLAUDE_CODE_GUARD = re.compile(
     r"too complex to verify|stays? inside the worktree|cannot be shown not to be git|"
-    r"isolated in the worktree|worktree isolation guard",
+    r"isolated in the worktree|worktree isolation guard|protected from removal",
     re.I,
 )
 
@@ -329,7 +330,7 @@ def _entries(path: Path) -> tuple[str, ...]:
 
 def friction_lines(tree: Path) -> tuple[str, ...]:
     """The tree's `logs/friction.md` entries this tree has not already had filed, less
-    any about Claude Code's own worktree guard.
+    any about Claude Code's own guards (`CLAUDE_CODE_GUARD`).
 
     A session writes the file whole, and once the pass has filed it away the next write
     carries the old lines again: a174d816's line was filed twice from one tree, and the
