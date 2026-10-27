@@ -451,31 +451,30 @@ def _zombie(pid: int) -> bool:
 
 def _exits_within(pid: int, seconds: float) -> bool:
     """Whether process `pid` is gone, or goes within `seconds`."""
-    if os.name != "nt":
-        deadline = time.monotonic() + seconds
-        while True:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return True
-            if _zombie(pid) or time.monotonic() > deadline:
-                return _zombie(pid)
-                return False
-            time.sleep(0.1)
-    import ctypes
+    if sys.platform == "win32":  # spelled so mypy skips `WinDLL` off Windows
+        import ctypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.restype = ctypes.c_void_p
-    kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
-    kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
-    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-    handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
-    if not handle:
-        return True
-    try:
-        return kernel32.WaitForSingleObject(handle, int(seconds * 1000)) == 0
-    finally:
-        kernel32.CloseHandle(handle)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+        kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return True
+        try:
+            return kernel32.WaitForSingleObject(handle, int(seconds * 1000)) == 0
+        finally:
+            kernel32.CloseHandle(handle)
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        if _zombie(pid) or time.monotonic() > deadline:
+            return _zombie(pid)
+        time.sleep(0.1)
 
 
 def _reap(*pids: int) -> None:
