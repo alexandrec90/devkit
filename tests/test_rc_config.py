@@ -257,6 +257,33 @@ def test_an_unusable_hosts_entry_is_dropped(hosts):
     assert config.hosts == ()
 
 
+@pytest.mark.parametrize(
+    ("typed", "key"),
+    [
+        ("desktop-a", "desktop-a"),
+        ("  Desktop-A.tail1234.ts.net ", "desktop-a"),
+        ("DESKTOP-B9FC8VP", "desktop-b9fc8vp"),
+        ("", ""),
+        ("...", ""),
+    ],
+    ids=["already-a-key", "case-suffix-and-space", "upper-case", "empty", "no-name-left"],
+)
+def test_host_key_spells_a_typed_host_as_the_ledger_spells_the_machine(typed, key):
+    assert rc_config.host_key(typed) == key
+
+
+def test_host_for_prefers_a_project_s_own_entry_over_the_default():
+    config = rc_config.Config(hosts=(("*", "desktop-a"), ("carameli", "desktop-b")))
+    assert rc_config.host_for(config, "carameli") == "desktop-b"
+    assert rc_config.host_for(config, "devkit") == "desktop-a"
+
+
+def test_host_for_is_empty_for_a_project_nothing_assigns():
+    config = rc_config.Config(hosts=(("devkit", "desktop-a"),))
+    assert rc_config.host_for(config, "carameli") == ""
+    assert rc_config.host_for(rc_config.Config(), "devkit") == ""
+
+
 # --- valid_time and due_for_update ------------------------------------------
 
 
