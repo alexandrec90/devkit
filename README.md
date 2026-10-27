@@ -590,7 +590,8 @@ each, run here.
 
 1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
    push with the push gate skipped, open the PR -- labelled `automerge` when the pass cut
-   the tree for a fixer, so a fixer's PR merges once green while a person's waits for
+   the tree for a fixer or the person shipped with `/ship auto` (the intent ends
+   `Automerge: yes`), so those merge once green while any other person's PR waits for
    them even after a fixer was sent to repair it (`ship_intent.labels_for`) -- record
    the outcome in `logs/ship-state.json` beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
