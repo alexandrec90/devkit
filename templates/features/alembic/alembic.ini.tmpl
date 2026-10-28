@@ -1,6 +1,8 @@
 [alembic]
 script_location = migrations
 prepend_sys_path = {{ src_root }}
+# How the path lists above split; left out, alembic warns that it falls back to spaces.
+path_separator = os
 # Timestamped, slugged filenames so `ls migrations/versions` reads chronologically.
 file_template = %%(year)d%%(month).2d%%(day).2d_%%(hour).2d%%(minute).2d-%%(rev)s_%%(slug)s
 
@@ -8,6 +10,18 @@ file_template = %%(year)d%%(month).2d%%(day).2d_%%(hour).2d%%(minute).2d-%%(rev)
 # A URL committed here would be wrong for every checkout but one, because each
 # worktree publishes the database on its own host port.
 sqlalchemy.url =
+
+# Every revision `alembic revision` writes goes through ruff before anyone sees it: the
+# stock template imports `op` and `sa` whether the revision uses them or not, and quotes
+# with `'`, so an untouched one failed the pre-commit gate. `module` needs alembic 1.17.
+[post_write_hooks]
+hooks = ruff_fix, ruff_format
+ruff_fix.type = module
+ruff_fix.module = ruff
+ruff_fix.options = check --fix REVISION_SCRIPT_FILENAME
+ruff_format.type = module
+ruff_format.module = ruff
+ruff_format.options = format REVISION_SCRIPT_FILENAME
 
 [loggers]
 keys = root,sqlalchemy,alembic

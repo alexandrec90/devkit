@@ -841,6 +841,19 @@ def test_the_no_register_flag_is_reachable_from_the_cli(
     assert "--no-register" not in capsys.readouterr().out
 
 
+def test_the_generator_names_the_trust_step_the_fix_pass_needs(tmp_path, capsys):
+    """10a9810d, 18e737b9: productivity-tracker's first fixer was refused as an untrusted
+    workspace, two hours after it was generated. The person running the generator is the
+    one who can accept the prompt, so the generator names the checkout to accept it in."""
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    step = f"run `claude` in {the_plan.root} once and accept the trust prompt"
+    new_project.trust_hint(the_plan)
+    assert step in capsys.readouterr().out
+    new_project.next_steps(the_plan)
+    out = capsys.readouterr().out
+    assert "ports.toml [slots]" in out and step in out, "what `main` ends on"
+
+
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
 def test_the_generated_diagnostic_scripts_actually_run_and_pass(tmp_path, features):
     """`lint-all.py` and `run-tests.py` must be green in a fresh project.

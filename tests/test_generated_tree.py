@@ -8,6 +8,7 @@ green and handed the gate a project whose first `ruff format --check` failed (#4
 Keep it to checks that are cheap and read every rendered file.
 """
 
+import configparser
 import subprocess
 import sys
 
@@ -69,3 +70,19 @@ def test_no_generated_function_or_class_is_past_the_structure_limits(tmp_path, f
     lim = structure_check.limits(cfg)
     over = [structure_check.describe(f, lim) for f in worse if f.rule in held]
     assert over == [], "reshape the template, do not grow the baseline:\n" + "\n".join(over)
+
+
+def test_alembic_finds_the_scripts_its_ini_points_at(tmp_path):
+    """10a9810d: productivity-tracker's first PR Gate failed at `alembic upgrade head` with
+    "Path doesn't exist: migrations": the `alembic` feature rendered an `alembic.ini` naming
+    a `migrations/` folder, and its `env.py`, that no template wrote, so every project
+    generated with the feature was red on its first commit."""
+    root = generate(tmp_path, {"alembic": True})
+    ini = configparser.ConfigParser(interpolation=None)
+    ini.read(root / "alembic.ini", encoding="utf-8")
+    scripts = root / ini["alembic"]["script_location"]
+    assert (scripts / "script.py.mako").is_file(), "`alembic revision` renders from it"
+    assert (scripts / "versions").is_dir(), "where revisions go, kept by its .gitkeep"
+    env = (scripts / "env.py").read_text(encoding="utf-8")
+    compile(env, "env.py", "exec")
+    assert 'os.environ.get("DATABASE_URL"' in env, "the URL the gate and .env.example set"
