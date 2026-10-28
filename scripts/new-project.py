@@ -23,8 +23,9 @@ Steps, in order:
   2. render `templates/` into the new directory
   3. `git init` + initial commit
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
-  5. register the project in the shared `alex-projects.code-workspace`
-     (the one step that writes OUTSIDE the new directory; `--no-register` skips it)
+  5. register the project in devkit's `workspace.jsonc` and the shared
+     `alex-projects.code-workspace` (the one step that writes OUTSIDE the new
+     directory; `--no-register` skips it)
   6. create the private GitHub repo and push          <- outward-facing
 """
 
@@ -582,7 +583,7 @@ def git_init(plan: Plan, dry_run: bool) -> None:
 
 
 def register_in_workspace(plan: Plan, dry_run: bool) -> None:
-    """Add the project to `alex-projects.code-workspace`.
+    """Add the project to `workspace.jsonc` and `alex-projects.code-workspace`.
 
     This used to write a *new* `<name>.code-workspace` per project, to keep the task
     quick-pick free of every other repo's tasks. Two things made that wrong. The task
@@ -605,23 +606,39 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     file: it lands in `folders` and in every scope picker, which puts a directory
     under a temp path into `sweep.py`'s registry, and it survives the `rm -rf` that
     ends the acceptance test.
+
+    **Both copies, canonical first.** The live file is rendered from devkit's
+    `workspace.jsonc` (`.claude/rules/vscode-tasks.md`), so registering in the live file
+    alone left `devkit_project.py --check-workspace` reporting the new project as
+    `folder in the workspace but not in devkit` until someone adopted it by hand on a
+    branch (8a1c0927). The canonical edit is left uncommitted, the shape
+    `plug-projects.py` and `--adopt-workspace` leave theirs in: it is a registry change
+    every machine shares, so it goes through a branch and a review like any other. The
+    live write stays too, because a render only lands on the next scheduled pass and
+    the project should be in the sweep's registry from the moment it exists.
     """
     if not plan.register:
         print("  skip    workspace registration (--no-register)")
         return
-    path = devkit_project.DEFAULT_WORKSPACE
     names = [plan.name]
-    if dry_run:
-        print(f"  update  ../{path.name} (folders + project picker: {', '.join(names)})")
-        return
-    try:
-        text = path.read_text(encoding="utf-8")
-        path.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
-    except (OSError, devkit_project.RegistryEditError) as exc:
-        print(f"  WARNING could not register in {path.name}: {exc}")
-        print(f"          add {', '.join(names)} to its folders list and project picker by hand")
-        return
-    print(f"  update  ../{path.name} (folders + project picker)")
+    canonical = devkit_project.CANONICAL_WORKSPACE
+    for path in (canonical, devkit_project.DEFAULT_WORKSPACE):
+        shown = path.name if path == canonical else f"../{path.name}"
+        if dry_run:
+            print(f"  update  {shown} (folders + project picker: {', '.join(names)})")
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            path.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
+        except (OSError, devkit_project.RegistryEditError) as exc:
+            print(f"  WARNING could not register in {path.name}: {exc}")
+            print(
+                f"          add {', '.join(names)} to its folders list and project picker by hand"
+            )
+            continue
+        print(f"  update  {shown} (folders + project picker)")
+    if not dry_run:
+        print(f"          commit devkit's {canonical.name} on a branch and ship it")
 
 
 def create_remote(plan: Plan, dry_run: bool) -> None:
