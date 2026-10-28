@@ -48,6 +48,7 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import subprocess
@@ -84,16 +85,36 @@ STEPS: tuple[Step, ...] = (
 )
 
 
-def interpreter(root: Path) -> str:
+def venv_python(root: Path) -> Path:
+    """The interpreter inside `root`'s `.venv`, spelled for this platform."""
+    if os.name == "nt":
+        return root / ".venv" / "Scripts" / "python.exe"
+    return root / ".venv" / "bin" / "python"
+
+
+def _this_has_pytest() -> bool:
+    return importlib.util.find_spec("pytest") is not None
+
+
+def interpreter(root: Path, has_pytest: Callable[[], bool] = _this_has_pytest) -> str:
     """The interpreter to run the project's tooling with.
 
     The project's `scripts/project_python.py` when it has one -- that module knows about
-    the venv, and about borrowing a checkout's venv from a worktree that has none -- and
-    otherwise the interpreter running this hook. The wrappers re-exec themselves through
-    the same helper, so the pytest step is the one that needs the answer here.
+    the venv, and about borrowing a checkout's venv from a worktree that has none. The
+    wrappers re-exec themselves (through that helper, or the vendored `toolchain`), so
+    the pytest step is the one that needs the answer here.
+
+    A project with no helper -- every generated one, since it is devkit's own and not in
+    the `MANIFEST` -- gets this interpreter while it has pytest, and the project's
+    `.venv` when it does not. pre-commit runs this hook under an environment of its own
+    with no pytest in it, so answering `sys.executable` there failed the hook tier with
+    `No module named pytest` on a project whose `.venv` had it (8448080a).
     """
     helper = root / "scripts" / "project_python.py"
     if not helper.is_file():
+        venv = venv_python(root)
+        if not has_pytest() and venv.is_file():
+            return str(venv)
         return sys.executable
     try:
         module = load_by_path("project_python", helper)

@@ -719,6 +719,36 @@ def test_registration_is_still_the_default(tmp_path, monkeypatch):
     assert calls == [[the_plan.name]]
 
 
+def test_the_default_parent_is_the_directory_the_workspace_registers_from(tmp_path, monkeypatch):
+    """8448080a / b42a921e: the default was `~/Desktop/vs_code` while the workspace sat in
+    `~/vs-code`, so productivity-tracker was generated in one and registered by bare name
+    in the other. Every reader of the registry then resolved a folder that did not
+    exist: `rc-servers.py maintain` failed every fire on `[WinError 267] The directory
+    name is invalid`, and the fix pass's collect step raised the same error."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", workspace)
+    the_plan = new_project.plan(make_args(parent=""), registry())
+    assert the_plan.root == (tmp_path / "ws").resolve() / the_plan.name
+
+
+def test_a_project_outside_the_workspace_directory_is_not_registered(tmp_path, capsys, monkeypatch):
+    """The registry names a folder relative to its own directory, so registering a
+    project generated anywhere else writes an entry that points at nothing."""
+    the_plan = new_project.plan(make_args(parent=str(tmp_path / "elsewhere")), registry())
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", workspace)
+    calls = _recording_register(monkeypatch)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert str(the_plan.root) in out
+
+
 def test_the_no_register_flag_is_reachable_from_the_cli(tmp_path, capsys, monkeypatch):
     """RELEASING.md's acceptance test passes it; a renamed dest breaks that silently."""
     monkeypatch.setattr(

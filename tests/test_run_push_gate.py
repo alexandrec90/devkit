@@ -187,6 +187,35 @@ def test_the_interpreter_is_this_one_when_the_project_ships_no_helper(tmp_path):
     assert gate.interpreter(tmp_path) == sys.executable
 
 
+def _venv(root: Path) -> Path:
+    """Lay down the file `.venv`'s interpreter would be, spelled for this platform."""
+    python = gate.venv_python(root)
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    return python
+
+
+def test_with_no_helper_a_hook_interpreter_lacking_pytest_uses_the_projects_venv(tmp_path):
+    """8448080a: a freshly generated project vendors no `project_python.py`, so the hook
+    tier ran under pre-commit's own interpreter -- `No module named pytest` -- while the
+    lint and test wrappers beside it re-ran themselves under `.venv` and passed, and
+    `new-project.py --remote` failed its first push."""
+    python = _venv(tmp_path)
+    assert gate.interpreter(tmp_path, has_pytest=lambda: False) == str(python)
+
+
+def test_with_no_helper_a_hook_interpreter_with_pytest_stays(tmp_path):
+    """CI and an activated shell already have pytest; switching them to a venv that may
+    hold other versions would change what the gate tests."""
+    _venv(tmp_path)
+    assert gate.interpreter(tmp_path, has_pytest=lambda: True) == sys.executable
+
+
+def test_with_no_helper_and_no_venv_the_hook_interpreter_is_the_answer(tmp_path):
+    """Nothing better exists: the step then fails naming the missing module."""
+    assert gate.interpreter(tmp_path, has_pytest=lambda: False) == sys.executable
+
+
 def test_the_interpreter_comes_from_the_projects_own_helper(tmp_path):
     """A push from an agent's shell is never from an activated venv; `project_python`
     is what finds the venv's pytest, so the hook has to ask it rather than PATH."""
