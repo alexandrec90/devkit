@@ -913,6 +913,25 @@ def test_a_session_that_failed_to_open_is_the_exit_code_not_recorded_and_filed(w
     assert "filed    carameli dispatch-failed: carameli #412" in text
 
 
+def test_a_dispatch_refused_as_untrusted_files_the_checkouts_person_step(world, monkeypatch):
+    """10a9810d: productivity-tracker's dispatch was refused with "Workspace not trusted",
+    filed as that problem's failed dispatch beside the dead session's own group. One
+    group per checkout, awaiting the person who trusts it, whichever path saw it."""
+    world["failures"] = [failure()]
+
+    def refused(*_args, **_kwargs):
+        print("Workspace not trusted. Run `claude` in C:\\x once and accept it.", file=sys.stderr)
+        return 1
+
+    monkeypatch.setattr(fix_pass.fix_send, "dispatch", refused)
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 1
+    text = artifact(world)
+    assert "FAILED to dispatch" not in text and "dispatch-failed" not in text
+    assert f"refused, its checkout untrusted ({fix_pass.fix_loop.UNTRUSTED_KIND} filed)" in text
+    detail = fix_pass.fix_loop.untrusted_detail(world["workspace"] / "carameli")
+    assert f"filed    carameli {fix_pass.fix_loop.UNTRUSTED_KIND}: {detail[:40]}" in text
+
+
 def test_an_update_is_one_gh_call_and_no_session(monkeypatch, tmp_path):
     calls = []
 

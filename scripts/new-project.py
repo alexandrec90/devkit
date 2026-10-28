@@ -748,6 +748,25 @@ def register_slot_hint(plan: Plan) -> None:
     print(f"  {plan.name} = {plan.context['slot']}")
 
 
+def trust_hint(plan: Plan) -> None:
+    """Tell the user to trust the checkout in Claude Code. Deliberately not automatic.
+
+    `claude --bg` refuses to start in a checkout nobody has trusted, and a trusted folder
+    above it does not count, so the fix pass's first fixer here is refused until a person
+    accepts the prompt (10a9810d, 18e737b9). The prompt is a person's consent to the
+    project's own settings and hooks running; a generator that wrote it into Claude
+    Code's state would be consenting on their behalf.
+    """
+    print("\nNext: trust the checkout in Claude Code, or the fix pass cannot work in it:")
+    print(f"  run `claude` in {plan.root} once and accept the trust prompt")
+
+
+def next_steps(plan: Plan) -> None:
+    """What the person who ran the generator still has to do, which it will not."""
+    register_slot_hint(plan)
+    trust_hint(plan)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -878,7 +897,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\nDry run complete. Re-run with --yes to apply.")
     else:
         print(f"\nDone: {the_plan.root}")
-    register_slot_hint(the_plan)
+    next_steps(the_plan)
     return 0
 
 

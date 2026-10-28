@@ -9,7 +9,8 @@ dependencies = [
   "psycopg[binary]>=3.2",
 {{/postgres}}
 {{#alembic}}
-  "alembic>=1.13",
+  # 1.17: `alembic.ini`'s ruff hooks are `type = module`, which arrived there.
+  "alembic>=1.17",
 {{/alembic}}
 {{#redis}}
   "redis>=5.0",

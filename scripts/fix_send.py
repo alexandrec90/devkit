@@ -29,6 +29,7 @@ import fix_findings
 import fix_ledger
 import fix_loop
 import fix_plan
+import fix_reports
 import host_memory
 import release
 import ship_intent
@@ -405,12 +406,19 @@ def _send_one(
         first = decision.failures[0]
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         detail, kind = f"{names}: {decision.note[:160]}", f"{decision.action}-failed"
+        if fix_reports.untrusted(said):
+            # The machine's setup, not this problem: the group the dead session files
+            # too, awaiting the person who trusts the checkout (`fix_loop.UNTRUSTED_KIND`).
+            detail = fix_loop.untrusted_detail(ctx.root / first.project)
+            kind = fix_loop.UNTRUSTED_KIND
         # Why it failed is only ever printed, and a scheduled pass's streams go nowhere:
         # the finding for #538 named no step until its push was reproduced by hand.
         where = ""
         if journal is not None and said.strip():
             where = fix_findings.evidence_file(f"{detail}\n\n{said}", journal.devkit_dir, kind)
         fix_findings.file(journal, kind, first.project, detail, evidence=where)
+        if kind == fix_loop.UNTRUSTED_KIND:
+            return f"refused, its checkout untrusted ({kind} filed)", EXIT_FAILED
         return f"FAILED to {decision.action}", EXIT_FAILED
     key = fix_ledger.decision_key(decision)
     fix_ledger.record(
