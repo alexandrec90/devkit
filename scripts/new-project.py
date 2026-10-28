@@ -368,7 +368,10 @@ def build_context(
 def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
     """Decide everything. Touches nothing."""
     validate_name(args.name)
-    root = Path(args.parent).expanduser().resolve() / args.name
+    # Beside the workspace file by default: it registers a project by bare name, so a
+    # project anywhere else is registered as a folder that does not exist (8448080a).
+    parent = args.parent or devkit_project.DEFAULT_WORKSPACE.parent
+    root = Path(parent).expanduser().resolve() / args.name
     if root.exists() and any(root.iterdir()):
         raise GeneratorError(
             f"{root} already exists and is not empty. Generating into it would "
@@ -621,8 +624,18 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
         print("  skip    workspace registration (--no-register)")
         return
     names = [plan.name]
+    live = devkit_project.DEFAULT_WORKSPACE
+    # The registry names each folder relative to the live file's directory, and the
+    # canonical copy renders into it. A project generated anywhere else would be
+    # registered in both as a folder that does not exist, and every reader of the
+    # registry -- `rc-servers.py`, the fix pass's collect step -- then fails on it rather
+    # than skipping it (b42a921e, 79505f2b).
+    if plan.root.parent != live.parent.resolve():
+        print(f"  WARNING {plan.root} is not beside {live}: not registered")
+        print(f"          move it to {live.parent} and add {plan.name} to its folders by hand")
+        return
     canonical = devkit_project.CANONICAL_WORKSPACE
-    for path in (canonical, devkit_project.DEFAULT_WORKSPACE):
+    for path in (canonical, live):
         shown = path.name if path == canonical else f"../{path.name}"
         if dry_run:
             print(f"  update  {shown} (folders + project picker: {', '.join(names)})")
@@ -757,8 +770,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--display-name", default="", help="human title (default: from name)")
     parser.add_argument(
         "--parent",
-        default=str(Path.home() / "Desktop" / "vs_code"),
-        help="directory to create the project in",
+        default="",
+        help="directory to create the project in (default: the shared workspace file's)",
     )
     parser.add_argument("--github-owner", default="alexandrec90")
     parser.add_argument("--python-version", default="3.12")

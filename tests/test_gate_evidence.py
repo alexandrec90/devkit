@@ -776,6 +776,18 @@ def test_collect_drops_a_nightly_green_at_the_tip(monkeypatch, tmp_path):
     assert ev.collect(workspace, {"carameli": []}) == []
 
 
+def test_a_registered_checkout_missing_from_disk_costs_its_issues_not_the_pass():
+    """79505f2b: productivity-tracker was registered with no checkout beside the
+    workspace, `gh` refused its cwd with `NotADirectoryError: [WinError 267]`, and the
+    whole collect step raised -- no project's red PRs reached the pass that night.
+    `broken_prs` already answers empty on the same failure."""
+
+    def refused(*_args: str):
+        raise NotADirectoryError(267, "The directory name is invalid")
+
+    assert ev.nightly_issues(refused) == []
+
+
 def test_collect_reads_every_red_pr_and_every_tracker_issue(monkeypatch, tmp_path):
     workspace = tmp_path / "w" / "alex.code-workspace"
     workspace.parent.mkdir()

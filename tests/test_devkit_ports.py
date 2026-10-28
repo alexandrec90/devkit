@@ -274,9 +274,10 @@ def test_every_checkout_either_holds_a_slot_or_says_why_not():
     known = {o if isinstance(o, str) else o["value"] for o in options}
     missing = sorted(known - set(registry.slots) - set(SLOTLESS))
     assert not missing, (
-        f"{missing} have no slot in ports.toml and no reason in SLOTLESS — either run "
-        f"`python scripts/devkit_ports.py --next` and register them, or record why they "
-        f"publish no host ports"
+        f"{missing} have no slot in ports.toml and no reason in SLOTLESS — either add "
+        f"each to [slots] at the slot its docker-compose.yml's `*_HOST_PORT` defaults "
+        f"already publish (base + slot; `python scripts/devkit_ports.py` lists the "
+        f"taken ones), or record why they publish no host ports"
     )
 
 
