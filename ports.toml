@@ -89,3 +89,7 @@ apt-finder = 6
 # renumbering. Declaring it is what stops a future box lease being handed slot 2 while
 # the static stack is sitting on it.
 social-scraper = 2
+# Generated on slot 3 -- its compose defaults are db 5435 and app 8003 -- but the
+# "register the slot" step `new-project.py` prints was skipped, so this is the same
+# backfill again: the number the stack already publishes, not a new allocation.
+productivity-tracker = 3
