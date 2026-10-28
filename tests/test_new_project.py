@@ -21,6 +21,7 @@ import pytest
 from support import (
     REPO_ROOT,
     TEMPLATES,
+    devkit_jsonc,
     devkit_ports,
     devkit_project,
     generate,
@@ -658,7 +659,17 @@ def test_the_generator_writes_no_per_project_workspace_file(tmp_path):
     assert not list(tmp_path.glob("**/*.code-workspace"))
 
 
-def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch):
+@pytest.fixture
+def canonical_copy(tmp_path, monkeypatch) -> Path:
+    """devkit's `workspace.jsonc`, copied aside so registering cannot edit the real one."""
+    copy = tmp_path / "canonical" / "workspace.jsonc"
+    copy.parent.mkdir()
+    copy.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", copy)
+    return copy
+
+
+def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch, canonical_copy):
     """The project is already written by then; a broken registry is fixable by hand."""
     args = make_args(parent=str(tmp_path))
     the_plan = new_project.plan(args, registry())
@@ -667,6 +678,70 @@ def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", broken)
     new_project.register_in_workspace(the_plan, dry_run=False)
     assert "WARNING" in capsys.readouterr().out
+
+
+def test_registration_lands_in_the_canonical_copy_too(
+    tmp_path, capsys, monkeypatch, canonical_copy
+):
+    """The live file is rendered from `workspace.jsonc`, so registering only there is drift.
+
+    It was (8a1c0927): a freshly generated project left `--check-workspace` saying
+    `folder in the workspace but not in devkit` until someone adopted it by hand.
+    """
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical_copy.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+    assert the_plan.name not in devkit_project.known_projects(canonical_copy.read_text("utf-8"))
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    for path in (canonical_copy, live):
+        assert the_plan.name in devkit_project.known_projects(path.read_text(encoding="utf-8"))
+    assert (
+        devkit_project.workspace_drift(
+            devkit_jsonc.loads(live.read_text(encoding="utf-8")),
+            devkit_jsonc.loads(canonical_copy.read_text(encoding="utf-8")),
+        )
+        == []
+    )
+    out = capsys.readouterr().out
+    assert "WARNING" not in out
+    assert f"commit devkit's {canonical_copy.name}" in out
+
+
+def test_an_unwritable_canonical_copy_still_registers_the_live_file(tmp_path, capsys, monkeypatch):
+    """Each copy is best-effort on its own: one failing must not skip the other."""
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", tmp_path / "nowhere" / "ws.jsonc")
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    assert the_plan.name in devkit_project.known_projects(live.read_text(encoding="utf-8"))
+    assert "WARNING could not register in ws.jsonc" in capsys.readouterr().out
+
+
+def test_a_dry_run_names_both_copies_and_writes_neither(
+    tmp_path, capsys, monkeypatch, canonical_copy
+):
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    live = tmp_path / "live.code-workspace"
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+    before = canonical_copy.read_text(encoding="utf-8")
+
+    new_project.register_in_workspace(the_plan, dry_run=True)
+
+    out = capsys.readouterr().out
+    assert f"update  {canonical_copy.name}" in out
+    assert f"update  ../{live.name}" in out
+    assert canonical_copy.read_text(encoding="utf-8") == before
+    assert not live.exists()
 
 
 def _recording_register(monkeypatch) -> list[list[str]]:
@@ -705,7 +780,7 @@ def test_no_register_never_opens_the_workspace_file(tmp_path, capsys, monkeypatc
     assert "WARNING" not in out
 
 
-def test_registration_is_still_the_default(tmp_path, monkeypatch):
+def test_registration_is_still_the_default(tmp_path, monkeypatch, canonical_copy):
     """The flag is opt-out: a real project must stay visible to `sweep.py`."""
     args = make_args(parent=str(tmp_path))
     the_plan = new_project.plan(args, registry())
@@ -716,7 +791,8 @@ def test_registration_is_still_the_default(tmp_path, monkeypatch):
 
     new_project.register_in_workspace(the_plan, dry_run=False)
 
-    assert calls == [[the_plan.name]]
+    # Once for devkit's canonical copy, once for the live file.
+    assert calls == [[the_plan.name], [the_plan.name]]
 
 
 def test_the_default_parent_is_the_directory_the_workspace_registers_from(tmp_path, monkeypatch):
@@ -749,7 +825,9 @@ def test_a_project_outside_the_workspace_directory_is_not_registered(tmp_path, c
     assert str(the_plan.root) in out
 
 
-def test_the_no_register_flag_is_reachable_from_the_cli(tmp_path, capsys, monkeypatch):
+def test_the_no_register_flag_is_reachable_from_the_cli(
+    tmp_path, capsys, monkeypatch, canonical_copy
+):
     """RELEASING.md's acceptance test passes it; a renamed dest breaks that silently."""
     monkeypatch.setattr(
         devkit_project, "DEFAULT_WORKSPACE", tmp_path / "nowhere" / "ws.code-workspace"
