@@ -1701,6 +1701,34 @@ def test_an_import_probe_excuses_only_the_modules_it_imported():
     assert sf.probed_modules('python -c "import a; print(a)"') == frozenset()
 
 
+def test_a_uv_run_outside_every_project_is_the_sessions_directory_not_the_environment():
+    """de36b95c: a fixer's scratch generator died on its own `FileExistsError`, so the
+    `Set-Location` after it went nowhere, and every `uv run` behind it ran outside any
+    project on uv's bare interpreter. uv says so; its "No module named alembic" was filed
+    as an environment the harness left unprovisioned. The exact call and output, cut."""
+    command = (
+        '$out = "$env:CLAUDE_JOB_DIR\\tmp\\gen"; $root = (.venv\\Scripts\\python.exe '
+        "$env:CLAUDE_JOB_DIR\\tmp\\gen_alembic.py $out | Select-Object -Last 1); Set-Location "
+        "$root; uv sync --extra dev -q 2>&1 | Select-Object -Last 3; uv run --no-sync python "
+        '-m alembic revision -m "first table" 2>&1 | Select-Object -Last 4'
+    )
+    out = (
+        "Exit code 1\nTraceback (most recent call last):\r\n"
+        "FileExistsError: [WinError 183] Cannot create a file when that file already exists\r\n"
+        "error: No `pyproject.toml` found in current directory or any parent directory\r\n"
+        "warning: `--no-sync` has no effect when used outside of a project\r\n"
+        "C:\\Users\\a\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\\"
+        "python.exe: No module named alembic\r\nrev exit=1"
+    )
+    assert classes([call(command, "1"), result(out, "1")]) == []
+    # Inside a project, the same missing module is still the environment.
+    inside = out.split("error: No `pyproject")[0] + "python.exe: No module named alembic"
+    assert classes([call(command, "1"), result(inside, "1")]) == ["environment"]
+    # And uv's own complaint excuses only the interpreter it ran, not a shell's.
+    missing = out + "\nbash: ruff: command not found"
+    assert classes([call(command, "1"), result(missing, "1")]) == ["environment"]
+
+
 def _git_tree(root: Path, files: dict[str, str]) -> Path:
     """A repository at `root` tracking `files`: what `git grep` reads."""
     root.mkdir(parents=True)

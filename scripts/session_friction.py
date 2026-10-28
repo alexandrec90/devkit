@@ -114,6 +114,15 @@ GENERATED_WORDS = re.compile(r"\$\(|`|\{[^}]*\.\.[^}]*\}|\$\w")
 # setting that stops it: the probe that put `MSYS2_ARG_CONV_EXCL` in the agent env was
 # filed as the defect it measured (d71a2caf), as `BYTE_DUMP` is for a heredoc's probe.
 REWRITTEN_REV = re.compile(r"^ambiguous argument", re.I)
+# uv saying the call ran in no project: its `uv run` took uv's bare interpreter, so the
+# module that interpreter lacks is no environment any tree was owed. The session was in
+# the wrong directory -- de36b95c, a scratch script's crash leaving a `Set-Location`
+# nowhere to go. It excuses a missing module only, never a shell's missing command.
+UV_OUTSIDE_PROJECT = re.compile(
+    r"has no effect when used outside of a project|"
+    r"No `pyproject\.toml` found in current directory or any parent directory"
+)
+MISSING_MODULE_MATCH = re.compile(r"^(?:No module named|ModuleNotFoundError)$", re.I)
 PATH_CONVERSION_PROBE = re.compile(r"\bMSYS2_ARG_CONV_EXCL=|\bMSYS_NO_PATHCONV=")
 # The same for an interpreter: a `python -c` whose whole program is imports asks whether
 # they import, so its "No module named 'x'" for a module it imported is the answer, not a
@@ -711,12 +720,14 @@ def _result_class(text: str, command: str = "") -> tuple[str, str]:
     text = ANSI.sub("", text)
     probe = bool(PATH_CONVERSION_PROBE.search(command))
     probed = probed_modules(command)
+    projectless = bool(UV_OUTSIDE_PROJECT.search(text))
     for cls, pattern in RESULT_PATTERNS:
         for found in pattern.finditer(text):
             if (
                 _quoted(text, found.start())
                 or (probe and REWRITTEN_REV.match(found.group()))
                 or _answers_probe(text, found.start(), probed)
+                or (projectless and MISSING_MODULE_MATCH.match(found.group()))
             ):
                 continue
             missing = _missing_command(text, found)
