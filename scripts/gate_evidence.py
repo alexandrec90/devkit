@@ -290,10 +290,19 @@ def run_id_from_body(body: str) -> str:
 
 
 def nightly_issues(gh: Gh) -> list[dict]:
-    """The open tracker issues in one checkout: the reporter's title shape only."""
-    listed = gh_json(
-        gh("issue", "list", "--state", "open", "--limit", str(ISSUE_LIMIT), "--json", ISSUE_FIELDS)
-    )
+    """The open tracker issues in one checkout: the reporter's title shape only.
+
+    Empty when `gh` cannot be spawned there, on `broken_pr_menu.broken_prs`'s terms: a
+    registered checkout missing from disk raised `NotADirectoryError` here and took
+    every other project's evidence down with the collect step (79505f2b).
+    """
+    try:
+        done = gh(
+            "issue", "list", "--state", "open", "--limit", str(ISSUE_LIMIT), "--json", ISSUE_FIELDS
+        )
+    except OSError:
+        return []
+    listed = gh_json(done)
     if not isinstance(listed, list):
         return []
     return [

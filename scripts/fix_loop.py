@@ -317,6 +317,19 @@ LOGIN_DETAIL = (
     "dispatched sessions end at their first reply, Claude Code's stored login refused "
     f"-- {triage.PERSON_STEP} run `claude auth login` on this machine"
 )
+# A checkout Claude Code refuses to launch in (`fix_reports.UNTRUSTED`): one group per
+# project, filed alike by the dispatch the launcher refused (`fix_send`) and by the dead
+# session it leaves, which were two groups for one refusal (10a9810d, 18e737b9).
+UNTRUSTED_KIND = "fixer-workspace-untrusted"
+
+
+def untrusted_detail(checkout: Path) -> str:
+    """The finding's detail for an untrusted `checkout`, naming the step that trusts it."""
+    return (
+        f"Claude Code refuses to start a dispatched session in {checkout.name}, a checkout "
+        f"it was never told to trust -- {triage.PERSON_STEP} run `claude` in {checkout} "
+        "once and accept the trust prompt"
+    )
 
 
 def judge_dead(
@@ -328,19 +341,25 @@ def judge_dead(
     journal: fix_findings.Journal,
 ) -> list[str]:
     """Free a dead session's dispatch, and file it unless a restart killed it -- a lapsed
-    login is filed once, for a person, and not as the fixer's; the lines for the record."""
+    login or an untrusted checkout is filed once, for a person, and not as the fixer's;
+    the lines for the record."""
     key = str(tree.stamp.get("key", ""))
     if ctx.writes:
         fix_reports.note_on_stamp(tree.path, "dead", state)
-    if state in (fix_reports.INTERRUPTED, fix_reports.LOGGED_OUT):
-        # The machine went down under it, or nobody was logged in: no attempt spent, only
-        # a re-send, which finds a PR's tree as the session left it.
+    if state in (fix_reports.INTERRUPTED, fix_reports.LOGGED_OUT, fix_reports.UNTRUSTED):
+        # The machine went down under it, nobody was logged in, or nobody trusted the
+        # checkout: no attempt spent, only a re-send, which finds a PR's tree as the
+        # session left it.
         if ctx.writes:
             fix_ledger.mark_interrupted(ctx.ledger_path, key, state)
         if state == fix_reports.LOGGED_OUT:
             # The machine's login, not the fixer: one group whichever tree it hit, awaiting
             # a person -- the re-send is what shows the login is back.
             journal.add(Finding("fixer-login-refused", "devkit", LOGIN_DETAIL, evidence=transcript))
+        elif state == fix_reports.UNTRUSTED:
+            detail = untrusted_detail(ctx.root / tree.project)
+            cited = str(tree.path / fix_reports.LAUNCH_FILE)
+            journal.add(Finding(UNTRUSTED_KIND, tree.project, detail, evidence=cited))
         return [f"{where} -- {state}; sent again"]
     # No key: a dead session is re-sent at once, not parked behind the finding. One
     # that never started is cited by what its launcher said, when it left a record.

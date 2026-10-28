@@ -203,8 +203,48 @@ def test_a_consumer_with_no_helper_still_gets_its_venvs_pytest(tmp_path, monkeyp
     assert gate.interpreter(tmp_path) == str(venv)
 
 
-def test_a_hook_shipped_without_devkits_helper_falls_back_to_this_interpreter(tmp_path):
-    assert gate.interpreter(tmp_path, bundled=tmp_path / "absent.py") == sys.executable
+def _venv(root: Path) -> Path:
+    """Lay down the file `.venv`'s interpreter would be, spelled for this platform."""
+    python = gate.venv_python(root)
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    return python
+
+
+def _no_helper_at_all(root: Path) -> Path:
+    """Where a hook shipped without devkit's `project_python.py` would look for it."""
+    return root / "absent.py"
+
+
+def test_with_no_helper_a_hook_interpreter_lacking_pytest_uses_the_projects_venv(tmp_path):
+    """8448080a: a freshly generated project vendors no `project_python.py`, so the hook
+    tier ran under pre-commit's own interpreter -- `No module named pytest` -- while the
+    lint and test wrappers beside it re-ran themselves under `.venv` and passed, and
+    `new-project.py --remote` failed its first push. With devkit's own copy missing
+    too, the hook still finds the venv itself."""
+    python = _venv(tmp_path)
+    answer = gate.interpreter(
+        tmp_path, bundled=_no_helper_at_all(tmp_path), has_pytest=lambda: False
+    )
+    assert answer == str(python)
+
+
+def test_with_no_helper_a_hook_interpreter_with_pytest_stays(tmp_path):
+    """CI and an activated shell already have pytest; switching them to a venv that may
+    hold other versions would change what the gate tests."""
+    _venv(tmp_path)
+    answer = gate.interpreter(
+        tmp_path, bundled=_no_helper_at_all(tmp_path), has_pytest=lambda: True
+    )
+    assert answer == sys.executable
+
+
+def test_with_no_helper_and_no_venv_the_hook_interpreter_is_the_answer(tmp_path):
+    """Nothing better exists: the step then fails naming the missing module."""
+    answer = gate.interpreter(
+        tmp_path, bundled=_no_helper_at_all(tmp_path), has_pytest=lambda: False
+    )
+    assert answer == sys.executable
 
 
 def test_the_interpreter_comes_from_the_projects_own_helper(tmp_path):

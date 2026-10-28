@@ -23,8 +23,9 @@ Steps, in order:
   2. render `templates/` into the new directory
   3. `git init` + initial commit
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
-  5. register the project in the shared `alex-projects.code-workspace`
-     (the one step that writes OUTSIDE the new directory; `--no-register` skips it)
+  5. register the project in devkit's `workspace.jsonc` and the shared
+     `alex-projects.code-workspace` (the one step that writes OUTSIDE the new
+     directory; `--no-register` skips it)
   6. create the private GitHub repo and push          <- outward-facing
 """
 
@@ -85,7 +86,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
 # users who cannot hit the fast path. So it must track the newest tag, and
 # `test_fallback_devkit_ref_tracks_the_newest_tag` fails at release time if a tag
 # lands without it being bumped. Bump it in the same commit as the tag.
-FALLBACK_DEVKIT_REF = "v0.11.73"
+FALLBACK_DEVKIT_REF = "v0.11.74"
 
 
 class GeneratorError(RuntimeError):
@@ -367,7 +368,10 @@ def build_context(
 def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
     """Decide everything. Touches nothing."""
     validate_name(args.name)
-    root = Path(args.parent).expanduser().resolve() / args.name
+    # Beside the workspace file by default: it registers a project by bare name, so a
+    # project anywhere else is registered as a folder that does not exist (8448080a).
+    parent = args.parent or devkit_project.DEFAULT_WORKSPACE.parent
+    root = Path(parent).expanduser().resolve() / args.name
     if root.exists() and any(root.iterdir()):
         raise GeneratorError(
             f"{root} already exists and is not empty. Generating into it would "
@@ -582,7 +586,7 @@ def git_init(plan: Plan, dry_run: bool) -> None:
 
 
 def register_in_workspace(plan: Plan, dry_run: bool) -> None:
-    """Add the project to `alex-projects.code-workspace`.
+    """Add the project to `workspace.jsonc` and `alex-projects.code-workspace`.
 
     This used to write a *new* `<name>.code-workspace` per project, to keep the task
     quick-pick free of every other repo's tasks. Two things made that wrong. The task
@@ -605,23 +609,49 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     file: it lands in `folders` and in every scope picker, which puts a directory
     under a temp path into `sweep.py`'s registry, and it survives the `rm -rf` that
     ends the acceptance test.
+
+    **Both copies, canonical first.** The live file is rendered from devkit's
+    `workspace.jsonc` (`.claude/rules/vscode-tasks.md`), so registering in the live file
+    alone left `devkit_project.py --check-workspace` reporting the new project as
+    `folder in the workspace but not in devkit` until someone adopted it by hand on a
+    branch (8a1c0927). The canonical edit is left uncommitted, the shape
+    `plug-projects.py` and `--adopt-workspace` leave theirs in: it is a registry change
+    every machine shares, so it goes through a branch and a review like any other. The
+    live write stays too, because a render only lands on the next scheduled pass and
+    the project should be in the sweep's registry from the moment it exists.
     """
     if not plan.register:
         print("  skip    workspace registration (--no-register)")
         return
-    path = devkit_project.DEFAULT_WORKSPACE
     names = [plan.name]
-    if dry_run:
-        print(f"  update  ../{path.name} (folders + project picker: {', '.join(names)})")
+    live = devkit_project.DEFAULT_WORKSPACE
+    # The registry names each folder relative to the live file's directory, and the
+    # canonical copy renders into it. A project generated anywhere else would be
+    # registered in both as a folder that does not exist, and every reader of the
+    # registry -- `rc-servers.py`, the fix pass's collect step -- then fails on it rather
+    # than skipping it (b42a921e, 79505f2b).
+    if plan.root.parent != live.parent.resolve():
+        print(f"  WARNING {plan.root} is not beside {live}: not registered")
+        print(f"          move it to {live.parent} and add {plan.name} to its folders by hand")
         return
-    try:
-        text = path.read_text(encoding="utf-8")
-        path.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
-    except (OSError, devkit_project.RegistryEditError) as exc:
-        print(f"  WARNING could not register in {path.name}: {exc}")
-        print(f"          add {', '.join(names)} to its folders list and project picker by hand")
-        return
-    print(f"  update  ../{path.name} (folders + project picker)")
+    canonical = devkit_project.CANONICAL_WORKSPACE
+    for path in (canonical, live):
+        shown = path.name if path == canonical else f"../{path.name}"
+        if dry_run:
+            print(f"  update  {shown} (folders + project picker: {', '.join(names)})")
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            path.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
+        except (OSError, devkit_project.RegistryEditError) as exc:
+            print(f"  WARNING could not register in {path.name}: {exc}")
+            print(
+                f"          add {', '.join(names)} to its folders list and project picker by hand"
+            )
+            continue
+        print(f"  update  {shown} (folders + project picker)")
+    if not dry_run:
+        print(f"          commit devkit's {canonical.name} on a branch and ship it")
 
 
 def create_remote(plan: Plan, dry_run: bool) -> None:
@@ -731,6 +761,25 @@ def register_slot_hint(plan: Plan) -> None:
     print(f"  {plan.name} = {plan.context['slot']}")
 
 
+def trust_hint(plan: Plan) -> None:
+    """Tell the user to trust the checkout in Claude Code. Deliberately not automatic.
+
+    `claude --bg` refuses to start in a checkout nobody has trusted, and a trusted folder
+    above it does not count, so the fix pass's first fixer here is refused until a person
+    accepts the prompt (10a9810d, 18e737b9). The prompt is a person's consent to the
+    project's own settings and hooks running; a generator that wrote it into Claude
+    Code's state would be consenting on their behalf.
+    """
+    print("\nNext: trust the checkout in Claude Code, or the fix pass cannot work in it:")
+    print(f"  run `claude` in {plan.root} once and accept the trust prompt")
+
+
+def next_steps(plan: Plan) -> None:
+    """What the person who ran the generator still has to do, which it will not."""
+    register_slot_hint(plan)
+    trust_hint(plan)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -740,8 +789,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--display-name", default="", help="human title (default: from name)")
     parser.add_argument(
         "--parent",
-        default=str(Path.home() / "Desktop" / "vs_code"),
-        help="directory to create the project in",
+        default="",
+        help="directory to create the project in (default: the shared workspace file's)",
     )
     parser.add_argument("--github-owner", default="alexandrec90")
     parser.add_argument("--python-version", default="3.12")
@@ -861,7 +910,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\nDry run complete. Re-run with --yes to apply.")
     else:
         print(f"\nDone: {the_plan.root}")
-    register_slot_hint(the_plan)
+    next_steps(the_plan)
     return 0
 
 

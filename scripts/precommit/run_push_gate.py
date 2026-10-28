@@ -49,6 +49,7 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import subprocess
@@ -92,14 +93,34 @@ STEPS: tuple[Step, ...] = (
 BUNDLED_HELPER = Path(__file__).resolve().parents[1] / "project_python.py"
 
 
-def interpreter(root: Path, bundled: Path = BUNDLED_HELPER) -> str:
+def venv_python(root: Path) -> Path:
+    """The interpreter inside `root`'s `.venv`, spelled for this platform."""
+    if os.name == "nt":
+        return root / ".venv" / "Scripts" / "python.exe"
+    return root / ".venv" / "bin" / "python"
+
+
+def _this_has_pytest() -> bool:
+    return importlib.util.find_spec("pytest") is not None
+
+
+def interpreter(
+    root: Path,
+    bundled: Path = BUNDLED_HELPER,
+    has_pytest: Callable[[], bool] = _this_has_pytest,
+) -> str:
     """The interpreter to run the project's tooling with.
 
     `project_python.interpreter` answers it -- that module knows about the venv, and about
     borrowing a checkout's venv from a worktree that has none. The project's own copy
-    wins when it has one, then devkit's `bundled` one, which answers for any `root`, and
-    only then the interpreter running this hook. The wrappers re-exec themselves, so the
-    pytest step is the one that needs the answer here.
+    wins when it has one, then devkit's `bundled` one, which answers for any `root`. The
+    wrappers re-exec themselves (through that helper, or the vendored `toolchain`), so
+    the pytest step is the one that needs the answer here.
+
+    With neither helper loadable, this interpreter answers while it has pytest, and the
+    project's `.venv` when it does not. pre-commit runs this hook under an environment of
+    its own with no pytest in it, so answering `sys.executable` there failed the hook
+    tier with `No module named pytest` on a project whose `.venv` had it (8448080a).
     """
     for helper in (root / "scripts" / "project_python.py", bundled):
         if not helper.is_file():
@@ -113,6 +134,9 @@ def interpreter(root: Path, bundled: Path = BUNDLED_HELPER) -> str:
             # the right place to read it.
             continue
         return str(module.interpreter(root, "pytest"))
+    venv = venv_python(root)
+    if not has_pytest() and venv.is_file():
+        return str(venv)
     return sys.executable
 
 

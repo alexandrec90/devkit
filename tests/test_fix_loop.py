@@ -397,6 +397,32 @@ def test_one_launcher_failure_is_one_detail_whichever_branch_it_hit(ctx, monkeyp
     assert details[0] == details[1]
 
 
+def test_a_launch_refused_as_untrusted_is_sent_again_and_awaits_a_person(ctx, monkeypatch):
+    """10a9810d, 18e737b9: productivity-tracker's first fixer was refused with "Workspace
+    not trusted" and filed as a session that never started, naming its fresh tree, for
+    fixers that could only be refused the same way. Trusting a checkout is a person's."""
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW - _dt.timedelta(hours=2))
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=2))
+    said = f"{fix_reports.UNTRUSTED_SAID}. Run `claude` in {path} once and accept the trust prompt"
+    done = subprocess.CompletedProcess(["claude"], 1, "", said)
+    fix_reports.record_launch(path, ["claude", "--bg", "--", "fix it all"], done)
+    closed, journal = close(ctx)
+    assert closed.lines == [f"carameli agent/x-0919 -- {fix_reports.UNTRUSTED}; sent again"]
+    [found] = journal.findings
+    assert (found.kind, found.project) == (fix_loop.UNTRUSTED_KIND, "carameli")
+    assert found.detail == fix_loop.untrusted_detail(ctx.root / "carameli")
+    assert str(path) not in found.detail, "the checkout, not the tree a re-send replaces"
+    assert found.evidence == str(path / fix_reports.LAUNCH_FILE)
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.UNTRUSTED and fix_ledger.sends(entry) == 0
+    row = triage.parse_line(
+        fix_findings.harness_events.event_line("0", found.event, found.fields())
+    )
+    step = f"run `claude` in {ctx.root / 'carameli'} once and accept the trust prompt"
+    assert triage.person_step(row) == step
+    assert triage.awaiting_person([row]) == {row.signature: step}
+
+
 def test_a_session_gone_quiet_without_an_outcome_is_dead(ctx, monkeypatch):
     tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=5), transcript_age=_dt.timedelta(hours=3))
     _, journal = close(ctx)
