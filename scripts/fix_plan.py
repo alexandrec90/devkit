@@ -58,6 +58,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+import harness_triage
 import task_branch as tb
 from _loader import load_by_path
 
@@ -137,6 +138,16 @@ CONFLICT = "merge conflict"
 # What a job GitHub never gave a runner is signed with, after its name: it ran no step,
 # so there is no step name, test id or log line to sign it by.
 NO_RUNNER = "no runner acquired"
+# What a job GitHub refused to start over the account's Actions billing is signed with,
+# after its name. productivity-tracker #3 and social-scraper #108 were red on nothing
+# else, the shared signature folded them into a devkit session, and that session could
+# only report that a payment had failed: no fixer, re-run or code change turns it green.
+NO_BILLING = "refused by the account's Actions billing"
+# The step it takes, which only the account's owner can (`harness_triage.PERSON_STEP`).
+BILLING_STEP = (
+    "settle the GitHub account's Actions billing (Settings > Billing and plans: the failed "
+    "payment or the spending limit), then re-run the red gates"
+)
 
 # Where the evidence lands inside the worktree the agent opens in. Under `logs/`
 # because every project ignores that directory, so nothing here can be committed.
@@ -283,6 +294,11 @@ def is_runner_side(sig: tuple[str, ...]) -> bool:
     return bool(sig) and all(
         entry.endswith(UNSTARTED) or entry.rpartition(" / ")[2] in RUNNER_STEPS for entry in sig
     )
+
+
+def is_billing_refused(sig: tuple[str, ...]) -> bool:
+    """Every entry is a job GitHub refused to start over billing (`NO_BILLING`)."""
+    return bool(sig) and all(entry.endswith(f" / {NO_BILLING}") for entry in sig)
 
 
 def signature(conflicted: bool, texts: Iterable[str], jobs: Iterable[dict]) -> tuple[str, ...]:
@@ -477,9 +493,14 @@ def plan(
     grouped: dict[tuple[str, ...], list[Failure]] = {}
     decisions: list[Decision] = []
     listed = list(failures)
-    # An unread branch is skipped and still red: its PRs stay held behind it.
+    # An unread branch is skipped and still red: its PRs stay held behind it. A branch
+    # refused over billing is skipped and holds nothing: its PRs are refused alike.
     red_bases = {
-        (f.project, f.base) for f in listed if f.kind == BRANCH and not is_release_red(f.signature)
+        (f.project, f.base)
+        for f in listed
+        if f.kind == BRANCH
+        and not is_release_red(f.signature)
+        and not is_billing_refused(f.signature)
     }
     for failure in sorted(listed, key=lambda f: (f.kind, f.project, f.number)):
         if why := skip_reason(failure, latest, prefixes):
@@ -529,6 +550,10 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     unless GitHub's annotations say outright that no runner took them (`lost_runs`),
     which is re-run at any attempt. Both come after the hold: a re-run under a red base
     would only come back with the base's red.
+
+    A run GitHub refused to start over billing (`is_billing_refused`) is skipped, naming
+    the person's step, before the hold: a re-run is refused the same way, and a fixer
+    can only find the annotation.
     """
     against_red = failure.kind in (PR, NIGHTLY) and (failure.project, failure.base) in red_bases
     if CONFLICT in failure.signature and not against_red:
@@ -540,10 +565,18 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
             else f"behind origin/{failure.base}"
         )
         return Decision(UPDATE, f"{describe(failure)}; {why}", (failure,))
+    if is_billing_refused(failure.signature):
+        return Decision(SKIP, billing_note(failure), (failure,))
     if against_red:
         return Decision(HOLD, held_note(failure), (failure,))
     if failure.kind == NIGHTLY and failure.tip_running:
         return Decision(HOLD, tip_note(failure, "a run at the tip is in progress"), (failure,))
+    return runner_rerun(failure)
+
+
+def runner_rerun(failure: Failure) -> Decision | None:
+    """The `RERUN` `_place` gives a failure no code took part in, past its holds; None
+    when it is not one."""
     if reruns_at_tip(failure):
         return Decision(RERUN, tip_note(failure, "re-running it there"), (failure,))
     if failure.lost_runs and CONFLICT not in failure.signature:
@@ -554,6 +587,14 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     if reruns_in_place(failure) and failure.attempt == 1:
         return Decision(RERUN, f"{describe(failure)}; {_in_place_note(failure)}", (failure,))
     return None
+
+
+def billing_note(failure: Failure) -> str:
+    """Why a run GitHub refused to start over billing is skipped, and whose step it is."""
+    return (
+        f"{describe(failure)}; GitHub refused to start its jobs over the account's billing "
+        f"-- {harness_triage.PERSON_STEP} {BILLING_STEP}"
+    )
 
 
 def _in_place_note(failure: Failure) -> str:

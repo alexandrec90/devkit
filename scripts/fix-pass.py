@@ -614,6 +614,7 @@ def run(
     release, (harness, go, held, skipped) = release_and_plan(
         workspace, ctx, journal, failures, green, backlog
     )
+    closed.verified += step("billing", fix_red.billing, ctx, journal, skipped, default=[])
 
     # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current,
     # and the next fire routes a click's.

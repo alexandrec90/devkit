@@ -26,10 +26,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broken_pr_menu as menu
 import fix_backlog
 import fix_cycle
+import fix_findings
+import fix_loop
 import fix_plan
 import gate_evidence
 import sweep
 import task_branch as tb
+
+# A gate GitHub refused to start over the account's billing (`fix_plan.is_billing_refused`):
+# one group for the account, whichever checkouts it hit, naming the step only its owner
+# can take, so it awaits that person (`triage.awaiting_person`) and the morning toast says
+# so, rather than the plan's skip line being the only place it is written.
+BILLING_KIND = "actions-billing-refused"
+BILLING_DETAIL = (
+    "GitHub refuses to start the account's Actions jobs -- "
+    f"{fix_findings.triage.PERSON_STEP} {fix_plan.BILLING_STEP}"
+)
 
 
 def collect_red(
@@ -50,6 +62,41 @@ def collect_red(
     green, _ = branches.get(fix_cycle.DEVKIT, (None, None))
     unread = [name for name, (verdict, _) in branches.items() if verdict is None]
     return failures, green, unread
+
+
+def billing(
+    ctx: fix_loop.Context, journal: fix_findings.Journal, skipped: list[fix_plan.Decision]
+) -> list[str]:
+    """File `BILLING_KIND` when the plan skipped a gate over billing; else retire an open
+    one, as of this pass: lines for the record.
+
+    Nothing else retires it -- the person who settled the bill rarely writes the
+    resolution, as with a login (`fix_loop.retire_login`). Not after a collect step that
+    raised, which read no gate and so proves nothing about the account.
+    """
+    refused = [f for d in skipped for f in d.failures if fix_plan.is_billing_refused(f.signature)]
+    if refused:
+        journal.add(
+            fix_findings.Finding(BILLING_KIND, "devkit", BILLING_DETAIL, evidence=refused[0].url)
+        )
+        return []
+    if "collect" in journal.crashed:
+        return []
+    marker = f"{BILLING_KIND}: "
+    stale = [
+        item
+        for item in fix_findings.triage.open_items(
+            fix_findings.triage.load(ctx.devkit_dir), (fix_findings.FINDING,)
+        )
+        if item.fields.get("detail", "").startswith(marker)
+    ]
+    if not stale:
+        return []
+    note = "no gate was refused over billing on this pass"
+    if ctx.writes:
+        fix_findings.triage.resolve([item.id for item in stale], note, root=ctx.devkit_dir)
+    verb = "retired" if ctx.writes else "would retire"
+    return [f"{verb} [{item.id}] -- {note}" for item in stale]
 
 
 def backlog_failure(

@@ -200,6 +200,14 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
 # is `cancelled` with zero steps, no log and no artifact. roguelike's gate run 37364441127
 # and social-scraper's 37364457089 failed on nothing else, and a fixer went at each.
 RUNNER_LOST = re.compile(r"\bwas not acquired by runner\b", re.I)
+# What GitHub annotates a job it would not start over the account's billing with: "The
+# job was not started because recent account payments have failed or your spending
+# limit needs to be increased" -- productivity-tracker's PR Gate run 40962955157 and
+# social-scraper's 40962940638, every job `failure` with zero steps.
+BILLING_REFUSED = re.compile(
+    r"\bnot started because recent account payments have failed\b|\bspending limit needs to be increased\b",
+    re.I,
+)
 # The job conclusions that are not red; anything else -- `cancelled` included -- is.
 JOB_PASSED = frozenset({"success", "skipped", "neutral"})
 
@@ -217,17 +225,36 @@ def runner_lost(gh: Gh, jobs: list[dict]) -> tuple[str, ...]:
     """The red jobs' names when every one of them is a job GitHub never gave a runner:
     no step ran, and its check run says so. () when any red job ran a step, or says
     nothing about its runner -- that red is the code's, and a fixer's to read."""
+    return unstarted_for(gh, jobs, RUNNER_LOST)
+
+
+def billing_refused(gh: Gh, jobs: list[dict]) -> tuple[str, ...]:
+    """The red jobs' names when GitHub refused to start every one of them over the
+    account's billing (`BILLING_REFUSED`); () otherwise, as `runner_lost` says it."""
+    return unstarted_for(gh, jobs, BILLING_REFUSED)
+
+
+def unstarted_for(gh: Gh, jobs: list[dict], why: re.Pattern[str]) -> tuple[str, ...]:
+    """The red jobs' names when every one ran no step and its check run says `why`."""
     red = [job for job in jobs if str(job.get("conclusion", "")).lower() not in JOB_PASSED]
     for job in red:
         if job.get("steps") or not job.get("databaseId"):
             return ()
-        if not any(RUNNER_LOST.search(said) for said in job_annotations(gh, job["databaseId"])):
+        if not any(why.search(said) for said in job_annotations(gh, job["databaseId"])):
             return ()
     return tuple(sorted({str(job.get("name", "?")) for job in red}))
 
 
 def lost_signature(names: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(f"{name} / {fix_plan.NO_RUNNER}" for name in names)
+
+
+def billing_signature(gh: Gh, sig: tuple[str, ...], jobs: list[dict]) -> tuple[str, ...]:
+    """`sig`, or the jobs signed `fix_plan.NO_BILLING` when it is jobs that never started
+    a step (`fix_plan.is_unstarted`) and GitHub's billing refused every one of them.
+    Asked of no other signature, so a run that names a failure costs no annotation read."""
+    names = billing_refused(gh, jobs) if fix_plan.is_unstarted(sig) else ()
+    return tuple(f"{name} / {fix_plan.NO_BILLING}" for name in names) or sig
 
 
 def drop_empty(dest: Path) -> list[str]:
@@ -466,6 +493,7 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     texts, jobs, lost = read_runs(gh, run_ids, where)
     lost = () if conflicted else lost
     sig = lost_signature(lost) if lost else fix_plan.signature(conflicted, texts, jobs)
+    sig = billing_signature(gh, sig, jobs)
     unread = False
     if fix_plan.names_nothing(sig):
         sig, unread = reread(gh, run_ids, conflicted, texts)
@@ -544,7 +572,7 @@ def read_default_branch(
     )
     where = root / evidence_slot(failure)
     texts, jobs = run_evidence(gh, run_id, where) if run_id else ([], [])
-    sig = fix_plan.signature(False, texts, jobs)
+    sig = billing_signature(gh, fix_plan.signature(False, texts, jobs), jobs)
     if fix_plan.is_release_red(sig) and is_tagged(git, failure.sha):
         return True, None
     if lost := runner_lost(gh, jobs):
