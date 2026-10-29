@@ -1121,6 +1121,31 @@ def test_each_suite_root_is_excused_once_after_a_suite_wide_change():
     assert sf.suite_root(" ./ -q") == "." and sf.suite_root(" tests/ tests/x.py") == "tests"
 
 
+def test_a_whole_run_interrupted_at_collection_checked_nothing():
+    """4812c0c7: a productivity-tracker session edited `tests/conftest.py`, ran its suite
+    whole, and pytest stopped at one test file's import -- "Interrupted: 1 error during
+    collection", no test run. Its rerun after the import fix was the first run to check
+    the conftest change, and was filed as the habit. The exact calls, in order."""
+    conftest = _tool("Edit", "e", file_path="C:\\t\\tests\\conftest.py")
+    first = "ls tests/__init__.py 2>&1; .venv/Scripts/python -m pytest tests -q -p no:cacheprovider 2>&1 | tail -30"
+    interrupted = (
+        "ERROR tests/test_overlay_window.py\n"
+        "!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n"
+        "1 error in 0.58s"
+    )
+    fix = _tool("Edit", "f", file_path="C:\\t\\tests\\test_overlay_window.py")
+    rerun = call(".venv/Scripts/python -m pytest tests -q -p no:cacheprovider 2>&1 | tail -30", "2")
+    rows = [conftest, call(first, "1"), result(interrupted, "1", error=False), fix, rerun]
+    assert classes(rows) == []
+    assert classes([*rows, result("128 passed in 5.29s", "2", error=False), rerun]) == [
+        "full-suite"
+    ], "a whole run that ran the suite has checked the change"
+    nothing = [conftest, call(first, "1"), result("no tests ran in 0.01s", "1"), rerun]
+    assert classes(nothing) == [], "a run that collected nothing checked nothing"
+    passed = [conftest, call(first, "1"), result("95 passed in 3.28s", "1", error=False), rerun]
+    assert classes(passed) == ["full-suite"]
+
+
 def test_a_suite_wide_file_git_reports_changed_is_a_suite_wide_change():
     """493a237b: an ibkr_trader fixer's tree arrived with `uv.lock` relocked by its
     provisioning -- data-lake's pytest floor had moved -- and its first `git status`
