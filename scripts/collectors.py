@@ -413,17 +413,7 @@ def spawn(argv: Sequence[str], timeout: int, cwd: Path | None = None) -> tuple[i
     return done.returncode, "\n".join(p for p in (done.stdout, done.stderr) if p).strip()
 
 
-_FRACTION = re.compile(r"\.\d+")
-
-
-def parse_created(text: str) -> float | None:
-    """Docker's `Created` (`2026-10-03T00:16:05.123456789Z`) as a POSIX time; None when it
-    is not one. The nanoseconds go: `fromisoformat` takes at most six digits."""
-    try:
-        when = _dt.datetime.fromisoformat(_FRACTION.sub("", text.strip()).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return when.timestamp() if when.tzinfo else None
+parse_created = collector_tasks.parse_created
 
 
 def desktop_status(text: str) -> str | None:

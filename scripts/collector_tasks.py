@@ -130,6 +130,17 @@ UPDATE_LISTING = ("tasklist", "/FI", "IMAGENAME eq Docker Desktop*", "/FO", "CSV
 REAP_TIMEOUT = 30
 # `spawn`'s code for a child it ended at its timeout, as `timeout(1)` reports one.
 TIMED_OUT = 124
+# A failed command whose `needs` did not serve it throughout (`restarted_under`) failed on
+# Docker's engine going away under it, not on its own code, and is skipped like a fire
+# landing in an update. 2026-10-29 22:11 UTC Docker's WSL VM froze mid-scrape with nothing
+# in its log, Desktop came back at 22:19 with the db restarted, and the scrape's crawls had
+# given up on the db by then; the eighth ledger filing of one cause (8d30fbea) that no
+# fixer could reach: social-scraper's 180 s connect patience was sized to the 15 s
+# Desktop crash of f5e12548, and any patience is outlasted by a longer freeze. The next
+# fire runs on the restarted engine; one that stays down fails that fire's start, and the
+# collectors pass's `revive_engine` owns it. A run whose `needs` served it throughout
+# fails as before, whatever its error says.
+WENT_AWAY = "this run's failure is the engine's, not the command's -- skipped; the next fire runs"
 
 # Lines of the command's output the log keeps: the tail, where the error is.
 LOG_LINES = 300
@@ -626,6 +637,45 @@ def first(text: str) -> str:
     return (text.strip().splitlines() or ["(nothing)"])[0]
 
 
+_FRACTION = re.compile(r"\.\d+")
+
+
+def parse_created(text: str) -> float | None:
+    """Docker's `Created` (`2026-10-03T00:16:05.123456789Z`) as a POSIX time; None when it
+    is not one. The nanoseconds go: `fromisoformat` takes at most six digits."""
+    try:
+        when = _dt.datetime.fromisoformat(_FRACTION.sub("", text.strip()).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when.timestamp() if when.tzinfo else None
+
+
+def restarted_under(needs: Sequence[str], checkout: Path, run: Spawner, since: float) -> str:
+    """How `needs` failed to serve a command that began at `since` (a POSIX time) all the
+    way through: the engine silent now, one not running, or one started after `since` --
+    the engine bringing an `unless-stopped` service back. `""` when every one has run
+    since before the command, or when the engine answers but cannot say: only what is
+    established excuses a failure (`WENT_AWAY`)."""
+    names = ", ".join(needs)
+    code, out = run(["docker", "compose", "ps", "-q", *needs], checkout, PROBE)
+    if code != 0:
+        engine = probe(checkout, run)
+        return "" if engine[0] == 0 else f"the Docker engine stopped answering: {first(out)}"
+    ids = out.split()
+    if len(ids) < len(needs):
+        return f"{names} not all running after the command"
+    inspect = ["docker", "inspect", "--format", "{{.State.StartedAt}}", *ids]
+    code, out = run(inspect, checkout, PROBE)
+    starts = [parse_created(line) for line in out.splitlines() if line.strip()]
+    if code != 0 or len(starts) != len(ids) or None in starts:
+        return ""
+    latest = max(start for start in starts if start is not None)
+    if latest <= since:
+        return ""
+    at = _dt.datetime.fromtimestamp(latest, _dt.UTC).strftime("%H:%M:%S")
+    return f"{names} started again at {at} UTC, after the command began"
+
+
 def fire(
     collector: config.Collector,
     checkout: Path,
@@ -645,7 +695,8 @@ def fire(
     A `needs` that cannot start because Docker Desktop is installing an update
     (`desktop_updating`) skips this run, exit 0: the update is Docker's maintenance, the
     next fire runs on the new engine, and `collectors.revive_engine` fails an update that
-    outlasts its `HOLD_LIMIT`.
+    outlasts its `HOLD_LIMIT`. So does a failed command whose `needs` the engine lost
+    under it (`restarted_under`), for `WENT_AWAY`'s reason.
     """
     stamp = fired_env(fired or _dt.datetime.now(_dt.UTC))
     began = _time.monotonic()
@@ -670,11 +721,16 @@ def fire(
             return code, [*lines, *failed, *said, *stuck, cause]
         lines.append(f"started: {', '.join(collector.needs)}")
     left = FIRE_TIMEOUT - int(_time.monotonic() - began)
+    since = _dt.datetime.now(_dt.UTC).timestamp()
     code, out = run(resolve(collector.command), checkout, left, stamp)
     output = out.splitlines()
     if len(output) > LOG_LINES:
         output = [f"... {len(output) - LOG_LINES} earlier lines dropped", *output[-LOG_LINES:]]
-    return code, [*lines, "", *output]
+    lines = [*lines, "", *output]
+    if code != 0 and collector.needs:
+        if gone := restarted_under(collector.needs, checkout, run, since):
+            return 0, [*lines, "", f"exit {code}, but {gone}: {WENT_AWAY}"]
+    return code, lines
 
 
 def running(name: str, run: Runner) -> bool:
