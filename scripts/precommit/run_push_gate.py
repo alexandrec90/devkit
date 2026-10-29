@@ -39,8 +39,9 @@ wrappers are project-owned (`.claude/rules/engineering.md`, "a missing one is a 
 skip by design"), and a project that has not adopted the vendored tier has no hook tests.
 
 Runs with the consuming repo as cwd, the way every hook in this directory does, and
-spawns the project's own interpreter through `project_python` when the project ships it,
-so a push from a shell that never activated the venv still runs the venv's tools.
+spawns the project's own interpreter through `project_python` -- the project's copy, or
+devkit's beside this hook -- so a push from a shell that never activated the venv still
+runs the venv's tools.
 `SKIP=devkit-push-gate git push` is pre-commit's own bypass for a deliberate WIP push.
 
 Stdlib only. Tested in `tests/test_run_push_gate.py`.
@@ -48,6 +49,7 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import subprocess
@@ -84,26 +86,58 @@ STEPS: tuple[Step, ...] = (
 )
 
 
-def interpreter(root: Path) -> str:
+# devkit's own copy, beside this hook in pre-commit's clone of devkit. It is not in the
+# MANIFEST, so no consumer ships one, and without this fallback the pytest step ran on
+# whatever interpreter pushed: a bare workstation Python refused productivity-tracker's
+# first push on `No module named pytest`, after lint and the suite had passed.
+BUNDLED_HELPER = Path(__file__).resolve().parents[1] / "project_python.py"
+
+
+def venv_python(root: Path) -> Path:
+    """The interpreter inside `root`'s `.venv`, spelled for this platform."""
+    if os.name == "nt":
+        return root / ".venv" / "Scripts" / "python.exe"
+    return root / ".venv" / "bin" / "python"
+
+
+def _this_has_pytest() -> bool:
+    return importlib.util.find_spec("pytest") is not None
+
+
+def interpreter(
+    root: Path,
+    bundled: Path = BUNDLED_HELPER,
+    has_pytest: Callable[[], bool] = _this_has_pytest,
+) -> str:
     """The interpreter to run the project's tooling with.
 
-    The project's `scripts/project_python.py` when it has one -- that module knows about
-    the venv, and about borrowing a checkout's venv from a worktree that has none -- and
-    otherwise the interpreter running this hook. The wrappers re-exec themselves through
-    the same helper, so the pytest step is the one that needs the answer here.
+    `project_python.interpreter` answers it -- that module knows about the venv, and about
+    borrowing a checkout's venv from a worktree that has none. The project's own copy
+    wins when it has one, then devkit's `bundled` one, which answers for any `root`. The
+    wrappers re-exec themselves (through that helper, or the vendored `toolchain`), so
+    the pytest step is the one that needs the answer here.
+
+    With neither helper loadable, this interpreter answers while it has pytest, and the
+    project's `.venv` when it does not. pre-commit runs this hook under an environment of
+    its own with no pytest in it, so answering `sys.executable` there failed the hook
+    tier with `No module named pytest` on a project whose `.venv` had it (8448080a).
     """
-    helper = root / "scripts" / "project_python.py"
-    if not helper.is_file():
-        return sys.executable
-    try:
-        module = load_by_path("project_python", helper)
-    except (ImportError, OSError, SyntaxError):
-        # Unloadable, unreadable or unparsable: the interpreter question is then the
-        # only thing the helper was going to answer, and this one is the fallback its
-        # own callers use. Anything else the helper raises is a defect worth the
-        # traceback, and a refused push is the right place to read it.
-        return sys.executable
-    return str(module.interpreter(root, "pytest"))
+    for helper in (root / "scripts" / "project_python.py", bundled):
+        if not helper.is_file():
+            continue
+        try:
+            module = load_by_path("project_python", helper)
+        except (ImportError, OSError, SyntaxError):
+            # Unloadable, unreadable or unparsable: the interpreter question is then the
+            # only thing the helper was going to answer, so ask the next one. Anything
+            # else a helper raises is a defect worth the traceback, and a refused push is
+            # the right place to read it.
+            continue
+        return str(module.interpreter(root, "pytest"))
+    venv = venv_python(root)
+    if not has_pytest() and venv.is_file():
+        return str(venv)
+    return sys.executable
 
 
 # Git exports these into every hook's environment, naming the repository the push is

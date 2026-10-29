@@ -434,6 +434,13 @@ class Account:
     migrated: tuple[str, ...] = ()
     # What a pass past its send deadline left to the next one (`fix-pass.LATE`).
     late: tuple[str, ...] = ()
+    # The tray's half (`tray_state.fix_pass_states`): the fixer trees with a session at
+    # work, each person's step the ledger awaits (`fix_loop.person_steps`), and the open
+    # groups a fixer is owed. `backlog` counts rows, and counts the person's groups too,
+    # so "owed and nothing sent" cannot be read off it.
+    working: tuple[str, ...] = ()
+    person: tuple[str, ...] = ()
+    owed: int = 0
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -468,6 +475,8 @@ def render(account: Account) -> str:
         ("issue", account.issues),
         ("migrate", account.migrated),
         ("late", account.late),
+        ("working", account.working),
+        ("you", account.person),
     ):
         lines += labelled(label, rows)
     lines.append(f"ledger   {account.backlog} open on the harness-defect ledger")
@@ -498,5 +507,8 @@ def history_line(account: Account, now: _dt.datetime) -> str:
             "filed": len(account.filed),
             "backlog": account.backlog,
             "release": account.release,
+            "working": list(account.working),
+            "person": list(account.person),
+            "owed": account.owed,
         }
     )

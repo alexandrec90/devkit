@@ -1268,6 +1268,16 @@ than no indicator, because it would disagree with the `workspace-status.py` line
 the same machine. A machine with nothing registered shows **amber, not green**: green over a set
 of zero jobs is the most misleading thing it could say.
 
+The fix pass gets rows of its own, read off the newest line of
+`logs/fix-pass.history.jsonl` and judged by the pass, not the tray. A **`your step`** row,
+red, for each step the harness-defect ledger awaits a person for (`claude auth login`, a
+checkout to trust), with the command that retires it. And one **`fixers`** row: how many
+are at work, waiting, owed, and when one was last sent. It turns amber when a red harness
+holds every send, or when a fixer has been owed for `tray_state.STUCK_PASSES` passes with
+none sent, at work or waiting. Clicking either opens `logs/fix-pass.log`. A stale login
+row does not keep the tray red: the pass retires it once a fixer that began after it
+reaches an outcome (`fix_loop.retire_login`).
+
 ```bash
 python scripts/tray.py --once            # what it would show, as text
 python scripts/install-tray.py --yes     # start it at every logon

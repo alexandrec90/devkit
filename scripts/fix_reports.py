@@ -213,22 +213,45 @@ def record_launch(tree: Path, argv: list[str], done: object, diagnosis: str = ""
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def launch_refused(tree: Path) -> bool:
-    """This dispatch's launcher exited non-zero; `stamp` clears an older record."""
+def _launch_record(tree: Path) -> dict:
     try:
         record = json.loads((tree / LAUNCH_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False
-    return isinstance(record, dict) and record.get("returncode") not in (0, None)
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def launch_refused(tree: Path) -> bool:
+    """This dispatch's launcher exited non-zero; `stamp` clears an older record."""
+    record = _launch_record(tree)
+    return bool(record) and record.get("returncode") not in (0, None)
+
+
+# What `claude --bg` says, exiting 1, in a checkout Claude Code was never told to trust.
+# Trust is held per checkout, not inherited from a trusted folder above it: the first
+# fixer sent at productivity-tracker, generated that afternoon under a trusted
+# `vs-code`, was refused on 2026-10-28 and filed twice, as a failed dispatch and as a
+# session that never started (10a9810d, 18e737b9). Accepting the prompt is a person's.
+UNTRUSTED_SAID = "Workspace not trusted"
+
+
+def untrusted(said: str) -> bool:
+    """Whether a launcher's words are its refusal of an untrusted checkout."""
+    return UNTRUSTED_SAID in said
+
+
+def launch_untrusted(tree: Path) -> bool:
+    """This dispatch's launcher refused the tree's checkout as untrusted (`untrusted`)."""
+    record = _launch_record(tree)
+    return launch_refused(tree) and untrusted(
+        f"{record.get('stdout') or ''}\n{record.get('stderr') or ''}"
+    )
 
 
 def launch_line(tree: Path) -> str:
     """The launch record as one line of a finding's detail; "" when there is none."""
-    try:
-        record = json.loads((tree / LAUNCH_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    if not isinstance(record, dict):
+    record = _launch_record(tree)
+    if not record:
         return ""
     said = " ".join(str(record.get("stderr") or record.get("stdout") or "").split())
     return f"launcher exited {record.get('returncode')}" + (f": {said[-160:]}" if said else "")
@@ -545,7 +568,10 @@ INTERRUPTED = "stopped by a restart"
 # Refused at its first turn because Claude Code's login had lapsed (`login_refused`): like
 # a restart, nothing the session did, so its send is taken back.
 LOGGED_OUT = "logged out"
-DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED, LOGGED_OUT)
+# Refused by its launcher because the checkout is untrusted (`launch_untrusted`): the
+# machine's setup again, not the session's, and a person's to take.
+UNTRUSTED = "refused as an untrusted workspace"
+DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED, LOGGED_OUT, UNTRUSTED)
 
 
 def booted_at(now: _dt.datetime | None = None) -> _dt.datetime | None:
@@ -575,7 +601,7 @@ def _unheard(tree: Path, sent: _dt.datetime, now: _dt.datetime, booted: _dt.date
     # The grace is for a session starting, not one its launcher refused: 0927-2's
     # held every ledger send for two iterations while the backlog grew.
     if launch_refused(tree):
-        return NEVER_STARTED
+        return UNTRUSTED if launch_untrusted(tree) else NEVER_STARTED
     if _restarted(sent, booted, now):
         return INTERRUPTED
     return NEVER_STARTED if now - sent > START_GRACE else WORKING
@@ -598,7 +624,8 @@ def session_state(
 
     `DONE` once it left an intent or a report and has no background task still out,
     `WORKING` while its transcript moves (or it is still inside `START_GRACE`), one of
-    `DEAD` otherwise: `LOGGED_OUT` when its last reply was the login's refusal, and
+    `DEAD` otherwise: `LOGGED_OUT` when its last reply was the login's refusal,
+    `UNTRUSTED` when its launcher refused the checkout as untrusted, and
     `INTERRUPTED` when the machine started (`booted`, from `booted_at`) after the session
     was last heard from, with no wait. `""` for a tree with no
     stamp, one already judged dead, or a session this cannot see -- only Claude Code

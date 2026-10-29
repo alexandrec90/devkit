@@ -571,6 +571,14 @@ def late_lines(journal: Journal) -> tuple[str, ...]:
     return (f"{LATE}: {', '.join(journal.late)}",) if journal.late else ()
 
 
+def _switched_off() -> int:
+    """A switched-off fire did nothing, so it says so only where nothing else has: every
+    half hour it would otherwise erase the record a manual pass just wrote."""
+    if not (REPO_ROOT / ARTIFACT).is_file():
+        write_artifact(f"fix-pass: mode=off -- set {fix_cycle.SETTING} to plan or dispatch")
+    return EXIT_OK
+
+
 def run(
     workspace: Path,
     mode: str,
@@ -584,11 +592,7 @@ def run(
     now = now or _dt.datetime.now(_dt.UTC)
     deadline = send_deadline(time.monotonic()) if deadline is None else deadline
     if mode == fix_cycle.OFF:
-        # A switched-off fire did nothing, so it says so only where nothing else has:
-        # every half hour it would otherwise erase the record a manual pass just wrote.
-        if not (REPO_ROOT / ARTIFACT).is_file():
-            write_artifact(f"fix-pass: mode=off -- set {fix_cycle.SETTING} to plan or dispatch")
-        return EXIT_OK
+        return _switched_off()
     ctx = context(workspace, mode, now)
     root, projects, devkit_dir = ctx.root, ctx.projects, ctx.devkit_dir
     journal = pass_journal(devkit_dir, deadline)
@@ -647,6 +651,9 @@ def run(
         issues=tuple(issues),
         migrated=tuple(migrated),
         late=late_lines(journal),
+        working=tuple(closed.at_work),
+        person=tuple(step("person", fix_loop.person_steps, ctx, default=[], always=True)),
+        owed=step("owed", fix_loop.owed, ctx, default=0, always=True),
     )
     publish(account, now)
     return exit_code(moved, worst, failed_steps)

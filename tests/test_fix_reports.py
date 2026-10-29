@@ -237,6 +237,30 @@ def test_a_launch_the_launcher_refused_never_started_without_waiting_out_the_gra
     assert fix_reports.session_state(tree, now, tmp_path / "projects")[0] == fix_reports.WORKING
 
 
+def test_a_launch_refused_for_an_untrusted_checkout_is_its_own_dead_state(tmp_path):
+    """10a9810d, 18e737b9: `claude --bg` exits 1 in a checkout nobody trusted, a step only
+    a person can take, so it is told apart from a launcher that failed on its own."""
+    now = _dt.datetime.now(_dt.UTC)
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=2))
+    said = (
+        "Workspace not trusted. Run `claude` in C:\\x once and accept the trust prompt, then retry."
+    )
+    assert fix_reports.untrusted(said) and not fix_reports.untrusted("Couldn't reach it")
+    refused = subprocess.CompletedProcess(["claude", "--bg", "p"], 1, "", said)
+    fix_reports.record_launch(tree, ["claude", "--bg", "p"], refused)
+    assert fix_reports.launch_untrusted(tree)
+    assert fix_reports.session_state(tree, now, tmp_path / "projects") == (
+        fix_reports.UNTRUSTED,
+        "",
+    )
+    assert fix_reports.UNTRUSTED in fix_reports.DEAD
+    other = subprocess.CompletedProcess(["claude", "--bg", "p"], 1, "", "Couldn't reach it")
+    fix_reports.record_launch(tree, ["claude", "--bg", "p"], other)
+    assert not fix_reports.launch_untrusted(tree)
+    (tree / fix_reports.LAUNCH_FILE).unlink()
+    assert not fix_reports.launch_untrusted(tree), "no record, no refusal"
+
+
 def test_a_session_is_working_done_or_dead(tmp_path):
     now = _dt.datetime.now(_dt.UTC)
     projects = tmp_path / "projects"
