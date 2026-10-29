@@ -351,14 +351,100 @@ def test_a_naive_fire_time_is_this_machines_local_time():
     assert expected.endswith("+00:00")
 
 
-def test_the_exit_code_is_the_commands_own(tmp_path):
-    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), FakeSpawn((0, ""), (3, "x blocked")))
-    assert code == 3 and "x blocked" in lines
-
-
 NO_IMAGE = (1, "Error response from daemon: no such image")
 ENGINE_UP = (0, "28.4.0\n")
 SILENT = (1, "error during connect: open //./pipe/dockerDesktopLinuxEngine")
+# What `restarted_under` asks of a failed command's `needs`: their ids, then their starts.
+DB_RUNNING = (0, "4a272914a359\n")
+STARTED_BEFORE = (0, "2026-10-29T16:23:33.106212512Z\n")
+
+
+def started_at_now(seconds=0):
+    """`docker inspect`'s `StartedAt` for a start `seconds` from now."""
+    when = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=seconds)
+    return (0, when.strftime("%Y-%m-%dT%H:%M:%S.123456789Z\n"))
+
+
+def test_the_exit_code_is_the_commands_own(tmp_path):
+    spawn = FakeSpawn((0, ""), (3, "x blocked"), DB_RUNNING, STARTED_BEFORE)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 3 and "x blocked" in lines
+    assert not any(tasks.WENT_AWAY in line for line in lines)
+
+
+def test_a_command_failed_by_its_db_restarting_under_it_is_skipped(tmp_path):
+    """8d30fbea: 2026-10-29 22:11 UTC Docker's VM froze mid-scrape, came back at 22:19 with
+    the db restarted, and the scrape had given up on the db -- the eighth filing of a
+    cause no fixer could reach. The next fire is the retry."""
+    error = "sqlalchemy.exc.OperationalError: connection timeout expired"
+    spawn = FakeSpawn((0, ""), (1, error), DB_RUNNING, started_at_now(60))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and error in lines, "the run's own output is kept"
+    assert spawn.calls[2][0] == ["docker", "compose", "ps", "-q", "db"]
+    assert spawn.calls[3][0][:4] == ["docker", "inspect", "--format", "{{.State.StartedAt}}"]
+    assert spawn.calls[3][0][4:] == ["4a272914a359"]
+    assert "exit 1, but db started again at" in lines[-1] and tasks.WENT_AWAY in lines[-1]
+    assert lines[-1].startswith("exit 1"), "no `error:` line for log-wrap to file"
+
+
+def test_a_command_failed_with_the_engine_gone_is_skipped(tmp_path):
+    spawn = FakeSpawn((0, ""), (1, "connection refused"), SILENT, SILENT)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "the Docker engine stopped answering" in lines[-1]
+    assert spawn.calls[3][0] == list(tasks.ENGINE_PROBE)
+
+
+def test_a_command_failed_with_its_db_stopped_is_skipped(tmp_path):
+    spawn = FakeSpawn((0, ""), (1, "connection refused"), (0, ""))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "db not all running after the command" in lines[-1]
+    assert len(spawn.calls) == 3, "nothing to inspect"
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param([(1, "no such service"), ENGINE_UP], id="compose-fails-engine-answers"),
+        pytest.param([DB_RUNNING, (1, "No such object")], id="inspect-fails"),
+        pytest.param([DB_RUNNING, (0, "<no value>\n")], id="start-unreadable"),
+        pytest.param([DB_RUNNING, (0, "")], id="start-missing"),
+    ],
+)
+def test_a_restart_the_engine_cannot_establish_does_not_excuse_a_failure(tmp_path, answers):
+    spawn = FakeSpawn((0, ""), (1, "boom"), *answers)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and lines[-1] == "boom"
+
+
+def test_a_start_from_before_the_command_does_not_excuse_it(tmp_path):
+    spawn = FakeSpawn((0, ""), (1, "boom"), DB_RUNNING, started_at_now(-5))
+    assert tasks.fire(SCRAPER, checkout(tmp_path), spawn)[0] == 1
+
+
+def test_a_passing_command_asks_nothing_about_its_needs(tmp_path):
+    spawn = FakeSpawn((0, ""), (0, "ok"))
+    assert tasks.fire(SCRAPER, checkout(tmp_path), spawn)[0] == 0 and len(spawn.calls) == 2
+
+
+def test_restarted_under_names_the_latest_start_of_several(tmp_path):
+    early, late = STARTED_BEFORE[1], "2026-10-29T22:19:42.309258733Z\n"
+    since = dt.datetime(2026, 10, 29, 22, 0, tzinfo=dt.UTC).timestamp()
+    spawn = FakeSpawn((0, "a\nb\n"), (0, early + late))
+    gone = tasks.restarted_under(["db", "cache"], checkout(tmp_path), spawn, since)
+    assert gone == "db, cache started again at 22:19:42 UTC, after the command began"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("2026-10-03T00:16:05.123456789Z", dt.datetime(2026, 10, 3, 0, 16, 5, tzinfo=dt.UTC)),
+        ("2026-10-03T00:16:05+02:00", dt.datetime(2026, 10, 2, 22, 16, 5, tzinfo=dt.UTC)),
+        ("2026-10-03T00:16:05", None),
+        ("<no value>", None),
+    ],
+)
+def test_dockers_created_is_read_to_the_second(text, expected):
+    assert tasks.parse_created(text) == (expected.timestamp() if expected else None)
 
 
 class Clock:
@@ -802,7 +888,8 @@ def test_a_missing_checkout_runs_nothing(tmp_path):
 
 def test_a_long_output_keeps_its_tail(tmp_path):
     out = "\n".join(f"line {n}" for n in range(tasks.LOG_LINES + 50))
-    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), FakeSpawn((0, ""), (1, out)))
+    spawn = FakeSpawn((0, ""), (1, out), DB_RUNNING, STARTED_BEFORE)
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
     assert f"line {tasks.LOG_LINES + 49}" in lines and "line 0" not in lines
     assert any("50 earlier lines dropped" in line for line in lines)
 

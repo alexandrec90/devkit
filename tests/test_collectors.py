@@ -800,17 +800,9 @@ def test_spawn_names_the_missing_program(monkeypatch):
     assert collectors.spawn(["git", "status"], 5) == (127, "git is not on PATH")
 
 
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("2026-10-03T00:16:05.123456789Z", dt.datetime(2026, 10, 3, 0, 16, 5, tzinfo=dt.UTC)),
-        ("2026-10-03T00:16:05+02:00", dt.datetime(2026, 10, 2, 22, 16, 5, tzinfo=dt.UTC)),
-        ("2026-10-03T00:16:05", None),
-        ("<no value>", None),
-    ],
-)
-def test_dockers_created_is_read_to_the_second(text, expected):
-    assert collectors.parse_created(text) == (expected.timestamp() if expected else None)
+def test_dockers_created_is_read_as_collector_tasks_reads_a_restart():
+    """One parse of Docker's timestamps: `collector_tasks.restarted_under` reads the same."""
+    assert collectors.parse_created is collectors.collector_tasks.parse_created
 
 
 def test_built_reads_the_containers_image_then_its_date(monkeypatch):
