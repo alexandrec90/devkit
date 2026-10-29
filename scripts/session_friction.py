@@ -114,6 +114,15 @@ GENERATED_WORDS = re.compile(r"\$\(|`|\{[^}]*\.\.[^}]*\}|\$\w")
 # setting that stops it: the probe that put `MSYS2_ARG_CONV_EXCL` in the agent env was
 # filed as the defect it measured (d71a2caf), as `BYTE_DUMP` is for a heredoc's probe.
 REWRITTEN_REV = re.compile(r"^ambiguous argument", re.I)
+# uv saying the call ran in no project: its `uv run` took uv's bare interpreter, so the
+# module that interpreter lacks is no environment any tree was owed. The session was in
+# the wrong directory -- de36b95c, a scratch script's crash leaving a `Set-Location`
+# nowhere to go. It excuses a missing module only, never a shell's missing command.
+UV_OUTSIDE_PROJECT = re.compile(
+    r"has no effect when used outside of a project|"
+    r"No `pyproject\.toml` found in current directory or any parent directory"
+)
+MISSING_MODULE_MATCH = re.compile(r"^(?:No module named|ModuleNotFoundError)$", re.I)
 PATH_CONVERSION_PROBE = re.compile(r"\bMSYS2_ARG_CONV_EXCL=|\bMSYS_NO_PATHCONV=")
 # The same for an interpreter: a `python -c` whose whole program is imports asks whether
 # they import, so its "No module named 'x'" for a module it imported is the answer, not a
@@ -343,6 +352,10 @@ SUITE_WIDE_COMMAND = re.compile(
     r"(?:npm|pnpm|yarn)\s+(?:add|remove|uninstall))\b",
     re.M,
 )
+# pytest saying a run stopped before any test: it checked no change, so the whole run
+# after it is still the one that does (4812c0c7, a conftest edit whose first run stopped
+# at another file's import, filed its rerun as the habit).
+RAN_NOTHING = re.compile(r"Interrupted: \d+ errors? during collection|\bno tests ran\b")
 # Git reporting what the working tree changes: `status` and `diff`, not a commit's history.
 GIT_TREE_READ = re.compile(r"(?:^|[;&|]\s*)git\s+(?:status|diff)\b", re.M)
 # A path in that report: a short or long status line, a diffstat row, a diff header.
@@ -711,12 +724,14 @@ def _result_class(text: str, command: str = "") -> tuple[str, str]:
     text = ANSI.sub("", text)
     probe = bool(PATH_CONVERSION_PROBE.search(command))
     probed = probed_modules(command)
+    projectless = bool(UV_OUTSIDE_PROJECT.search(text))
     for cls, pattern in RESULT_PATTERNS:
         for found in pattern.finditer(text):
             if (
                 _quoted(text, found.start())
                 or (probe and REWRITTEN_REV.match(found.group()))
                 or _answers_probe(text, found.start(), probed)
+                or (projectless and MISSING_MODULE_MATCH.match(found.group()))
             ):
                 continue
             missing = _missing_command(text, found)
@@ -811,6 +826,8 @@ class _Session:
     # After a suite-wide change (`changes_the_suite`, `reports_suite_change`), the suite
     # roots run whole since it; None while there has been none.
     checked: set[str] | None = None
+    # call id -> the roots its whole runs added to `checked`, until its result says.
+    claimed: dict[str, set[str]] = field(default_factory=dict)
     suite_asked: bool = False  # it invoked a `WHOLE_SUITE_SKILLS` skill
     targeted_runner: bool = False  # its `RUNNER` runs the tests for what changed, bare
     # (line, `declared_text`) of each call that declared dependencies.
@@ -857,8 +874,10 @@ class _Session:
             self.declared.append((event.line, said))
         self._note_command(event)
         if self.checked is not None:
-            # The next whole run is the habit.
-            self.checked.update(whole_runs(event.command, self.targeted_runner))
+            # The next whole run is the habit, once this one has run (`_unclaim`).
+            claimed = set(whole_runs(event.command, self.targeted_runner)) - self.checked
+            self.checked |= claimed
+            self.claimed[event.call_id] = claimed
         if event.tool == "AskUserQuestion" and self.dispatched:
             self.note(
                 "asked-user", "a dispatched session asked a question nobody would answer", event
@@ -921,11 +940,18 @@ class _Session:
                 "rerun-unchanged", "a session re-ran the same tests with no edit between", event
             )
 
+    def _unclaim(self, event: Event) -> None:
+        """Hand back the roots a whole run claimed when pytest says it ran nothing."""
+        claimed = self.claimed.pop(event.call_id, set())
+        if self.checked is not None and RAN_NOTHING.search(event.text):
+            self.checked -= claimed
+
     def succeeded(self, event: Event) -> None:
         """A call that exited 0 still failed if it was a test run or a git call reporting
         a missing environment: `| tail` hides pytest's exit code."""
         command = self.calls.get(event.call_id, "")
         self._brief_wait(event)
+        self._unclaim(event)
         # Once: the same dirty lock in every later `git status` is no new change.
         if self.checked is None and reports_suite_change(command, event.text):
             self.checked = set()
@@ -941,6 +967,7 @@ class _Session:
         command = self.calls.get(event.call_id, "")
         event = replace(event, command=command)
         self._brief_wait(event)
+        self._unclaim(event)
         if SLEEP_GUARD.search(event.text):
             self.retract("poll", COMMAND_DETAIL["poll"], event.call_id)
             return

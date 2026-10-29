@@ -397,6 +397,32 @@ def test_one_launcher_failure_is_one_detail_whichever_branch_it_hit(ctx, monkeyp
     assert details[0] == details[1]
 
 
+def test_a_launch_refused_as_untrusted_is_sent_again_and_awaits_a_person(ctx, monkeypatch):
+    """10a9810d, 18e737b9: productivity-tracker's first fixer was refused with "Workspace
+    not trusted" and filed as a session that never started, naming its fresh tree, for
+    fixers that could only be refused the same way. Trusting a checkout is a person's."""
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW - _dt.timedelta(hours=2))
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=2))
+    said = f"{fix_reports.UNTRUSTED_SAID}. Run `claude` in {path} once and accept the trust prompt"
+    done = subprocess.CompletedProcess(["claude"], 1, "", said)
+    fix_reports.record_launch(path, ["claude", "--bg", "--", "fix it all"], done)
+    closed, journal = close(ctx)
+    assert closed.lines == [f"carameli agent/x-0919 -- {fix_reports.UNTRUSTED}; sent again"]
+    [found] = journal.findings
+    assert (found.kind, found.project) == (fix_loop.UNTRUSTED_KIND, "carameli")
+    assert found.detail == fix_loop.untrusted_detail(ctx.root / "carameli")
+    assert str(path) not in found.detail, "the checkout, not the tree a re-send replaces"
+    assert found.evidence == str(path / fix_reports.LAUNCH_FILE)
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.UNTRUSTED and fix_ledger.sends(entry) == 0
+    row = triage.parse_line(
+        fix_findings.harness_events.event_line("0", found.event, found.fields())
+    )
+    step = f"run `claude` in {ctx.root / 'carameli'} once and accept the trust prompt"
+    assert triage.person_step(row) == step
+    assert triage.awaiting_person([row]) == {row.signature: step}
+
+
 def test_a_session_gone_quiet_without_an_outcome_is_dead(ctx, monkeypatch):
     tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=5), transcript_age=_dt.timedelta(hours=3))
     _, journal = close(ctx)
@@ -488,6 +514,105 @@ def test_a_session_whose_login_was_refused_is_one_group_awaiting_a_person(ctx, m
     row = triage.parse_line(line)
     assert triage.person_step(row) == "run `claude auth login` on this machine"
     assert triage.awaiting_person([row]) == {row.signature: triage.person_step(row)}
+
+
+def login_row(when: _dt.datetime) -> str:
+    """A `fixer-login-refused` ledger row stamped `when`, as `judge_dead` files it."""
+    found = fix_findings.Finding(fix_loop.LOGIN_KIND, "devkit", fix_loop.LOGIN_DETAIL)
+    return fix_findings.harness_events.event_line(when.isoformat(), found.event, found.fields())
+
+
+def seed(ctx, *rows: str) -> None:
+    (ctx.devkit_dir / "logs").mkdir(parents=True, exist_ok=True)
+    text = "".join(row + "\n" for row in rows)
+    (ctx.devkit_dir / "logs" / "harness-events.log").write_text(text, encoding="utf-8")
+
+
+def finished_tree(ctx, monkeypatch, began: _dt.datetime) -> Path:
+    """A stamped tree whose session began at `began` and left a ship intent: `DONE`."""
+    path = tree(ctx, monkeypatch, sent=began - _dt.timedelta(minutes=1), transcript_age=NOW - began)
+    (path / "logs" / "ship-intent.md").write_text("Fix x\n", encoding="utf-8")
+    return path
+
+
+def test_a_fixer_that_reached_an_outcome_retires_an_older_login_refusal(ctx, monkeypatch):
+    """26291670 told the morning toast to run `claude auth login` for three days after
+    fixers were finishing again: nothing retired it but a person, who had nothing to do.
+    A session that began after the row and reached an outcome is the proof it asked for."""
+    began = NOW - _dt.timedelta(minutes=50)
+    old, later = login_row(NOW - _dt.timedelta(hours=3)), login_row(NOW - _dt.timedelta(minutes=5))
+    other = f"{(NOW - _dt.timedelta(hours=4)).isoformat()}\tevent=fix-pass-finding\tproject=devkit\tdetail=x"
+    seed(ctx, other, old, later)
+    finished_tree(ctx, monkeypatch, began)
+    closed, _ = close(ctx)
+    assert closed.signed_in == began.isoformat(timespec="seconds")
+    note = f"the login works again: a fixer session begun at {closed.signed_in} reached an outcome"
+    assert f"retired [{triage.item_id(old)}] -- {note}" in closed.verified
+    still = {i.id for i in triage.open_items(triage.load(ctx.devkit_dir))}
+    assert still == {triage.item_id(other), triage.item_id(later)}, "a later refusal stays"
+
+
+def test_no_finished_fixer_retires_no_login_refusal(ctx, monkeypatch):
+    row = login_row(NOW - _dt.timedelta(hours=3))
+    seed(ctx, row)
+    tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=10),
+        transcript_age=_dt.timedelta(minutes=5),
+    )
+    closed, _ = close(ctx)
+    assert closed.signed_in == ""
+    assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [triage.item_id(row)]
+
+
+def test_retire_login_with_no_sign_in_or_nothing_older_resolves_nothing(ctx):
+    row = login_row(NOW - _dt.timedelta(hours=3))
+    seed(ctx, row)
+    assert fix_loop.retire_login(ctx, "") == []
+    earlier = fix_findings.stamp_of((NOW - _dt.timedelta(hours=4)).isoformat())
+    assert fix_loop.retire_login(ctx, earlier) == [], "a refusal filed after the session"
+    assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [triage.item_id(row)]
+    later = fix_findings.stamp_of(NOW.isoformat())
+    [line] = fix_loop.retire_login(ctx, later)
+    assert line.startswith(f"retired [{triage.item_id(row)}] -- the login works again")
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
+def test_a_plan_retires_no_login_refusal(ctx, monkeypatch):
+    row = login_row(NOW - _dt.timedelta(hours=3))
+    seed(ctx, row)
+    finished_tree(ctx, monkeypatch, NOW - _dt.timedelta(minutes=50))
+    plan = fix_loop.Context(**{**vars(ctx), "mode": fix_cycle.PLAN})
+    fix_loop.close(plan, fix_findings.Journal(ctx.devkit_dir))
+    assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [triage.item_id(row)]
+
+
+def test_a_tree_with_a_session_at_work_is_named_for_the_record(ctx, monkeypatch):
+    tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=10),
+        transcript_age=_dt.timedelta(minutes=2),
+    )
+    closed, _ = close(ctx)
+    assert closed.at_work == ["carameli agent/x-0919"]
+
+
+def test_person_steps_name_each_awaited_step_and_owed_counts_the_rest(ctx):
+    """The tray's red rows and its fixers row (`tray_state.fix_pass_states`): a person's
+    step is owed to the person, every other open group to a fixer."""
+    row = login_row(NOW - _dt.timedelta(hours=3))
+    seed(ctx, row, f"{NOW.isoformat()}\tevent=fix-pass-finding\tproject=devkit\tdetail=x")
+    assert fix_loop.person_steps(ctx) == [
+        "run `claude auth login` on this machine -- then: python scripts/harness_triage.py "
+        f"--resolve-like {triage.item_id(row)} --note '<the step taken>'"
+    ]
+    assert fix_loop.owed(ctx) == 1
+
+
+def test_an_empty_ledger_owes_nothing_and_awaits_no_one(ctx):
+    assert fix_loop.person_steps(ctx) == [] and fix_loop.owed(ctx) == 0
 
 
 def test_judging_a_dead_session_in_plan_mode_files_it_and_writes_nothing(ctx, monkeypatch):

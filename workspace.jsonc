@@ -61,6 +61,9 @@
 		},
 		{
 			"path": "social-scraper"
+		},
+		{
+			"path": "productivity-tracker"
 		}
 	],
 	"extensions": {
@@ -1615,7 +1618,8 @@
 								"data-lake",
 								"sports_betting",
 								"roguelike",
-								"social-scraper"
+								"social-scraper",
+								"productivity-tracker"
 							]
 						}
 					]
@@ -1654,7 +1658,8 @@
 								"data-lake",
 								"sports_betting",
 								"roguelike",
-								"social-scraper"
+								"social-scraper",
+								"productivity-tracker"
 							]
 						}
 					]
@@ -1786,7 +1791,8 @@
 					"data-lake",
 					"sports_betting",
 					"roguelike",
-					"social-scraper"
+					"social-scraper",
+					"productivity-tracker"
 				],
 				"default": "carameli"
 			},
@@ -2472,7 +2478,8 @@
 					"data-lake",
 					"sports_betting",
 					"roguelike",
-					"social-scraper"
+					"social-scraper",
+					"productivity-tracker"
 				],
 				"default": "carameli"
 			},

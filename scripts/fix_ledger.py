@@ -263,7 +263,7 @@ def mark_dead(path: Path, key: str, reason: str) -> bool:
 
 def mark_interrupted(path: Path, key: str, reason: str) -> bool:
     """The session sent under `key` died of something outside it: the machine restarting,
-    or a login that had lapsed.
+    a login that had lapsed, or a checkout nobody had trusted.
 
     Frees the key as `mark_dead` does, and takes the send back: nothing a fixer did is
     measured by a power-off, and counted, it spent a blind problem's one attempt and

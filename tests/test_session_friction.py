@@ -1121,6 +1121,31 @@ def test_each_suite_root_is_excused_once_after_a_suite_wide_change():
     assert sf.suite_root(" ./ -q") == "." and sf.suite_root(" tests/ tests/x.py") == "tests"
 
 
+def test_a_whole_run_interrupted_at_collection_checked_nothing():
+    """4812c0c7: a productivity-tracker session edited `tests/conftest.py`, ran its suite
+    whole, and pytest stopped at one test file's import -- "Interrupted: 1 error during
+    collection", no test run. Its rerun after the import fix was the first run to check
+    the conftest change, and was filed as the habit. The exact calls, in order."""
+    conftest = _tool("Edit", "e", file_path="C:\\t\\tests\\conftest.py")
+    first = "ls tests/__init__.py 2>&1; .venv/Scripts/python -m pytest tests -q -p no:cacheprovider 2>&1 | tail -30"
+    interrupted = (
+        "ERROR tests/test_overlay_window.py\n"
+        "!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n"
+        "1 error in 0.58s"
+    )
+    fix = _tool("Edit", "f", file_path="C:\\t\\tests\\test_overlay_window.py")
+    rerun = call(".venv/Scripts/python -m pytest tests -q -p no:cacheprovider 2>&1 | tail -30", "2")
+    rows = [conftest, call(first, "1"), result(interrupted, "1", error=False), fix, rerun]
+    assert classes(rows) == []
+    assert classes([*rows, result("128 passed in 5.29s", "2", error=False), rerun]) == [
+        "full-suite"
+    ], "a whole run that ran the suite has checked the change"
+    nothing = [conftest, call(first, "1"), result("no tests ran in 0.01s", "1"), rerun]
+    assert classes(nothing) == [], "a run that collected nothing checked nothing"
+    passed = [conftest, call(first, "1"), result("95 passed in 3.28s", "1", error=False), rerun]
+    assert classes(passed) == ["full-suite"]
+
+
 def test_a_suite_wide_file_git_reports_changed_is_a_suite_wide_change():
     """493a237b: an ibkr_trader fixer's tree arrived with `uv.lock` relocked by its
     provisioning -- data-lake's pytest floor had moved -- and its first `git status`
@@ -1699,6 +1724,34 @@ def test_an_import_probe_excuses_only_the_modules_it_imported():
         "e",
     }
     assert sf.probed_modules('python -c "import a; print(a)"') == frozenset()
+
+
+def test_a_uv_run_outside_every_project_is_the_sessions_directory_not_the_environment():
+    """de36b95c: a fixer's scratch generator died on its own `FileExistsError`, so the
+    `Set-Location` after it went nowhere, and every `uv run` behind it ran outside any
+    project on uv's bare interpreter. uv says so; its "No module named alembic" was filed
+    as an environment the harness left unprovisioned. The exact call and output, cut."""
+    command = (
+        '$out = "$env:CLAUDE_JOB_DIR\\tmp\\gen"; $root = (.venv\\Scripts\\python.exe '
+        "$env:CLAUDE_JOB_DIR\\tmp\\gen_alembic.py $out | Select-Object -Last 1); Set-Location "
+        "$root; uv sync --extra dev -q 2>&1 | Select-Object -Last 3; uv run --no-sync python "
+        '-m alembic revision -m "first table" 2>&1 | Select-Object -Last 4'
+    )
+    out = (
+        "Exit code 1\nTraceback (most recent call last):\r\n"
+        "FileExistsError: [WinError 183] Cannot create a file when that file already exists\r\n"
+        "error: No `pyproject.toml` found in current directory or any parent directory\r\n"
+        "warning: `--no-sync` has no effect when used outside of a project\r\n"
+        "C:\\Users\\a\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\\"
+        "python.exe: No module named alembic\r\nrev exit=1"
+    )
+    assert classes([call(command, "1"), result(out, "1")]) == []
+    # Inside a project, the same missing module is still the environment.
+    inside = out.split("error: No `pyproject")[0] + "python.exe: No module named alembic"
+    assert classes([call(command, "1"), result(inside, "1")]) == ["environment"]
+    # And uv's own complaint excuses only the interpreter it ran, not a shell's.
+    missing = out + "\nbash: ruff: command not found"
+    assert classes([call(command, "1"), result(missing, "1")]) == ["environment"]
 
 
 def _git_tree(root: Path, files: dict[str, str]) -> Path:
