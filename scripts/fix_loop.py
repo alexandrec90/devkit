@@ -304,9 +304,8 @@ def _judge_session(
     state, transcript = fix_reports.session_state(tree.path, ctx.now, booted=ctx.booted)
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
-    if state == fix_reports.DONE and transcript:
-        began = fix_reports.started_at(Path(transcript))
-        closed.signed_in = max(closed.signed_in, fix_findings.stamp_of(began and began.isoformat()))
+    if state == fix_reports.DONE:
+        _note_signed_in(closed, transcript)
     live = fix_reports.active_transcript(tree.path, ctx.now)
     if live is not None and bg_sessions.gone(closed.listing, tree.path, live):
         live = None
@@ -321,6 +320,14 @@ def _judge_session(
     elif (state == fix_reports.WORKING or running) and fix_ledger.is_upstream(key):
         closed.harness_busy = str(tree.path)
     return running or live is not None
+
+
+def _note_signed_in(closed: Closed, transcript: str) -> None:
+    """Move `closed.signed_in` up to when a `DONE` session's transcript began."""
+    if not transcript:
+        return
+    began = fix_reports.started_at(Path(transcript))
+    closed.signed_in = max(closed.signed_in, fix_findings.stamp_of(began and began.isoformat()))
 
 
 # Stable across every tree it hits, and naming the step no fixer can take, so its group

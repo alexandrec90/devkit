@@ -446,6 +446,14 @@ def test_the_fixers_row_says_what_is_at_work_waiting_owed_and_last_sent():
     assert fixers.detail == "1 at work, 1 waiting, 2 owed, last sent 12:00Z"
 
 
+def test_the_fixers_row_follows_every_person_step_and_reads_the_whole_history():
+    history = [pass_row(sent=["carameli #485 -- dispatch"]), pass_row(person=["a", "b"])]
+    *person, fixers = tray_state.fix_pass_states(history)
+    assert [row.name for row in person] == ["your step", "your step"]
+    assert fixers == tray_state.fixers_state(history)
+    assert fixers.detail == "0 at work, last sent 17:30Z", "the send is an older line's"
+
+
 def test_a_red_harness_holds_every_send_and_says_so():
     [fixers] = tray_state.fix_pass_states([pass_row(harness=["1 harness failure(s) open"])])
     assert fixers.state == tray_state.WARN

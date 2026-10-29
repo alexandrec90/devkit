@@ -566,6 +566,19 @@ def test_no_finished_fixer_retires_no_login_refusal(ctx, monkeypatch):
     assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [triage.item_id(row)]
 
 
+def test_retire_login_with_no_sign_in_or_nothing_older_resolves_nothing(ctx):
+    row = login_row(NOW - _dt.timedelta(hours=3))
+    seed(ctx, row)
+    assert fix_loop.retire_login(ctx, "") == []
+    earlier = fix_findings.stamp_of((NOW - _dt.timedelta(hours=4)).isoformat())
+    assert fix_loop.retire_login(ctx, earlier) == [], "a refusal filed after the session"
+    assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [triage.item_id(row)]
+    later = fix_findings.stamp_of(NOW.isoformat())
+    [line] = fix_loop.retire_login(ctx, later)
+    assert line.startswith(f"retired [{triage.item_id(row)}] -- the login works again")
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
 def test_a_plan_retires_no_login_refusal(ctx, monkeypatch):
     row = login_row(NOW - _dt.timedelta(hours=3))
     seed(ctx, row)
