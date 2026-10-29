@@ -589,6 +589,73 @@ def test_a_default_branch_whose_red_jobs_never_got_a_runner_is_marked_too(monkey
     assert failure.signature == (f"Lint / {fix_plan.NO_RUNNER}", f"Tests / {fix_plan.NO_RUNNER}")
 
 
+# productivity-tracker's PR Gate run 40962955157 as `gh` gave it: every job `failure`
+# with zero steps, each annotated with GitHub's billing refusal beside a runner notice.
+BILLING = (
+    "The job was not started because recent account payments have failed or your spending "
+    "limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+)
+REFUSED_JOBS = [
+    {"databaseId": 11, "name": "Tests", "conclusion": "failure", "steps": []},
+    {"databaseId": 12, "name": "Lint", "conclusion": "failure", "steps": []},
+]
+REFUSED_SAID = {11: [BILLING, "The ubuntu-latest label will migrate"], 12: [BILLING]}
+
+
+def test_red_jobs_billing_refused_are_named_and_any_other_red_is_not():
+    assert ev.billing_refused(lost_gh(REFUSED_JOBS, REFUSED_SAID), REFUSED_JOBS) == (
+        "Lint",
+        "Tests",
+    )
+    one = {11: [BILLING], 12: [NOT_ACQUIRED]}
+    assert ev.billing_refused(lost_gh(REFUSED_JOBS, one), REFUSED_JOBS) == ()
+    assert ev.unstarted_for(lost_gh(REFUSED_JOBS, one), REFUSED_JOBS[1:], ev.RUNNER_LOST) == (
+        "Lint",
+    )
+    assert ev.runner_lost(lost_gh(REFUSED_JOBS, REFUSED_SAID), REFUSED_JOBS) == ()
+
+
+def test_the_billing_signature_is_asked_only_of_jobs_that_never_started():
+    gh = lost_gh(REFUSED_JOBS, REFUSED_SAID)
+    unstarted = ("Lint (never started a step)", "Tests (never started a step)")
+    assert ev.billing_signature(gh, unstarted, REFUSED_JOBS) == (
+        f"Lint / {fix_plan.NO_BILLING}",
+        f"Tests / {fix_plan.NO_BILLING}",
+    )
+    asked = len(gh.calls)
+    assert ev.billing_signature(gh, ("Tests / Pytest",), REFUSED_JOBS) == ("Tests / Pytest",)
+    assert len(gh.calls) == asked, "a run that named a failure costs no annotation read"
+    quiet = lost_gh(REFUSED_JOBS, {})
+    assert ev.billing_signature(quiet, unstarted, REFUSED_JOBS) == unstarted
+
+
+def test_a_pr_gate_refused_over_billing_is_skipped_as_a_persons_step(monkeypatch, tmp_path):
+    """productivity-tracker #3, social-scraper #108: the shared signature of four jobs
+    that never started folded both into a devkit session, which could change nothing."""
+    gh = lost_gh(REFUSED_JOBS, REFUSED_SAID)
+    gh.answers[("run", "view", "7", "--json", "attempt")] = {"attempt": 2}
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    failure = ev.read_pr(tmp_path, ev.pr_failure("productivity-tracker", pr()), tmp_path / "ev")
+    assert failure.signature == (f"Lint / {fix_plan.NO_BILLING}", f"Tests / {fix_plan.NO_BILLING}")
+    assert (failure.lost_runs, failure.attempt) == ((), 0)
+    [decision] = fix_plan.plan([failure], "", ())
+    assert decision.action == fix_plan.SKIP
+    assert f"{fix_plan.harness_triage.PERSON_STEP} {fix_plan.BILLING_STEP}" in decision.note
+
+
+def test_a_default_branch_refused_over_billing_is_signed_so(monkeypatch, tmp_path):
+    branch_world(monkeypatch, "failure", "", "")
+    gh = lost_gh(REFUSED_JOBS, REFUSED_SAID)
+    gh.answers[("run", "list")] = [
+        {"databaseId": 7, "status": "completed", "conclusion": "failure", "headSha": "fb17a310"}
+    ]
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    green, failure = ev.read_default_branch("social-scraper", tmp_path, tmp_path / "ev")
+    assert green is False and failure is not None
+    assert fix_plan.is_billing_refused(failure.signature)
+    assert failure.lost_runs == ()
+
+
 def test_a_run_whose_jobs_never_started_is_read_with_its_attempt(monkeypatch, tmp_path):
     """carameli PR Gate run 37363944090: one job cancelled with zero steps. The plan
     re-runs a first attempt like that instead of sending a session, so its attempt is

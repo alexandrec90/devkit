@@ -162,7 +162,12 @@ def _harness_shaped(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> 
     Dependabot cannot do: two consumers of one sibling share the signature `"data-lake"
     is unfetchable`, and as a shared signature it would fold into the devkit session,
     which can bump neither lock. Its entries name no harness path, so it is the project's.
+    Nor is a gate GitHub refused to start over billing (`fix_plan.is_billing_refused`):
+    every consumer shares it, and as harness it held every project fixer behind a red no
+    session could clear -- the plan skips it as a person's step.
     """
+    if fix_plan.is_billing_refused(failure.signature):
+        return False
     return failure.kind != fix_plan.DEPENDABOT and (
         failure.project == DEVKIT
         or bool(failure.signature and failure.signature in shared)

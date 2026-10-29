@@ -678,6 +678,8 @@ def test_a_gate_whose_red_jobs_never_got_a_runner_is_re_run_not_fixed():
         assert decision.action == fix_plan.RERUN, lost.kind
         assert decision.note.endswith("GitHub never gave its red jobs a runner: re-running them")
         assert f"Tests / {fix_plan.NO_RUNNER}" in decision.note
+        assert fix_plan.runner_rerun(lost) == decision
+    assert fix_plan.runner_rerun(failure(head="agent/x", signature=("tests/t.py::a",))) is None
 
 
 def test_a_lost_runner_under_a_red_base_or_a_conflict_is_not_re_run():
@@ -688,6 +690,44 @@ def test_a_lost_runner_under_a_red_base_or_a_conflict_is_not_re_run():
     assert {d.failures[0].kind: d.action for d in decisions}[fix_plan.PR] == fix_plan.HOLD
     conflicted = _lost(signature=(fix_plan.CONFLICT,))
     assert fix_plan.plan([conflicted], "v0-11-23", PREFIXES)[0].action == fix_plan.RESOLVE
+
+
+BILLED = (f"Lint / {fix_plan.NO_BILLING}", f"Tests / {fix_plan.NO_BILLING}")
+
+
+def test_a_gate_refused_over_billing_is_skipped_as_a_persons_step_at_any_attempt():
+    """productivity-tracker #3, social-scraper #108: GitHub started no job, "recent
+    account payments have failed", and a devkit fixer was sent at it. A re-run is
+    refused the same way, so neither a re-run nor a session goes."""
+    assert fix_plan.is_billing_refused(BILLED)
+    assert not fix_plan.is_billing_refused((*BILLED, "tests/t.py::a"))
+    assert not fix_plan.is_billing_refused(())
+    for refused in (
+        failure(head="agent/x", signature=BILLED, run_id="1", attempt=1),
+        failure(head="agent/x", signature=BILLED, run_id="1", attempt=2),
+        failure(kind=fix_plan.BRANCH, number=0, head="", signature=BILLED),
+    ):
+        [decision] = fix_plan.plan([refused], "v0-11-23", PREFIXES)
+        assert decision.action == fix_plan.SKIP, refused.kind
+        assert decision.note == fix_plan.billing_note(refused)
+        assert decision.note.endswith(
+            f"over the account's billing -- {fix_plan.harness_triage.PERSON_STEP} "
+            f"{fix_plan.BILLING_STEP}"
+        )
+
+
+def test_a_base_refused_over_billing_holds_no_pr_behind_it():
+    """Its PRs are refused alike, and each is skipped on its own signature; one with a
+    failure of its own still goes."""
+    decisions = fix_plan.plan(
+        [red_main(project="carameli", signature=BILLED), failure(number=1, head="agent/a")],
+        "v0-11-23",
+        PREFIXES,
+    )
+    assert actions(decisions) == [
+        (fix_plan.SKIP, ["carameli#0"]),
+        (fix_plan.DISPATCH, ["carameli#1"]),
+    ]
 
 
 def test_a_nightly_with_a_run_going_at_the_tip_waits_for_that_run():

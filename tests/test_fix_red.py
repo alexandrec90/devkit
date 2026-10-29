@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_cycle
+import fix_findings
+import fix_loop
+import fix_plan
 import fix_red
 
 
@@ -116,3 +120,64 @@ def test_regate_unread_outside_dispatch_only_says_what_it_would_do(monkeypatch, 
     # "devkit's gate could not be read" showed holds the dispatch pass never makes.
     assert rerun == {"devkit"}
     assert fix_red.regate_unread(tmp_path, [], fix_cycle.DISPATCH) == ([], set())
+
+
+# --- a gate GitHub refused to start over billing -------------------------------------
+
+BILLED = (f"Lint / {fix_plan.NO_BILLING}",)
+
+
+def _billing_ctx(tmp_path: Path, mode: str = fix_cycle.DISPATCH) -> fix_loop.Context:
+    devkit = tmp_path / "devkit"
+    devkit.mkdir(exist_ok=True)
+    now = _dt.datetime(2026, 10, 29, 23, 0, tzinfo=_dt.UTC)
+    return fix_loop.Context(tmp_path, [], devkit, tmp_path / "l.json", tmp_path / "h", mode, now)
+
+
+def _skipped(signature: tuple[str, ...], project: str = "productivity-tracker"):
+    failure = fix_plan.Failure(
+        kind=fix_plan.PR,
+        project=project,
+        number=3,
+        title="T",
+        url=f"u/{project}",
+        signature=signature,
+    )
+    return fix_plan.Decision(fix_plan.SKIP, "n", (failure,))
+
+
+def test_a_gate_refused_over_billing_files_one_finding_awaiting_a_person(tmp_path):
+    """productivity-tracker #3, social-scraper #108: the plan's skip line alone is a
+    record line a person has to notice; the finding puts the step in the morning toast."""
+    ctx = _billing_ctx(tmp_path)
+    journal = fix_findings.Journal(ctx.devkit_dir)
+    skipped = [_skipped(BILLED), _skipped(BILLED, "social-scraper"), _skipped(("x::y",))]
+    assert fix_red.billing(ctx, journal, skipped) == []
+    [found] = journal.findings
+    assert (found.kind, found.project, found.evidence) == (
+        fix_red.BILLING_KIND,
+        "devkit",
+        "u/productivity-tracker",
+    )
+    assert found.detail == fix_red.BILLING_DETAIL
+    fix_loop.record(ctx, journal)
+    items = fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir))
+    assert list(fix_findings.triage.awaiting_person(items).values()) == [fix_plan.BILLING_STEP]
+
+
+def test_a_pass_with_no_billing_refusal_retires_the_open_finding(tmp_path):
+    """Nothing else would: the person who settled the bill rarely writes the resolution."""
+    ctx = _billing_ctx(tmp_path)
+    journal = fix_findings.Journal(ctx.devkit_dir)
+    fix_red.billing(ctx, journal, [_skipped(BILLED)])
+    fix_loop.record(ctx, journal)
+    [item] = fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir))
+    crashed = fix_findings.Journal(ctx.devkit_dir, crashed=["collect"])
+    assert fix_red.billing(ctx, crashed, []) == [], "a pass that read no gate proves nothing"
+    rehearsal = _billing_ctx(tmp_path, fix_cycle.PLAN)
+    assert fix_red.billing(rehearsal, journal, [])[0].startswith(f"would retire [{item.id}]")
+    assert fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir)) != []
+    [line] = fix_red.billing(ctx, journal, [_skipped(("x::y",))])
+    assert line == f"retired [{item.id}] -- no gate was refused over billing on this pass"
+    assert fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir)) == []
+    assert fix_red.billing(ctx, journal, []) == []

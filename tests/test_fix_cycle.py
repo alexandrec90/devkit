@@ -225,6 +225,20 @@ def test_what_dependabot_cannot_do_is_the_projects_even_when_two_share_it():
     assert {fix_cycle.classify(f, shared) for f in red} == {fix_cycle.PROJECT}
 
 
+def test_a_gate_refused_over_billing_is_not_the_harness_even_when_shared():
+    """productivity-tracker #3 and social-scraper #108 shared four unstarted jobs, were
+    folded into a devkit session as harness, and held every project fixer behind it."""
+    billed = (f"Lint / {fix_plan.NO_BILLING}", f"Tests / {fix_plan.NO_BILLING}")
+    red = [
+        failure(project=p, number=n, signature=billed)
+        for p, n in (("productivity-tracker", 3), ("social-scraper", 108))
+    ]
+    shared = fix_cycle.shared_signatures(red)
+    assert billed in shared
+    assert {fix_cycle.classify(f, shared) for f in red} == {fix_cycle.PROJECT}
+    assert fix_cycle.harness_state(fix_cycle.classify_all(red), True, []).clean
+
+
 def test_classify_all_is_keyed_like_the_ledger():
     red = [failure(number=1), failure(project="a", number=2, signature=VENDORED)]
     classes = fix_cycle.classify_all(red)
