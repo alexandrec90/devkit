@@ -542,6 +542,25 @@ def test_the_history_line_says_why_nothing_went():
     assert line["capped"] == ["carameli #412 -- 2 session(s) sent -- needs a human"]
 
 
+def test_the_history_line_carries_what_the_tray_shows():
+    """`tray_state.fix_pass_states` reads only this line: the fixers at work, the steps
+    awaiting a person, and the groups still owed a fixer."""
+    account = fix_cycle.Account(
+        fix_cycle.DISPATCH,
+        fix_cycle.harness_state({}, True, []),
+        working=("devkit agent/fix-x",),
+        person=("run `claude auth login` on this machine",),
+        owed=2,
+    )
+    line = json.loads(fix_cycle.history_line(account, NOW))
+    assert line["working"] == ["devkit agent/fix-x"]
+    assert line["person"] == ["run `claude auth login` on this machine"]
+    assert line["owed"] == 2
+    text = fix_cycle.render(account)
+    assert "working  devkit agent/fix-x" in text
+    assert "you      run `claude auth login` on this machine" in text
+
+
 def test_the_record_names_the_adoptions_still_open():
     harness = fix_cycle.harness_state({}, True, ["carameli"])
     text = fix_cycle.render(fix_cycle.Account(fix_cycle.DISPATCH, harness))

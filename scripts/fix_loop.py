@@ -105,6 +105,11 @@ class Closed:
     # Trees whose stamped session is done or dead, and the idle sessions stopped in them.
     finished: list[str] = field(default_factory=list)
     stopped: list[str] = field(default_factory=list)
+    # Each tree some session is at work in now, as the record names it (`where`).
+    at_work: list[str] = field(default_factory=list)
+    # When the newest stamped session that reached an outcome began: proof the machine's
+    # login worked then, which retires a `LOGIN_KIND` row older than it (`retire_login`).
+    signed_in: str = ""
     # ref -> pr of each resolution whose fix has not merged (`in_flight`): the backlog
     # step sends no session at a group waiting on one.
     in_flight: dict[str, str] = field(default_factory=dict)
@@ -147,6 +152,9 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
         closed.verified += journal.step("verify", _verify, ctx, default=[])
         closed.verified += journal.step("recheck", _recheck, ctx, default=[])
         closed.verified += journal.step("predates-fix", _predates_fix, ctx, default=[])
+        closed.verified += journal.step(
+            "signed-in", retire_login, ctx, closed.signed_in, default=[]
+        )
         runner = ship_intent.run_quiet
         closed.stopped = journal.step(
             "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
@@ -168,6 +176,8 @@ def _one_tree(
         closed.keep_tree(problem, str(tree.path), str(tree.stamp.get("when", "")))
     # Judged before anything is filed away: a filed report is still the session's outcome.
     at_work = _judge_session(ctx, tree, where, journal, closed)
+    if at_work:
+        closed.at_work.append(where)
     if waits := fix_reports.waits_on(tree.path):
         # Not a finding: no session can merge another PR. `fix_budget` holds the problem
         # until that PR closes, then sends its next fixer.
@@ -294,6 +304,8 @@ def _judge_session(
     state, transcript = fix_reports.session_state(tree.path, ctx.now, booted=ctx.booted)
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
+    if state == fix_reports.DONE:
+        _note_signed_in(closed, transcript)
     live = fix_reports.active_transcript(tree.path, ctx.now)
     if live is not None and bg_sessions.gone(closed.listing, tree.path, live):
         live = None
@@ -310,9 +322,18 @@ def _judge_session(
     return running or live is not None
 
 
+def _note_signed_in(closed: Closed, transcript: str) -> None:
+    """Move `closed.signed_in` up to when a `DONE` session's transcript began."""
+    if not transcript:
+        return
+    began = fix_reports.started_at(Path(transcript))
+    closed.signed_in = max(closed.signed_in, fix_findings.stamp_of(began and began.isoformat()))
+
+
 # Stable across every tree it hits, and naming the step no fixer can take, so its group
 # awaits a person (`triage.awaiting_person`) instead of being sent a fixer that dies too;
 # every re-send until then dies free (`mark_interrupted`).
+LOGIN_KIND = "fixer-login-refused"
 LOGIN_DETAIL = (
     "dispatched sessions end at their first reply, Claude Code's stored login refused "
     f"-- {triage.PERSON_STEP} run `claude auth login` on this machine"
@@ -355,7 +376,7 @@ def judge_dead(
         if state == fix_reports.LOGGED_OUT:
             # The machine's login, not the fixer: one group whichever tree it hit, awaiting
             # a person -- the re-send is what shows the login is back.
-            journal.add(Finding("fixer-login-refused", "devkit", LOGIN_DETAIL, evidence=transcript))
+            journal.add(Finding(LOGIN_KIND, "devkit", LOGIN_DETAIL, evidence=transcript))
         elif state == fix_reports.UNTRUSTED:
             detail = untrusted_detail(ctx.root / tree.project)
             cited = str(tree.path / fix_reports.LAUNCH_FILE)
@@ -887,6 +908,50 @@ def _recheck(ctx: Context) -> list[str]:
         triage.resolve([ref], why, root=ctx.devkit_dir)
         lines.append(f"retired [{ref}] -- {why}")
     return lines
+
+
+def retire_login(ctx: Context, signed_in: str) -> list[str]:
+    """Retire each open `LOGIN_KIND` row filed before `signed_in`; lines for the record.
+
+    Nothing else retires one: the step is a person's, and the person who ran
+    `claude auth login` rarely comes back to write the resolution. 26291670 sat open for
+    three days after fixers were finishing again, telling the morning toast to log in.
+    A session that began after the row and reached an outcome is the proof the step
+    asked for, so the row goes as of that session; a refusal filed later stays open.
+    """
+    if not signed_in:
+        return []
+    marker = f"{LOGIN_KIND}: "
+    stale = [
+        item
+        for item in triage.open_items(triage.load(ctx.devkit_dir), (fix_findings.FINDING,))
+        if item.fields.get("detail", "").startswith(marker) and item.stamp < signed_in
+    ]
+    if not stale:
+        return []
+    note = f"the login works again: a fixer session begun at {signed_in} reached an outcome"
+    triage.resolve([item.id for item in stale], note, root=ctx.devkit_dir)
+    return [f"retired [{item.id}] -- {note}" for item in stale]
+
+
+def person_steps(ctx: Context) -> list[str]:
+    """Each step the open ledger awaits a person for (`triage.awaiting_person`), with
+    the command that retires its group once taken."""
+    items = triage.open_items(triage.load(ctx.devkit_dir))
+    awaiting = triage.awaiting_person(items)
+    return [
+        f"{step} -- then: python scripts/harness_triage.py --resolve-like {bucket[0].id} "
+        "--note '<the step taken>'"
+        for _, bucket in triage.groups(items)
+        if (step := awaiting.get(bucket[0].signature))
+    ]
+
+
+def owed(ctx: Context) -> int:
+    """How many open ledger groups a fixer is owed: every group not awaiting a person."""
+    items = triage.open_items(triage.load(ctx.devkit_dir))
+    awaiting = triage.awaiting_person(items)
+    return sum(1 for signature, _ in triage.groups(items) if signature not in awaiting)
 
 
 def recheck_open(ctx: Context) -> list[str]:

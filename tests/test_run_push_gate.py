@@ -183,8 +183,24 @@ def test_plan_pairs_each_step_with_a_command_or_none(tmp_path):
     assert planned["tests"][1:] == ["scripts/run-tests.py"]
 
 
-def test_the_interpreter_is_this_one_when_the_project_ships_no_helper(tmp_path):
+def test_the_interpreter_is_this_one_when_the_project_has_no_helper_and_no_venv(tmp_path):
     assert gate.interpreter(tmp_path) == sys.executable
+
+
+def test_a_consumer_with_no_helper_still_gets_its_venvs_pytest(tmp_path, monkeypatch):
+    """`project_python.py` is devkit's own and not in the MANIFEST, so no generated
+    project ships one. The hook fell back to the pushing interpreter -- a bare workstation
+    Python with no pytest -- and refused productivity-tracker's first push on `No module
+    named pytest`, after lint and the suite had passed by re-execing into the venv."""
+    venv = tmp_path / ".venv" / "Scripts" / "python.exe"
+    venv.parent.mkdir(parents=True)
+    venv.write_text("", encoding="utf-8")
+
+    def only_the_venv_has_pytest(argv, **_kwargs):
+        return completed(argv, 0 if argv[0] == str(venv) else 1)
+
+    monkeypatch.setattr(subprocess, "run", only_the_venv_has_pytest)
+    assert gate.interpreter(tmp_path) == str(venv)
 
 
 def _venv(root: Path) -> Path:
@@ -195,25 +211,40 @@ def _venv(root: Path) -> Path:
     return python
 
 
+def _no_helper_at_all(root: Path) -> Path:
+    """Where a hook shipped without devkit's `project_python.py` would look for it."""
+    return root / "absent.py"
+
+
 def test_with_no_helper_a_hook_interpreter_lacking_pytest_uses_the_projects_venv(tmp_path):
     """8448080a: a freshly generated project vendors no `project_python.py`, so the hook
     tier ran under pre-commit's own interpreter -- `No module named pytest` -- while the
     lint and test wrappers beside it re-ran themselves under `.venv` and passed, and
-    `new-project.py --remote` failed its first push."""
+    `new-project.py --remote` failed its first push. With devkit's own copy missing
+    too, the hook still finds the venv itself."""
     python = _venv(tmp_path)
-    assert gate.interpreter(tmp_path, has_pytest=lambda: False) == str(python)
+    answer = gate.interpreter(
+        tmp_path, bundled=_no_helper_at_all(tmp_path), has_pytest=lambda: False
+    )
+    assert answer == str(python)
 
 
 def test_with_no_helper_a_hook_interpreter_with_pytest_stays(tmp_path):
     """CI and an activated shell already have pytest; switching them to a venv that may
     hold other versions would change what the gate tests."""
     _venv(tmp_path)
-    assert gate.interpreter(tmp_path, has_pytest=lambda: True) == sys.executable
+    answer = gate.interpreter(
+        tmp_path, bundled=_no_helper_at_all(tmp_path), has_pytest=lambda: True
+    )
+    assert answer == sys.executable
 
 
 def test_with_no_helper_and_no_venv_the_hook_interpreter_is_the_answer(tmp_path):
     """Nothing better exists: the step then fails naming the missing module."""
-    assert gate.interpreter(tmp_path, has_pytest=lambda: False) == sys.executable
+    answer = gate.interpreter(
+        tmp_path, bundled=_no_helper_at_all(tmp_path), has_pytest=lambda: False
+    )
+    assert answer == sys.executable
 
 
 def test_the_interpreter_comes_from_the_projects_own_helper(tmp_path):
@@ -229,8 +260,8 @@ def test_the_interpreter_comes_from_the_projects_own_helper(tmp_path):
 
 
 def test_an_unparsable_helper_falls_back_rather_than_refusing_every_push(tmp_path):
-    """A half-written helper answers nothing about the interpreter, so the hook uses
-    the fallback the helper's own callers use. Only the load-time failures are caught:
+    """A half-written helper answers nothing about the interpreter, so the hook asks
+    devkit's copy instead. Only the load-time failures are caught:
     a helper that raises on its own logic is a defect the traceback should show."""
     helper = tmp_path / "scripts" / "project_python.py"
     helper.parent.mkdir()
