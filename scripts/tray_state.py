@@ -18,10 +18,16 @@ scheduled task, so the scheduler cannot report it, and `collectors.row` is its
 `schedule_health` (`collector_states`). A scheduled one *is* a task -- named after its
 project, not `devkit-` -- so it is asked about in the same scheduler query and judged by
 the same `problems`, then shown under the collectors' label (`collector_task_states`).
+
+The fix pass rides along too, read off its history's newest line (`fix_pass_states`): a
+red row per step the ledger awaits a person for -- the one thing no fixer can take, which
+otherwise reached the person only through the morning toast -- and one row on the fixers
+themselves. The pass judges both and writes them down; this only draws them.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +35,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collectors
 import schedule_health
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 OK = "ok"
 WARN = "warn"
@@ -192,7 +200,96 @@ def refresh(now=None) -> list[JobState]:
         jobs, now, deliberate, artifacts={**schedule_health.ARTIFACTS, **tasks}
     )
     found = collector_task_states(states(jobs, lines, deliberate), tasks)
-    return sorted(found + collector_states(), key=lambda item: (-RANK[item.state], item.name))
+    found += collector_states() + fix_pass_states(read_history(REPO_ROOT / FIX_HISTORY))
+    return sorted(found, key=lambda item: (-RANK[item.state], item.name))
+
+
+# The fix pass's own history and record (`fix-pass.HISTORY`, `fix-pass.ARTIFACT`), in the
+# checkout both it and the tray are installed from. The history's newest line is the
+# pass's verdict; the tray re-judges none of it, for the reason this module's docstring
+# gives about `schedule_health`.
+FIX_HISTORY = Path("logs") / "fix-pass.history.jsonl"
+FIX_RECORD = Path("logs") / "fix-pass.log"
+PERSON_ROW = "your step"
+FIXERS_ROW = "fixers"
+# Passes in a row with a fixer owed and none sent, at work or waiting with a reason,
+# before the row turns amber: three hours at the half-hourly schedule. A lapsed login, a
+# launcher that cannot start, a plan that drops the backlog -- each looks like this, and
+# none of them is a failed job, so no other row goes amber for it.
+STUCK_PASSES = 6
+# `fix_cycle.DISPATCH`, spelled here so the tray imports none of the pass; a test holds
+# the two equal.
+DISPATCH = "dispatch"
+
+
+def read_history(path: Path) -> list[dict]:
+    """The pass's history lines, oldest first; empty when it has none or cannot be read."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def fix_pass_states(history: list[dict]) -> list[JobState]:
+    """A red row per step the ledger awaits a person for, then one row on the fixers.
+
+    None at all on a machine with no history: the pass's scheduled job is a row of its
+    own, and a pass that never ran is that row's to report.
+    """
+    if not history:
+        return []
+    record = FIX_RECORD.as_posix()
+    steps = history[-1].get("person") or []
+    person = [JobState(PERSON_ROW, FAIL, str(step), record) for step in steps]
+    return [*person, fixers_state(history)]
+
+
+def _clock(when: object) -> str:
+    """`HH:MMZ` of an ISO stamp, or the stamp itself when it is not one."""
+    text = str(when)
+    return f"{text[11:16]}Z" if len(text) >= 16 and text[10] == "T" else text
+
+
+def _stuck(row: dict) -> bool:
+    """Whether one pass owed a fixer and had none sent, at work or waiting."""
+    owed = row.get("owed")
+    if not isinstance(owed, int) or "working" not in row:
+        return False  # written before the pass recorded either: nothing to judge by
+    return owed > 0 and not (row.get("sent") or row.get("working") or row.get("waiting"))
+
+
+def fixers_state(history: list[dict]) -> JobState:
+    """What the fixers are doing, by the newest pass; amber when they cannot be sent."""
+    last = history[-1]
+    working, waiting = last.get("working") or [], last.get("waiting") or {}
+    parts = [f"{len(working)} at work"] if "working" in last else []
+    parts += [f"{len(waiting)} waiting"] if waiting else []
+    parts += [f"{last['owed']} owed"] if last.get("owed") else []
+    sends = [row for row in history if row.get("sent")]
+    parts.append(f"last sent {_clock(sends[-1]['when'])}" if sends else "none sent")
+    detail = ", ".join(parts)
+    record = FIX_RECORD.as_posix()
+    harness = last.get("harness", "clean")
+    if harness != "clean":
+        reasons = "; ".join(harness) if isinstance(harness, list) else str(harness)
+        return JobState(FIXERS_ROW, WARN, f"harness RED, sends held -- {reasons}; {detail}", record)
+    recent = history[-STUCK_PASSES:]
+    if len(recent) == STUCK_PASSES and all(_stuck(row) for row in recent):
+        stuck = f"owed a fixer and none sent for {STUCK_PASSES} passes"
+        return JobState(FIXERS_ROW, WARN, f"{stuck}; {detail}", record)
+    mode = last.get("mode", "")
+    if mode != DISPATCH:
+        detail = f"mode={mode}, sends nothing; {detail}"
+    return JobState(FIXERS_ROW, OK, detail, record)
 
 
 def collector_task_states(found: list[JobState], tasks: dict[str, str]) -> list[JobState]:

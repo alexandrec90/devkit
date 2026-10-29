@@ -647,6 +647,9 @@ def run(
         issues=tuple(issues),
         migrated=tuple(migrated),
         late=late_lines(journal),
+        working=tuple(closed.at_work),
+        person=tuple(step("person", fix_loop.person_steps, ctx, default=[], always=True)),
+        owed=step("owed", fix_loop.owed, ctx, default=0, always=True),
     )
     publish(account, now)
     return exit_code(moved, worst, failed_steps)
