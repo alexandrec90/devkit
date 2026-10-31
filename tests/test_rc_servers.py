@@ -115,6 +115,61 @@ def test_a_launch_that_fails_is_a_failure_and_forgets_the_pid(monkeypatch, tmp_p
     assert "devkit" not in plan.state.servers
 
 
+# --- retire ------------------------------------------------------------------
+
+
+def test_a_project_no_longer_served_here_has_its_server_stopped(monkeypatch, tmp_path):
+    """`ensure_up` only starts. Without this, a project handed to another machine by
+    `hosts` kept its server here and the phone listed it once per machine."""
+    monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: True)
+    stopped = []
+    monkeypatch.setattr(rc_machine, "stop_server", lambda pid: stopped.append(pid) or "")
+    plan = plan_for(tmp_path, names=("devkit",), servers={"devkit": 42, "carameli": 43})
+    report = rc.retire(plan, rc.Pass())
+    assert stopped == [43]
+    assert plan.state.servers == {"devkit": 42}
+    assert report.failures == 0 and "carameli: no longer served here" in report.lines[0]
+
+
+def test_a_retired_pid_that_is_no_longer_claude_is_forgotten_not_killed(monkeypatch, tmp_path):
+    """Pids are reused; a recycled one names a stranger."""
+    monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: False)
+
+    def explode(pid):
+        raise AssertionError("killed a pid that is not a claude")
+
+    monkeypatch.setattr(rc_machine, "stop_server", explode)
+    plan = plan_for(tmp_path, names=(), servers={"carameli": 43})
+    report = rc.retire(plan, rc.Pass())
+    assert plan.state.servers == {} and report.lines == []
+
+
+def test_a_retired_server_that_will_not_stop_is_a_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: True)
+    monkeypatch.setattr(rc_machine, "stop_server", lambda pid: "Access is denied.")
+    report = rc.retire(plan_for(tmp_path, names=(), servers={"carameli": 43}), rc.Pass())
+    assert report.failures == 1
+
+
+def test_maintain_retires_before_it_starts(monkeypatch, no_launch, tmp_path):
+    monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: pid == 43)
+    stopped = []
+    monkeypatch.setattr(rc_machine, "stop_server", lambda pid: stopped.append(pid) or "")
+    plan = plan_for(tmp_path, names=("devkit",), servers={"carameli": 43})
+    plan.state.last_update = _dt.date.today().isoformat()
+    rc.run_mode("maintain", plan, rc.Pass(), _dt.datetime.now())
+    assert stopped == [43] and no_launch == ["devkit"]
+    assert set(plan.state.servers) == {"devkit"}
+
+
+def test_status_never_retires(monkeypatch, tmp_path):
+    monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: True)
+    monkeypatch.setattr(rc_machine, "is_idle", lambda cwd, store, minutes: True)
+    plan = plan_for(tmp_path, names=(), servers={"carameli": 43})
+    rc.run_mode("status", plan, rc.Pass(), _dt.datetime.now())
+    assert plan.state.servers == {"carameli": 43}
+
+
 # --- cycle -------------------------------------------------------------------
 
 
@@ -239,6 +294,15 @@ def test_down_stops_every_server_it_started(monkeypatch, tmp_path):
     assert plan.state.servers == {}
 
 
+def test_down_also_stops_a_server_for_a_project_no_longer_served_here(monkeypatch, tmp_path):
+    stopped = []
+    monkeypatch.setattr(rc_machine, "stop_server", lambda pid: stopped.append(pid) or "")
+    plan = plan_for(tmp_path, names=(), servers={"devkit": 1})
+    rc.down(plan, rc.Pass())
+    assert stopped == [1]
+    assert plan.state.servers == {}
+
+
 def test_down_reports_a_server_it_could_not_stop(monkeypatch, tmp_path):
     monkeypatch.setattr(rc_machine, "stop_server", lambda pid: "Access is denied.")
     report = rc.down(plan_for(tmp_path, servers={"devkit": 1}), rc.Pass())
@@ -278,6 +342,23 @@ def test_build_plan_fails_when_every_named_project_is_unknown(tmp_path):
     report = rc.Pass()
     assert rc.build_plan(workspace(tmp_path, ["typo"]), tmp_path, report) is None
     assert report.failures == 1
+
+
+def test_build_plan_serves_only_what_hosts_assigns_this_machine(tmp_path):
+    setting = {"projects": "all", "hosts": {"*": "desktop-a", "carameli": "desktop-b"}}
+    report = rc.Pass()
+    plan = rc.build_plan(workspace(tmp_path, setting), tmp_path, report, host="desktop-b")
+    assert plan is not None and plan.names == ["carameli"]
+    assert report.failures == 0
+    assert report.lines == ["devkit: served by desktop-a, not here (desktop-b)"]
+
+
+def test_a_machine_hosts_assigns_nothing_still_gets_a_plan_to_retire_with(tmp_path):
+    """`None` would end the pass before `retire`, leaving the servers it ran before the
+    assignment moved up for good."""
+    setting = {"projects": "all", "hosts": "desktop-a"}
+    plan = rc.build_plan(workspace(tmp_path, setting), tmp_path, rc.Pass(), host="desktop-b")
+    assert plan is not None and plan.names == []
 
 
 def test_parse_args_defaults_to_the_read_only_mode():
