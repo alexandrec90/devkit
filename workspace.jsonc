@@ -1188,6 +1188,31 @@
 				},
 				"problemMatcher": []
 			},
+			// A literal checkout, not `ibkrCheckout`: the server binds one port, so a
+			// second ticked checkout could only queue behind the first or collide with it.
+			{
+				"label": "IBKR: Open Trader UI",
+				"detail": "Build the frontend if it is stale, then serve ibkr_trader's local web UI on 127.0.0.1:8001 (UI_PORT in .env overrides) and open the browser. Runs until you close the terminal; needs the db container up.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"ibkr_trader",
+					"trader-ui"
+				],
+				"icon": {
+					"id": "dashboard",
+					"color": "terminal.ansiBrightCyan"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
 			// --- scoped: social-scraper -------------------------------------------
 			// One checkout, so `--project` is spelled out rather than asked.
 			{
