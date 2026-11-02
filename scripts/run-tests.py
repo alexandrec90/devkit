@@ -17,7 +17,8 @@ changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.p
 to the tests that spell its name; a script the test contract's `COVERED_BY` lists, to
 the module it names; a data file `READ_BY` lists, to the tests that read it), plus
 `CONTRACT_TESTS`, which read every module and
-so are named by none of them.
+so are named by none of them. Named test files run with the contract tests too, unless
+`--only` says just these.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
 
@@ -25,7 +26,8 @@ Usage:
     python scripts/run-tests.py             # the tests for what changed
     python scripts/run-tests.py --all       # the whole suite
     python scripts/run-tests.py --changed   # pytest's last-failed subset
-    python scripts/run-tests.py tests/test_a.py tests/test_b.py::test_c   # just these
+    python scripts/run-tests.py tests/test_a.py tests/test_b.py::test_c   # these, and the contracts
+    python scripts/run-tests.py --only tests/test_a.py                    # just these
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
-USAGE = "%(prog)s [-h] [--all | --changed] [test file or pytest argument ...]"
+USAGE = "%(prog)s [-h] [--all | --changed] [--only] [test file or pytest argument ...]"
 
 # Where the whole suite is the point: CI, and the push gate that mirrors it (pre-commit
 # exports `PRE_COMMIT` into every hook's environment).
@@ -107,6 +109,12 @@ PYTEST_NO_TESTS_COLLECTED = 5
 # baseline, since their files hold minutes of unit tests besides. #581 went red on a
 # `.devkit-untested.txt` line its own tests had made stale, which no run short of the
 # push gate reported (1c4eaf1b).
+#
+# Named test files get them too, in runs of their own so the files' options (`-k reap`)
+# do not bind to them. A session that named its files got none of them, so it ran the
+# whole of `scripts/hooks/tests` to reach the two ratchets -- 1,693 tests, twice in one
+# session, the second catching the untested-symbol failure the named run had not
+# (9caa3f5d). `--only` is the run of just the named files.
 CONTRACT_TESTS = (
     "tests/test_test_contract.py",
     "tests/test_scheduled_jobs.py",
@@ -354,15 +362,33 @@ def _reading_tests(posix: str, root: Path) -> list[str]:
     return found
 
 
+def contracts_beyond(targets: list[str], root: Path = REPO_ROOT) -> list[str]:
+    """Every `CONTRACT_TESTS` target whose file `root` holds and which `targets` does not
+    already run: by that node id, by its file, or by a directory holding that file."""
+    named = [t.replace("\\", "/").rstrip("/") for t in targets if not t.startswith("-")]
+
+    def runs(contract: str) -> bool:
+        path = target_file(contract)
+        return any(n in (contract, path, ".", "") or path.startswith(f"{n}/") for n in named)
+
+    return [t for t in CONTRACT_TESTS if not runs(t) and (root / target_file(t)).is_file()]
+
+
 def with_contracts(tests: list[str], root: Path = REPO_ROOT) -> list[str]:
-    """`tests` followed by every `CONTRACT_TESTS` target whose file `root` holds and which
-    `tests` does not already run, whole or by that node id."""
-    extra = [
-        t
-        for t in CONTRACT_TESTS
-        if t not in tests and target_file(t) not in tests and (root / target_file(t)).is_file()
-    ]
-    return [*tests, *extra]
+    """`tests` followed by every `CONTRACT_TESTS` target `contracts_beyond` them."""
+    return [*tests, *contracts_beyond(tests, root)]
+
+
+def explicit_runs(targets: list[str], root: Path = REPO_ROOT) -> list[list[str]]:
+    """The pytest runs for targets a caller named: those as one run, since they may carry
+    options that bind to them, then the contract tests they do not run, one run per
+    `TEST_DIRS` root. No targets is the whole suite, which holds every contract."""
+    if not targets:
+        return [targets]
+    extra = contracts_beyond(targets, root)
+    if extra:
+        print(f"run-tests: and {len(extra)} contract test(s) besides; --only skips them")
+    return [targets, *by_test_root(extra)]
 
 
 def by_test_root(targets: list[str]) -> list[list[str]]:
@@ -436,6 +462,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, usage=USAGE)
     parser.add_argument("--all", action="store_true", help="run the whole suite")
     parser.add_argument("--changed", action="store_true", help="run pytest's last-failed subset")
+    parser.add_argument(
+        "--only", action="store_true", help="run just the named tests, not the contract tests"
+    )
     args, extra = parser.parse_known_args(argv)
     targets = [a for a in extra if a]
 
@@ -445,8 +474,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd += ["--last-failed", "--last-failed-no-failures", "all"]
     whole = args.all or args.changed or targets or any(os.environ.get(k) for k in FULL_SUITE_ENV)
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    # Explicit targets stay one run: they may carry options (`-k reap`) that bind to them.
-    groups = [targets]
+    groups = [targets] if args.only else explicit_runs(targets, REPO_ROOT)
     if not whole:
         planned = _plan_changed(REPO_ROOT)
         if planned == []:
