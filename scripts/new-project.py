@@ -23,9 +23,9 @@ Steps, in order:
   2. render `templates/` into the new directory
   3. `git init` + initial commit
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
-  5. register the project in devkit's `workspace.jsonc` and the shared
-     `alex-projects.code-workspace` (the one step that writes OUTSIDE the new
-     directory; `--no-register` skips it)
+  5. register the project in the shared `alex-projects.code-workspace` and, on a task
+     branch with a ship intent, in devkit's `workspace.jsonc` (the one step that writes
+     OUTSIDE the new directory; `--no-register` skips it)
   6. create the private GitHub repo and push          <- outward-facing
 """
 
@@ -42,9 +42,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 
 import devkit_ports
 import devkit_project
+import task_branch as tb
+import worktree_tiers
 from devkit_render import TemplateError, render
 from project_env import lock_dependencies, missing_commit_tooling, provision_environment
 
@@ -614,11 +617,14 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     `workspace.jsonc` (`.claude/rules/vscode-tasks.md`), so registering in the live file
     alone left `devkit_project.py --check-workspace` reporting the new project as
     `folder in the workspace but not in devkit` until someone adopted it by hand on a
-    branch (8a1c0927). The canonical edit is left uncommitted, the shape
-    `plug-projects.py` and `--adopt-workspace` leave theirs in: it is a registry change
-    every machine shares, so it goes through a branch and a review like any other. The
-    live write stays too, because a render only lands on the next scheduled pass and
-    the project should be in the sweep's registry from the moment it exists.
+    branch (8a1c0927). The canonical edit is a registry change every machine shares, so
+    it goes through a branch and a review like any other: `hand_off_registration` puts it
+    on a task branch with a ship intent and restores devkit's static checkout, which the
+    fix pass runs from and will not update while it is dirty (851308ef). The live write
+    stays too, because a render only lands on the next scheduled pass and the project
+    should be in the sweep's registry from the moment it exists -- and a render of the
+    canonical copy without it refuses rather than dropping it, the live file carrying an
+    edit no stamp covers.
     """
     if not plan.register:
         print("  skip    workspace registration (--no-register)")
@@ -635,6 +641,9 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
         print(f"          move it to {live.parent} and add {plan.name} to its folders by hand")
         return
     canonical = devkit_project.CANONICAL_WORKSPACE
+    # Asked before the write, so a hand edit already sitting there is never carried off
+    # onto a branch under this project's name.
+    clean_before = not dry_run and not _dirty(canonical)
     for path in (canonical, live):
         shown = path.name if path == canonical else f"../{path.name}"
         if dry_run:
@@ -650,8 +659,84 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
             )
             continue
         print(f"  update  {shown} (folders + project picker)")
-    if not dry_run:
-        print(f"          commit devkit's {canonical.name} on a branch and ship it")
+    if dry_run:
+        return
+    handed = hand_off_registration(plan.name, canonical) if clean_before else ""
+    print(handed or f"          commit devkit's {canonical.name} on a branch and ship it")
+
+
+def _git_in(checkout: Path, runner=subprocess.run):
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return runner(
+            ["git", "-C", str(checkout), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    return git
+
+
+def _dirty(path: Path, runner=subprocess.run) -> bool:
+    """Whether git reports `path` changed in its checkout; False where git cannot say."""
+    done = _git_in(path.parent, runner)("status", "--porcelain", "--", path.name)
+    return done.returncode == 0 and bool(done.stdout.strip())
+
+
+REGISTRATION_INTENT = """Register {name} in the workspace registry
+
+`scripts/new-project.py` generated `{name}` and registered it in the live workspace file
+and in devkit's canonical `workspace.jsonc`. The live half is in effect already; this is
+the canonical half, which every machine shares and so goes through a PR.
+
+The generator cut this branch itself rather than leave the edit uncommitted in devkit's
+static checkout: the fix pass runs from that checkout and will not fast-forward a dirty
+one, so the uncommitted registration held the pass on stale code (851308ef).
+"""
+
+
+def hand_off_registration(name: str, canonical: Path, runner=subprocess.run) -> str:
+    """Move the registry edit off devkit's static checkout onto a task branch: what was done.
+
+    The canonical edit used to be left uncommitted where it was written, for someone to
+    commit on a branch -- in the checkout the scheduled fix pass runs from. Its watchdog
+    fast-forwards that checkout before every fire and refuses a dirty one, so skinamp's
+    registration, left there on 2026-11-02, held the pass on stale code and filed a
+    `pass-stale` finding (851308ef). Here the edit goes onto `agent/register-<name>-<mmdd>`
+    in a `.claude/worktrees/` tree off the checkout's `HEAD` -- the commit the edit was
+    made against -- with a ship intent the pass ships like any other, and the static
+    checkout's copy is put back.
+
+    "" when there is nothing to hand off, and the caller says to commit by hand: a linked
+    worktree or a task branch (the edit is already on a branch), a checkout git cannot
+    read, or a cut that failed (said as a WARNING, with the file left as it was).
+    """
+    checkout = canonical.parent
+    git = _git_in(checkout, runner)
+    if not (checkout / ".git").is_dir() or not _dirty(canonical, runner):
+        return ""
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if branch != tb.detect_default_branch(git, fallback="main"):
+        return ""
+    heads = git("for-each-ref", "--format=%(refname:short)", "refs/heads").stdout.split()
+    task = tb.branch_name(tb.slugify(f"register-{name}"), set(heads))
+    tree = worktree_tiers.default_root(checkout) / task.partition("/")[2]
+    cut = git("worktree", "add", "--quiet", "--no-track", "-b", task, str(tree), "HEAD")
+    if cut.returncode != 0:
+        said = (cut.stderr or cut.stdout or "").strip().splitlines()
+        return (
+            f"  WARNING could not cut {task}: {said[-1] if said else cut.returncode}\n"
+            f"          commit devkit's {canonical.name} on a branch and ship it"
+        )
+    edited = canonical.read_text(encoding="utf-8")
+    (tree / canonical.name).write_text(edited, encoding="utf-8", newline="\n")
+    intent = tree / "logs" / "ship-intent.md"
+    intent.parent.mkdir(parents=True, exist_ok=True)
+    intent.write_text(REGISTRATION_INTENT.format(name=name), encoding="utf-8", newline="\n")
+    git("checkout", "--", canonical.name)
+    return f"  branch  {task}: {canonical.name}'s registration, for the fix pass to ship\n          {tree}"
 
 
 def create_remote(plan: Plan, dry_run: bool) -> None:
