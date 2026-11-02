@@ -64,6 +64,9 @@
 		},
 		{
 			"path": "productivity-tracker"
+		},
+		{
+			"path": "skinamp"
 		}
 	],
 	"extensions": {
@@ -1594,7 +1597,8 @@
 								"sports_betting",
 								"roguelike",
 								"social-scraper",
-								"productivity-tracker"
+								"productivity-tracker",
+								"skinamp"
 							]
 						}
 					]
@@ -1634,7 +1638,8 @@
 								"sports_betting",
 								"roguelike",
 								"social-scraper",
-								"productivity-tracker"
+								"productivity-tracker",
+								"skinamp"
 							]
 						}
 					]
@@ -1767,7 +1772,8 @@
 					"sports_betting",
 					"roguelike",
 					"social-scraper",
-					"productivity-tracker"
+					"productivity-tracker",
+					"skinamp"
 				],
 				"default": "carameli"
 			},
@@ -2454,7 +2460,8 @@
 					"sports_betting",
 					"roguelike",
 					"social-scraper",
-					"productivity-tracker"
+					"productivity-tracker",
+					"skinamp"
 				],
 				"default": "carameli"
 			},

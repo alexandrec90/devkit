@@ -23,9 +23,9 @@ Steps, in order:
   2. render `templates/` into the new directory
   3. `git init` + initial commit
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
-  5. register the project in devkit's `workspace.jsonc` and the shared
-     `alex-projects.code-workspace` (the one step that writes OUTSIDE the new
-     directory; `--no-register` skips it)
+  5. register the project in the shared `alex-projects.code-workspace` and, on a task
+     branch with a ship intent, in devkit's `workspace.jsonc` (the one step that writes
+     OUTSIDE the new directory; `--no-register` skips it)
   6. create the private GitHub repo and push          <- outward-facing
 """
 
@@ -38,13 +38,17 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 
 import devkit_ports
 import devkit_project
+import task_branch as tb
+import worktree_tiers
 from devkit_render import TemplateError, render
 from project_env import lock_dependencies, missing_commit_tooling, provision_environment
 
@@ -233,6 +237,9 @@ class Plan:
     files: list[tuple[Path, Path, bool]] = field(default_factory=list)
     remote: bool = True
     register: bool = True
+    # Set once the registration branch carries the slot too, so the closing hint does
+    # not ask a person to add it a second time.
+    slot_on_branch: bool = False
 
 
 def slugify_package(name: str) -> str:
@@ -614,11 +621,14 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     `workspace.jsonc` (`.claude/rules/vscode-tasks.md`), so registering in the live file
     alone left `devkit_project.py --check-workspace` reporting the new project as
     `folder in the workspace but not in devkit` until someone adopted it by hand on a
-    branch (8a1c0927). The canonical edit is left uncommitted, the shape
-    `plug-projects.py` and `--adopt-workspace` leave theirs in: it is a registry change
-    every machine shares, so it goes through a branch and a review like any other. The
-    live write stays too, because a render only lands on the next scheduled pass and
-    the project should be in the sweep's registry from the moment it exists.
+    branch (8a1c0927). The canonical edit is a registry change every machine shares, so
+    it goes through a branch and a review like any other: `hand_off_registration` puts it
+    on a task branch with a ship intent and restores devkit's static checkout, which the
+    fix pass runs from and will not update while it is dirty (851308ef). The live write
+    stays too, because a render only lands on the next scheduled pass and the project
+    should be in the sweep's registry from the moment it exists -- and a render of the
+    canonical copy without it refuses rather than dropping it, the live file carrying an
+    edit no stamp covers.
     """
     if not plan.register:
         print("  skip    workspace registration (--no-register)")
@@ -635,6 +645,9 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
         print(f"          move it to {live.parent} and add {plan.name} to its folders by hand")
         return
     canonical = devkit_project.CANONICAL_WORKSPACE
+    # Asked before the write, so a hand edit already sitting there is never carried off
+    # onto a branch under this project's name.
+    clean_before = not dry_run and not _dirty(canonical)
     for path in (canonical, live):
         shown = path.name if path == canonical else f"../{path.name}"
         if dry_run:
@@ -650,8 +663,157 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
             )
             continue
         print(f"  update  {shown} (folders + project picker)")
-    if not dry_run:
-        print(f"          commit devkit's {canonical.name} on a branch and ship it")
+    if dry_run:
+        return
+    slot = plan.context.get("slot")
+    handed = hand_off_registration(plan.name, canonical, slot=slot) if clean_before else Handoff()
+    plan.slot_on_branch = handed.slot
+    print(handed.said or f"          commit devkit's {canonical.name} on a branch and ship it")
+
+
+def _git_in(checkout: Path, runner=subprocess.run):
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return runner(
+            ["git", "-C", str(checkout), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    return git
+
+
+def _dirty(path: Path, runner=subprocess.run) -> bool:
+    """Whether git reports `path` changed in its checkout; False where git cannot say."""
+    done = _git_in(path.parent, runner)("status", "--porcelain", "--", path.name)
+    return done.returncode == 0 and bool(done.stdout.strip())
+
+
+REGISTRATION_INTENT = """Register {name} in the workspace registry
+
+`scripts/new-project.py` generated `{name}` and registered it in the live workspace file
+and in devkit's canonical `workspace.jsonc`. The live half is in effect already; this is
+the canonical half, which every machine shares and so goes through a PR.
+
+The generator cut this branch itself rather than leave the edit uncommitted in devkit's
+static checkout: the fix pass runs from that checkout and will not fast-forward a dirty
+one, so the uncommitted registration held the pass on stale code (851308ef).
+"""
+
+SLOT_INTENT = """
+It also registers `{name} = {slot}` in `ports.toml`'s `[slots]`: the slot the generated
+`.env` and compose defaults already publish. A workspace folder with neither a slot nor a
+`SLOTLESS` reason fails `tests/test_devkit_ports.py`, so the two halves ship together.
+"""
+
+
+@dataclass(frozen=True)
+class Handoff:
+    """What `hand_off_registration` did: the line to print, and whether the slot went too."""
+
+    said: str = ""
+    slot: bool = False
+
+
+def register_slot(text: str, name: str, slot: int) -> str | None:
+    """`ports.toml` with `name = slot` appended to `[slots]`; None when it cannot be.
+
+    None for a file with no `[slots]` table, one that already names the checkout, or one
+    the result would fail `devkit_ports.validate` on (a slot already taken, past the
+    ceiling): the caller then leaves the registry alone and says to register by hand,
+    since a guessed slot is how two stacks end up on one port.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if line.strip() == "[slots]"), None)
+    if start is None:
+        return None
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    if not lines[end - 1].endswith("\n"):
+        lines[end - 1] += "\n"
+    lines.insert(end, f"{name} = {slot}\n")
+    edited = "".join(lines)
+    try:
+        if name in tomllib.loads(text).get("slots", {}):
+            return None
+        devkit_ports.from_dict(tomllib.loads(edited))
+    except (tomllib.TOMLDecodeError, devkit_ports.RegistryError):
+        return None
+    return edited
+
+
+def hand_off_registration(
+    name: str, canonical: Path, runner=subprocess.run, slot: object = None
+) -> Handoff:
+    """Move the registry edit off devkit's static checkout onto a task branch: what was done.
+
+    The canonical edit used to be left uncommitted where it was written, for someone to
+    commit on a branch -- in the checkout the scheduled fix pass runs from. Its watchdog
+    fast-forwards that checkout before every fire and refuses a dirty one, so skinamp's
+    registration, left there on 2026-11-02, held the pass on stale code and filed a
+    `pass-stale` finding (851308ef). Here the edit goes onto `agent/register-<name>-<mmdd>`
+    in a `.claude/worktrees/` tree off the checkout's `HEAD` -- the commit the edit was
+    made against -- with a ship intent the pass ships like any other, and the static
+    checkout's copy is put back.
+
+    The branch carries the project's `ports.toml` slot as well, when `slot` is given and
+    `register_slot` can place it. Without it every registration branch was red on
+    `test_every_checkout_either_holds_a_slot_or_says_why_not` -- skinamp's was, on the PR
+    that introduced this hand-off -- because the slot was only ever a printed hint.
+
+    An empty `said` when there is nothing to hand off, and the caller says to commit by
+    hand: a linked worktree or a task branch (the edit is already on a branch), a checkout
+    git cannot read, or a cut that failed (said as a WARNING, with the file left as it was).
+    """
+    checkout = canonical.parent
+    git = _git_in(checkout, runner)
+    if not (checkout / ".git").is_dir() or not _dirty(canonical, runner):
+        return Handoff()
+    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if branch != tb.detect_default_branch(git, fallback="main"):
+        return Handoff()
+    heads = git("for-each-ref", "--format=%(refname:short)", "refs/heads").stdout.split()
+    task = tb.branch_name(tb.slugify(f"register-{name}"), set(heads))
+    tree = worktree_tiers.default_root(checkout) / task.partition("/")[2]
+    cut = git("worktree", "add", "--quiet", "--no-track", "-b", task, str(tree), "HEAD")
+    if cut.returncode != 0:
+        said = (cut.stderr or cut.stdout or "").strip().splitlines()
+        return Handoff(
+            f"  WARNING could not cut {task}: {said[-1] if said else cut.returncode}\n"
+            f"          commit devkit's {canonical.name} on a branch and ship it"
+        )
+    edited = canonical.read_text(encoding="utf-8")
+    (tree / canonical.name).write_text(edited, encoding="utf-8", newline="\n")
+    message = REGISTRATION_INTENT.format(name=name)
+    carried = _carry_slot(tree / devkit_ports.REGISTRY_NAME, name, slot)
+    if carried:
+        message += SLOT_INTENT.format(name=name, slot=slot)
+    intent = tree / "logs" / "ship-intent.md"
+    intent.parent.mkdir(parents=True, exist_ok=True)
+    intent.write_text(message, encoding="utf-8", newline="\n")
+    git("checkout", "--", canonical.name)
+    what = f"{canonical.name}'s registration" + (
+        f" and {devkit_ports.REGISTRY_NAME} slot {slot}" if carried else ""
+    )
+    return Handoff(f"  branch  {task}: {what}, for the fix pass to ship\n          {tree}", carried)
+
+
+def _carry_slot(registry: Path, name: str, slot: object) -> bool:
+    """Write `name = slot` into the branch's `ports.toml`; whether it was written. A slot
+    that is not an int (a plan built without one) carries nothing."""
+    if not isinstance(slot, int) or not registry.is_file():
+        return False
+    edited = register_slot(registry.read_text(encoding="utf-8"), name, slot)
+    if edited is None:
+        return False
+    registry.write_text(edited, encoding="utf-8", newline="\n")
+    return True
 
 
 def create_remote(plan: Plan, dry_run: bool) -> None:
@@ -751,12 +913,17 @@ def _warn_if_pin_is_stale(ref: str) -> None:
 
 
 def register_slot_hint(plan: Plan) -> None:
-    """Tell the user what to add to ports.toml. Deliberately not automatic.
+    """Tell the user what to add to ports.toml, unless the registration branch has it.
 
-    The generator does not edit devkit's registry itself: devkit is a git repo with
-    its own PR gate, and a tool that silently commits to its own source of truth is
-    how two projects end up claiming one slot from two different sessions.
+    The generator never commits to devkit's registry itself: a tool that silently
+    commits to its own source of truth is how two projects end up claiming one slot from
+    two different sessions. A slot on the registration branch is not that -- it goes
+    through a PR, where two branches claiming one slot conflict on the same line and
+    `test_no_two_shipped_checkouts_share_a_port` fails the second -- so only a project
+    whose registration was not handed off is left to this hint.
     """
+    if plan.slot_on_branch:
+        return
     print("\nNext: register the slot in devkit's ports.toml [slots] table:")
     print(f"  {plan.name} = {plan.context['slot']}")
 
