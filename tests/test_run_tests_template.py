@@ -92,7 +92,36 @@ def test_help_says_it_takes_test_files(runner, capsys):
     "accepts no test paths"; the template's usage line names them like devkit's does."""
     with pytest.raises(SystemExit):
         runner.main(["--help"])
-    assert "[--all | --changed] [test file or pytest argument ...]" in capsys.readouterr().out
+    assert "[--all | --changed] [--only] [test file or pytest argument ...]" in (
+        capsys.readouterr().out
+    )
+
+
+def test_named_test_files_run_with_the_contract_tests(run_in, runner, tmp_path):
+    """9caa3f5d: a session that named its test files got no contract test and ran the
+    whole vendored tier to reach one. Each test root is its own run, options unbound."""
+    for rel in run_in.contracts:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("", encoding="utf-8")
+    runner.main(["tests/test_game.py", "-k", "x"])
+    named, contracts = run_in.seen
+    assert named[-3:] == ["tests/test_game.py", "-k", "x"]
+    assert contracts[-len(run_in.contracts) :] == run_in.contracts and "-k" not in contracts
+    run_in.seen.clear()
+    runner.main(["--only", "tests/test_game.py"])
+    assert len(run_in.seen) == 1
+
+
+def test_contracts_beyond_drops_what_the_targets_already_run(runner, tmp_path):
+    for rel in runner.CONTRACT_TESTS:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("", encoding="utf-8")
+    every = list(runner.CONTRACT_TESTS)
+    assert runner.contracts_beyond(["tests/test_a.py"], tmp_path) == every
+    assert runner.contracts_beyond(["scripts/hooks/tests/"], tmp_path) == []
+    assert runner.contracts_beyond([every[0]], tmp_path) == every[1:]
+    assert runner.explicit_runs([], tmp_path) == [[]]
+    assert runner.explicit_runs(["tests/test_a.py"], tmp_path) == [["tests/test_a.py"], every]
 
 
 def test_frontend_sources_are_the_scripts_under_src(runner):
