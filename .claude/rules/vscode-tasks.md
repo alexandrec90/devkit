@@ -7,9 +7,24 @@ paths:
   - tests/test_devkit_project.py
   - tests/test_git_merge_default.py
   - tests/test_self_hosting.py
+  - tests/test_workspace_tasks_live.py
+  - tests/test_vscode_tasks_e2e.py
+  - tests/vscode_e2e/**
 ---
 
 # Rule: VS Code tasks
+
+**A claim in this file about what VS Code does is checked by clicking, not by reading.**
+Every contract below was written from a belief about VS Code and its two input
+extensions, and the beliefs were wrong often enough that two test tiers now do what a
+click does, nightly, on this workstation (`scripts/e2e.py`).
+`tests/test_workspace_tasks_live.py` runs every live picker's command, chained as the
+extension chains it and held to a time budget. It also cancels every task that reads a
+command picker. `tests/test_vscode_tasks_e2e.py` opens an isolated VS Code on the
+canonical block and runs each task, accepting and then escaping its picks, and judges
+the argv VS Code resolved. When one of them disagrees with a paragraph here, the
+paragraph is the defect. Before adding a task, run the second for it:
+`DEVKIT_VSCODE_E2E_ONLY="<label>" python -m pytest tests/test_vscode_tasks_e2e.py`.
 
 **Tasks live in the workspace file, never in a repo's `.vscode/tasks.json`.** A task
 defined in a repo is invisible from the workspace root, cannot be scoped with

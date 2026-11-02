@@ -884,6 +884,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | Job | Installer | Cadence | Its record |
 | --- | --- | --- | --- |
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
+| `devkit-local-e2e` | `scripts/install-e2e-schedule.py` | nightly 01:00, each project once the PC is idle | `logs/scheduled-local-e2e.log`, results under `logs/e2e/` |
 | `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00 | `logs/scheduled-devkit-release.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
@@ -1550,6 +1551,34 @@ while, which was harmless as an example and not as configuration, since the vend
 scripts run here and one reading another project's shape acts on directories that are
 not here. So the tiers devkit does not have are off in it, and the vendored suite skips them
 locally; the `generated-project` job above is what exercises them.
+
+### The local end-to-end tier: what no hosted runner can run
+
+Some tests need *this workstation*: the live workspace file, VS Code itself, a project's
+Docker stack, a browser session, a credential. CI skips them, a session never runs the
+whole suite, and a box is not the static checkout -- so until this tier they ran only
+when a person happened to run the suite on `main`. Now `devkit-local-e2e`
+(`scripts/install-e2e-schedule.py`) runs them every night once the PC has been idle for
+ten minutes, and a red one reaches the fix pass as that project's red default branch.
+
+| Piece | What it does |
+| --- | --- |
+| `scripts/e2e.py` in a project | **The contract.** Exit 0 green, anything else red; print each failure as pytest's `FAILED <id>` line. A project without it has no tier. |
+| `scripts/e2e-pass.py run` | Waits for idle, fast-forwards each static checkout to `origin/<default>` (skipping, with the reason, one a person is working in), runs its `scripts/e2e.py`, writes `logs/e2e/<project>/result.json` and `output.log` in devkit. Exits 0 on a red result. |
+| `scripts/e2e_results.py` | Turns a red result into a `fix_plan.LOCAL` failure, read by `fix_red.collect_red`. A result older than the tip is held until the next night. |
+| `scripts/e2e-pass.py status` | Each project's last result. |
+
+devkit's own `scripts/e2e.py` runs every test marked `local`, and `needs_live_workspace` and
+`needs_the_static_checkout` in `tests/support.py` apply that mark themselves. Under the
+scheduler a skip there is a failure. That covers the live-workspace checks,
+`tests/test_workspace_tasks_live.py` (every picker run for real, every task cancelled,
+every path and extension present) and `tests/test_vscode_tasks_e2e.py`, which clicks
+every workspace task in an isolated VS Code. Set `DEVKIT_VSCODE_E2E_ONLY` to a
+comma-separated list of labels to drive just those.
+
+To give a project the tier, write its `scripts/e2e.py`. A pytest marker of its own,
+run the way devkit's is, is the usual shape. Then `python scripts/e2e-pass.py run --no-wait
+<project>` from devkit shows what the night will see.
 
 ### The repo contract
 
