@@ -1133,9 +1133,20 @@ is rendered per machine. Or, with the knobs:
   "updateAt": "04:45",              // after devkit-global-tools, deliberately
   "capacity": 8,                    // sessions per server; the CLI's own default is 32
   "powerSaving": false,             // see below — not a free saving
-  "awayMinutes": 15
+  "awayMinutes": 15,
+  "hosts": {"*": "desktop-a", "data-lake": "desktop-b"}  // or just "desktop-a"
 }
 ```
+
+`hosts` is for a workspace checked out on more than one PC. The setting is the same on
+every machine, so without it each PC serves every project and the phone lists each one
+once per machine. With it, a project gets a server only on the machine named for it
+(`"*"` covers every project not named on its own), and every other machine stops the
+server it was running for that project on its next fire. Hosts are spelled as
+`harness_events.host_name` spells a machine: `$DEVKIT_HOST`, else the hostname,
+lowercased. A project `hosts` leaves unassigned is served nowhere, and each machine's
+`logs/rc-servers.log` says which host it is waiting on. There is no failover: while the
+named machine is off, its projects have no server.
 
 `permissionMode` reaches the server as `--permission-mode`, and **it does not raise the
 mode of a session the phone spawns.** A spawned session is handed the server's mode as the
