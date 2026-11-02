@@ -943,6 +943,28 @@ def publish_verdict(branch: str, default: str, canonical_dirty: bool) -> str:
     return ""
 
 
+def held_line(workspace: Path, payload: dict, problems: list[str]) -> str:
+    """The refusal's line when every live edit is already on a pushed branch; "" else.
+
+    `new-project.py` registers a project in the live file at once and in
+    `workspace.jsonc` through a PR, so between the two every daily publish refused and
+    was filed as `workspace-publish-refused` (4ea2781c, photolab's #704) -- a failure
+    that asked for `--adopt-workspace` or `--force` while all it awaited was a merge.
+    Still a line, naming the branch: a branch that never merges keeps it in the toast,
+    and past `devkit_project.HELD_DAYS` the branch stops counting and the failure returns.
+    """
+    held = devkit_project.held_on_branches(
+        problems, payload, devkit_project.pending_copies(workspace)
+    )
+    if not held or set(devkit_project.live_only(problems)) - held.keys():
+        return ""
+    return (
+        f"{workspace.name}: {len(problems)} difference(s), not published -- its own edits "
+        f"are on unmerged {', '.join(sorted(set(held.values())))}, so it publishes once "
+        "that merges"
+    )
+
+
 def workspace_sync_line(workspace: Path) -> str:
     """Publish devkit's canonical copy to the live workspace file, and say what changed.
 
@@ -963,9 +985,9 @@ def workspace_sync_line(workspace: Path) -> str:
             return ""
         # This machine's view, not the whole registry: a project registered from another
         # workstation and not cloned here is left out of the render, so it is not drift.
+        payload = devkit_jsonc.loads(workspace.read_text(encoding="utf-8"))
         problems = devkit_project.workspace_drift(
-            devkit_jsonc.loads(workspace.read_text(encoding="utf-8")),
-            devkit_jsonc.loads(devkit_project.canonical_view(workspace)[0]),
+            payload, devkit_jsonc.loads(devkit_project.canonical_view(workspace)[0])
         )
         if not problems:
             return ""
@@ -982,6 +1004,8 @@ def workspace_sync_line(workspace: Path) -> str:
             )
         outcome, published = devkit_project.publish_workspace(workspace)
         if outcome == devkit_project.RENDER_REFUSED:
+            if held := held_line(workspace, payload, published):
+                return held
             return (
                 f"{workspace.name}: {len(problems)} difference(s), and {PUBLISH_REFUSED} "
                 "-- `--adopt-workspace` keeps them, `--render-workspace --force` discards them"

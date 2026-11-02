@@ -1705,6 +1705,55 @@ def test_canonical_history_is_each_committed_copy_newest_first(workspace_pair):
     assert len(list(devkit_project.canonical_history(live, depth=1))) == 1
 
 
+def test_held_on_branches_names_the_branch_holding_each_live_edit():
+    """4ea2781c: a live-only line some pushed copy already holds is a merge awaited; an
+    ahead line is never "held" -- it is not the live file's edit."""
+    payload = {"folders": [{"path": "devkit"}, {"path": "photolab"}], "settings": {"x": 1}}
+    problems = [
+        "folder in the workspace but not in devkit: photolab",
+        "setting in the workspace but not in devkit: x",
+        "missing from the workspace: Some Task",
+    ]
+    pending = [
+        ("origin/elsewhere", {"folders": [{"path": "devkit"}]}),
+        ("origin/agent/register-photolab", {"folders": payload["folders"]}),
+        ("origin/older", {"folders": payload["folders"], "settings": {"x": 1}}),
+    ]
+    held = devkit_project.held_on_branches(problems, payload, pending)
+    assert held == {
+        problems[0]: "origin/agent/register-photolab",
+        problems[1]: "origin/older",
+    }
+    assert devkit_project.held_on_branches(problems, payload, []) == {}
+
+
+def test_pending_copies_are_the_pushed_commits_head_lacks(workspace_pair):
+    canonical, live = workspace_pair
+    assert list(devkit_project.pending_copies(live)) == [], "no repository, nothing pending"
+    _commit_canonical(canonical)
+    repo = canonical.parent
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    base = git("rev-parse", "HEAD")
+    for cwd, ref in (("pushed", "refs/remotes/origin/agent/reg"), ("local", "refs/heads/mine")):
+        _set_switches(canonical, **{"powershell.cwd": cwd})
+        git("commit", "-qam", cwd)
+        git("update-ref", ref, "HEAD")
+        git("reset", "-q", "--hard", base)
+    git("update-ref", "refs/remotes/origin/main", base)
+
+    seen = [(b, c["settings"]["powershell.cwd"]) for b, c in devkit_project.pending_copies(live)]
+    assert seen == [("origin/agent/reg", "pushed")], "local-only and merged commits are not"
+
+
 def test_canonical_history_reads_a_committed_copy_intact_outside_utf8_mode(
     workspace_pair, monkeypatch
 ):
