@@ -1384,6 +1384,66 @@ def canonical_history(live: Path, depth: int = HISTORY_DEPTH) -> Iterator[dict]:
             continue
 
 
+# How long a pushed branch's copy of `workspace.jsonc` may hold a live edit before the
+# refusal it explains counts as a failure again: a PR open past this is stuck, not pending.
+HELD_DAYS = 14
+
+
+def pending_copies(live: Path, depth: int = HISTORY_DEPTH) -> Iterator[tuple[str, dict]]:
+    """`(branch, copy)` for each pushed `workspace.jsonc` commit HEAD does not hold yet,
+    newest first, as the machine `live` belongs to renders it; nothing where git cannot say.
+
+    The forward half of `canonical_history`: `new-project.py` registers a project in the
+    live file at once and in `workspace.jsonc` on a branch of its own (#704 for photolab),
+    so until that PR merges the live file carries an edit HEAD's copy lacks -- one git
+    holds all the same, on a remote branch.
+    """
+    git = sweep.git_for(CANONICAL_WORKSPACE.parent)
+    log = git(
+        "log",
+        "--remotes",
+        "--not",
+        "HEAD",
+        f"--since={HELD_DAYS}.days",
+        f"-{depth}",
+        "--source",
+        "--format=%H%x09%S",
+        "--",
+        CANONICAL_WORKSPACE.name,
+    )
+    for row in (log.stdout or "").splitlines() if log.returncode == 0 else []:
+        sha, _, branch = row.partition("\t")
+        shown = git("show", f"{sha}:{CANONICAL_WORKSPACE.name}")
+        if shown.returncode != 0:
+            continue
+        try:
+            yield branch, devkit_jsonc.loads(machine_view(shown.stdout, live.parent)[0])
+        except ValueError:  # RegistryEditError included: a copy that would not render
+            continue
+
+
+def held_on_branches(
+    problems: list[str], payload: dict, pending: Iterable[tuple[str, dict]]
+) -> dict[str, str]:
+    """Each `live_only` line of `problems` that some `pending` copy already holds, mapped
+    to that copy's branch: the line is gone from the live file's drift against it.
+
+    A refusal over lines all held here protects nothing git lacks, so it is a merge
+    awaited, not a decision owed -- `workspace-status.workspace_sync_line` says which
+    branch and files no failure (4ea2781c). The publish still refuses: rendering now
+    would drop the edit from every window until the branch merges.
+    """
+    unheld = set(live_only(problems))
+    held: dict[str, str] = {}
+    for branch, copy in pending:
+        if not unheld:
+            break
+        for line in unheld - set(live_only(workspace_drift(payload, copy))):
+            held[line] = branch
+        unheld -= held.keys()
+    return held
+
+
 def stamp_path(workspace: Path) -> Path:
     """Where the render stamp for `workspace` lives.
 
