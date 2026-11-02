@@ -393,6 +393,10 @@ ACTIONS: dict[str, Action] = {
     "questrade-plan": Action(
         "scripts/questrade-task.py", "Questrade: Recommend Orders", ("plan",), projects=IBKR
     ),
+    # The local web UI, in the foreground until its terminal closes -- the MLflow view's
+    # shape. The script builds the frontend first when it has to, so the click is the
+    # whole setup. One server per port, which is why the task names the checkout.
+    "trader-ui": Action("scripts/ui-task.py", "IBKR: Open Trader UI", projects=IBKR),
     # --- scoped to social-scraper ---
     #
     # Signing in once in a visible browser, so the platform's persistent profile under
