@@ -498,6 +498,9 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # Born scoped, by capability: only ibkr_trader holds Questrade accounts and the
         # forward snapshots a plan reads. `scripts/questrade-task.py` is the contract.
         "questrade-plan",
+        # Born scoped, by capability: only ibkr_trader ships the web UI.
+        # `scripts/ui-task.py` is the contract.
+        "trader-ui",
     }
 
 
@@ -671,6 +674,38 @@ def test_the_questrade_plan_names_its_missing_script(tmp_path):
     """An ibkr_trader checkout that predates the script is a conformance failure by name."""
     with pytest.raises(ProjectError, match=r"scripts/questrade-task\.py"):
         plan_command(ACTIONS["questrade-plan"], tmp_path, ["--strategy", "core_satellite"])
+
+
+def test_the_trader_ui_is_ibkr_scoped_and_runs_the_script_bare(tmp_path):
+    """`ui-task.py` takes no subcommand: its port defaults inside the checkout's .env, so
+    the dispatch adds nothing between the interpreter and the script."""
+    action = ACTIONS["trader-ui"]
+    assert action.script == "scripts/ui-task.py"
+    assert action.args == ()
+    assert action.projects == IBKR
+    assert action.owner == devkit_project.PROJECT
+    assert "trader-ui" not in expected_actions("devkit")
+
+    checkout = tmp_path / "ibkr_trader"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "ui-task.py").write_text("", encoding="utf-8")
+    argv = plan_command(action, checkout, [])
+    assert argv[-2:] == ["python", "scripts/ui-task.py"]
+
+
+def test_the_trader_ui_task_names_its_checkout_rather_than_asking(canonical):
+    """The server binds one port, so a multi-pick would start the second checkout's UI
+    only after the first's terminal closed -- or onto a port already taken. A literal
+    `--project` asks nothing; the literal-scope test above holds it to the action."""
+    task = next(t for t in canonical["tasks"] if t["label"] == "IBKR: Open Trader UI")
+    args = [str(a) for a in task["args"]]
+    assert args[args.index("--project") + 1 :] == ["ibkr_trader", "trader-ui"]
+
+
+def test_the_trader_ui_names_its_missing_script(tmp_path):
+    """A checkout without the UI branch merged is a conformance failure by name."""
+    with pytest.raises(ProjectError, match=r"scripts/ui-task\.py"):
+        plan_command(ACTIONS["trader-ui"], tmp_path, [])
 
 
 def test_the_host_preview_pair_is_one_script_told_apart_by_a_flag():
