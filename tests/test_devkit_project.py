@@ -2373,11 +2373,20 @@ def test_no_two_tasks_share_an_icon_and_colour(canonical):
 # reader most often wants side by side. The `logs/` artifacts do not cover the gap —
 # `log-wrap.py` empties a task's log when it passes, so a successful run exists only in
 # its terminal. Terminals accumulate instead, and that is the accepted trade.
+#
+# `runOptions` is the one that destroyed work. VS Code's defaults are `instanceLimit: 1`
+# and `instancePolicy: "prompt"`, so clicking a task that is still running offers to
+# terminate it, and a second *Project: New from devkit* killed the first mid-push: an
+# empty GitHub repo and a scaffold with no `.git`. `panel: "new"` does not prevent it.
+# The limit lets a second run start beside the first, and `warn` means that past the
+# limit the new run is refused with a warning rather than the old one being killed.
 TASK_CONTRACT = {
     "type": "process",  # VS Code watches the process, so the exit-code icon is real
     "presentation.panel": "new",  # one run, one terminal; nothing is overwritten
     "presentation.close": False,  # the terminal stays open for review
     "presentation.reveal": "always",  # a task you clicked shows you what it did
+    "runOptions.instanceLimit": 4,  # a second click runs beside the first
+    "runOptions.instancePolicy": "warn",  # past the limit, refuse the new run, kill nothing
 }
 
 # Tasks that deliberately finish without a toast, for the same reason `UNLOGGED_TASKS`

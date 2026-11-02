@@ -145,7 +145,8 @@ never renders.
 
 - **The settings a task carries are a table in the tests, not a habit.** `TASK_CONTRACT`
   in `tests/test_devkit_project.py` holds `type`, `presentation.panel`,
-  `presentation.close` and `presentation.reveal` with what each is for, and
+  `presentation.close`, `presentation.reveal` and the two `runOptions` with what each is
+  for, and
   `CONTRACT_EXCEPTIONS` holds the two deviations and why. Copy the nearest neighbour and
   the test tells you what you missed. A run's terminal is the only place a *passing* run's
   output exists, because `log-wrap.py` empties the log when the task passes, so
@@ -337,10 +338,14 @@ never renders.
   - **the first row of the model and effort lists passes no flag at all** -- not the
     configured value, which is a different thing the moment the configuration changes
     between the click and the spawn.
-- **A task meant to run twice at once says so with `runOptions.instanceLimit`.** The
-  default is **1**, and re-running an active task offers to terminate it instead — which
-  made comparing two preview branches look impossible while `worktree.py` underneath had
-  been concurrency-safe all along. `presentation.panel` is *not* this setting: `new` gives
-  each run its own terminal and still refuses the second run. Raising it gives that task's
-  `log-wrap.py` artifact two writers, which is what `write_artifact`'s `since` argument
-  handles.
+- **A second click never cancels the first, on any task.** VS Code defaults
+  `runOptions.instanceLimit` to **1** and `instancePolicy` to `prompt`, so re-running an
+  active task offers to terminate it. A second *Project: New from devkit* killed the first
+  mid-push that way, leaving an empty GitHub repo and a scaffold with no `.git`. So every
+  task raises the limit, and sets `warn` so that past the limit the *new* run is refused
+  rather than the old one killed. `TASK_CONTRACT` holds both; an exception goes in
+  `CONTRACT_EXCEPTIONS` with its reason. `presentation.panel` is *not* this setting:
+  `new` gives each run its own terminal and still refuses the second run. Two runs mean
+  the task's `log-wrap.py` artifact has two writers, which is what `write_artifact`'s
+  `since` argument handles. A script that cannot tolerate a concurrent run of itself has
+  to guard that itself: the CLI never had this limit anyway.

@@ -170,6 +170,10 @@
 					"id": "beaker",
 					"color": "terminal.ansiGreen"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -201,6 +205,10 @@
 					"id": "checklist",
 					"color": "terminal.ansiYellow"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -223,6 +231,10 @@
 				"icon": {
 					"id": "sync",
 					"color": "terminal.ansiCyan"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "silent",
@@ -270,6 +282,10 @@
 					"id": "cloud-upload",
 					"color": "terminal.ansiRed"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -301,6 +317,10 @@
 				"icon": {
 					"id": "save",
 					"color": "terminal.ansiCyan"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -334,6 +354,10 @@
 				"icon": {
 					"id": "table",
 					"color": "terminal.ansiBlue"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -381,6 +405,10 @@
 				"icon": {
 					"id": "checklist",
 					"color": "terminal.ansiBrightGreen"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -432,6 +460,10 @@
 					"id": "git-merge",
 					"color": "terminal.ansiBrightCyan"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -466,6 +498,10 @@
 					"id": "vm-running",
 					"color": "terminal.ansiGreen"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -488,6 +524,10 @@
 				"icon": {
 					"id": "vm-outline",
 					"color": "terminal.ansiYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -512,6 +552,10 @@
 					"id": "debug-restart",
 					"color": "terminal.ansiBlue"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -534,6 +578,10 @@
 				"icon": {
 					"id": "tools",
 					"color": "terminal.ansiYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -558,6 +606,10 @@
 					"id": "debug-disconnect",
 					"color": "terminal.ansiRed"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -580,6 +632,10 @@
 				"icon": {
 					"id": "trash",
 					"color": "terminal.ansiRed"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -607,6 +663,10 @@
 				"icon": {
 					"id": "flame",
 					"color": "terminal.ansiBrightRed"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -655,6 +715,10 @@
 					"id": "checklist",
 					"color": "terminal.ansiBrightCyan"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -684,6 +748,10 @@
 					"id": "cloud-download",
 					"color": "terminal.ansiGreen"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -711,6 +779,10 @@
 				"icon": {
 					"id": "pulse",
 					"color": "terminal.ansiYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -783,7 +855,8 @@
 				// a second batch later in the day should not offer to kill the first. Ports
 				// are free-scanned per server, so instances cannot collide.
 				"runOptions": {
-					"instanceLimit": 4
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"problemMatcher": []
 			},
@@ -864,7 +937,8 @@
 				// what actually bounds the concurrency; this only stops VS Code adding a
 				// bound of one on top of it.
 				"runOptions": {
-					"instanceLimit": 4
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"problemMatcher": []
 			},
@@ -891,6 +965,10 @@
 				"icon": {
 					"id": "debug-stop",
 					"color": "terminal.ansiBrightRed"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -932,6 +1010,10 @@
 					"id": "file-media",
 					"color": "terminal.ansiBrightMagenta"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -959,6 +1041,10 @@
 				"icon": {
 					"id": "radio-tower",
 					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -991,6 +1077,10 @@
 					"id": "device-desktop",
 					"color": "terminal.ansiBrightBlue"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -1016,6 +1106,10 @@
 					"id": "cloud-download",
 					"color": "terminal.ansiBrightCyan"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -1039,6 +1133,10 @@
 				"icon": {
 					"id": "calendar",
 					"color": "terminal.ansiBrightYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1075,6 +1173,10 @@
 					"id": "graph-line",
 					"color": "terminal.ansiBrightBlue"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -1101,6 +1203,10 @@
 				"icon": {
 					"id": "graph",
 					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1129,6 +1235,10 @@
 					"id": "pie-chart",
 					"color": "terminal.ansiBrightGreen"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -1155,6 +1265,10 @@
 				"icon": {
 					"id": "beaker",
 					"color": "terminal.ansiBrightYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1183,6 +1297,10 @@
 					"id": "credit-card",
 					"color": "terminal.ansiBrightGreen"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -1208,6 +1326,10 @@
 				"icon": {
 					"id": "sign-in",
 					"color": "terminal.ansiBrightGreen"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1238,6 +1360,10 @@
 				"icon": {
 					"id": "database",
 					"color": "terminal.ansiBrightRed"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1278,6 +1404,14 @@
 					"id": "new-folder",
 					"color": "terminal.ansiCyan"
 				},
+				// Every task carries this pair; see TASK_CONTRACT in
+				// tests/test_devkit_project.py. This is the task that taught it: a second
+				// run offered to terminate the first, which was mid-push, and left an
+				// empty GitHub repo beside a scaffold with no `.git`.
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -1311,6 +1445,10 @@
 				"icon": {
 					"id": "tag",
 					"color": "terminal.ansiBrightYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1349,6 +1487,10 @@
 				"icon": {
 					"id": "package",
 					"color": "terminal.ansiBlue"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1405,6 +1547,10 @@
 				"icon": {
 					"id": "list-tree",
 					"color": "terminal.ansiCyan"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1484,7 +1630,8 @@
 				// unrelated pieces of work, and the second must not offer to terminate the
 				// first. Nothing here is leased, so the only bound is the machine's.
 				"runOptions": {
-					"instanceLimit": 4
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"problemMatcher": []
 			},
@@ -1511,6 +1658,10 @@
 				"icon": {
 					"id": "trash",
 					"color": "terminal.ansiBrightRed"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1561,6 +1712,10 @@
 				"icon": {
 					"id": "history",
 					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
