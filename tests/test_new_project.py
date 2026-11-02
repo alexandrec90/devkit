@@ -711,13 +711,17 @@ def test_registration_lands_in_the_canonical_copy_too(
     assert f"commit devkit's {canonical_copy.name}" in out
 
 
-def _devkit_checkout(path: Path) -> Path:
-    """A static checkout on `main` holding devkit's `workspace.jsonc`, committed. Its own
-    `core.hooksPath` points nowhere, since this machine installs a global branch policy as
-    a hooks path and a fixture repo must not be judged by it."""
+def _devkit_checkout(path: Path, *, ports: bool = False) -> Path:
+    """A static checkout on `main` holding devkit's `workspace.jsonc` (and, with `ports`,
+    its `ports.toml`), committed. Its own `core.hooksPath` points nowhere, since this
+    machine installs a global branch policy as a hooks path and a fixture repo must not be
+    judged by it."""
     path.mkdir(parents=True)
     canonical = path / "workspace.jsonc"
     canonical.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    if ports:
+        shipped = (REPO_ROOT / devkit_ports.REGISTRY_NAME).read_text(encoding="utf-8")
+        (path / devkit_ports.REGISTRY_NAME).write_text(shipped, encoding="utf-8", newline="\n")
     for args in (
         ("init", "--quiet", "-b", "main"),
         ("config", "core.hooksPath", str(path / ".nohooks")),
@@ -767,6 +771,100 @@ def test_registration_leaves_the_static_checkout_clean(tmp_path, capsys, monkeyp
     assert f"branch  {branch}" in out and "commit devkit's" not in out
 
 
+def test_the_registration_branch_carries_the_slot_too(tmp_path, capsys, monkeypatch):
+    """PR #701's gate: skinamp's registration branch put it in the `project` picker with no
+    `ports.toml` slot, and `test_every_checkout_either_holds_a_slot_or_says_why_not` failed
+    on it, because the slot was only ever a hint printed after the run."""
+    canonical = _devkit_checkout(tmp_path / "devkit", ports=True)
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+    new_project.next_steps(the_plan)
+
+    checkout = canonical.parent
+    assert _git_out(checkout, "status", "--porcelain", "--untracked-files=no") == ""
+    assert the_plan.name not in devkit_ports.load(checkout).slots
+    (tree,) = (checkout / ".claude" / "worktrees").iterdir()
+    slot = the_plan.context["slot"]
+    assert devkit_ports.load(tree).slot_of(the_plan.name) == slot
+    changed = _git_out(tree, "diff", "--name-only").splitlines()
+    assert sorted(changed) == ["ports.toml", "workspace.jsonc"]
+    intent = (tree / "logs" / "ship-intent.md").read_text(encoding="utf-8")
+    assert f"`{the_plan.name} = {slot}`" in intent
+    out = capsys.readouterr().out
+    assert f"ports.toml slot {slot}" in out
+    assert "Next: register the slot" not in out, "the branch already carries it"
+
+
+def test_a_registration_branch_without_a_registry_still_leaves_the_slot_hint(
+    tmp_path, capsys, monkeypatch
+):
+    canonical = _devkit_checkout(tmp_path / "devkit")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+    new_project.next_steps(the_plan)
+
+    assert not the_plan.slot_on_branch
+    out = capsys.readouterr().out
+    assert (
+        f"Next: register the slot in devkit's ports.toml [slots] table:\n  {the_plan.name}" in out
+    )
+
+
+SLOTS_TOML = """[services]
+db = 5432
+
+[slots]
+# a comment the edit keeps
+carameli = 0
+ibkr_trader = 1
+
+"""
+
+
+def test_register_slot_appends_to_the_slots_table():
+    edited = new_project.register_slot(SLOTS_TOML, "fresh-one", 2)
+    assert edited is not None
+    assert edited.endswith("carameli = 0\nibkr_trader = 1\nfresh-one = 2\n\n")
+    assert tomllib.loads(edited)["slots"] == {"carameli": 0, "ibkr_trader": 1, "fresh-one": 2}
+
+
+def test_register_slot_lands_inside_its_table_when_another_follows():
+    text = SLOTS_TOML + "[shared]\notel_http = 4318\n"
+    edited = new_project.register_slot(text, "fresh", 2)
+    assert edited is not None
+    data = tomllib.loads(edited)
+    assert data["slots"]["fresh"] == 2 and data["shared"] == {"otel_http": 4318}
+
+
+def test_register_slot_on_a_file_with_no_final_newline():
+    edited = new_project.register_slot(SLOTS_TOML.rstrip("\n"), "fresh", 2)
+    assert edited is not None and edited.endswith("ibkr_trader = 1\nfresh = 2\n")
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "slot", "why"),
+    [
+        (SLOTS_TOML, "carameli", 5, "the checkout already holds a slot"),
+        (SLOTS_TOML, "fresh", 1, "slot 1 is taken"),
+        (SLOTS_TOML, "fresh", 99, "past the slot ceiling"),
+        ("[services]\ndb = 5432\n", "fresh", 2, "no [slots] table"),
+        ("[slots\n", "fresh", 2, "not TOML"),
+    ],
+)
+def test_register_slot_refuses_rather_than_guess(text, name, slot, why):
+    assert new_project.register_slot(text, name, slot) is None, why
+
+
 def test_a_hand_edit_already_in_the_canonical_copy_is_never_carried_off(
     tmp_path, capsys, monkeypatch
 ):
@@ -792,7 +890,7 @@ def test_a_canonical_copy_on_a_task_branch_is_left_on_it(tmp_path):
         check=True,
     )
     canonical.write_text(canonical.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-    assert new_project.hand_off_registration("skinamp", canonical) == ""
+    assert new_project.hand_off_registration("skinamp", canonical) == new_project.Handoff()
     assert _git_out(canonical.parent, "status", "--porcelain") == "M workspace.jsonc"
 
 
