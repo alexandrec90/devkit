@@ -67,6 +67,9 @@
 		},
 		{
 			"path": "skinamp"
+		},
+		{
+			"path": "photolab"
 		}
 	],
 	"extensions": {
@@ -1598,7 +1601,8 @@
 								"roguelike",
 								"social-scraper",
 								"productivity-tracker",
-								"skinamp"
+								"skinamp",
+								"photolab"
 							]
 						}
 					]
@@ -1639,7 +1643,8 @@
 								"roguelike",
 								"social-scraper",
 								"productivity-tracker",
-								"skinamp"
+								"skinamp",
+								"photolab"
 							]
 						}
 					]
@@ -1773,7 +1778,8 @@
 					"roguelike",
 					"social-scraper",
 					"productivity-tracker",
-					"skinamp"
+					"skinamp",
+					"photolab"
 				],
 				"default": "carameli"
 			},
@@ -2461,7 +2467,8 @@
 					"roguelike",
 					"social-scraper",
 					"productivity-tracker",
-					"skinamp"
+					"skinamp",
+					"photolab"
 				],
 				"default": "carameli"
 			},

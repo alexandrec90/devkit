@@ -97,3 +97,4 @@ productivity-tracker = 3
 # in the workspace without it, which reddened the PR carrying that registration. The
 # generator's registration branch now carries the slot too (`register_slot`).
 skinamp = 5
+photolab = 7
