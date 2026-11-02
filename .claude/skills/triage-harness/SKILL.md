@@ -165,7 +165,8 @@ cannot produce it again — not when this one tree, box or run is repaired. A mi
 the durable fix was in what provisions every tree (`scripts/worktree_env.py`, the git
 `post-checkout` hook). Ask of each group *what should have prevented this, and why did
 it not* — then fix that, and test it. A group marked `RECURRED` in the triage log was
-retired before by a fix that did not hold: its last note is what not to repeat. One
+retired before by a fix that did not hold: the `tried` lines under it are every such fix,
+with its refs and PR, and none of them is the one to repeat. One
 marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, so the
 pass sends no session at it, and the pass retires the rows filed while it waited against
 that PR once it merges; only a row filed after the merge reads `RECURRED`. One marked
