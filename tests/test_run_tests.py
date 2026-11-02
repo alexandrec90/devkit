@@ -487,6 +487,38 @@ def test_every_covered_by_entry_in_devkit_names_its_module():
     assert all((REPO_ROOT / module).is_file() for module in covered.values())
 
 
+def test_a_data_file_names_the_tests_that_read_it(tmp_path, monkeypatch):
+    """817b82a0: a change to `ports.toml` printed "no test named for ports.toml", so
+    `test_devkit_ports.py`, which gates it, ran only by hand."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_reader.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        run_tests,
+        "READ_BY",
+        {"data.toml": ("tests/test_reader.py",), "gone.toml": ("tests/test_gone.py",)},
+    )
+    assert run_tests.tests_for(["data.toml", "gone.toml", "other.toml"], tmp_path) == (
+        ["tests/test_reader.py"],
+        ["gone.toml", "other.toml"],
+    )
+
+
+def test_ports_and_the_workspace_file_name_the_test_that_gates_them():
+    gate = "tests/test_devkit_ports.py"
+    for path in ("ports.toml", "workspace.jsonc"):
+        tests, unnamed = run_tests.tests_for([path], REPO_ROOT)
+        assert gate in tests and not unnamed, path
+
+
+def test_every_read_by_entry_names_a_tracked_file_and_existing_tests():
+    for path, readers in run_tests.READ_BY.items():
+        assert (REPO_ROOT / path).is_file(), f"READ_BY lists {path}, which is gone"
+        assert readers, f"READ_BY lists {path} with no test"
+        for reader in readers:
+            assert reader.startswith("tests/test_") and (REPO_ROOT / reader).is_file(), reader
+
+
 def test_a_template_of_a_test_is_not_run_as_one(tmp_path):
     """`templates/core/tests/test_smoke.py.tmpl` renders into a test; unrendered it is
     not one, and naming it would hand pytest a file it cannot collect."""

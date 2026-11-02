@@ -15,7 +15,8 @@ into every consuming project and must stay separately runnable there.
 changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.py`
 (and, for anything under `templates/`, to `GENERATED_TREE_TESTS` too; a `.tmpl` also
 to the tests that spell its name; a script the test contract's `COVERED_BY` lists, to
-the module it names), plus `CONTRACT_TESTS`, which read every module and
+the module it names; a data file `READ_BY` lists, to the tests that read it), plus
+`CONTRACT_TESTS`, which read every module and
 so are named by none of them.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
@@ -59,6 +60,25 @@ TEMPLATE_SUFFIX = ".tmpl"
 # runner needs no test tree on its path. Without it a change to `scripts/fix_send.py`
 # named no test and ran only the contract tests (8e2abca7).
 COVERED_BY_SOURCE = "tests/test_test_contract.py"
+
+# A data file the suite holds to invariants, -> the tests that read the live file. No
+# name leads there: `ports.toml` is read through `devkit_ports.load(REPO_ROOT)` and
+# `workspace.jsonc` through `devkit_project.canonical_tasks()`, so a change to either
+# alone named no test and the one that gates it ran only by hand (817b82a0). Listed are
+# the tests whose assertions are about the file's content, not every test that loads it
+# as a fixture; `tests/test_run_tests.py` fails an entry whose file or test is gone.
+READ_BY: dict[str, tuple[str, ...]] = {
+    "ports.toml": ("tests/test_devkit_ports.py", "tests/test_worktree_port.py"),
+    "workspace.jsonc": (
+        "tests/test_devkit_ports.py",
+        "tests/test_collectors_config.py",
+        "tests/test_agent_options.py",
+        "tests/test_workspace_task_index.py",
+        "tests/test_devkit_project.py",
+    ),
+    ".pre-commit-config.yaml": ("tests/test_precommit_hooks.py",),
+    ".pre-commit-hooks.yaml": ("tests/test_precommit_hooks.py",),
+}
 
 # The checks over a generated project as a whole -- format-clean, for one -- which every
 # change under `templates/` names in addition to its own tests.
@@ -238,8 +258,9 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
     `tests/test_fix_pass.py`), when that file exists; a `.py.tmpl` names that and
     `test_<stem>_template.py`, and anything under `templates/` names
     `GENERATED_TREE_TESTS`. A `.tmpl` also names every test
-    whose source spells its file name, since that is how a test reads one, and a script
-    in `COVERED_BY_SOURCE`'s `COVERED_BY` names the module it gives. Everything
+    whose source spells its file name, since that is how a test reads one, a script
+    in `COVERED_BY_SOURCE`'s `COVERED_BY` names the module it gives, and a data file in
+    `READ_BY` names the tests that read it. Everything
     else -- a document, a workflow, a module with no test of its own -- is reported so
     the caller can see what the run did not cover.
     """
@@ -248,7 +269,11 @@ def tests_for(paths: list[str], root: Path = REPO_ROOT) -> tuple[list[str], list
     unnamed: list[str] = []
     for path in paths:
         posix = path.replace("\\", "/")
-        named = [*_named_tests(posix), covered.get(posix.rsplit("/", 1)[-1], "")]
+        named = [
+            *_named_tests(posix),
+            covered.get(posix.rsplit("/", 1)[-1], ""),
+            *READ_BY.get(posix, ()),
+        ]
         found = [name for name in dict.fromkeys(named) if name and (root / name).is_file()]
         found += [name for name in _reading_tests(posix, root) if name not in found]
         tests.extend(name for name in found if name not in tests)
