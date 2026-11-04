@@ -666,7 +666,8 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
   its patched version. When the cause is a sibling path dependency the Dependabot runner
   cannot fetch, the prompt says so: the fix is a hand bump or a fetchable source, never
   a Dependabot retry. A project whose only red is that unfetchable sibling, with every
-  alert answered, is a `dependabot` line in the record and no session.
+  alert answered, is a `dependabot` line in the record and no session; so is a job whose
+  entry has left the default branch's `dependabot.yml`, which never runs again.
 - **A red PR that is behind its base** is updated, not fixed: `gh pr update-branch`,
   no session, and the pass reads the new run next time. Its red may already be fixed
   on the base, and a session sent at it can only merge the base in. A PR the update
