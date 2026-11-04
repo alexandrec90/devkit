@@ -156,6 +156,11 @@ SHELL_OWN = frozenset(
     | {"cut", "tr", "tee", "xargs", "env", "mkdir", "rm", "cp", "mv", "dirname"}
     | {"basename", "touch", "date", "which", "git"}
 )
+# What a session asks about the hardware. Its absence is the answer, and no tree is owed
+# one: a photolab session surveying the machine for a GPU, `nvidia-smi` beside `node
+# --version` in one line, was filed as a toolchain gap (1ae862a1). Listed by name, since
+# a survey alone proves nothing: a missing `uv` in that line would be a real gap.
+HOST_PROBES = frozenset({"nvidia-smi", "lspci", "lscpu", "lsusb", "free", "vmstat", "wmic"})
 WAIT_TOOLS = frozenset({"Monitor"})
 
 # An odd count of any of these before a match on its line means the match is quoted.
@@ -735,7 +740,7 @@ def _result_class(text: str, command: str = "") -> tuple[str, str]:
             ):
                 continue
             missing = _missing_command(text, found)
-            if missing in SHELL_OWN:
+            if missing in SHELL_OWN or missing in HOST_PROBES:
                 continue
             if missing:
                 return cls, f"{missing}: command not found"
@@ -1243,7 +1248,7 @@ def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tupl
     found = [
         row
         for row in outside_the_tree(detect(events, targeted), cwd)
-        if not _environment_excused(row, cwd, roots)
+        if not _environment_excused(row, cwd, roots, workspace_root)
     ]
     if not asks_for_targeted_runs(cwd, workspace_root, project):
         found = [row for row in found if row[0] != "full-suite"]
@@ -1253,12 +1258,19 @@ def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tupl
     return found
 
 
-def _environment_excused(row: tuple[str, str, Event], cwd: str, roots: list[Path]) -> bool:
+def _environment_excused(
+    row: tuple[str, str, Event], cwd: str, roots: list[Path], workspace_root: Path
+) -> bool:
     """An `environment` row the tree explains: the machine's interpreter run where the tree
-    has its own, or a package only the session's own program wanted."""
+    has its own, or a package only the session's own program wanted. Or one with no tree
+    to explain it: a module missing from a session at the workspace root, which no
+    provisioner serves (308378fa, a scratch scan wanting `boto3`, which `imported_by_tree`
+    then found in a project under that root)."""
     if row[0] != "environment":
         return False
     if has_own_venv(cwd) and BARE_INTERPRETER.search(row[2].command):
+        return True
+    if MISSING_MODULE.search(row[1]) and cwd and Path(cwd).resolve() == workspace_root.resolve():
         return True
     return reached_past_the_tree(row, roots)
 

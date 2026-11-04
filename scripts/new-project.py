@@ -32,13 +32,16 @@ Steps, in order:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -143,10 +146,10 @@ def latest_devkit_tag(root: Path = DEVKIT_ROOT) -> str | None:
 def harness_files_matching_ref(ref: str, root: Path = DEVKIT_ROOT) -> list[str] | None:
     """MANIFEST paths whose working-tree bytes differ from those at `ref`.
 
-    This is the exact condition the generated project's `devkit-drift` job checks: it
-    vendors from the working tree but drift-checks against the pinned tag. If they
-    disagree, that job fails on the very first PR — so warn at generation time, when
-    the fix (tag devkit, or pass --devkit-ref) is still cheap.
+    This is the exact condition the generated project's `devkit-drift` job checks: a
+    project drift-checks against the tag it pins, so if this tree differs from that tag
+    a project vendoring it fails on its first commit. `harness_source` vendors the tag
+    instead wherever that is so; a rehearsal keeps this tree and is warned.
 
     None means the comparison could not be made (unknown ref, no git).
     """
@@ -519,6 +522,52 @@ def run(cmd: list[str], cwd: Path, dry_run: bool, check: bool = True) -> int:
     return result.returncode
 
 
+def lands_in_the_workspace(plan: Plan) -> bool:
+    """A project being made to be kept, not a rehearsal: beside the live workspace file.
+
+    The generated-project gate and every test render under a temporary parent, and there
+    vendoring this tree is the point: it is the change under test."""
+    return plan.root.parent == devkit_project.DEFAULT_WORKSPACE.parent.resolve()
+
+
+@contextlib.contextmanager
+def harness_source(plan: Plan, dry_run: bool) -> Iterator[Path]:
+    """The devkit the project vendors from: a clone at its pin wherever this tree differs.
+
+    Vendoring this tree and pinning a tag agree only until a MANIFEST file changes past
+    that tag. From then on every new project died in `git_init`, its own `devkit-drift`
+    comparing what was just vendored with the release it pins: "1 vendored file(s) differ
+    from devkit", and no registration and no `gh repo create` behind it (ebe2fa33, homelab).
+    A project that arrives holding the release it pins is green whatever `main` is doing.
+
+    Hooks are off for the clone: it is read and thrown away, and the machine's
+    `post-checkout` would provision it first. A clone that fails leaves this tree as the
+    source, which is `_warn_if_pin_is_stale`'s old warning and no worse than before."""
+    ref = str(plan.context["devkit_ref"])
+    behind = not dry_run and lands_in_the_workspace(plan)
+    if not behind or not harness_files_matching_ref(ref, DEVKIT_ROOT):
+        yield DEVKIT_ROOT
+        return
+    with tempfile.TemporaryDirectory(prefix="devkit-pin-", ignore_cleanup_errors=True) as held:
+        clone = Path(held) / "devkit"
+        command = ["git", "-c", "core.hooksPath=/dev/null", "clone", "--quiet", "--shared"]
+        done = subprocess.run(
+            [*command, "--branch", ref, str(DEVKIT_ROOT), str(clone)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if done.returncode != 0:
+            print(f"  WARNING could not clone {ref}: vendoring this tree instead")
+            print(f"          {done.stderr.strip()[-200:]}")
+            yield DEVKIT_ROOT
+            return
+        print(f"  vendor  from {ref}, which this project pins")
+        yield clone
+
+
 def vendor_harness(plan: Plan, dry_run: bool) -> None:
     """Copy devkit's MANIFEST into the new repo and stamp DEVKIT_VERSION.
 
@@ -526,32 +575,33 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
     reimplementing the copy — so the generator can never disagree with the tool that
     drift-checks the result.
     """
-    for name in ("sync-devkit.py", "devkit_manifest.py"):  # the tool, and the list it reads
-        if not dry_run:
-            (plan.root / "scripts").mkdir(parents=True, exist_ok=True)
-            shutil.copy2(DEVKIT_ROOT / "scripts" / name, plan.root / "scripts" / name)
-        else:
-            print(f"  write   scripts/{name}    (bootstrap copy)")
-    run(
-        [
-            sys.executable,
-            "scripts/sync-devkit.py",
-            "--pull",
-            "--src",
-            str(DEVKIT_ROOT),
-            # Generating is not adopting a release, so `--pull`'s release guards do
-            # not apply here. They exist to stop an *existing* consumer vendoring
-            # from an unreleased revision it can never pin. This project has no pins
-            # yet: the generator renders both from `latest_devkit_tag() or
-            # FALLBACK_DEVKIT_REF`, which is the tagged ref, not this checkout's HEAD.
-            # Refusing here would mean devkit could not generate a project at all
-            # while it had uncommitted work — which is most of the time.
-            "--allow-dirty",
-            "--allow-untagged",
-        ],
-        plan.root,
-        dry_run,
-    )
+    with harness_source(plan, dry_run) as source:
+        for name in ("sync-devkit.py", "devkit_manifest.py"):  # the tool, and the list it reads
+            if not dry_run:
+                (plan.root / "scripts").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source / "scripts" / name, plan.root / "scripts" / name)
+            else:
+                print(f"  write   scripts/{name}    (bootstrap copy)")
+        run(
+            [
+                sys.executable,
+                "scripts/sync-devkit.py",
+                "--pull",
+                "--src",
+                str(source),
+                # Generating is not adopting a release, so `--pull`'s release guards do
+                # not apply here. They exist to stop an *existing* consumer vendoring
+                # from an unreleased revision it can never pin. This project has no pins
+                # yet: the generator renders both from `latest_devkit_tag() or
+                # FALLBACK_DEVKIT_REF`, which is the tagged ref, not this checkout's HEAD.
+                # Refusing here would mean devkit could not generate a project at all
+                # while it had uncommitted work — which is most of the time.
+                "--allow-dirty",
+                "--allow-untagged",
+            ],
+            plan.root,
+            dry_run,
+        )
     # Codex reads project instructions from CLAUDE.md through its configured fallback,
     # but repository skills and hooks still use Codex-specific paths. Runs after the
     # pull because the compatibility script arrives with the vendored harness.
@@ -573,7 +623,8 @@ def announce(plan: Plan, dry_run: bool) -> None:
     print(f"  remote    {'yes' if plan.remote else 'no'}")
     print(f"  devkit    {ref} (pinned by the generated PR gate)")
     print()
-    _warn_if_pin_is_stale(ref)
+    if not lands_in_the_workspace(plan):  # one that does vendors the pin (`harness_source`)
+        _warn_if_pin_is_stale(ref)
     _warn_if_pre_commit_channel_is_unpublished(ref)
     missing = missing_commit_tooling()
     if missing and not dry_run:

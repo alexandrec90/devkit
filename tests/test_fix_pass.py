@@ -1362,6 +1362,19 @@ def test_release_and_plan_falls_back_to_the_harness_alone(monkeypatch, tmp_path)
     assert journal.crashed, "the plan's crash is the journal's"
 
 
+def test_a_plan_left_for_the_deadline_is_not_said_to_have_raised(monkeypatch, tmp_path):
+    """The 23:00 pass of 2026-11-03 read "the plan step raised" in its record, beside a
+    `left to the next pass` line naming the plan and no crash anywhere."""
+    monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda devkit_dir: "v9")
+    monkeypatch.setattr(fix_pass.fix_release, "cut_release", lambda *a: "")
+    monkeypatch.setattr(fix_pass.fix_release, "pending_adoptions", lambda *a: [])
+    journal = fix_pass.pass_journal(tmp_path, time.monotonic() - 1)
+    ctx = _ctx(tmp_path, fix_cycle.DISPATCH)
+    _, planned = fix_pass.release_and_plan(Path("ws"), ctx, journal, [], True, None)
+    assert planned[0].reasons == (f"{fix_cycle.PLAN_LATE}; only the devkit session goes",)
+    assert not journal.crashed
+
+
 def test_every_step_says_when_it_starts(world, capsys):
     """The 01:00 pass was stopped with nothing in its output past the launches, and the
     rescue had to rebuild the timeline from file times. Each step is now a flushed line."""

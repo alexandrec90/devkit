@@ -153,6 +153,15 @@ def default_branch(root: Path) -> str:
 FETCH_ATTEMPTS = 2
 FETCH_PAUSE_SECONDS = 5.0
 _SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
+# How self-update says a fetch failed, and how many fires running it must before it is
+# filed. The fetch is the one step that needs the network, and each of the four
+# `pass-stale` rows it has filed (7599a153, a 2026-10-02 TLS reset, 6d06634e) healed at a
+# later fire on its own, each after sending a session at nothing. The pass still runs and
+# the note is still in its record; the next fire is the fix, and only one that is not
+# says anything about the machine.
+FETCH_FAILED = "could not fetch"
+FETCH_STREAK = "fetch_failures"
+FETCH_FIRES = 2
 
 
 def fetch(root: Path, base: str) -> str:
@@ -162,7 +171,12 @@ def fetch(root: Path, base: str) -> str:
     holds `refs/remotes/origin/<base>`'s lock: at 06:00 on 2026-09-27, with #430 merged a
     minute before and a fixer mid-verification, the watchdog's fetch failed and was filed
     as a stale pass with no reason on record (7599a153). The reason is git's own last
-    line, shas masked, so one cause is one ledger detail."""
+    line, shas masked, so one cause is one ledger detail.
+
+    A fetch that timed out is not retried: that second try is for a lock released in
+    seconds, and a bound of minutes spent twice comes straight out of the pass's window.
+    The 23:00 fire of 2026-11-03 began its pass nine minutes late, and the deadline then
+    cut it off mid-ship."""
     said = ""
     for attempt in range(FETCH_ATTEMPTS):
         if attempt:
@@ -172,7 +186,19 @@ def fetch(root: Path, base: str) -> str:
             return ""
         lines = (done.stderr or "").strip().splitlines()
         said = _SHA.sub("<sha>", lines[-1].strip()) if lines else f"git exited {done.returncode}"
+        if done.returncode == TIMED_OUT:
+            break
     return said
+
+
+def worth_filing(state: dict, ok: bool, what: str) -> bool:
+    """Whether this fire's self-update result is a finding: any failure but a fetch, and
+    a fetch that has now failed `FETCH_FIRES` fires running (`state` counts them)."""
+    if ok or not what.startswith(FETCH_FAILED):
+        state.pop(FETCH_STREAK, None)
+        return not ok
+    state[FETCH_STREAK] = state.get(FETCH_STREAK, 0) + 1
+    return state[FETCH_STREAK] >= FETCH_FIRES
 
 
 def self_update(root: Path) -> tuple[bool, str]:
@@ -190,7 +216,7 @@ def self_update(root: Path) -> tuple[bool, str]:
     if git(root, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         return False, "the checkout the pass runs from has uncommitted changes"
     if failed := fetch(root, base):
-        return False, f"could not fetch origin/{base} -- {failed}"
+        return False, f"{FETCH_FAILED} origin/{base} -- {failed}"
     before = git(root, "rev-parse", "HEAD").stdout.strip()
     if git(root, "merge", "--ff-only", "--quiet", f"origin/{base}").returncode != 0:
         return False, f"{base} has diverged from origin/{base}"
@@ -505,7 +531,7 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
     if mode != "off":
         ok, what = self_update(REPO_ROOT)
         notes.append(f"watchdog: self-update -- {what}")
-        if not ok:
+        if worth_filing(state, ok, what):
             file_once(
                 state, signature("pass-stale", what, head), "pass-stale", what, str(REPO_ROOT), now
             )

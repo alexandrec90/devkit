@@ -1077,6 +1077,12 @@ def ship_one(
         return error
 
     if error := _retrying(open_pr):
+        # The PR's calls go through `sweep`, whose deadline answers with a result where
+        # `run_quiet` raises. Out of time is held, never refused or failed: #710's ship
+        # reached this step past the pass's deadline, and its branch was filed as a
+        # failed ship for a devkit session when the next pass opened the PR unaided.
+        if sweep.past_until():
+            raise OutOfTime(f"pr: {error}", ended=False)
         return _failed(intent, "pr", error, when)
     head = runner(["git", "rev-parse", "HEAD"], cwd=tree)
     sha = (head.stdout or "").strip()
