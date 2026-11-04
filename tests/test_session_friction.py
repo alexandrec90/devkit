@@ -966,7 +966,8 @@ def test_a_row_todays_detectors_no_longer_file_is_outdated(tmp_path, monkeypatch
         [user("go"), call("sleep 300", "1"), call("python -m x", "2"), result(missing, "2")],
         str(tmp_path / "ws" / "devkit"),
     )
-    rows = _rows(sf.session_findings(session, st.read_new(session, 0), str(tmp_path), tmp_path))
+    tree = str(tmp_path / "ws" / "devkit")
+    rows = _rows(sf.session_findings(session, st.read_new(session, 0), tree, tmp_path))
     assert sorted(r.detail.split(":")[0] for r in rows) == ["environment", "poll"]
     assert sf.outdated(rows) == [], "both still fire"
     # Standing in for a detector a fix removed, as #410 removed `isolation-guard`.
@@ -1431,6 +1432,31 @@ def test_runs_suite_bare_is_a_tree_whose_own_runner_has_no_targeted_default(tmp_
     assert sf.runs_suite_bare(whole)
     assert not sf.runs_suite_bare(none), "nothing to run bare"
     assert not sf.runs_suite_bare(REPO_ROOT), "devkit's own runner is targeted"
+
+
+def test_a_hardware_probe_that_finds_no_tool_is_an_answer_not_a_gap():
+    """1ae862a1: photolab's survey for a GPU. A real tool in the same shape stays filed."""
+    survey = "docker ps | head -5; nvidia-smi --query-gpu=name --format=csv 2>&1 | head -3"
+    said = "/usr/bin/bash: line 1: nvidia-smi: command not found"
+    assert sf._result_class(said, survey) == ("", "")
+    assert sf._result_class(said.replace("nvidia-smi", "uv"), survey) == (
+        "environment",
+        "uv: command not found",
+    )
+
+
+def test_a_module_missing_at_the_workspace_root_is_owed_by_no_tree(tmp_path):
+    """308378fa: a scratch scan at `vs-code/` wanted `boto3`, a project under that root
+    imports it, and so it read as this tree's own dependency. A real tree stays filed."""
+    ran = 'python "$TEMP/lake_scan.py"'
+    said = "ModuleNotFoundError: No module named 'boto3'"
+    rows = [call(ran, "1"), result(said, "1")]
+    events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+    tree = tmp_path / "data-lake"
+    tree.mkdir()
+    (tree / "lake.py").write_text("import boto3\n", encoding="utf-8")
+    assert [row[0] for row in sf.judged(events, str(tree), tmp_path)] == ["environment"]
+    assert sf.judged(events, str(tmp_path), tmp_path) == []
 
 
 def test_the_machines_python_in_a_tree_with_its_own_venv_is_no_missing_environment(tmp_path):

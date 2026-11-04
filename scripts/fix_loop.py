@@ -477,6 +477,8 @@ JOB_KIND = "scheduled-job"
 JOB_HISTORY = "the scheduler is reporting history"
 # `schedule_health.problems`' line for a run that exited non-zero.
 JOB_FAILED_RUN = ": last run failed ("
+# The scheduled job this very pass runs under (`install-fix-pass-task.py`'s `TASK_NAME`).
+OWN_TASK = "devkit-fix-pass"
 # The run's time and count, kept out of the detail: a group must survive its recurrences.
 _JOB_WHEN = re.compile(r" (?:at|since) \d{4}-\d\d-\d\d \d\d:\d\d| \(\d+ intervals ago\)")
 
@@ -549,12 +551,15 @@ def _filed_elsewhere(
     git,
 ) -> bool:
     """Whether `line` is not this pass's to file: history the scheduler is only
-    repeating, a failed run its `log-wrap.py --always` wrapper filed already, or a run
-    whose group a fix has since retired (`_resolved_since`, `_ran_before_fix`)."""
+    repeating, a fire this very pass made good (`_covered_by_this_pass`), a failed run
+    its `log-wrap.py --always` wrapper filed already, or a run whose group a fix has
+    since retired (`_resolved_since`, `_ran_before_fix`)."""
     if JOB_HISTORY in line:
         return True
     if job is None:
         return False
+    if _covered_by_this_pass(ctx, job):
+        return True
     if JOB_FAILED_RUN in line and "log-wrap.py" in job.command and "--always" in job.command:
         return True
     ran = _run_began(ctx, finding, job)
@@ -565,6 +570,23 @@ def _filed_elsewhere(
     return _resolved_since(finding, items, ran) or _ran_before_fix(
         code, fix_findings.signature(finding), items, ran, git
     )
+
+
+def _covered_by_this_pass(ctx: Context, job: schedule_health.Job) -> bool:
+    """`job` is the pass's own task, refused at a fire this pass began at or after, inside
+    that fire's half hour: the half hour got its pass, and the pass is the one reading.
+
+    c4192c14 came back three times this way. On 2026-11-03 the pass that began at 22:00:58
+    read its own task as "a run was still going at 22:00" sixteen minutes in, and its
+    record, written only when it ends, as an earlier run's: a defect report about itself.
+    A pass begun *before* the refused fire did outlive it, and is still filed; a run
+    stopped at the bound is the watchdog's `pass-hung`."""
+    if job.name != OWN_TASK or job.last_result not in schedule_health.OVERLAPPING:
+        return False
+    if job.last_run is None or job.interval is None:
+        return False
+    began = ctx.now.astimezone().replace(tzinfo=None)  # the scheduler speaks local time
+    return _dt.timedelta(0) <= began - job.last_run < job.interval
 
 
 def _run_began(ctx: Context, finding: Finding, job: schedule_health.Job) -> _dt.datetime | None:

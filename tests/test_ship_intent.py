@@ -1241,6 +1241,34 @@ def test_a_pr_that_could_not_be_opened_is_a_failure_to_retry(tmp_path, monkeypat
     assert out.stage == ship_intent.FAILED and "no auth" in out.detail
 
 
+def test_a_pr_the_pass_s_deadline_left_unopened_is_held_not_failed(tmp_path, monkeypatch):
+    """19834a2e: #710 reached its PR past the deadline, `sweep` answered "not started",
+    and the branch was filed as a failed ship the next pass cleared unaided."""
+    one = intent(tmp_path)
+    said = "not started: past the caller's deadline"
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("", False, said))
+    with ship_intent.sweep.until(time.monotonic() - 1):
+        with pytest.raises(ship_intent.OutOfTime) as stopped:
+            ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    assert not stopped.value.ended and said in str(stopped.value)
+
+
+def test_past_until_reads_the_deadline_in_force():
+    assert not ship_intent.sweep.past_until(), "no deadline, nothing past it"
+    with ship_intent.sweep.until(time.monotonic() - 1):
+        assert ship_intent.sweep.past_until()
+    with ship_intent.sweep.until(time.monotonic() + 600):
+        assert not ship_intent.sweep.past_until()
+
+
+def test_a_pr_that_failed_in_time_is_not_taken_for_the_deadline(tmp_path, monkeypatch):
+    one = intent(tmp_path)
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("", False, "no auth"))
+    with ship_intent.sweep.until(time.monotonic() + 600):
+        out = ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED
+
+
 def test_an_intent_already_shipped_with_a_clean_tree_is_not_shipped_twice(tmp_path, monkeypatch):
     one = intent(tmp_path)
     monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))

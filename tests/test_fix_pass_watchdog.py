@@ -261,6 +261,36 @@ def test_a_checkout_that_cannot_be_kept_current_is_filed(watched, monkeypatch):
     assert found.detail == "pass-stale: the checkout is on agent/x, not main"
 
 
+FETCH_DOWN = "could not fetch origin/main -- timed out after 120s; ended it and its children"
+
+
+def test_worth_filing_counts_only_fetches_and_only_in_a_row():
+    state: dict = {}
+    assert not watchdog.worth_filing(state, False, FETCH_DOWN)
+    assert not watchdog.worth_filing(state, True, "current")
+    assert not watchdog.worth_filing(state, False, FETCH_DOWN), "the count restarted"
+    assert watchdog.worth_filing(state, False, FETCH_DOWN)
+    assert watchdog.worth_filing({}, False, "on agent/x, not main"), "no network in that one"
+
+
+def test_a_fetch_that_fails_on_one_fire_alone_files_nothing(watched, monkeypatch):
+    """6d06634e: the same fetch went through at the next fire, as each of its forebears
+    had. The note is in the pass's record; the ledger waits for a fire that repeats it."""
+    outcomes = iter([(False, FETCH_DOWN), (True, "current"), (False, FETCH_DOWN)])
+    monkeypatch.setattr(watchdog, "self_update", lambda root: next(outcomes))
+    for _ in range(3):
+        assert watchdog.watch(watched["argv"], NOW) == 0
+    assert findings(watched["devkit"]) == [], "a success between two failures restarts the count"
+
+
+def test_a_fetch_that_fails_two_fires_running_is_filed(watched, monkeypatch):
+    monkeypatch.setattr(watchdog, "self_update", lambda root: (False, FETCH_DOWN))
+    assert watchdog.watch(watched["argv"], NOW) == 0
+    assert watchdog.watch(watched["argv"], NOW) == 0
+    [found] = findings(watched["devkit"])
+    assert found.detail == f"pass-stale: {FETCH_DOWN}"
+
+
 # --- repair -------------------------------------------------------------------------------
 
 
@@ -464,6 +494,24 @@ def test_a_fetch_that_fails_once_is_tried_again(checkout, monkeypatch):
     monkeypatch.setattr(watchdog, "git", flaky)
     ok, what = watchdog.self_update(checkout)
     assert ok and what.startswith("updated") and len(fetches) == 2
+
+
+def test_a_fetch_that_timed_out_is_not_tried_again(checkout, monkeypatch):
+    """The retry is for a lock released in seconds. A second two-minute wait came out of
+    the pass's window on the evening 6d06634e was filed, and the deadline cut it short."""
+    monkeypatch.setattr(watchdog, "FETCH_PAUSE_SECONDS", 0)
+    real, fetches = watchdog.git, []
+
+    def hung(root, *args):
+        if args[0] == "fetch":
+            fetches.append(args)
+            said = "timed out after 120s; ended it and its children"
+            return subprocess.CompletedProcess(args, watchdog.TIMED_OUT, "", said)
+        return real(root, *args)
+
+    monkeypatch.setattr(watchdog, "git", hung)
+    assert watchdog.self_update(checkout)[1] == FETCH_DOWN
+    assert len(fetches) == 1
 
 
 def test_a_fetch_that_keeps_failing_says_why_without_its_shas(checkout, monkeypatch):

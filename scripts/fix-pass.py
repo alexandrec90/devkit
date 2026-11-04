@@ -540,7 +540,7 @@ def release_and_plan(
     backlog: fix_plan.Failure | None,
 ) -> tuple[str, tuple]:
     """Step 4's release and plan, each isolated: `(release line, decide's result)`, the
-    plan falling back to the harness alone when it raises."""
+    plan falling back to the harness alone when it raises or is left for the deadline."""
     step = journal.step
     newest = step("newest-release", gate_evidence.newest_release, ctx.devkit_dir, default="")
     dispatching = ctx.mode == fix_cycle.DISPATCH
@@ -559,9 +559,11 @@ def release_and_plan(
     )
     prefixes = fix_release.adoption_prefixes()
     fallback = fix_cycle.only_the_harness(backlog)
-    return release, step(
-        "plan", decide, failures, green, newest, adopting, prefixes, default=fallback
-    )
+    planned = step("plan", decide, failures, green, newest, adopting, prefixes, default=fallback)
+    if "plan" in journal.late:
+        # Not the step's fault: the record said it "raised", with nothing filed to match.
+        return release, fix_cycle.only_the_harness(backlog, fix_cycle.PLAN_LATE)
+    return release, planned
 
 
 def late_lines(journal: Journal) -> tuple[str, ...]:
@@ -710,7 +712,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # The scheduled job that runs this pass: `install-fix-pass-task.py`'s `TASK_NAME`.
-SCHEDULED_TASK = "devkit-fix-pass"
+SCHEDULED_TASK = fix_loop.OWN_TASK
 
 
 def hand_to_scheduled_task() -> int:

@@ -1131,6 +1131,34 @@ def test_an_overlap_with_no_earlier_recorded_start_is_judged_by_the_skipped_fire
     assert asked[0] == f"HEAD@{{{since}}}"
 
 
+def _own_refused_fire(ctx, minutes_before_the_pass: int) -> fix_loop.schedule_health.Job:
+    """The pass's own task, refused at a fire that many minutes before this pass began."""
+    fire = ctx.now.astimezone() - _dt.timedelta(minutes=minutes_before_the_pass)
+    return fix_loop.schedule_health.Job(
+        fix_loop.OWN_TASK,
+        True,
+        fix_loop.schedule_health.SCHED_REFUSED_ALREADY_RUNNING,
+        fire.replace(tzinfo=None),
+        (fire + _dt.timedelta(minutes=30)).replace(tzinfo=None),
+    )
+
+
+def test_a_pass_does_not_report_the_fire_it_is_running_under(ctx):
+    """c4192c14: the pass begun at 22:00:58 read its own task as overlapped at 22:00, and
+    its own unfinished record as an earlier run's."""
+    assert fix_loop.job_findings(ctx, [_own_refused_fire(ctx, 1)], tasks={}) == []
+
+
+def test_a_pass_that_outlived_a_fire_of_its_own_is_still_filed(ctx):
+    """Begun before the refused fire: this run is what held the task past it."""
+    [found] = fix_loop.job_findings(ctx, [_own_refused_fire(ctx, -5)], tasks={})
+    assert found.kind == fix_loop.JOB_KIND
+
+
+def test_a_refused_fire_older_than_this_pass_s_half_hour_is_still_filed(ctx):
+    assert len(fix_loop.job_findings(ctx, [_own_refused_fire(ctx, 45)], tasks={})) == 1
+
+
 def test_a_job_failure_never_resolved_asks_git_nothing(ctx):
     asked: list[str] = []
     job = _job("devkit-reap-stale", 2, NOW)

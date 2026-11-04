@@ -242,6 +242,12 @@ def until(deadline: float | None) -> Iterator[None]:
         _until = before
 
 
+def past_until() -> bool:
+    """Whether `until`'s deadline has passed: what a `TIMED_OUT` inside it owes to the
+    clock rather than to the call."""
+    return _until is not None and time.monotonic() >= _until
+
+
 def _within_until(timeout: float | None) -> float | None:
     """`timeout` cut to what is left before `until`'s deadline; never below zero."""
     if _until is None:
