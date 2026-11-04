@@ -98,3 +98,4 @@ productivity-tracker = 3
 # generator's registration branch now carries the slot too (`register_slot`).
 skinamp = 5
 photolab = 7
+homelab = 8
