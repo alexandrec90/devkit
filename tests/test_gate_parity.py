@@ -303,6 +303,12 @@ def test_a_red_vendored_suite_in_devkits_own_gate_uploads_what_failed():
     assert "logs/junit-hooks.xml" in upload and "logs/test-failures.log" in upload
 
 
+def test_the_push_gate_writes_the_report_ci_uploads_for_the_same_tier():
+    """45259a3b: one tier, one report. Whatever reads CI's `junit-hooks.xml` reads a
+    refused push's, so the local name may not wander off the workflow's."""
+    assert f"--junit-xml={gate.HOOK_TESTS_ARTIFACT}" in PR_GATE.read_text(encoding="utf-8")
+
+
 def test_a_red_vendored_suite_does_not_hide_the_devkit_suite():
     """f07541c7: the hook-script step failed, the `run-tests.py` step after it was
     skipped, and the fixer was sent with `junit-hooks.xml` alone -- a third red

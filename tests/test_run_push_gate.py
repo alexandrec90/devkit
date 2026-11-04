@@ -101,7 +101,8 @@ def test_every_step_runs_when_the_project_has_every_file(tmp_path, monkeypatch):
     runner = FakeRunner()
     assert gate.run_gate(root, runner) == 0
     assert [
-        [arg for arg in call[1:] if not arg.startswith("--basetemp=")] for call in runner.calls
+        [arg for arg in call[1:] if not arg.startswith(("--basetemp=", "--junit-xml="))]
+        for call in runner.calls
     ] == [list(step.argv) for step in gate.STEPS]
 
 
@@ -146,6 +147,94 @@ def test_the_first_failure_ends_the_run_with_its_exit_code(tmp_path, capsys):
     assert "tests failed (exit 3)" in out
     # The bypass is named, so a deliberate WIP push does not reach for --no-verify.
     assert f"SKIP={gate.HOOK_ID}" in out
+
+
+RED_HOOK_TEST = "def test_red():\n    assert False\n"
+
+
+def _hook_tier(root: Path, monkeypatch) -> Path:
+    """`root` with one red vendored test, run by this interpreter's real pytest."""
+    (root / "scripts" / "hooks" / "tests").mkdir(parents=True)
+    (root / "scripts" / "hooks" / "tests" / "test_hook.py").write_text(
+        RED_HOOK_TEST, encoding="utf-8"
+    )
+    monkeypatch.setattr(gate, "interpreter", lambda _root: sys.executable)
+    monkeypatch.setattr(gate, "parallel_args", lambda _python: [])
+    return root / gate.HOOK_TESTS_ARTIFACT
+
+
+def test_a_red_hook_tier_leaves_a_report_naming_the_test(tmp_path, monkeypatch, capsys):
+    """45259a3b: the step printed to stdout and wrote nothing, unlike the two wrappers
+    before it, so homelab's refused v0.11.76 adoption left only timestamps to go on and
+    which test failed was unrecoverable."""
+    artifact = _hook_tier(tmp_path, monkeypatch)
+
+    assert gate.run_gate(tmp_path, release_prepare="") != 0
+
+    assert "test_red" in artifact.read_text(encoding="utf-8")
+    out = capsys.readouterr().out
+    assert f"Fix it from {gate.HOOK_TESTS_ARTIFACT}," in out
+
+
+def test_a_hook_tier_that_never_reported_leaves_no_older_report_to_read(
+    tmp_path, monkeypatch, capsys
+):
+    """A step can die before pytest writes anything -- `No module named pytest` refused
+    productivity-tracker's first push. A green report from the last run must not then be
+    what the refusal sends the reader to."""
+    artifact = _hook_tier(tmp_path, monkeypatch)
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("<testsuites/>", encoding="utf-8")
+
+    assert gate.run_gate(tmp_path, FakeRunner({"-m": 1}), release_prepare="") == 1
+
+    assert not artifact.exists()
+    out = capsys.readouterr().out
+    assert "output above" in out and f"no {gate.HOOK_TESTS_ARTIFACT}" in out
+
+
+def test_a_report_the_gate_cannot_clear_does_not_refuse_the_push(tmp_path, monkeypatch):
+    """A locked file is pytest's to report. Raising from the clear would fail the gate
+    with a traceback about a report, before the step it belongs to has run."""
+    artifact = _hook_tier(tmp_path, monkeypatch)
+    artifact.mkdir(parents=True)  # unlink raises on a directory, as on a locked file
+
+    assert gate.run_gate(tmp_path, FakeRunner(), release_prepare="") == 0
+
+
+def test_clearing_touches_only_the_steps_own_report(tmp_path):
+    """Nothing on disk is an unchanged answer, and a wrapper's step names no file: its
+    artifact is the wrapper's to clear, which is how it survives to be read."""
+    (hook_step, wrapper_step) = (gate.STEPS[2], gate.STEPS[1])
+    report = tmp_path / gate.HOOK_TESTS_ARTIFACT
+    gate.clear_artifact(tmp_path, hook_step)  # nothing there yet
+    report.parent.mkdir()
+    report.write_text("old", encoding="utf-8")
+
+    gate.clear_artifact(tmp_path, wrapper_step)
+    assert report.exists()
+
+    gate.clear_artifact(tmp_path, hook_step)
+    assert not report.exists()
+
+
+def test_a_refusal_only_ever_names_a_report_that_exists(tmp_path):
+    hook_step = gate.STEPS[2]
+    assert gate.read_from(tmp_path, gate.STEPS[1]) == "the artifact under logs/"
+    assert "output above" in gate.read_from(tmp_path, hook_step)
+
+    report = tmp_path / gate.HOOK_TESTS_ARTIFACT
+    report.parent.mkdir()
+    report.write_text("<testsuites/>", encoding="utf-8")
+    assert gate.read_from(tmp_path, hook_step) == gate.HOOK_TESTS_ARTIFACT
+
+
+def test_a_wrapper_step_still_points_at_the_artifacts_it_writes_itself(tmp_path, capsys):
+    """`lint-all.py` and `run-tests.py` are project-owned, so their file names are not
+    this gate's to promise."""
+    root = project(tmp_path, "scripts/lint-all.py")
+    assert gate.run_gate(root, FakeRunner({"scripts/lint-all.py": 2}), release_prepare="") == 2
+    assert "Fix it from the artifact under logs/," in capsys.readouterr().out
 
 
 def test_a_gate_run_outside_pre_commit_still_asks_for_the_whole_suite(tmp_path, monkeypatch):
