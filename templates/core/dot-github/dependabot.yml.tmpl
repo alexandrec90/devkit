@@ -2,7 +2,7 @@
 #
 # Grouping is not cosmetic. Ungrouped, a weekly run opens one PR per package and
 # every one of them costs a full PR Gate run. Minor/patch land as a single PR;
-# majors stay individual so `dependabot-automerge.yml` can judge each on its own.
+# majors stay individual, so one that fails the gate holds back no other update.
 #
 # Neither is `assignees`, which every entry carries. A Dependabot PR matches none of
 # the tabs on github.com/pulls -- the bot is the author, it mentions nobody, and it
@@ -120,8 +120,8 @@ updates:
     assignees:
       - {{ github_owner }}
     ignore:
-      # A Python base-image bump reads as semver-MINOR (3.12 -> 3.14), so it would
-      # sail straight through the auto-merge classifier — while uv.lock is resolved
+      # A Python base-image bump reads as semver-MINOR (3.12 -> 3.14), and it would
+      # sail straight through auto-merge — while uv.lock is resolved
       # for {{ python_version }} and the PR Gate runs {{ python_version }}, neither
       # of which the image bump touches, and no gate job builds the image at all.
       # The runtime moves together with the lock and the workflows, deliberately.
