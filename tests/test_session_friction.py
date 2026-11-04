@@ -1445,6 +1445,66 @@ def test_a_hardware_probe_that_finds_no_tool_is_an_answer_not_a_gap():
     )
 
 
+def test_a_lookup_of_a_tool_is_answered_by_its_absence():
+    """3c59e222: a fixer on the desktop PR asked whether this machine had `dotnet` -- the
+    exact call and output -- and moved on when it did not. No project here builds .NET and
+    no test spawns it, so nothing was owed. The final `git log` is why an exit 0 was read."""
+    ran = (
+        "ls .venv/Scripts/python.exe; which dotnet; dotnet --list-runtimes 2>&1 | head; "
+        'which docker wsl; grep -rn "EnableWindowsTargeting" templates | head; '
+        'grep -n "dotnet" -r templates/features/desktop --include=*.md --include=*.tmpl -l '
+        "| head; git log --oneline -3"
+    )
+    said = (
+        ".venv/Scripts/python.exe\nwhich: no dotnet in (/c/Users/alexa/bin:/mingw64/bin)\n"
+        "/usr/bin/bash: line 1: dotnet: command not found\n"
+        "/c/WINDOWS/system32/wsl\n833f7a5 Release v0.11.78 (#719)"
+    )
+    assert classes([call(ran, "1"), result(said, "1", error=False)]) == []
+    assert classes([call(ran, "1"), result(said, "1")]) == []
+
+
+@pytest.mark.parametrize(
+    "asked",
+    [
+        "which uv; uv --version",
+        "which -a uv && uv version",
+        "command -v uv; uv -V 2>&1 | head -1",
+        "type uv; uv --help",
+        "where.exe uv; uv --info",
+        "(Get-Command uv -ErrorAction SilentlyContinue).Source; uv --version",
+        "which docker uv; docker ps; uv --list-pythons",
+        "which uv\nuv --version",
+    ],
+)
+def test_each_spelling_of_a_lookup_answers_for_the_tool_it_named(asked):
+    said = "/usr/bin/bash: line 1: uv: command not found"
+    assert sf.looked_up("uv", asked), asked
+    assert sf._result_class(said, asked) == ("", ""), asked
+
+
+@pytest.mark.parametrize(
+    "ran",
+    [
+        "uv --version",  # asked of the tool alone: a survey proves nothing
+        "docker ps; uv --version",
+        "which uv; uv sync",  # it was the work, and the lookup only came first
+        "which uv; uv --version; uv sync",
+        "which uv; uv",
+        "which uv; (uv sync)",
+        "which uv || uv sync",
+        "if which uv; then uv sync; fi",
+        "which docker; uv --version",  # looked up something else
+        "grep 'which uv' notes.md; uv --version",  # quoted, so nothing asked
+        "echo which uv; uv --version",
+        "which uvx; uv --version",
+    ],
+)
+def test_a_tool_the_call_needed_stays_filed_whatever_else_it_asked(ran):
+    said = "/usr/bin/bash: line 1: uv: command not found"
+    assert sf._result_class(said, ran) == ("environment", "uv: command not found"), ran
+
+
 def test_a_module_missing_at_the_workspace_root_is_owed_by_no_tree(tmp_path):
     """308378fa: a scratch scan at `vs-code/` wanted `boto3`, a project under that root
     imports it, and so it read as this tree's own dependency. A real tree stays filed."""
