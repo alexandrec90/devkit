@@ -1992,26 +1992,32 @@ def test_generated_gate_is_least_privilege_and_re_runnable(tmp_path):
 DEPENDABOT_ECOSYSTEMS = [
     pytest.param({}, {"uv", "github-actions"}, id="bare"),
     pytest.param({"docker": True}, {"uv", "github-actions", "docker"}, id="docker"),
-    pytest.param(
-        {"frontend": True},
-        {"uv", "github-actions", "docker", "npm"},
-        id="frontend",
-    ),
+    pytest.param({"frontend": True}, {"uv", "github-actions", "docker"}, id="frontend"),
     # `uv` stays: the harness and scripts are Python, locked in `uv.lock`.
     pytest.param({"desktop": True}, {"uv", "github-actions", "nuget"}, id="desktop"),
 ]
+# What Dependabot fetches for each ecosystem under the entry's `directory`, as a glob:
+# a solution is named after the project. dependabot-core's nuget discovery enters a
+# repository through a `.sln`, `.slnx` or `.proj`, so the root `.slnx` is that manifest.
+DEPENDABOT_MANIFESTS = {
+    "uv": "pyproject.toml",
+    "github-actions": ".github/workflows",
+    "docker": "Dockerfile",
+    "npm": "package.json",
+    "nuget": "*.slnx",
+}
 
 
 @pytest.mark.parametrize("features,expected", DEPENDABOT_ECOSYSTEMS)
 def test_generated_dependabot_covers_exactly_the_manifests_the_project_has(
     tmp_path, features, expected
 ):
-    """An ecosystem entry with no manifest behind it is a permanent Dependabot error.
+    """An entry with no manifest behind it fails its scheduled job outright.
 
-    It never surfaces in CI — it sits in the repo's Dependabot insights, where nobody
-    is looking — so the only place it can be caught is here. `npm` is the deliberate
-    exception and carries its reason in the template: the frontend feature declares
-    the tier before anything scaffolds `frontend/package.json`.
+    0b725cd8: the frontend feature rendered an active `npm` entry for a tree the generator
+    never ships, and photolab's job died on "Error during file fetching; aborting:
+    /frontend/package.json not found". It reports only through Dependabot, not the PR
+    gate, so this is the one place a generated project can be held to it.
     """
     yaml = pytest.importorskip("yaml")
     root = generate(tmp_path, features)
@@ -2020,6 +2026,35 @@ def test_generated_dependabot_covers_exactly_the_manifests_the_project_has(
     parsed = yaml.safe_load(config.read_text(encoding="utf-8"))
     assert parsed["version"] == 2
     assert {u["package-ecosystem"] for u in parsed["updates"]} == expected
+    for update in parsed["updates"]:
+        manifest = DEPENDABOT_MANIFESTS[update["package-ecosystem"]]
+        assert any((root / update["directory"].lstrip("/")).glob(manifest)), update
+
+
+def test_the_frontend_npm_entry_is_one_uncomment_away_from_active(tmp_path):
+    """The entry stays in the file, off, so the toolchain groups are there the day a
+    frontend is scaffolded. This parses what removing the `# ` yields: a block that had
+    drifted out of valid YAML would otherwise be found by that day's first update job."""
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"frontend": True})
+    lines = (root / ".github" / "dependabot.yml").read_text(encoding="utf-8").splitlines()
+    start = lines.index("  # - package-ecosystem: npm")
+    block = list(itertools.takewhile(lambda line: line.startswith("  # "), lines[start:]))
+
+    (entry,) = yaml.safe_load("\n".join(["updates:", *(f"  {b[4:]}" for b in block)]))["updates"]
+
+    assert entry["package-ecosystem"] == "npm"
+    assert entry["directory"] == "/frontend"
+    assert entry["assignees"] and entry["groups"]
+    # Dependabot takes the first group that matches, so the catch-all has to stay last.
+    assert list(entry["groups"])[-1] == "minor-and-patch"
+
+
+def test_a_frontend_project_is_told_to_turn_npm_on_when_it_turns_the_tier_on(tmp_path):
+    """Flipping `[frontend] enabled` is the one step every scaffold takes, so that note
+    is where a project hears about the entry that nothing activates for it."""
+    root = generate(tmp_path, {"frontend": True})
+    assert ".github/dependabot.yml" in (root / ".devkit.toml").read_text(encoding="utf-8")
 
 
 def test_generated_dependabot_never_lets_the_python_runtime_move_by_bot(tmp_path):

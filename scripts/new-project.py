@@ -112,7 +112,7 @@ PATH_PLACEHOLDER = re.compile(r"__([a-z][a-z0-9_]*?)__")
 # users who cannot hit the fast path. So it must track the newest tag, and
 # `test_fallback_devkit_ref_tracks_the_newest_tag` fails at release time if a tag
 # lands without it being bumped. Bump it in the same commit as the tag.
-FALLBACK_DEVKIT_REF = "v0.11.76"
+FALLBACK_DEVKIT_REF = "v0.11.77"
 
 
 class GeneratorError(RuntimeError):
