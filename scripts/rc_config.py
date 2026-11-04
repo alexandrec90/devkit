@@ -22,7 +22,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import devkit_jsonc
+import harness_events
 import sweep
 
 # The workspace-file setting naming the projects that get a server. A list of checkout
@@ -36,6 +38,19 @@ RC_SETTING = "devkit.remoteControl"
 # Read off the file the job is handed -- the live one is `machine_view`, so it is the
 # projects checked out on *this* machine, never one registered only on another PC.
 ALL_PROJECTS = "all"
+
+# The key in the `hosts` knob naming the machine that serves every project not named on
+# its own: `"hosts": {"*": "desktop-a", "data-lake": "desktop-b"}`, or just
+# `"hosts": "desktop-a"` when one machine serves them all.
+#
+# **Why a machine is named at all.** The workspace file is the same on every PC, so
+# `"all"` served each project once *per machine*, and the phone listed `devkit` three
+# times with nothing saying which desk each one was on. A phone needs one server per
+# project, not one per project per PC. `hosts` absent keeps the old reading -- every
+# machine serves its own checkouts -- because a one-PC workspace has nothing to assign.
+# Spelled as `harness_events.host_name` spells a machine, so `$DEVKIT_HOST` and a
+# MagicDNS suffix mean what they mean to the ledger and to a collector handoff.
+ANY_PROJECT = "*"
 
 # `same-dir` is `remote-control`'s own default and is kept as this job's default
 # deliberately -- but it is a default, not a prohibition, and `"spawn": "worktree"` is a
@@ -137,6 +152,32 @@ class Config:
     capacity: int = DEFAULT_CAPACITY
     power_saving: bool = DEFAULT_POWER_SAVING
     away_minutes: int = DEFAULT_AWAY_MINUTES
+    # `(project, host)` pairs rather than a dict, so the frozen dataclass stays hashable.
+    hosts: tuple[tuple[str, str], ...] = ()
+
+
+def host_key(typed: str) -> str:
+    """A host as a person typed it -- any case, with or without a MagicDNS suffix -- as
+    `harness_events.host_name` spells that machine. "" when nothing of a name is left."""
+    return harness_events.host_slug(typed.strip().split(".")[0])
+
+
+def _hosts(value: object) -> tuple[tuple[str, str], ...]:
+    """`hosts` as pairs. A bare string is the one-machine shorthand for `{"*": name}`.
+
+    An entry that names no usable host is dropped, which leaves its project unassigned
+    and so served nowhere -- the same direction every other malformed value here falls.
+    """
+    if isinstance(value, str):
+        value = {ANY_PROJECT: value}
+    if not isinstance(value, dict):
+        return ()
+    pairs = []
+    for project, host in value.items():
+        key = host_key(host) if isinstance(host, str) else ""
+        if isinstance(project, str) and project and key:
+            pairs.append((project, key))
+    return tuple(pairs)
 
 
 def _text(value: object, fallback: str) -> str:
@@ -206,6 +247,7 @@ def parse_config(text: str) -> Config:
         # power-saving mode nobody asked for starts destroying sessions.
         power_saving=raw.get("powerSaving") is True,
         away_minutes=_positive_int(raw.get("awayMinutes"), DEFAULT_AWAY_MINUTES),
+        hosts=_hosts(raw.get("hosts")),
     )
 
 
@@ -227,6 +269,36 @@ def selected(config: Config, known: Sequence[str]) -> tuple[list[str], list[str]
         else:
             serve.append(name)
     return serve, notes
+
+
+def host_for(config: Config, project: str) -> str:
+    """The machine `hosts` assigns `project`, or "" when it assigns none."""
+    hosts = dict(config.hosts)
+    return hosts.get(project, hosts.get(ANY_PROJECT, ""))
+
+
+def assigned_here(config: Config, names: Sequence[str], host: str) -> tuple[list[str], list[str]]:
+    """`(here, elsewhere)` -- the projects this machine serves, and a line for each it
+    leaves to another one (or to none).
+
+    Every name is served here when `hosts` is absent. The lines are said, not failed: a
+    project another machine serves is this one working as configured. They are still
+    written, because a mistyped host serves nothing on every machine, and the artifact
+    naming the host it waited for is how that reads differently from a quiet desk.
+    """
+    if not config.hosts:
+        return list(names), []
+    here: list[str] = []
+    elsewhere: list[str] = []
+    for name in names:
+        owner = host_for(config, name)
+        if owner == host:
+            here.append(name)
+        elif owner:
+            elsewhere.append(f"{name}: served by {owner}, not here ({host})")
+        else:
+            elsewhere.append(f"{name}: no machine assigned in `hosts` -- served nowhere")
+    return here, elsewhere
 
 
 def valid_time(at: str) -> bool:

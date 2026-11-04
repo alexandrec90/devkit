@@ -82,6 +82,112 @@ def test_a_refusal_is_not_retried(monkeypatch, tmp_path):
     assert len(asked) == 1
 
 
+_NO_WORKFLOW = (
+    "HTTP 404: workflow pr-gate.yml not found on the default branch "
+    "(https://api.github.com/repos/o/skinamp/actions/workflows/pr-gate.yml)"
+)
+
+
+def _seed_world(monkeypatch, *, empty: str, local: int = 0, pushed: tuple = (0, "")) -> dict:
+    """skinamp, 2026-11-02 (3120f1ce): `gh repo create --push` made the repo, and the run
+    was ended before its push, so GitHub holds no branch and the dispatch 404s."""
+    seen: dict = {"gh": [], "git": []}
+
+    def gh(*args):
+        seen["gh"].append(args)
+        if args[:2] == ("repo", "view"):
+            return subprocess.CompletedProcess(args, 0, f"{empty}\n", "")
+        return subprocess.CompletedProcess(args, 1, "", _NO_WORKFLOW)
+
+    def git(*args, env=None):
+        seen["git"].append((args, env))
+        if args[0] == "rev-parse":
+            return subprocess.CompletedProcess(args, local, "", "")
+        return subprocess.CompletedProcess(args, pushed[0], "", pushed[1])
+
+    monkeypatch.setattr(fix_red.sweep, "gh_for", lambda _p: gh)
+    monkeypatch.setattr(fix_red.sweep, "git_for", lambda _p: git)
+    monkeypatch.setattr(fix_red.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(fix_red.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+    return seen
+
+
+def test_a_repo_github_holds_no_branch_of_is_seeded_with_the_local_default(monkeypatch, tmp_path):
+    seen = _seed_world(monkeypatch, empty="true")
+    ok, line = fix_red.regate(tmp_path)
+    assert ok, line
+    assert "FAILED" not in line and "pushed main" in line
+    (push, env) = seen["git"][-1]
+    assert push == ("push", "-u", "origin", "main")
+    # The generator's own waiver, and the pass's push-gate skip: CI gates the push.
+    assert env["DEVKIT_SKIP_BRANCH_POLICY"] == "1"
+    assert fix_red.SKIP_PUSH_GATE in env["SKIP"].split(",")
+
+
+def test_a_404_on_a_repo_with_branches_is_never_seeded(monkeypatch, tmp_path):
+    """A repo whose default branch lacks the workflow is a real defect, and a push there
+    could land local commits nobody reviewed on a published main."""
+    seen = _seed_world(monkeypatch, empty="false")
+    ok, line = fix_red.regate(tmp_path)
+    assert not ok and line.startswith("main -- FAILED to re-run the gate: HTTP 404")
+    assert not [args for args, _ in seen["git"] if args[0] == "push"]
+
+
+def test_a_seed_with_nothing_local_or_a_refused_push_is_filed(monkeypatch, tmp_path):
+    _seed_world(monkeypatch, empty="true", local=1)
+    ok, line = fix_red.regate(tmp_path)
+    assert not ok and line == "main -- FAILED to seed the empty GitHub repo: no local main"
+    _seed_world(monkeypatch, empty="true", pushed=(1, "x\n! [remote rejected] main -> main\n"))
+    ok, line = fix_red.regate(tmp_path)
+    assert not ok
+    assert line == "main -- FAILED to seed the empty GitHub repo: ! [remote rejected] main -> main"
+
+
+def test_seed_env_adds_to_a_skip_list_already_set(monkeypatch):
+    monkeypatch.setenv("SKIP", "ruff")
+    assert fix_red.seed_env()["SKIP"] == f"ruff,{fix_red.SKIP_PUSH_GATE}"
+
+
+def test_the_seed_skips_the_push_gate_the_shipper_skips():
+    import ship_intent
+
+    assert fix_red.SKIP_PUSH_GATE == ship_intent.SKIP_PUSH_GATE
+
+
+@pytest.mark.parametrize(
+    ("code", "out", "empty"),
+    [(0, "true\n", True), (0, "false\n", False), (1, "", False), (0, "", False)],
+)
+def test_unseeded_is_true_only_when_github_says_the_repo_is_empty(code, out, empty):
+    """A `gh` that failed says nothing about the repo, so it never reads as empty: a seed
+    pushes a default branch, and only an answer of `true` makes that safe."""
+    asked: list = []
+
+    def gh(*args):
+        asked.append(args)
+        return subprocess.CompletedProcess(args, code, out, "")
+
+    assert fix_red.unseeded(gh) is empty
+    assert asked == [("repo", "view", "--json", "isEmpty", "--jq", ".isEmpty")]
+
+
+def test_seed_pushes_the_local_default_branch_and_says_so():
+    calls: list = []
+
+    def git(*args, env=None):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    assert fix_red.seed(git, "main") == (
+        True,
+        "main -- GitHub held no branch; pushed main, which raises its gate",
+    )
+    assert calls == [
+        ("rev-parse", "--verify", "--quiet", "refs/heads/main"),
+        ("push", "-u", "origin", "main"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("said", "transient"),
     [

@@ -505,13 +505,111 @@ def test_a_reopened_row_says_why_and_which_resolution_it_undid():
 
 
 def test_verdict_lines_prefer_a_fix_in_flight_to_a_recurrence():
+    old, a, b = (
+        triage.read_items(_line("triage-resolved", stamp=_STAMPS[1], ref=r, pr=p, note=n))[0]
+        for r, p, n in (("r0", "6", "old"), ("r1", "7", "a"), ("r2", "-", "b"))
+    )
     assert triage.verdict_lines(None, None) == []
     assert triage.verdict_lines("", []) == []
-    assert triage.verdict_lines("410", ["old"])[0].startswith("  PENDING on 410 --")
-    assert triage.verdict_lines(None, ["a", "b"]) == [
+    assert triage.verdict_lines("410", [old])[0].startswith("  PENDING on 410 --")
+    assert triage.verdict_lines(None, [a, b]) == [
         "  RECURRED after 2 resolutions -- last: b -- that fix did not hold; "
-        "fix the cause so it cannot come back"
+        "fix the cause so it cannot come back",
+        f"    tried  {_STAMPS[1]}  pr=7  refs r1 -- a",
+        f"    tried  {_STAMPS[1]}  pr=-  refs r2 -- b",
     ]
+
+
+def test_a_recurred_group_lists_every_fix_tried_with_its_refs_and_pr():
+    """cab2dfdd: a group read `RECURRED after 10 resolutions -- last: ...`, and the
+    session sent at it grepped the ledger for the group id to read the other nine. That
+    id is a hash of the newest row and is written nowhere, so it matched nothing. Each
+    fix tried is listed under the verdict -- once per `--resolve-like`, not once per row
+    it wrote -- with the refs a grep does find, the PR and when it was made."""
+    one = _line("session-friction", stamp=_STAMPS[0], detail="No module named pytest")
+    two = _line("session-friction", stamp=_STAMPS[1], detail="No module named pytest")
+    refs = [triage.item_id(one), triage.item_id(two)]
+    first = [
+        _line("triage-resolved", stamp=f"2026-08-24T13:00:0{n}+00:00", ref=r, pr="11", note="uv")
+        for n, r in enumerate(refs)
+    ]
+    again = _line(
+        "session-friction", stamp="2026-08-25T09:00:00+00:00", detail="No module named pytest"
+    )
+    later = _line(
+        "triage-resolved",
+        stamp="2026-08-26T09:00:00+00:00",
+        ref=triage.item_id(again),
+        pr="agent/y",
+        note="provision in post-checkout",
+        resolved="2026-08-25T23:00:00+00:00",
+    )
+    back = _line(
+        "session-friction", stamp="2026-08-27T09:00:00+00:00", detail="No module named pytest"
+    )
+    history = triage.read_items("\n".join((one, two, *first, again, later, back)))
+    text = triage.render(triage.open_items(history), history)
+    assert "  RECURRED after 3 resolutions -- last: provision in post-checkout --" in text
+    assert f"    tried  2026-08-24T13:00:00+00:00  pr=11  refs {' '.join(refs)} -- uv" in text
+    assert (
+        f"    tried  2026-08-25T23:00:00+00:00  pr=agent/y  refs {triage.item_id(again)} "
+        "-- provision in post-checkout"
+    ) in text, "a re-pointed fix is dated when it was made"
+    assert text.index("pr=11") < text.index("pr=agent/y"), "oldest fix first"
+
+
+def test_a_long_recurrence_lists_the_newest_fixes_and_points_at_the_rest():
+    """This ledger's worst group had 13 fixes, one retiring 24 rows: listed whole, the
+    verdict outgrew the group it describes."""
+    shown, refs = triage.TRIED_SHOWN, triage.REFS_SHOWN
+    rows = triage.read_items(
+        "\n".join(
+            _line(
+                "triage-resolved",
+                stamp=f"2026-08-{10 + n:02d}T00:00:00+00:00",
+                ref=f"f{n}r{k}",
+                pr=str(n),
+                note=f"fix {n}",
+            )
+            for n in range(shown + 2)
+            for k in range(refs + 1 if n == shown + 1 else 1)
+        )
+    )
+    lines = triage.verdict_lines(None, rows)
+    assert lines[1] == (
+        "    ...    2 older fix(es) since 2026-08-10T00:00:00+00:00: grep the ledger for ref=f0r0"
+    )
+    assert len(lines) == 2 + shown
+    assert lines[2].startswith("    tried  2026-08-12T00:00:00+00:00  pr=2  refs f2r0 -- fix 2")
+    newest = " ".join(f"f{shown + 1}r{k}" for k in range(refs))
+    assert lines[-1].endswith(f"refs {newest} +1 more -- fix {shown + 1}")
+
+
+def test_fixes_tried_is_one_line_per_pr_and_per_note_without_one():
+    """`fix_verify` retired 13 rows filed while PR 578 waited once per resolution in
+    flight, each with its own note: keyed on the note, one merged PR read as six fixes."""
+    stamps = (*_STAMPS, *(f"2026-08-24T12:00:0{n}+00:00" for n in range(3, 7)))
+    rows = triage.read_items(
+        "\n".join(
+            _line("triage-resolved", stamp=stamps[i], ref=ref, pr=pr, note=note)
+            for i, (ref, pr, note) in enumerate(
+                (
+                    ("r0", "578", "the fix"),
+                    ("r1", "-", "same"),
+                    ("r0", "578", "filed while the fix for [x] was in flight"),
+                    ("r2", "578", "filed while the fix for [y] was in flight"),
+                    ("r3", "", "same"),
+                    ("r4", "", "other"),
+                )
+            )
+        )
+    )
+    assert triage.fixes_tried(rows) == [
+        (stamps[0], "578", ["r0", "r2"], "the fix"),
+        (stamps[1], "", ["r1", "r3"], "same"),
+        (stamps[5], "", ["r4"], "other"),
+    ]
+    assert triage.fixes_tried([]) == []
 
 
 def test_past_fixes_counts_only_resolutions_still_standing():
@@ -521,7 +619,8 @@ def test_past_fixes_counts_only_resolutions_still_standing():
     held = _line("triage-resolved", stamp=_STAMPS[1], ref=ref, note="fixed the hook")
     undone = _line("triage-reopened", stamp="2026-08-24T12:00:03+00:00", ref=ref, note="no merge")
     signature = triage.read_items(first)[0].signature
-    assert triage.past_fixes(triage.read_items(first + "\n" + held)) == {
+    found = triage.past_fixes(triage.read_items(first + "\n" + held))
+    assert {sig: [r.fields["note"] for r in rows] for sig, rows in found.items()} == {
         signature: ["fixed the hook"]
     }
     assert triage.past_fixes(triage.read_items("\n".join((first, held, undone)))) == {}

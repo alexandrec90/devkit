@@ -272,12 +272,17 @@ def harness_state(
     The harness-defect ledger's backlog is harness-shaped and rides in the devkit
     session when one goes, but does not by itself make one go: one unresolved hook
     event anywhere was holding every project fixer.
+
+    devkit's local end-to-end red (`fix_plan.LOCAL`) gets its devkit session and holds
+    no one either: that tier judges this workstation's tooling -- a picker over budget,
+    a task VS Code cannot resolve -- not the harness a project fixer runs under.
     """
     reasons = []
+    unholding = (fix_plan.LEDGER, fix_plan.LOCAL)
     red = sum(
         1
         for key, cls in classes.items()
-        if cls == HARNESS and fix_ledger.key_kind(key) != fix_plan.LEDGER
+        if cls == HARNESS and fix_ledger.key_kind(key) not in unholding
     )
     if red:
         reasons.append(f"{red} harness failure(s) open")

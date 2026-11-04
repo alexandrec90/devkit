@@ -85,6 +85,12 @@ SIGNATURE_WIDTH = 80
 
 ARTIFACT = Path("logs") / "harness-triage.log"
 
+# How much of a `RECURRED` group's history `verdict_lines` lists: the newest fixes tried,
+# and a few refs of each -- any one is a `ref=` a grep of the ledger finds. This ledger's
+# worst group had 13 distinct fixes, one of them retiring 24 rows.
+TRIED_SHOWN = 8
+REFS_SHOWN = 3
+
 # What a job's error line says before a step only a person can take: an elevated command,
 # a reboot, an app a person quit. A group whose newest row carries it awaits that person
 # (`awaiting_person`), and the fix pass sends it no fixer: 563408cf's fixer was sent at a
@@ -260,21 +266,43 @@ def groups(items: list[Item]) -> list[tuple[tuple[str, str, str, str], list[Item
     return sorted(buckets.items(), key=lambda kv: (-len(kv[1]), kv[0]))
 
 
-def past_fixes(history: list[Item]) -> dict[tuple[str, str, str, str], list[str]]:
-    """`signature -> notes` of every resolution still standing on an item of it.
+def past_fixes(history: list[Item]) -> dict[tuple[str, str, str, str], list[Item]]:
+    """`signature -> resolutions`, oldest first, of every resolution still standing on an
+    item of it.
 
     A group that is open *and* has one of these came back after it was retired: the fix
     repaired an instance and left the cause. That is the difference between a durable
-    fix and an ad hoc one, and nothing else on the ledger shows it.
+    fix and an ad hoc one, and nothing else on the ledger shows it. The rows themselves,
+    not their notes: `verdict_lines` lists each fix's ref, PR and date, which a sweep
+    cannot find by grepping the group id -- that is a hash of the newest row, written
+    nowhere (cab2dfdd).
     """
     by_id = {item.id: item for item in history}
     standing = resolved_refs(history)
-    notes: dict[tuple[str, str, str, str], list[str]] = {}
+    found: dict[tuple[str, str, str, str], list[Item]] = {}
     for item in history:
         ref = item.fields.get("ref", "")
         if item.event == RESOLVED_EVENT and ref in standing and ref in by_id:
-            notes.setdefault(by_id[ref].signature, []).append(item.fields.get("note", ""))
-    return notes
+            found.setdefault(by_id[ref].signature, []).append(item)
+    return found
+
+
+def fixes_tried(resolutions: list[Item]) -> list[tuple[str, str, list[str], str]]:
+    """`(when, pr, refs, note)` per distinct fix, oldest first.
+
+    One `--resolve-like` writes a row per id it retires, all with one note and one PR, so
+    ten rows are often two fixes: listed per row, the earlier fix scrolls past behind
+    copies of the later one. A fix is its PR when it names one -- `fix_verify` retires the
+    rows filed while a fix waited once per resolution in flight, each with its own note,
+    which made one merged PR six lines -- else its note. `when` and `note` are its first
+    row's; `refs` each once, in order."""
+    by_fix: dict[str, tuple[str, str, str, list[str]]] = {}
+    for item in resolutions:
+        pr, note = item.fields.get("pr", "").strip(" -"), item.fields.get("note", "")
+        fix = by_fix.setdefault(pr or f"note:{note}", (resolved_at(item), pr, note, []))
+        if (ref := item.fields.get("ref", "")) not in fix[3]:
+            fix[3].append(ref)
+    return [(when, pr, refs, note) for when, pr, note, refs in by_fix.values()]
 
 
 def reopened(history: list[Item]) -> dict[str, str]:
@@ -629,21 +657,34 @@ def awaiting_line(ref: str, step: str) -> str:
     )
 
 
-def verdict_lines(waiting: str | None, before: list[str] | None) -> list[str]:
+def verdict_lines(waiting: str | None, before: list[Item] | None) -> list[str]:
     """What earlier resolutions of a group's signature say about it now: its fix is in
-    flight on `waiting`, or it came back after the fixes noted in `before`, or nothing."""
+    flight on `waiting`, or it came back after the resolutions in `before` -- each fix
+    tried listed under it -- or nothing."""
     if waiting:
         return [
             f"  PENDING on {waiting} -- its fix has not merged yet, so these rows are the "
             "defect still on the default branch: nothing to do until it lands"
         ]
-    if before:
-        times = f"{len(before)} resolution" + ("s" if len(before) > 1 else "")
-        return [
-            f"  RECURRED after {times} -- last: {before[-1]} -- that fix did not hold; "
-            "fix the cause so it cannot come back"
-        ]
-    return []
+    if not before:
+        return []
+    times = f"{len(before)} resolution" + ("s" if len(before) > 1 else "")
+    lines = [
+        f"  RECURRED after {times} -- last: {before[-1].fields.get('note', '')} -- that fix "
+        "did not hold; fix the cause so it cannot come back"
+    ]
+    tried = fixes_tried(before)
+    if len(tried) > TRIED_SHOWN:
+        older = tried[:-TRIED_SHOWN]
+        lines.append(
+            f"    ...    {len(older)} older fix(es) since {older[0][0]}: grep the ledger for "
+            f"ref={older[0][2][0]}"
+        )
+    for when, pr, refs, note in tried[-TRIED_SHOWN:]:
+        more = f" +{len(refs) - REFS_SHOWN} more" if len(refs) > REFS_SHOWN else ""
+        shown = " ".join(refs[:REFS_SHOWN])
+        lines.append(f"    tried  {when}  pr={pr or '-'}  refs {shown}{more} -- {note}")
+    return lines
 
 
 def ledger_file(root: Path | None = None) -> Path:

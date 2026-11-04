@@ -1,0 +1,13 @@
+{
+  "name": "devkit-tasks-driver",
+  "displayName": "devkit tasks driver",
+  "description": "Runs the workspace's tasks in a real VS Code and answers their quick-picks. Test-only; loaded with --extensionDevelopmentPath by tests/test_vscode_tasks_e2e.py.",
+  "version": "0.0.1",
+  "publisher": "devkit",
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": []
+}

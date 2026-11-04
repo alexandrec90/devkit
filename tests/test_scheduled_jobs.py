@@ -347,6 +347,8 @@ UNATTENDED: dict[str, str] = {
     "scripts/fix_release.py": "the release pipeline the pass starts detached when main owes a tag",
     "scripts/git_trust.py": "the git config --global safe.directory a dispatching pass adds",
     "scripts/log-wrap.py": "the wrapper every job but the tray is launched through",
+    "scripts/e2e-pass.py": "devkit-local-e2e runs it nightly; it spawns each project's e2e.py",
+    "scripts/e2e.py": "the pass spawns devkit's own; it spawns pytest over the local tier",
     "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
     "scripts/collector_tasks.py": "the schtasks that pass makes, and each scheduled collector's fire",
     "scripts/collector_handoff.py": "the project's handoff command that pass asks and imports through",
@@ -386,6 +388,8 @@ DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/gate_evidence.py": "scripts/sweep.py",
     "scripts/broken_pr_menu.py": "scripts/sweep.py",
     "scripts/session_trees.py": "scripts/sweep.py",
+    "scripts/e2e-pass.py": "scripts/sweep.py",
+    "scripts/e2e.py": "scripts/sweep.py",
 }
 
 SPAWN_ATTRS = frozenset({"run", "Popen", "call", "check_call", "check_output"})

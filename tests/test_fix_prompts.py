@@ -100,7 +100,53 @@ def every_prompt() -> list[str]:
         fix_prompts.upstream_prompt((failure(), red_main()), "agent/fix"),
         fix_prompts.branch_prompt(red_main(), "agent/fix"),
         fix_prompts.nightly_prompt(failure(kind=fix_plan.NIGHTLY, number=3), "agent/fix"),
+        fix_prompts.local_prompt(local_red(), "agent/fix"),
     ]
+
+
+def local_red(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "kind": fix_plan.LOCAL,
+        "number": 0,
+        "head": "",
+        "url": "",
+        "reason": "",
+        "workflow": "Local E2E",
+        "sha": "59a4ef5aaaaa1111",
+        "tip": "59a4ef5aaaaa1111",
+        "signature": ("tests/test_tasks_live.py::test_every_picker_draws",),
+    }
+    base.update(fields)
+    return failure(**base)
+
+
+def test_the_local_prompt_says_it_ran_here_and_how_to_run_it_again(tmp_path):
+    """The inverse of the gate's Linux note: this red was seen on this machine, so the
+    fixer reproduces it -- and the PR gate never runs these tests, so its green on the
+    fix is no evidence about them."""
+    (tmp_path / "output.log").write_text("FAILED x\n", encoding="utf-8")
+    text = fix_prompts.local_prompt(local_red(evidence=str(tmp_path)), "agent/fix-e2e")
+    for expected in (
+        "Local E2E run in carameli",
+        "origin/main at 59a4ef5aaaaa",
+        "test_every_picker_draws",
+        "python scripts/e2e.py",
+        f"{fix_plan.EVIDENCE_DIR}/ in this worktree -- read output.log there first",
+        "its green is no evidence about them",
+        "agent/fix-e2e",
+    ):
+        assert expected in text, expected
+    assert fix_prompts.LINUX not in text
+    assert "Its output did not come down" in fix_prompts.local_prompt(local_red(), "b")
+
+
+def test_a_devkit_local_red_folded_upstream_is_told_how_to_reproduce_it():
+    """devkit's own local red is harness-shaped, so it reaches the upstream session,
+    whose shared sentence otherwise points at a run URL a local run does not have."""
+    text = fix_prompts.upstream_prompt((local_red(project="devkit"),), "agent/fix")
+    assert "devkit origin/main (local e2e) -- Local E2E failing" in text
+    assert text.count(fix_prompts.LOCAL_RERUN.strip()) == 1
+    assert fix_prompts.LOCAL_RERUN.strip() not in fix_prompts.upstream_prompt((failure(),), "b")
 
 
 def test_every_prompt_ends_on_the_one_narrow_exit():

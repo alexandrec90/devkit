@@ -1180,6 +1180,45 @@ def test_a_live_edit_devkit_never_wrote_is_refused_rather_than_overwritten(tmp_p
     assert "--adopt-workspace" in line
 
 
+def test_a_live_edit_already_on_a_pushed_branch_is_a_merge_awaited_not_a_failure(
+    tmp_path, monkeypatch
+):
+    """4ea2781c: `new-project.py` registered photolab in the live file and opened #704 for
+    `workspace.jsonc`, and until it merged every daily publish refused and was filed as a
+    failure asking for `--adopt-workspace` or `--force`. git held the edit all along."""
+    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
+    _checkout(monkeypatch)
+    live = _live(tmp_path, {"a": "b", "c": "d"})
+    before = live.read_text(encoding="utf-8")
+    branch = {"folders": [{"path": "devkit"}], "settings": {"a": "b", "c": "d"}}
+    monkeypatch.setattr(
+        ws.devkit_project, "pending_copies", lambda _live: iter([("origin/agent/reg", branch)])
+    )
+
+    line = ws.workspace_sync_line(live)
+
+    assert live.read_text(encoding="utf-8") == before, "the edit is not dropped meanwhile"
+    assert "on unmerged origin/agent/reg, so it publishes once that merges" in line
+    assert ws.failure_kind(line) == ""
+
+
+def test_a_live_edit_no_branch_holds_is_still_the_refusal(tmp_path, monkeypatch):
+    """One held edit beside one nobody holds is still a decision owed."""
+    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
+    _checkout(monkeypatch)
+    live = _live(tmp_path, {"a": "b", "e": "f"})
+    branch = {"folders": [{"path": "devkit"}], "settings": {"a": "b", "c": "d"}}
+    monkeypatch.setattr(
+        ws.devkit_project, "pending_copies", lambda _live: iter([("origin/agent/reg", branch)])
+    )
+
+    line = ws.workspace_sync_line(live)
+
+    assert ws.failure_kind(line) == "workspace-publish-refused"
+    ahead_only = ["setting missing from the workspace: c"]
+    assert ws.held_line(live, branch, ahead_only) == "", "nothing of the live file's to hold"
+
+
 def test_a_task_branch_checkout_reports_the_drift_and_publishes_nothing(tmp_path, monkeypatch):
     """A branch's copy is a proposal. Publishing it would ship it to every window."""
     _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})

@@ -1784,3 +1784,21 @@ def test_a_folded_prs_head_is_named_with_the_tree_holding_it(root):
     text = fix_prs.fix_prompts.upstream_prompt(found, "agent/fix")
     assert f"(its head is checked out in {found[0].tree})" in text
     assert text.count("its head is checked out") == 1
+
+
+def test_a_fresh_branch_session_is_told_by_the_shape_of_its_first_failure(tmp_path):
+    """A local end-to-end red gets the prompt that says how to run it again here, not
+    the nightly one, which would send it to a GitHub run it does not have."""
+    local = failure(
+        kind=fix_plan.LOCAL, number=0, head="", url="", workflow="Local E2E", sha="b31b60c"
+    )
+    prompt, title = fix_prs.fresh_prompt(
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (local,)), tmp_path, "agent/fix-e2e"
+    )
+    assert prompt == fix_prs.fix_prompts.local_prompt(local, "agent/fix-e2e")
+    assert title == "carameli local e2e"
+    nightly = failure(kind=fix_plan.NIGHTLY, number=3, head="", workflow="Nightly")
+    prompt, title = fix_prs.fresh_prompt(
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (nightly,)), tmp_path, "b"
+    )
+    assert (prompt, title) == (fix_prs.fix_prompts.nightly_prompt(nightly, "b"), "carameli Nightly")

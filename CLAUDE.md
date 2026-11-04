@@ -14,11 +14,11 @@ it does today. This tier carries only what neither of those can.
 | [`.claude/rules/engineering.md`](.claude/rules/engineering.md) | baseline policy: testing, scripts, lint, the vendored harness |
 | [`.claude/rules/authoring.md`](.claude/rules/authoring.md) | writing rules, skills and instruction files |
 | [`.claude/rules/session-scope.md`](.claude/rules/session-scope.md) | what a session leaves to the fix pass: commit, push, PR, the full suite |
-| [`.claude/fixer.md`](.claude/fixer.md) | a fix-pass session, where it differs from the rules above |
+| [`.claude/rules/local-e2e.md`](.claude/rules/local-e2e.md) | tests only this workstation can run || [`.claude/fixer.md`](.claude/fixer.md) | a fix-pass session, where it differs from the rules above |
 | [`.claude/rules/vscode-tasks.md`](.claude/rules/vscode-tasks.md) | the workspace task block and its dispatcher |
 | [`scripts/CLAUDE.md`](scripts/CLAUDE.md) | vendoring, the two channels, boxes, scheduled jobs, loading a module by path |
 
-The first four are vendored *out* of here, so **point at them, never restate them**:
+The first five are vendored *out* of here, so **point at them, never restate them**:
 `scripts/hooks/tests/test_repo_contract.py` fails a `CLAUDE.md` that paraphrases their
 clauses, because a second copy is not drift-checked.
 
@@ -59,8 +59,6 @@ far as a generated project is concerned**, however green `main` is.
 
 `.devkit.toml`, `$DEVKIT_DIR`, `DEVKIT_VERSION`, `scripts/sync-devkit.py`, and the
 published hook ids `devkit-manifest` / `devkit-hooks-stdlib-only` / `devkit-drift`. Treat
-them as fixed: the rename from the `agent-harness` spelling had to be one atomic change
-across devkit and every consumer, because `sync-devkit.py` is **itself in the `MANIFEST`**
-— it is the very path list the drift check compares by, so a half-applied rename fails
-`--check` in whichever repo lands second. The old spelling anywhere is a miss from that
-migration, not a deliberate holdout.
+them as fixed: `sync-devkit.py` is **itself in the `MANIFEST`**, so a rename applied in
+one repo fails `--check` in the other. The old `agent-harness` spelling anywhere is a
+miss from that migration, not a deliberate holdout.

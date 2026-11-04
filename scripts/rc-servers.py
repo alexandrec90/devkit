@@ -56,7 +56,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import agent_clis
+import harness_events
 import rc_config
 import rc_machine
 import sweep
@@ -129,6 +131,28 @@ def ensure_up(plan: Plan, report: Pass) -> Pass:
     return report
 
 
+def retire(plan: Plan, report: Pass) -> Pass:
+    """Stop every server this job started for a project it no longer serves here.
+
+    `ensure_up` only ever starts, so a project dropped from the setting -- or handed to
+    another machine by `hosts` -- kept its server on this one until a reboot, and the
+    phone went on listing it once per machine. Not left to `reap-stale.py`: that pass
+    reaps a named server the state file does *not* own, and this one it does.
+
+    A pid that is no longer a `claude` is forgotten, never killed: pids are reused.
+    """
+    for name in sorted(set(plan.state.servers) - set(plan.names)):
+        pid = plan.state.servers.pop(name)
+        if not (pid and rc_machine.pid_is_server(pid)):
+            continue
+        error = rc_machine.stop_server(pid)
+        if error:
+            report.fail(f"{name}: no longer served here, could not stop pid {pid} -- {error}")
+        else:
+            report.say(f"{name}: no longer served here -- stopped (pid {pid})")
+    return report
+
+
 def cycle(
     plan: Plan, report: Pass, update: Callable[..., object] | None = None
 ) -> tuple[Pass, bool]:
@@ -197,8 +221,9 @@ def status(plan: Plan, report: Pass) -> Pass:
 
 
 def down(plan: Plan, report: Pass) -> Pass:
-    """Stop every server this job started."""
-    for name in plan.names:
+    """Stop every server this job started -- by the state file, not by `plan.names`, so a
+    project since assigned to another machine is stopped too."""
+    for name in list(plan.state.servers):
         pid = plan.state.servers.get(name, 0)
         if not pid:
             continue
@@ -225,8 +250,12 @@ def write_artifact(text: str, root: Path = REPO_ROOT) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def build_plan(workspace: Path, root: Path, report: Pass) -> Plan | None:
-    """Resolve the workspace file into a `Plan`, or `None` with the reason reported."""
+def build_plan(workspace: Path, root: Path, report: Pass, host: str | None = None) -> Plan | None:
+    """Resolve the workspace file into a `Plan`, or `None` with the reason reported.
+
+    A machine `hosts` assigns nothing still gets a `Plan`, with no names in it: that is
+    what lets `retire` stop the servers it was running before the assignment moved.
+    """
     text = workspace.read_text(encoding="utf-8")
     config = rc_config.parse_config(text)
     if not config.projects:
@@ -235,7 +264,12 @@ def build_plan(workspace: Path, root: Path, report: Pass) -> Plan | None:
     names, notes = rc_config.selected(config, sweep.parse_workspace(text))
     for note in notes:
         report.fail(note)
-    if not names:
+    names, elsewhere = rc_config.assigned_here(
+        config, names, harness_events.host_name() if host is None else host
+    )
+    for line in elsewhere:
+        report.say(line)
+    if not names and not elsewhere:
         return None
     return Plan(
         names=names,
@@ -279,6 +313,7 @@ def run_mode(mode: str, plan: Plan, report: Pass, now: _dt.datetime) -> None:
     if mode == "down":
         down(plan, report)
         return
+    retire(plan, report)
     if mode == "cycle" or (
         mode == "maintain"
         and rc_config.due_for_update(plan.state.last_update, now, plan.config.update_at)

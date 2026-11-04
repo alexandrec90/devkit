@@ -602,6 +602,24 @@ def test_the_ledger_backlog_rides_along_without_holding_anyone():
     assert fix_cycle.harness_state(classes, True, []).clean
 
 
+def test_a_devkit_local_e2e_red_gets_its_session_and_holds_no_project_fixer():
+    """devkit's local tier judges its workstation tooling -- a picker over its budget, a
+    task VS Code cannot resolve -- not the harness a project fixer runs under, so it is
+    devkit's to fix and no reason to stop every other repository's fixes behind it."""
+    local = failure(
+        kind=fix_plan.LOCAL, project="devkit", number=0, head="", url="", workflow="Local E2E"
+    )
+    project = failure(project="carameli", signature=("tests/test_x.py::test_y",))
+    classes = fix_cycle.classify_all([local, project])
+    assert classes[fix_ledger.failure_key(local)] == fix_cycle.HARNESS
+    harness = fix_cycle.harness_state(classes, True, [])
+    assert harness.clean
+    decisions = fix_plan.plan([local, project], "v0-11-23", ())
+    go, held = fix_cycle.phase(decisions, classes, harness)
+    assert held == []
+    assert {f.kind for d in go for f in d.failures} == {fix_plan.LOCAL, fix_plan.PR}
+
+
 def test_a_gate_running_at_the_tip_is_not_a_reason_to_hold():
     """Every pass in the minutes after a merge to devkit main read "could not be read"
     and held every project fixer behind a gate that was merely running."""

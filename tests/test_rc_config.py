@@ -196,6 +196,94 @@ def test_everything_known_is_served_with_nothing_to_report():
     assert notes == []
 
 
+# --- hosts and assigned_here ------------------------------------------------
+
+
+def test_without_hosts_every_machine_serves_its_own_checkouts():
+    """A one-PC workspace has nothing to assign, so absent keeps the old reading."""
+    config = rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS))
+    assert config.hosts == ()
+    assert rc_config.assigned_here(config, ["devkit", "carameli"], "anyone") == (
+        ["devkit", "carameli"],
+        [],
+    )
+
+
+def test_a_bare_host_string_assigns_every_project_to_that_machine():
+    """Spelled as `harness_events.host_name` spells it: any case, MagicDNS suffix off."""
+    config = rc_config.parse_config(
+        workspace_text({"projects": "all", "hosts": "Desktop-A.tail1234.ts.net"})
+    )
+    assert config.hosts == (("*", "desktop-a"),)
+    assert rc_config.assigned_here(config, ["devkit", "carameli"], "desktop-a") == (
+        ["devkit", "carameli"],
+        [],
+    )
+
+
+def test_a_machine_another_is_assigned_to_serves_nothing_and_says_who_does():
+    """The point of `hosts`: the workspace file is the same on every PC, and without it
+    the phone listed each project once per machine."""
+    config = rc_config.parse_config(workspace_text({"projects": "all", "hosts": "desktop-a"}))
+    here, elsewhere = rc_config.assigned_here(config, ["devkit"], "desktop-b")
+    assert here == []
+    assert elsewhere == ["devkit: served by desktop-a, not here (desktop-b)"]
+
+
+def test_a_project_named_in_hosts_overrides_the_default_machine():
+    config = rc_config.parse_config(
+        workspace_text({"projects": "all", "hosts": {"*": "desktop-a", "carameli": "desktop-b"}})
+    )
+    assert rc_config.assigned_here(config, ["devkit", "carameli"], "desktop-b")[0] == ["carameli"]
+    assert rc_config.assigned_here(config, ["devkit", "carameli"], "desktop-a")[0] == ["devkit"]
+
+
+def test_a_project_hosts_leaves_unassigned_is_served_nowhere_out_loud():
+    """No `*` and no entry of its own: no machine serves it, and every machine says so
+    rather than each quietly assuming another one has it."""
+    config = rc_config.parse_config(workspace_text({"projects": "all", "hosts": {"devkit": "a"}}))
+    here, elsewhere = rc_config.assigned_here(config, ["devkit", "carameli"], "b")
+    assert here == []
+    assert "carameli" in elsewhere[1] and "served nowhere" in elsewhere[1]
+
+
+@pytest.mark.parametrize(
+    "hosts",
+    [{"devkit": 7}, {"devkit": ""}, {"devkit": "..."}, {"": "desktop-a"}, ["desktop-a"], 3],
+    ids=["non-string-host", "empty-host", "no-name-left", "empty-project", "list", "int"],
+)
+def test_an_unusable_hosts_entry_is_dropped(hosts):
+    config = rc_config.parse_config(workspace_text({"projects": ["devkit"], "hosts": hosts}))
+    assert config.hosts == ()
+
+
+@pytest.mark.parametrize(
+    ("typed", "key"),
+    [
+        ("desktop-a", "desktop-a"),
+        ("  Desktop-A.tail1234.ts.net ", "desktop-a"),
+        ("DESKTOP-B9FC8VP", "desktop-b9fc8vp"),
+        ("", ""),
+        ("...", ""),
+    ],
+    ids=["already-a-key", "case-suffix-and-space", "upper-case", "empty", "no-name-left"],
+)
+def test_host_key_spells_a_typed_host_as_the_ledger_spells_the_machine(typed, key):
+    assert rc_config.host_key(typed) == key
+
+
+def test_host_for_prefers_a_project_s_own_entry_over_the_default():
+    config = rc_config.Config(hosts=(("*", "desktop-a"), ("carameli", "desktop-b")))
+    assert rc_config.host_for(config, "carameli") == "desktop-b"
+    assert rc_config.host_for(config, "devkit") == "desktop-a"
+
+
+def test_host_for_is_empty_for_a_project_nothing_assigns():
+    config = rc_config.Config(hosts=(("devkit", "desktop-a"),))
+    assert rc_config.host_for(config, "carameli") == ""
+    assert rc_config.host_for(rc_config.Config(), "devkit") == ""
+
+
 # --- valid_time and due_for_update ------------------------------------------
 
 

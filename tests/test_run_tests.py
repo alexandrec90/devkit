@@ -239,7 +239,9 @@ def test_help_says_it_takes_test_files(capsys):
     fixer told to pass test files read "[-h] [--changed]" as "accepts no test paths"."""
     with pytest.raises(SystemExit):
         run_tests.main(["--help"])
-    assert "[--all | --changed] [test file or pytest argument ...]" in capsys.readouterr().out
+    assert "[--all | --changed] [--only] [test file or pytest argument ...]" in (
+        capsys.readouterr().out
+    )
 
 
 def test_it_runs_pytest_with_this_interpreter(artifact, monkeypatch):
@@ -487,6 +489,38 @@ def test_every_covered_by_entry_in_devkit_names_its_module():
     assert all((REPO_ROOT / module).is_file() for module in covered.values())
 
 
+def test_a_data_file_names_the_tests_that_read_it(tmp_path, monkeypatch):
+    """817b82a0: a change to `ports.toml` printed "no test named for ports.toml", so
+    `test_devkit_ports.py`, which gates it, ran only by hand."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_reader.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        run_tests,
+        "READ_BY",
+        {"data.toml": ("tests/test_reader.py",), "gone.toml": ("tests/test_gone.py",)},
+    )
+    assert run_tests.tests_for(["data.toml", "gone.toml", "other.toml"], tmp_path) == (
+        ["tests/test_reader.py"],
+        ["gone.toml", "other.toml"],
+    )
+
+
+def test_ports_and_the_workspace_file_name_the_test_that_gates_them():
+    gate = "tests/test_devkit_ports.py"
+    for path in ("ports.toml", "workspace.jsonc"):
+        tests, unnamed = run_tests.tests_for([path], REPO_ROOT)
+        assert gate in tests and not unnamed, path
+
+
+def test_every_read_by_entry_names_a_tracked_file_and_existing_tests():
+    for path, readers in run_tests.READ_BY.items():
+        assert (REPO_ROOT / path).is_file(), f"READ_BY lists {path}, which is gone"
+        assert readers, f"READ_BY lists {path} with no test"
+        for reader in readers:
+            assert reader.startswith("tests/test_") and (REPO_ROOT / reader).is_file(), reader
+
+
 def test_a_template_of_a_test_is_not_run_as_one(tmp_path):
     """`templates/core/tests/test_smoke.py.tmpl` renders into a test; unrendered it is
     not one, and naming it would hand pytest a file it cannot collect."""
@@ -575,6 +609,74 @@ def test_explicit_targets_stay_one_run_with_their_options(artifact, monkeypatch)
     run_tests.main(["tests/test_a.py", "scripts/hooks/tests/test_b.py", "-k", "reap"])
     assert len(seen) == 1
     assert seen[0][-4:] == ["tests/test_a.py", "scripts/hooks/tests/test_b.py", "-k", "reap"]
+
+
+def hold_contracts(root: Path) -> None:
+    """Give `root` every contract test's file, as devkit's checkout has them."""
+    for target in run_tests.CONTRACT_TESTS:
+        path = root / run_tests.target_file(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+
+
+def test_named_test_files_run_with_the_contract_tests_in_runs_of_their_own(
+    artifact, monkeypatch, tmp_path, capsys
+):
+    """9caa3f5d: a session that named its test files got no contract test, so it ran the
+    whole of `scripts/hooks/tests` -- 1,693 tests -- to reach the untested-symbol ratchet,
+    which was red. The named files' options stay theirs; each test root is its own run."""
+    hold_contracts(tmp_path)
+    seen = stub_pytest(monkeypatch, 0)
+    monkeypatch.setattr(run_tests, "_parallel_args", list)
+    run_tests.main(["tests/test_a.py", "-k", "reap"])
+    assert seen[0][-3:] == ["tests/test_a.py", "-k", "reap"]
+    rest = [cmd[cmd.index("-q") + 1 :] for cmd in seen[1:]]
+    assert [t for run in rest for t in run] == list(run_tests.CONTRACT_TESTS)
+    assert all("-k" not in run for run in rest)
+    assert run_tests.by_test_root(list(run_tests.CONTRACT_TESTS)) == rest
+    assert "--only skips them" in capsys.readouterr().out
+
+
+def test_only_runs_just_the_named_tests(artifact, monkeypatch, tmp_path):
+    hold_contracts(tmp_path)
+    seen = stub_pytest(monkeypatch, 0)
+    run_tests.main(["--only", "tests/test_a.py"])
+    assert len(seen) == 1 and seen[0][-1] == "tests/test_a.py"
+
+
+def test_a_red_contract_run_fails_a_green_named_run(artifact, monkeypatch, tmp_path):
+    hold_contracts(tmp_path)
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        seen.append(list(cmd))
+        red = run_tests.CONTRACT_TESTS[0] in cmd
+        return subprocess.CompletedProcess(cmd, int(red), FAILING_OUTPUT if red else "", "")
+
+    monkeypatch.setattr(run_tests.subprocess, "run", fake_run)
+    assert run_tests.main(["tests/test_a.py"]) == 1
+    assert "test_b.py::test_b_thing" in artifact.read_text(encoding="utf-8")
+
+
+def test_contracts_beyond_drops_what_the_targets_already_run(tmp_path):
+    hold_contracts(tmp_path)
+    every = list(run_tests.CONTRACT_TESTS)
+    assert run_tests.contracts_beyond(["tests/test_a.py", "-k", "x"], tmp_path) == every
+    hooks = [t for t in every if t.startswith("scripts/hooks/tests/")]
+    assert run_tests.contracts_beyond(["tests"], tmp_path) == hooks
+    assert run_tests.contracts_beyond(["tests\\"], tmp_path) == hooks
+    assert run_tests.contracts_beyond(["tests", "scripts/hooks/tests"], tmp_path) == []
+    assert run_tests.contracts_beyond(["."], tmp_path) == []
+    node = hooks[0]
+    assert node not in run_tests.contracts_beyond([run_tests.target_file(node)], tmp_path)
+    assert node not in run_tests.contracts_beyond([node], tmp_path)
+
+
+def test_explicit_runs_with_no_targets_is_the_one_whole_run(tmp_path):
+    hold_contracts(tmp_path)
+    assert run_tests.explicit_runs([], tmp_path) == [[]]
+    runs = run_tests.explicit_runs(["tests/test_a.py"], tmp_path)
+    assert runs[0] == ["tests/test_a.py"] and len(runs) == 3
 
 
 def test_every_contract_test_listed_exists():
