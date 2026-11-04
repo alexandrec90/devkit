@@ -70,6 +70,10 @@ PR = "pr"
 NIGHTLY = "nightly"
 COMMIT = "commit"
 BRANCH = "branch"
+# A `LOCAL` is a default branch red in the scheduled local end-to-end run
+# (`e2e_results.py`): the tests no hosted runner can run, run on this machine. It is a
+# red default branch in every way the plan cares about, read off a file, not a run.
+LOCAL = "local"
 # The harness-defect ledger's open backlog (`harness_triage.py`), as one failure for the
 # devkit session: every entry on it is a devkit defect, whichever project filed it.
 LEDGER = "ledger"
@@ -176,7 +180,7 @@ UNSTARTED = "(never started a step)"
 class Failure:
     """One red thing, with everything the plan and the prompt need to know about it."""
 
-    kind: str  # PR, NIGHTLY, COMMIT, BRANCH, LEDGER or DEPENDABOT
+    kind: str  # PR, NIGHTLY, COMMIT, BRANCH, LOCAL, LEDGER or DEPENDABOT
     project: str  # the checkout name in the workspace registry
     number: int  # PR number, or the tracker issue's number for a nightly; 0 otherwise
     title: str
@@ -199,7 +203,7 @@ class Failure:
     check_runs: tuple[str, ...] = ()
     # COMMIT only: the worktree the refused intent sits in, which is where the fixer opens.
     tree: str = ""
-    # NIGHTLY only: origin/<base>'s tip when the evidence was read, which the red run at
+    # NIGHTLY and LOCAL: origin/<base>'s tip when the evidence was read, which the red run at
     # `sha` may predate; whether a run of the workflow at that tip is still going; and
     # the workflow's file when it takes `workflow_dispatch`, so the pass can run it there.
     tip: str = ""
@@ -405,6 +409,8 @@ def name_of(failure: Failure) -> str:
     """How a failure is named in a record: `#412`, the branch it sits on, or `origin/main`."""
     if failure.kind == BRANCH:
         return f"origin/{failure.base}"
+    if failure.kind == LOCAL:
+        return f"origin/{failure.base} (local e2e)"
     if failure.kind == COMMIT:
         return failure.head
     if failure.kind in (LEDGER, DEPENDABOT):
@@ -555,7 +561,9 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     the person's step, before the hold: a re-run is refused the same way, and a fixer
     can only find the annotation.
     """
-    against_red = failure.kind in (PR, NIGHTLY) and (failure.project, failure.base) in red_bases
+    against_red = (
+        failure.kind in (PR, NIGHTLY, LOCAL) and (failure.project, failure.base) in red_bases
+    )
     if CONFLICT in failure.signature and not against_red:
         return Decision(RESOLVE, describe(failure), (failure,))
     if failure.behind and CONFLICT not in failure.signature:
@@ -571,7 +579,22 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
         return Decision(HOLD, held_note(failure), (failure,))
     if failure.kind == NIGHTLY and failure.tip_running:
         return Decision(HOLD, tip_note(failure, "a run at the tip is in progress"), (failure,))
+    if is_stale_local(failure):
+        why = "the next scheduled local run re-tests the tip"
+        return Decision(HOLD, tip_note(failure, why), (failure,))
     return runner_rerun(failure)
+
+
+def is_stale_local(failure: Failure) -> bool:
+    """A local end-to-end red at a commit its base has moved past.
+
+    No GitHub run can be dispatched at the tip, so where a stale nightly is re-run the
+    stale local run is held until the scheduled job re-tests: the commits between may
+    carry the fix -- a fixer's own merged PR always does -- and a session sent at the old
+    red would be re-sent every `fix_ledger.RESEND_AFTER` until the next night. An unknown
+    tip is not a moved one, so a run whose base git cannot read is still dispatched.
+    """
+    return failure.kind == LOCAL and failure.tip not in ("", failure.sha)
 
 
 def runner_rerun(failure: Failure) -> Decision | None:
@@ -644,6 +667,8 @@ def describe(failure: Failure) -> str:
         head = failure.title
     elif failure.kind in (NIGHTLY, BRANCH):
         head = f"{failure.workflow} workflow failing on origin/{failure.base}"
+    elif failure.kind == LOCAL:
+        head = f"{failure.workflow} failing on origin/{failure.base} on this machine"
     else:
         head = failure.reason or "red"
     if failure.signature:

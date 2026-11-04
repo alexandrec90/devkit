@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
+from e2e_results import CONTRACT as E2E_CONTRACT
 from fix_plan import (
     ALERT_ENTRY,
     COMMIT,
@@ -30,6 +31,7 @@ from fix_plan import (
     DEPENDABOT_EVIDENCE,
     EVIDENCE_DIR,
     LEDGER,
+    LOCAL,
     PR,
     PROJECT_OWNED,
     UNFETCHABLE_ENTRY,
@@ -195,6 +197,8 @@ def _logs(failure: Failure) -> str:
     A run whose jobs never started a step has no log to read at all, and "no artifact
     came down" gave its fixer no hint of that (carameli PR Gate run 37363944090).
     """
+    if failure.kind == LOCAL:
+        return _local_logs(failure)
     if failure.evidence:
         return (
             f"The gate's own logs are in {EVIDENCE_DIR}/ in this worktree -- read "
@@ -229,6 +233,33 @@ def _first_read(evidence: Path) -> str:
         return f"{READABLE} (each failing test with its message and traceback), then the .log files"
     logs = sorted(p.relative_to(evidence).as_posix() for p in evidence.rglob("*.log"))
     return ", ".join(logs) if logs else "whatever is there"
+
+
+def _local_logs(failure: Failure) -> str:
+    """Where a local end-to-end run's output is, and how to run it again.
+
+    The inverse of `LINUX`: this red was seen on this very machine, so a fixer can and
+    must reproduce it -- and no PR gate will run these tests, so a green gate on the fix
+    says nothing about them. The scheduled job re-tests once the fix merges.
+    """
+    where = (
+        f"Its output is in {EVIDENCE_DIR}/ in this worktree -- read "
+        f"{_first_read(Path(failure.evidence))} there first."
+        if failure.evidence
+        else "Its output did not come down."
+    )
+    return f"{where}{LOCAL_RERUN}"
+
+
+# How a local end-to-end red is reproduced, said once wherever one is sent, the upstream
+# session included -- whose shared sentence otherwise sends it to a run URL there is none of.
+LOCAL_RERUN = (
+    f" A Local E2E run happened on this machine, from the static checkout, as python "
+    f"{E2E_CONTRACT}; run that same command in the worktree you fix it in, before changing "
+    "anything and again after, and say in the intent what it printed. The PR gate does "
+    "not run these tests, so its green is no evidence about them; the scheduled local run "
+    "re-tests once the fix merges."
+)
 
 
 # The gate runs on Linux and a fixer on this machine: one shipped a fix whose only real
@@ -444,6 +475,7 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         "worktree, one directory per failure that uploaded any; for the rest, read the "
         "run at its URL."
         + "".join(_ledger_log(f) + LEDGER_STEPS for f in ordered if f.kind == LEDGER)
+        + (LOCAL_RERUN if any(f.kind == LOCAL for f in ordered) else "")
         + f" This worktree is on the fresh branch {branch} off the default branch. Say in "
         f"the intent which of these the fix unblocks: {urls}. {OWN_DIFF} {FINISH}"
     )
@@ -498,6 +530,21 @@ def branch_prompt(failure: Failure, branch: str) -> str:
         f"This worktree is on the fresh branch {branch} off origin/{failure.base}, "
         "so the failure reproduces here. Fix it; every PR against this base is red until "
         f"the fix lands. {FINISH}"
+    )
+
+
+def local_prompt(failure: Failure, branch: str) -> str:
+    """A default branch red in the scheduled local end-to-end run: fix on a fresh branch.
+
+    `fix_plan.is_stale_local` holds a run older than the tip, so the run was at the tip
+    this tree was cut from, and the failure reproduces here.
+    """
+    return _framed(
+        f"The {failure.workflow} run in {failure.project} -- the tests no hosted runner can "
+        f"run, run on this machine -- is red on origin/{failure.base} at "
+        f"{failure.sha[:12] or 'its head'}. Failing: {_ids(failure.signature)}. "
+        f"{_logs(failure)} This worktree is on the fresh branch {branch} off "
+        f"origin/{failure.base}. Fix what the run is failing on. {FINISH}"
     )
 
 

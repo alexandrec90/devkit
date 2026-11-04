@@ -117,10 +117,22 @@ box_teardown = worktree.box_teardown
 # *this* machine is intact", which is exactly the thing CI has no opinion about.
 LIVE_WORKSPACE = devkit_project.DEFAULT_WORKSPACE
 
-needs_live_workspace = pytest.mark.skipif(
+_live_workspace_skip = pytest.mark.skipif(
     not LIVE_WORKSPACE.exists(),
     reason=f"{LIVE_WORKSPACE.name} is a workstation-local registry, not part of the checkout",
 )
+
+# What the two markers below add beside their skip: the test is in the end-to-end tier
+# `scripts/e2e.py` runs nightly on this workstation. Skipped in CI and in every box, each
+# such test ran only when a person happened to run the suite on `main`; the marker is
+# what gives it a runner, and putting it inside the same decorator means no test can be
+# skipped for wanting this machine without also being run on it.
+local = pytest.mark.local
+
+
+def needs_live_workspace(test):
+    """Skip without the live registry, and run in the nightly local tier (`local`)."""
+    return local(_live_workspace_skip(test))
 
 
 def on_a_task_branch(root: Path) -> bool:
@@ -189,10 +201,16 @@ def in_an_ephemeral_box(root: Path) -> bool:
 # that deletes the branch's edit. Rendering early is not the answer either: the live file
 # would then point VS Code at a task shape the *static* checkout's scripts cannot serve
 # until the same branch merges. So the check stays exactly where it means something.
-needs_the_static_checkout = pytest.mark.skipif(
+_static_checkout_skip = pytest.mark.skipif(
     in_an_ephemeral_box(REPO_ROOT) or on_a_task_branch(REPO_ROOT),
     reason="the live workspace is rendered from the static checkout after a branch merges",
 )
+
+
+def needs_the_static_checkout(test):
+    """Skip outside the static checkout's default branch, and run in the `local` tier."""
+    return local(_static_checkout_skip(test))
+
 
 __all__ = [
     "LIVE_WORKSPACE",
@@ -210,6 +228,7 @@ __all__ = [
     "harness_state",
     "in_an_ephemeral_box",
     "load_script",
+    "local",
     "needs_live_workspace",
     "needs_the_static_checkout",
     "on_a_task_branch",

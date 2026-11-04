@@ -311,8 +311,8 @@ def dispatch_fresh(
     key: str = "",
     problem: str = "",
 ) -> int:
-    """A nightly, a red default branch, what Dependabot cannot do, or a vendored failure
-    shared across consumers: a fresh branch."""
+    """A nightly, a red default branch (its gate's or its local end-to-end run's), what
+    Dependabot cannot do, or a vendored failure shared across consumers: a fresh branch."""
     first = decision.failures[0]
     upstream = decision.action == fix_plan.UPSTREAM
     project = DEVKIT if upstream else first.project
@@ -338,16 +338,24 @@ def dispatch_fresh(
             # The tracker issue the prompt names, in this same repo: the PR closes it.
             fix_reports.note_on_stamp(tree, fix_reports.CLOSES, str(first.number))
     print(f"  worktree {tree} on {branch}")
-    if upstream:
-        failures = fix_prompts.with_trees(decision.failures, root, sweep.git_for)
-        prompt, title = fix_prompts.upstream_prompt(failures, branch), f"devkit {branch}"
-    elif first.kind == fix_plan.BRANCH:
-        prompt, title = fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
-    elif first.kind == fix_plan.DEPENDABOT:
-        prompt, title = fix_prompts.dependabot_prompt(first, branch), f"{project} dependabot"
-    else:
-        prompt, title = fix_prompts.nightly_prompt(first, branch), f"{project} {first.workflow}"
+    prompt, title = fresh_prompt(decision, root, branch)
     return open_session(launch, tree, branch, tab_safe(prompt), title, runner)
+
+
+def fresh_prompt(decision: fix_plan.Decision, root: Path, branch: str) -> tuple[str, str]:
+    """`(prompt, tab title)` for a fresh-branch session, by the shape of its first failure."""
+    first = decision.failures[0]
+    if decision.action == fix_plan.UPSTREAM:
+        failures = fix_prompts.with_trees(decision.failures, root, sweep.git_for)
+        return fix_prompts.upstream_prompt(failures, branch), f"devkit {branch}"
+    project = first.project
+    if first.kind == fix_plan.BRANCH:
+        return fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
+    if first.kind == fix_plan.LOCAL:
+        return fix_prompts.local_prompt(first, branch), f"{project} local e2e"
+    if first.kind == fix_plan.DEPENDABOT:
+        return fix_prompts.dependabot_prompt(first, branch), f"{project} dependabot"
+    return fix_prompts.nightly_prompt(first, branch), f"{project} {first.workflow}"
 
 
 def rerun_workflow(failure: fix_plan.Failure, root: Path) -> int:

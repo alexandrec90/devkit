@@ -209,6 +209,17 @@ window-less — `CREATE_NO_WINDOW` on every spawn in the job's reachable set, pa
 **console** `python.exe` as the inner interpreter — and its rules are enforced by that
 same test.
 
+## A red end-to-end run is a result, not a failed job
+
+`devkit-local-e2e` exits 0 when a project's `scripts/e2e.py` is red. That is
+deliberate: the job's exit code goes to `log-wrap.py`, which files every failure on the
+events ledger, and every ledger row goes to the one devkit session ahead of all project
+fixers. A project's red e2e run belongs to that project's fixer. So the verdict travels
+as `logs/e2e/<project>/result.json`, and `e2e_results.collect` hands it to the fix pass
+as a `fix_plan.LOCAL` failure. Keep the job's non-zero exit for the pass itself breaking.
+`e2e_results.py` carries the rest, including why a run older than the tip is held
+rather than sent.
+
 ## The events ledger: append-only, and that is why resolution is an event
 
 `harness_events.py` is the write half and `harness_triage.py` the read half.

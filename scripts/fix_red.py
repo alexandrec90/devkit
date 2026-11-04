@@ -18,12 +18,14 @@ Tested in `tests/test_fix_red.py`, and through the pass in `tests/test_fix_pass.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broken_pr_menu as menu
+import e2e_results
 import fix_backlog
 import fix_cycle
 import fix_findings
@@ -50,6 +52,9 @@ def collect_red(
     """Everything red, devkit's default-branch verdict (None: unreadable), and the
     checkouts whose default-branch verdict could not be read.
 
+    devkit's verdict is its gate's alone: a red local run is a failure to fix, not a
+    reason to hold every project behind devkit's main the way a red gate is.
+
     Each default branch's own gate is read beside the PRs: a red one is a failure to
     send a session at (devkit's is the harness itself), not only a reason to hold. The
     harness-defect backlog is `backlog_failure`'s, read separately so that a crash here
@@ -59,6 +64,9 @@ def collect_red(
     branches = gate_evidence.collect_default_branches(workspace, projects)
     failures = refused + gate_evidence.collect(workspace, found)
     failures += [failure for _, failure in branches.values() if failure]
+    # After the branches: their read fetched origin, which the local runs' tips are read
+    # against. The tests no hosted runner can run, red on this machine (`e2e_results`).
+    failures += e2e_results.collect(workspace, projects, sweep.git_for)
     green, _ = branches.get(fix_cycle.DEVKIT, (None, None))
     unread = [name for name, (verdict, _) in branches.items() if verdict is None]
     return failures, green, unread
@@ -121,21 +129,70 @@ def transient(said: str) -> bool:
     return sweep.transient(said)
 
 
+def _last_line(done: object) -> str:
+    why = (getattr(done, "stderr", "") or getattr(done, "stdout", "") or "").strip()
+    return why.splitlines()[-1].strip() if why else "?"
+
+
+# `ship_intent.SKIP_PUSH_GATE`, spelled here because this module imports nothing that
+# ships; `tests/test_fix_red.py` holds the two equal.
+SKIP_PUSH_GATE = "devkit-push-gate"
+
+
+def seed_env() -> dict[str, str]:
+    """The environment a seed push runs in: `new-project.scripted_setup_env`'s branch
+    policy waiver -- this is the push that generator was making -- and the push gate
+    skipped the way the pass skips it for every push, added to any `SKIP` already set:
+    the push to the default branch raises the gate in CI, which is where it is read."""
+    env = dict(os.environ)
+    skipped = [s for s in env.get("SKIP", "").split(",") if s.strip()]
+    env["SKIP"] = ",".join([*skipped, SKIP_PUSH_GATE])
+    env["DEVKIT_SKIP_BRANCH_POLICY"] = "1"
+    return env
+
+
+def unseeded(gh) -> bool:
+    """Whether the checkout's repository on GitHub holds no branch at all."""
+    done = gh("repo", "view", "--json", "isEmpty", "--jq", ".isEmpty")
+    return getattr(done, "returncode", 1) == 0 and (done.stdout or "").strip() == "true"
+
+
+def seed(git, base: str) -> tuple[bool, str]:
+    """Push the local `base` to an empty GitHub repo: `(pushed, what for the record)`.
+
+    3120f1ce: `new-project.py`'s `gh repo create --push` made skinamp's repo and the run
+    was ended before its push finished -- a second click on the task terminated it -- so
+    GitHub held no branch, the dispatch 404ed, and the pass filed it on every run. Nothing
+    is overwritten: an empty repo has no branch to lose, and the local one is what the
+    generator was pushing.
+    """
+    if getattr(git("rev-parse", "--verify", "--quiet", f"refs/heads/{base}"), "returncode", 1):
+        return False, f"{base} -- FAILED to seed the empty GitHub repo: no local {base}"
+    done = git("push", "-u", "origin", base, env=seed_env())
+    if getattr(done, "returncode", 1) == 0:
+        return True, f"{base} -- GitHub held no branch; pushed {base}, which raises its gate"
+    return False, f"{base} -- FAILED to seed the empty GitHub repo: {_last_line(done)}"
+
+
 def regate(project_dir: Path) -> tuple[bool, str]:
     """Run the gate on the checkout's default branch: `(dispatched, what for the record)`.
 
     A failure still transient after every retry is said as *deferred*, without `FAILED`:
     the tip is still unread, so the next pass re-runs it, and `fix-pass.py` files only a
-    `FAILED` line -- a GitHub outage is nothing a devkit session can fix.
+    `FAILED` line -- a GitHub outage is nothing a devkit session can fix. A 404 from a
+    repo GitHub holds no branch of is a generator that stopped before its push, finished
+    here (`seed`); asked only after the 404, so a healthy re-run costs no extra call.
     """
-    base = tb.detect_default_branch(sweep.git_for(project_dir), fallback="main")
+    git = sweep.git_for(project_dir)
+    base = tb.detect_default_branch(git, fallback="main")
     gh = sweep.gh_for(project_dir)
     for pause in (*REGATE_RETRY_SECONDS, None):
         done = gh("workflow", "run", gate_evidence.GATE_WORKFLOW, "--ref", base)
         if getattr(done, "returncode", 1) == 0:
             return True, f"{base} -- no verdict at the tip; gate re-run"
-        why = (getattr(done, "stderr", "") or getattr(done, "stdout", "") or "").strip()
-        said = why.splitlines()[-1] if why else "?"
+        said = _last_line(done)
+        if said.startswith("HTTP 404") and unseeded(gh):
+            return seed(git, base)
         if not transient(said):
             return False, f"{base} -- FAILED to re-run the gate: {said}"
         if pause is not None:

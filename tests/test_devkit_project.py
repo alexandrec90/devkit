@@ -498,6 +498,9 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # Born scoped, by capability: only ibkr_trader holds Questrade accounts and the
         # forward snapshots a plan reads. `scripts/questrade-task.py` is the contract.
         "questrade-plan",
+        # Born scoped, by capability: only ibkr_trader ships the web UI.
+        # `scripts/ui-task.py` is the contract.
+        "trader-ui",
     }
 
 
@@ -671,6 +674,38 @@ def test_the_questrade_plan_names_its_missing_script(tmp_path):
     """An ibkr_trader checkout that predates the script is a conformance failure by name."""
     with pytest.raises(ProjectError, match=r"scripts/questrade-task\.py"):
         plan_command(ACTIONS["questrade-plan"], tmp_path, ["--strategy", "core_satellite"])
+
+
+def test_the_trader_ui_is_ibkr_scoped_and_runs_the_script_bare(tmp_path):
+    """`ui-task.py` takes no subcommand: its port defaults inside the checkout's .env, so
+    the dispatch adds nothing between the interpreter and the script."""
+    action = ACTIONS["trader-ui"]
+    assert action.script == "scripts/ui-task.py"
+    assert action.args == ()
+    assert action.projects == IBKR
+    assert action.owner == devkit_project.PROJECT
+    assert "trader-ui" not in expected_actions("devkit")
+
+    checkout = tmp_path / "ibkr_trader"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "ui-task.py").write_text("", encoding="utf-8")
+    argv = plan_command(action, checkout, [])
+    assert argv[-2:] == ["python", "scripts/ui-task.py"]
+
+
+def test_the_trader_ui_task_names_its_checkout_rather_than_asking(canonical):
+    """The server binds one port, so a multi-pick would start the second checkout's UI
+    only after the first's terminal closed -- or onto a port already taken. A literal
+    `--project` asks nothing; the literal-scope test above holds it to the action."""
+    task = next(t for t in canonical["tasks"] if t["label"] == "IBKR: Open Trader UI")
+    args = [str(a) for a in task["args"]]
+    assert args[args.index("--project") + 1 :] == ["ibkr_trader", "trader-ui"]
+
+
+def test_the_trader_ui_names_its_missing_script(tmp_path):
+    """A checkout without the UI branch merged is a conformance failure by name."""
+    with pytest.raises(ProjectError, match=r"scripts/ui-task\.py"):
+        plan_command(ACTIONS["trader-ui"], tmp_path, [])
 
 
 def test_the_host_preview_pair_is_one_script_told_apart_by_a_flag():
@@ -1670,6 +1705,55 @@ def test_canonical_history_is_each_committed_copy_newest_first(workspace_pair):
     assert len(list(devkit_project.canonical_history(live, depth=1))) == 1
 
 
+def test_held_on_branches_names_the_branch_holding_each_live_edit():
+    """4ea2781c: a live-only line some pushed copy already holds is a merge awaited; an
+    ahead line is never "held" -- it is not the live file's edit."""
+    payload = {"folders": [{"path": "devkit"}, {"path": "photolab"}], "settings": {"x": 1}}
+    problems = [
+        "folder in the workspace but not in devkit: photolab",
+        "setting in the workspace but not in devkit: x",
+        "missing from the workspace: Some Task",
+    ]
+    pending = [
+        ("origin/elsewhere", {"folders": [{"path": "devkit"}]}),
+        ("origin/agent/register-photolab", {"folders": payload["folders"]}),
+        ("origin/older", {"folders": payload["folders"], "settings": {"x": 1}}),
+    ]
+    held = devkit_project.held_on_branches(problems, payload, pending)
+    assert held == {
+        problems[0]: "origin/agent/register-photolab",
+        problems[1]: "origin/older",
+    }
+    assert devkit_project.held_on_branches(problems, payload, []) == {}
+
+
+def test_pending_copies_are_the_pushed_commits_head_lacks(workspace_pair):
+    canonical, live = workspace_pair
+    assert list(devkit_project.pending_copies(live)) == [], "no repository, nothing pending"
+    _commit_canonical(canonical)
+    repo = canonical.parent
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    base = git("rev-parse", "HEAD")
+    for cwd, ref in (("pushed", "refs/remotes/origin/agent/reg"), ("local", "refs/heads/mine")):
+        _set_switches(canonical, **{"powershell.cwd": cwd})
+        git("commit", "-qam", cwd)
+        git("update-ref", ref, "HEAD")
+        git("reset", "-q", "--hard", base)
+    git("update-ref", "refs/remotes/origin/main", base)
+
+    seen = [(b, c["settings"]["powershell.cwd"]) for b, c in devkit_project.pending_copies(live)]
+    assert seen == [("origin/agent/reg", "pushed")], "local-only and merged commits are not"
+
+
 def test_canonical_history_reads_a_committed_copy_intact_outside_utf8_mode(
     workspace_pair, monkeypatch
 ):
@@ -2373,11 +2457,20 @@ def test_no_two_tasks_share_an_icon_and_colour(canonical):
 # reader most often wants side by side. The `logs/` artifacts do not cover the gap —
 # `log-wrap.py` empties a task's log when it passes, so a successful run exists only in
 # its terminal. Terminals accumulate instead, and that is the accepted trade.
+#
+# `runOptions` is the one that destroyed work. VS Code's defaults are `instanceLimit: 1`
+# and `instancePolicy: "prompt"`, so clicking a task that is still running offers to
+# terminate it, and a second *Project: New from devkit* killed the first mid-push: an
+# empty GitHub repo and a scaffold with no `.git`. `panel: "new"` does not prevent it.
+# The limit lets a second run start beside the first, and `warn` means that past the
+# limit the new run is refused with a warning rather than the old one being killed.
 TASK_CONTRACT = {
     "type": "process",  # VS Code watches the process, so the exit-code icon is real
     "presentation.panel": "new",  # one run, one terminal; nothing is overwritten
     "presentation.close": False,  # the terminal stays open for review
     "presentation.reveal": "always",  # a task you clicked shows you what it did
+    "runOptions.instanceLimit": 4,  # a second click runs beside the first
+    "runOptions.instancePolicy": "warn",  # past the limit, refuse the new run, kill nothing
 }
 
 # Tasks that deliberately finish without a toast, for the same reason `UNLOGGED_TASKS`

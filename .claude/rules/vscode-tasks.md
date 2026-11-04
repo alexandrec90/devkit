@@ -7,9 +7,24 @@ paths:
   - tests/test_devkit_project.py
   - tests/test_git_merge_default.py
   - tests/test_self_hosting.py
+  - tests/test_workspace_tasks_live.py
+  - tests/test_vscode_tasks_e2e.py
+  - tests/vscode_e2e/**
 ---
 
 # Rule: VS Code tasks
+
+**A claim in this file about what VS Code does is checked by clicking, not by reading.**
+Every contract below was written from a belief about VS Code and its two input
+extensions, and the beliefs were wrong often enough that two test tiers now do what a
+click does, nightly, on this workstation (`scripts/e2e.py`).
+`tests/test_workspace_tasks_live.py` runs every live picker's command, chained as the
+extension chains it and held to a time budget. It also cancels every task that reads a
+command picker. `tests/test_vscode_tasks_e2e.py` opens an isolated VS Code on the
+canonical block and runs each task, accepting and then escaping its picks, and judges
+the argv VS Code resolved. When one of them disagrees with a paragraph here, the
+paragraph is the defect. Before adding a task, run the second for it:
+`DEVKIT_VSCODE_E2E_ONLY="<label>" python -m pytest tests/test_vscode_tasks_e2e.py`.
 
 **Tasks live in the workspace file, never in a repo's `.vscode/tasks.json`.** A task
 defined in a repo is invisible from the workspace root, cannot be scoped with
@@ -111,7 +126,10 @@ moved, not what moved, so `live_only` reads the drift and a canonical copy that 
 those are the entries a publish exists to deliver, and git holds every one of them. A
 "differs" line names a key both copies carry and not who moved it last, so git is asked:
 one whose live value an earlier `workspace.jsonc` held is devkit's change, relabelled
-by `devkit_project.behind` and published like the rest; any other counts as live-authored. `settings` is compared per key on the
+by `devkit_project.behind` and published like the rest; any other counts as live-authored.
+A refusal whose every live edit a pushed branch already holds (`held_on_branches`, as
+`new-project.py` leaves one) still refuses, but the daily line names that branch and files
+no failure. `settings` is compared per key on the
 same terms, minus `devkit_project.MACHINE_SETTINGS`: the operator's switches, which a
 render carries over from the live file and an adopt never records. The live file's value
 is this machine's answer and `workspace.jsonc`'s only a fresh machine's default, so switch
@@ -145,7 +163,8 @@ never renders.
 
 - **The settings a task carries are a table in the tests, not a habit.** `TASK_CONTRACT`
   in `tests/test_devkit_project.py` holds `type`, `presentation.panel`,
-  `presentation.close` and `presentation.reveal` with what each is for, and
+  `presentation.close`, `presentation.reveal` and the two `runOptions` with what each is
+  for, and
   `CONTRACT_EXCEPTIONS` holds the two deviations and why. Copy the nearest neighbour and
   the test tells you what you missed. A run's terminal is the only place a *passing* run's
   output exists, because `log-wrap.py` empties the log when the task passes, so
@@ -337,10 +356,14 @@ never renders.
   - **the first row of the model and effort lists passes no flag at all** -- not the
     configured value, which is a different thing the moment the configuration changes
     between the click and the spawn.
-- **A task meant to run twice at once says so with `runOptions.instanceLimit`.** The
-  default is **1**, and re-running an active task offers to terminate it instead — which
-  made comparing two preview branches look impossible while `worktree.py` underneath had
-  been concurrency-safe all along. `presentation.panel` is *not* this setting: `new` gives
-  each run its own terminal and still refuses the second run. Raising it gives that task's
-  `log-wrap.py` artifact two writers, which is what `write_artifact`'s `since` argument
-  handles.
+- **A second click never cancels the first, on any task.** VS Code defaults
+  `runOptions.instanceLimit` to **1** and `instancePolicy` to `prompt`, so re-running an
+  active task offers to terminate it. A second *Project: New from devkit* killed the first
+  mid-push that way, leaving an empty GitHub repo and a scaffold with no `.git`. So every
+  task raises the limit, and sets `warn` so that past the limit the *new* run is refused
+  rather than the old one killed. `TASK_CONTRACT` holds both; an exception goes in
+  `CONTRACT_EXCEPTIONS` with its reason. `presentation.panel` is *not* this setting:
+  `new` gives each run its own terminal and still refuses the second run. Two runs mean
+  the task's `log-wrap.py` artifact has two writers, which is what `write_artifact`'s
+  `since` argument handles. A script that cannot tolerate a concurrent run of itself has
+  to guard that itself: the CLI never had this limit anyway.
