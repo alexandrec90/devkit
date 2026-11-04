@@ -1699,6 +1699,7 @@
 								"agent-env",
 								"docker-prune",
 								"docker-stop-idle",
+								"e2e-schedule",
 								"git-policy",
 								"global-tools",
 								"installers-schedule",

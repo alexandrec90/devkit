@@ -651,6 +651,58 @@ def test_a_nightly_whose_jobs_never_started_is_re_run_at_the_tip_when_it_predate
     assert decision.action == fix_plan.RERUN and "re-run once" in decision.note
 
 
+def _local(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "kind": fix_plan.LOCAL,
+        "project": "carameli",
+        "number": 0,
+        "head": "",
+        "url": "",
+        "reason": "",
+        "workflow": "Local E2E",
+        "signature": ("tests/test_tasks_live.py::test_every_picker_draws",),
+        "sha": "59a4ef5aaaaa",
+        "tip": "59a4ef5aaaaa",
+    }
+    return failure(**(base | fields))
+
+
+def test_a_local_e2e_red_at_the_tip_gets_its_fixer_on_a_fresh_branch():
+    [decision] = fix_plan.plan([_local()], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.DISPATCH
+    assert decision.note.startswith("Local E2E failing on origin/main on this machine: ")
+    assert fix_plan.name_of(_local()) == "origin/main (local e2e)"
+
+
+def test_a_local_e2e_red_the_tip_has_moved_past_is_held_for_the_next_local_run():
+    """No run can be dispatched at the tip, so a stale local red waits for the night's
+    re-test: a fixer's own merged PR moves the tip, and a session sent at the red it
+    fixed would be re-sent every RESEND_AFTER until the scheduled job ran again."""
+    stale = _local(tip="b31b60cbbbbb")
+    assert fix_plan.is_stale_local(stale)
+    [decision] = fix_plan.plan([stale], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.HOLD
+    assert decision.note.endswith(
+        "its red run is at 59a4ef5aa, origin/main at b31b60cbb: "
+        "the next scheduled local run re-tests the tip"
+    )
+
+
+def test_a_local_e2e_red_whose_tip_git_cannot_read_is_still_dispatched():
+    """An unknown tip is not a moved one: holding it would hold it forever."""
+    assert not fix_plan.is_stale_local(_local(tip=""))
+    [decision] = fix_plan.plan([_local(tip="")], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.DISPATCH
+
+
+def test_a_local_e2e_red_against_a_red_gate_waits_for_the_gates_fixer():
+    """The gate's red is on the same commit; its fixer goes alone, as for a nightly."""
+    gate = failure(kind=fix_plan.BRANCH, number=0, head="", workflow="PR Gate", url="u")
+    decisions = fix_plan.plan([gate, _local()], "v0-11-23", PREFIXES)
+    actions = {d.failures[0].kind: d.action for d in decisions}
+    assert actions == {fix_plan.BRANCH: fix_plan.DISPATCH, fix_plan.LOCAL: fix_plan.HOLD}
+
+
 def test_the_tip_note_names_both_commits_and_what_the_pass_does():
     note = fix_plan.tip_note(_nightly(), "re-running it there")
     assert note.endswith(

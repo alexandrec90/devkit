@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import broken_pr_menu as menu
+import e2e_results
 import fix_backlog
 import fix_cycle
 import fix_findings
@@ -51,6 +52,9 @@ def collect_red(
     """Everything red, devkit's default-branch verdict (None: unreadable), and the
     checkouts whose default-branch verdict could not be read.
 
+    devkit's verdict is its gate's alone: a red local run is a failure to fix, not a
+    reason to hold every project behind devkit's main the way a red gate is.
+
     Each default branch's own gate is read beside the PRs: a red one is a failure to
     send a session at (devkit's is the harness itself), not only a reason to hold. The
     harness-defect backlog is `backlog_failure`'s, read separately so that a crash here
@@ -60,6 +64,9 @@ def collect_red(
     branches = gate_evidence.collect_default_branches(workspace, projects)
     failures = refused + gate_evidence.collect(workspace, found)
     failures += [failure for _, failure in branches.values() if failure]
+    # After the branches: their read fetched origin, which the local runs' tips are read
+    # against. The tests no hosted runner can run, red on this machine (`e2e_results`).
+    failures += e2e_results.collect(workspace, projects, sweep.git_for)
     green, _ = branches.get(fix_cycle.DEVKIT, (None, None))
     unread = [name for name, (verdict, _) in branches.items() if verdict is None]
     return failures, green, unread

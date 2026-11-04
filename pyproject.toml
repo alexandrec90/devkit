@@ -44,7 +44,10 @@ package = false
 testpaths = ["tests"]
 # No `-q` here: an agent adds its own, and `-qq` drops the "N passed" line -- sessions ran
 # the suite again and again looking for a verdict that was never printed.
-addopts = '-m "not paid" -p devkit_temproot'
+# `local` is deselected like `paid`: the tier that needs this workstation includes a run
+# that drives VS Code for half an hour, and the push gate runs this suite on this machine.
+# `scripts/e2e.py` selects it by name, nightly, once the PC is idle.
+addopts = '-m "not paid and not local" -p devkit_temproot'
 # The vendored plugin that gives each run a temp root of its own; `-p` above loads it.
 # What makes it importable: pytest applies this before it loads a `-p` plugin, which is
 # also why the floor above is 9.1. `scripts` too, so a test's `import fix_plan` does not
@@ -57,6 +60,7 @@ markers = [
   "claude_live: paid opt-in smoke tests that launch an authenticated Claude Code CLI session",
   "codex_live: paid opt-in smoke tests that launch an authenticated Codex CLI session",
   "paid: tests that may consume paid live infrastructure and are excluded by default",
+  "local: needs this workstation, not a runner; run nightly by scripts/e2e.py, skipped where it cannot run",
 ]
 
 [tool.mypy]
