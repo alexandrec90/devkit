@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT, load_script
+from support import REPO_ROOT, devkit_jsonc, load_script
 
 installers = load_script("scripts/installers.py")
 
@@ -518,3 +518,16 @@ def test_uninstall_carries_the_same_per_installer_options_the_check_does(tmp_pat
     runner = Removals()
     installers.decommission(root, True, {"install-alpha.py": ["--merge"]}, runner)
     assert runner.calls[0][2:] == ["--uninstall", "--yes", "--merge"]
+
+
+def test_the_scheduled_jobs_picker_offers_every_installer_on_disk():
+    """`installerJobs` is a hand-kept list, and it had already lost `collectors` and
+    `fix-pass-task` when `e2e-schedule` was added beside them: an installer missing from
+    it cannot be ticked, only reached by running every installer at once."""
+    inputs = devkit_jsonc.loads((REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8"))[
+        "tasks"
+    ]["inputs"]
+    picker = next(spec for spec in inputs if spec.get("id") == "installerJobs")
+    offered = [option for group in picker["args"]["optionGroups"] for option in group["options"]]
+    on_disk = [path.stem.removeprefix("install-") for path in installers.discover(REPO_ROOT)]
+    assert offered == on_disk

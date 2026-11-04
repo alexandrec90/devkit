@@ -13,9 +13,11 @@ task's job rather than this module's: the stages must appear **left to right in 
 dependence** in the task's arguments, and every input in the chain must be a
 `shellCommand.execute` one.
 
-**What this module owns is the scan in between.** The first stage has to run the full
-fan-out to count anything, and the second stage must not run it again -- so stage one
-writes the rows it built and hands stage two a **token** naming that exact write. Which
+**What this module owns is the scan in between.** A first stage that has to run the
+full fan-out to count anything must not make the second stage run it again -- so stage
+one writes the rows it built and hands stage two a **token** naming that exact write.
+One that can count without the fan-out (the delete task's, from `git worktree list`)
+writes nothing and hands on the empty token, which names no write by construction. Which
 is the whole point of the token, and worth being plain about: the failure this design
 has to rule out is the one the file-backed menus died of, a reader believing rows that
 some earlier pass wrote. A token that does not match is not repaired and not served

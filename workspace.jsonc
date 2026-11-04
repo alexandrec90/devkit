@@ -1861,9 +1861,11 @@
 							"minCount": 0,
 							"options": [
 								"agent-env",
+								"collectors",
 								"docker-prune",
 								"docker-stop-idle",
 								"e2e-schedule",
+								"fix-pass-task",
 								"git-policy",
 								"global-tools",
 								"installers-schedule",

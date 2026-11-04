@@ -84,6 +84,116 @@ def test_a_detached_worktree_is_not_counted_against_any_base():
     assert agent_worktree.unpushed_count(git, "") == 0
 
 
+@pytest.mark.parametrize(
+    ("upstream", "track", "against_default", "expected"),
+    [
+        ("origin/agent/x", "[ahead 3]", "9 0", 3),
+        ("origin/agent/x", "[ahead 1, behind 4]", "9 0", 1),
+        ("origin/agent/x", "[behind 4]", "9 0", 0),
+        ("origin/agent/x", "", "9 0", 0),
+        ("origin/agent/x", "[gone]", "5 2", 5),
+        ("", "", "2 7", 2),
+        ("", "", "", 0),
+    ],
+)
+def test_one_branch_counts_by_the_same_rule_as_unpushed_count(
+    upstream, track, against_default, expected
+):
+    """The upstream decides when it exists; no upstream, or one deleted on merge, falls
+    back to the default branch. An empty `track` is both "level" and "no upstream", which
+    only the upstream column tells apart."""
+    assert agent_worktree.branch_ahead(upstream, track, against_default) == expected
+
+
+def test_ahead_counts_reads_every_branch_in_one_call():
+    fmt = agent_worktree.AHEAD_FORMAT.format(default="main")
+    git = fake_git(
+        {
+            ("for-each-ref", fmt, "refs/heads"): (
+                0,
+                "main\torigin/main\t\t0 0\nagent/x\t\t\t2 1\nagent/y\torigin/agent/y\t[ahead 4]\t6 0\n",
+            )
+        }
+    )
+    assert agent_worktree.ahead_counts(git, "main") == {"main": 0, "agent/x": 2, "agent/y": 4}
+
+
+def test_a_git_too_old_for_ahead_behind_answers_none():
+    """`%(ahead-behind:)` is git 2.41; `trees_for` counts per worktree when it is absent."""
+    assert agent_worktree.ahead_counts(fake_git({}), "main") is None
+
+
+def test_trees_for_counts_from_the_checkout_without_a_rev_list_per_worktree(monkeypatch):
+    listing = (
+        "worktree C:/ws/devkit\nHEAD 1a\nbranch refs/heads/main\n\n"
+        "worktree C:/ws/devkit/.claude/worktrees/topic\nHEAD 2b\n"
+        "branch refs/heads/agent/topic-0905\n"
+    )
+    fmt = agent_worktree.AHEAD_FORMAT.format(default="main")
+    called: list[tuple[str, ...]] = []
+
+    def git_for(_path: Path):
+        table = {
+            ("worktree", "list", "--porcelain"): (0, listing),
+            ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): (
+                0,
+                "refs/remotes/origin/main",
+            ),
+            ("for-each-ref", fmt, "refs/heads"): (0, "agent/topic-0905\t\t\t3 0\n"),
+            ("status", "--porcelain"): (0, ""),
+        }
+        answer = fake_git(table)
+
+        def git(*args: str):
+            called.append(args)
+            return answer(*args)
+
+        return git
+
+    monkeypatch.setattr(agent_worktree.sweep, "git_for", git_for)
+    found = agent_worktree.trees_for(Path("C:/ws/devkit"))
+
+    assert [tree.unpushed for tree in found] == [3]
+    assert not [args for args in called if args[0] in ("rev-list", "rev-parse")]
+
+
+def test_listed_trees_runs_one_git_call_per_checkout(monkeypatch):
+    """The delete task's checkout stage counts from this, so nothing per worktree runs."""
+    listing = (
+        "worktree C:/ws/devkit\nHEAD 1a\nbranch refs/heads/main\n\n"
+        "worktree C:/ws/devkit/.claude/worktrees/topic\nHEAD 2b\n"
+        "branch refs/heads/agent/topic-0905\n"
+    )
+    asked: list[Path] = []
+
+    def git_for(path: Path):
+        asked.append(path)
+        return fake_git({("worktree", "list", "--porcelain"): (0, listing)})
+
+    monkeypatch.setattr(agent_worktree.sweep, "git_for", git_for)
+    found = agent_worktree.listed_trees(Path("C:/ws/devkit"))
+
+    assert [tree.name for tree in found] == ["topic"]
+    assert asked == [Path("C:/ws/devkit")]
+    monkeypatch.setattr(agent_worktree.sweep, "git_for", lambda _p: fake_git({}))
+    assert agent_worktree.listed_trees(Path("C:/ws/devkit")) == []
+
+
+def test_a_scan_of_one_half_never_reads_the_other(tmp_path, monkeypatch):
+    (tmp_path / "devkit").mkdir()
+    registry = tmp_path / "registry.code-workspace"
+    registry.write_text('{"folders": [{"path": "devkit"}]}', encoding="utf-8")
+    monkeypatch.setattr(
+        agent_worktree, "trees_for", lambda _dir: pytest.fail("the base half read the trees")
+    )
+    monkeypatch.setattr(agent_worktree, "recent_bases", lambda _dir: [("main", "x")])
+
+    trees, bases = agent_worktree.scan(registry, halves=("bases",))
+
+    assert trees == {"devkit": []}
+    assert bases == {"devkit": [("main", "x")]}
+
+
 def test_known_branches_folds_origin_and_local_into_one_namespace():
     """`tb.branch_name` disambiguates against what it is shown, and a name free locally
     but taken on origin fails at the push — which is after the work, not before it."""
@@ -609,7 +719,7 @@ def test_the_two_picker_verbs_print_their_own_list_and_nothing_else(tmp_path, mo
     monkeypatch.setattr(
         agent_worktree,
         "scan",
-        lambda ws, projects=None: (
+        lambda ws, projects=None, halves=agent_worktree.HALVES: (
             {"devkit": [tree]},
             {"devkit": [("main", "the default branch")]},
         ),
@@ -681,8 +791,22 @@ def two_stage(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_worktree.picker_scan, "SCANS_DIR", tmp_path / "scans")
     workspace = tmp_path / "alex.code-workspace"
     workspace.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(agent_worktree, "scan", lambda _ws, projects=None: SCANNED)
+    monkeypatch.setattr(
+        agent_worktree,
+        "scan",
+        lambda _ws, projects=None, halves=agent_worktree.HALVES: narrowed(projects),
+    )
     return workspace
+
+
+def narrowed(projects: list[str] | None):
+    """`SCANNED` as `scan` would answer for `projects`: only those checkouts."""
+    trees, bases = SCANNED
+    keep = (lambda name: True) if projects is None else (lambda name: name in projects)
+    return (
+        {name: found for name, found in trees.items() if keep(name)},
+        {name: found for name, found in bases.items() if keep(name)},
+    )
 
 
 def values(printed: list[str]) -> list[str]:
@@ -699,17 +823,44 @@ def test_the_two_checkout_verbs_draw_a_checkout_per_row(two_stage, capsys):
     assert [line.split(picker_rows.FIELD_SEP)[1] for line in drawn] == ["devkit"]
 
 
-def test_each_checkout_verb_records_the_scan_its_row_verb_reads(two_stage, capsys):
+def test_the_base_checkout_verb_records_the_scan_its_row_verb_reads(two_stage, capsys):
     """The handoff, end to end: the token a checkout row carries names a write that the
     row verb can then serve without scanning again."""
-    assert agent_worktree.main(["tree-projects", "--workspace", str(two_stage)]) == 0
+    assert agent_worktree.main(["base-projects", "--workspace", str(two_stage)]) == 0
     token = picker_scan.parse_projects(values(capsys.readouterr().out.splitlines())[0])[1]
+    assert token
 
+    assert (
+        agent_worktree.main(["bases", f"--checkouts=devkit@{token}", "--workspace", str(two_stage)])
+        == 0
+    )
+    assert values(capsys.readouterr().out.splitlines()) == ["devkit:main"]
+
+
+def test_the_tree_checkout_verb_records_nothing_so_its_rows_are_read_live(
+    two_stage, monkeypatch, capsys
+):
+    """Its scan only counted, so a row built from it would call every worktree clean and
+    pushed -- on the list of things the next click destroys. It hands on the empty token,
+    and `rows` reads the ticked checkout's worktrees itself."""
+    assert agent_worktree.main(["tree-projects", "--workspace", str(two_stage)]) == 0
+    projects, token = picker_scan.parse_projects(values(capsys.readouterr().out.splitlines())[0])
+    assert (projects, token) == (["devkit"], agent_worktree.UNRECORDED)
+    assert not picker_scan.scan_path(agent_worktree.SCAN_NAMES["trees"]).exists()
+
+    asked = []
+
+    def fake(_ws, projects=None, halves=agent_worktree.HALVES):
+        asked.append((projects, halves))
+        return narrowed(projects)
+
+    monkeypatch.setattr(agent_worktree, "scan", fake)
     assert (
         agent_worktree.main(["rows", f"--checkouts=devkit@{token}", "--workspace", str(two_stage)])
         == 0
     )
     assert values(capsys.readouterr().out.splitlines()) == ["devkit:box"]
+    assert asked == [(["devkit"], ("trees",))]
 
 
 def test_the_two_verbs_record_under_different_names(two_stage, capsys):
@@ -724,8 +875,8 @@ def test_the_two_verbs_record_under_different_names(two_stage, capsys):
 def test_a_token_that_names_no_scan_rescans_the_ticked_checkouts(two_stage, monkeypatch, capsys):
     asked = []
 
-    def fake(_ws, projects=None):
-        asked.append(projects)
+    def fake(_ws, projects=None, halves=agent_worktree.HALVES):
+        asked.append((projects, halves))
         return SCANNED
 
     monkeypatch.setattr(agent_worktree, "scan", fake)
@@ -733,7 +884,23 @@ def test_a_token_that_names_no_scan_rescans_the_ticked_checkouts(two_stage, monk
         agent_worktree.main(["rows", "--checkouts=devkit@stale", "--workspace", str(two_stage)])
         == 0
     )
-    assert asked == [["devkit"]]
+    assert asked == [(["devkit"], ("trees",))]
+
+
+def test_each_checkout_verb_scans_only_the_half_it_draws(two_stage, monkeypatch, capsys):
+    """The base picker drew from the branches alone and still paid a `git status` in
+    every worktree on the machine: seven of its seconds, on 257 worktrees. The tree
+    picker's checkout stage only counts, so it lists without reading."""
+    asked = []
+
+    def fake(_ws, projects=None, halves=agent_worktree.HALVES):
+        asked.append(halves)
+        return SCANNED
+
+    monkeypatch.setattr(agent_worktree, "scan", fake)
+    for verb in ("base-projects", "tree-projects"):
+        assert agent_worktree.main([verb, "--workspace", str(two_stage)]) == 0
+    assert asked == [("bases",), (agent_worktree.LISTED,)]
 
 
 def test_picked_rows_serves_a_recorded_scan_and_rescans_only_on_a_miss(
@@ -743,17 +910,17 @@ def test_picked_rows_serves_a_recorded_scan_and_rescans_only_on_a_miss(
     from the scan the checkout stage recorded, a token naming no scan rescans only the
     ticked checkouts, and an empty pick is the verb typed by hand, which scans the
     whole machine as it did before there was a first stage."""
-    assert agent_worktree.main(["tree-projects", "--workspace", str(two_stage)]) == 0
+    assert agent_worktree.main(["base-projects", "--workspace", str(two_stage)]) == 0
     token = picker_scan.parse_projects(values(capsys.readouterr().out.splitlines())[0])[1]
     asked = []
 
-    def fake(_ws, projects=None):
+    def fake(_ws, projects=None, halves=agent_worktree.HALVES):
         asked.append(projects)
         return SCANNED
 
     monkeypatch.setattr(agent_worktree, "scan", fake)
-    assert values(agent_worktree.picked_rows(two_stage, f"devkit@{token}", "trees")) == [
-        "devkit:box"
+    assert values(agent_worktree.picked_rows(two_stage, f"devkit@{token}", "bases")) == [
+        "devkit:main"
     ]
     assert asked == []
     agent_worktree.picked_rows(two_stage, "devkit@stale", "trees")
