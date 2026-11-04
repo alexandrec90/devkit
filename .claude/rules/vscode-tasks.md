@@ -307,7 +307,10 @@ never renders.
   first stage did not return (`strayed_picks`, in all three), and
   [`scripts/picker_scan.py`](../../scripts/picker_scan.py) owns the scan handed between
   the stages: one fan-out, a token naming that exact write, and a miss that rescans the
-  ticked checkouts rather than serving anything older. Where the two halves are genuinely
+  ticked checkouts rather than serving anything older. A first stage that can count
+  without the fan-out writes nothing and hands on the empty token, so stage two always
+  scans: `tree-projects` counts from `git worktree list` and leaves each worktree's
+  `git status` to the checkouts ticked. Where the two halves are genuinely
   different *lists* rather than a narrowing, they stay two commands over one scan:
   `agent-worktree.py rows` draws what can be destroyed and `bases` what a branch can be
   cut from, and a row from either in the other would refuse when picked.
