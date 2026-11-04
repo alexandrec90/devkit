@@ -161,6 +161,19 @@ SHELL_OWN = frozenset(
 # --version` in one line, was filed as a toolchain gap (1ae862a1). Listed by name, since
 # a survey alone proves nothing: a missing `uv` in that line would be a real gap.
 HOST_PROBES = frozenset({"nvidia-smi", "lspci", "lscpu", "lsusb", "free", "vmstat", "wmic"})
+# A session looking a tool up by name and running it only to have it describe itself asked
+# whether the machine has it, so "command not found" is the answer: `which dotnet; dotnet
+# --list-runtimes`, from a fixer that then moved on, was filed against a machine where no
+# project builds .NET (3c59e222). Any tool, unlike `HOST_PROBES`, since the lookup is what
+# says it was a question: `uv --version` alone says nothing of the kind, and a `uv sync`
+# beside the lookup was the work, so `looked_up` leaves both filed. A tree that does need
+# the tool loses nothing, as the call that runs it for real is filed.
+TOOL_LOOKUP = re.compile(
+    r"(?:^|[;&|(]\s*)(?:which|where(?:\.exe)?|type|command\s+-[vV]|Get-Command)\s+"
+    r"(?P<names>[^;&|()\n]*)",
+    re.M,
+)
+SELF_REPORT = re.compile(r"-{0,2}(?:version|help|info)|-[vVh]|--list[\w-]*")
 WAIT_TOOLS = frozenset({"Monitor"})
 
 # An odd count of any of these before a match on its line means the match is quoted.
@@ -740,7 +753,7 @@ def _result_class(text: str, command: str = "") -> tuple[str, str]:
             ):
                 continue
             missing = _missing_command(text, found)
-            if missing in SHELL_OWN or missing in HOST_PROBES:
+            if missing in SHELL_OWN or missing in HOST_PROBES or looked_up(missing, command):
                 continue
             if missing:
                 return cls, f"{missing}: command not found"
@@ -754,6 +767,21 @@ def _missing_command(text: str, found: re.Match[str]) -> str:
         return ""
     named = SHELL_MISSING.search(text[text.rfind("\n", 0, found.start()) + 1 : found.end() + 1])
     return named.group(1) if named else ""
+
+
+def looked_up(tool: str, command: str) -> bool:
+    """`command` looks `tool` up by name and runs it for nothing but `SELF_REPORT`."""
+    shown = command_position(command)
+    if not any(tool in found["names"].split() for found in TOOL_LOOKUP.finditer(shown)):
+        return False
+    runs = re.finditer(
+        r"(?:^|[;&|(]|\b(?:then|do|else)\b)\s*"
+        + re.escape(tool)
+        + r"(?![\w.+-])(?:[ \t]+(?P<first>[^\s;&|)]+))?",
+        shown,
+        re.M,
+    )
+    return all(SELF_REPORT.fullmatch(run["first"] or "") for run in runs)
 
 
 def probed_modules(command: str) -> frozenset[str]:
