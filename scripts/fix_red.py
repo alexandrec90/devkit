@@ -68,35 +68,44 @@ def billing(
     ctx: fix_loop.Context, journal: fix_findings.Journal, skipped: list[fix_plan.Decision]
 ) -> list[str]:
     """File `BILLING_KIND` when the plan skipped a gate over billing; else retire an open
-    one, as of this pass: lines for the record.
+    one, as of this pass: lines for the record. A stall filed about a billing skip is
+    retired on any pass, being the account finding's step again.
 
     Nothing else retires it -- the person who settled the bill rarely writes the
     resolution, as with a login (`fix_loop.retire_login`). Not after a collect step that
     raised, which read no gate and so proves nothing about the account.
     """
     refused = [f for d in skipped for f in d.failures if fix_plan.is_billing_refused(f.signature)]
+    open_items = fix_findings.triage.open_items(
+        fix_findings.triage.load(ctx.devkit_dir), (fix_findings.FINDING,)
+    )
+    # A stall `fix_stall` filed per refused PR before it left a person's step to the
+    # account finding: each was one more tray row for the same step.
+    stalls = [item for item in open_items if _billing_stall(item.fields.get("detail", ""))]
+    lines = _retire(ctx, stalls, "the account's actions-billing-refused finding names this")
     if refused:
         journal.add(
             fix_findings.Finding(BILLING_KIND, "devkit", BILLING_DETAIL, evidence=refused[0].url)
         )
-        return []
+        return lines
     if "collect" in journal.crashed:
-        return []
+        return lines
     marker = f"{BILLING_KIND}: "
-    stale = [
-        item
-        for item in fix_findings.triage.open_items(
-            fix_findings.triage.load(ctx.devkit_dir), (fix_findings.FINDING,)
-        )
-        if item.fields.get("detail", "").startswith(marker)
-    ]
-    if not stale:
-        return []
-    note = "no gate was refused over billing on this pass"
-    if ctx.writes:
-        fix_findings.triage.resolve([item.id for item in stale], note, root=ctx.devkit_dir)
+    stale = [item for item in open_items if item.fields.get("detail", "").startswith(marker)]
+    return lines + _retire(ctx, stale, "no gate was refused over billing on this pass")
+
+
+def _billing_stall(detail: str) -> bool:
+    """A `stalled` finding about a skip GitHub refused over billing."""
+    return detail.startswith("stalled: ") and fix_plan.NO_BILLING in detail
+
+
+def _retire(ctx: fix_loop.Context, items: list, note: str) -> list[str]:
+    """Resolve `items` with `note` when the pass writes; lines for the record either way."""
+    if items and ctx.writes:
+        fix_findings.triage.resolve([item.id for item in items], note, root=ctx.devkit_dir)
     verb = "retired" if ctx.writes else "would retire"
-    return [f"{verb} [{item.id}] -- {note}" for item in stale]
+    return [f"{verb} [{item.id}] -- {note}" for item in items]
 
 
 def backlog_failure(

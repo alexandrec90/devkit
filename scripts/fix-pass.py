@@ -20,7 +20,8 @@ which survives this file crashing). Two rules hold it together:
 4. **Collect everything red** (`fix_red.py`), the harness-defect backlog included, and
    what Dependabot cannot do (`fix_dependabot.py`: failing update jobs, alerts no PR
    answers -- under its own daily cap), plan it (`fix_plan.py`) and classify it
-   (`fix_cycle.py`).
+   (`fix_cycle.py`). A gate refused over the account's billing, and a private repo that
+   runs Actions (`fix_visibility.py`), are each filed as its owner's step.
 5. **Harness first**: while anything harness-shaped is red, one devkit session gets
    all of it and project fixers are held, out loud. Only one at a time.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
@@ -72,6 +73,7 @@ import fix_plan
 import fix_release
 import fix_red
 import fix_send
+import fix_visibility
 import gate_evidence
 import git_trust
 import installers
@@ -615,6 +617,7 @@ def run(
         workspace, ctx, journal, failures, green, backlog
     )
     closed.verified += step("billing", fix_red.billing, ctx, journal, skipped, default=[])
+    closed.verified += step("visibility", fix_visibility.check, ctx, journal, default=[])
 
     # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current,
     # and the next fire routes a click's.

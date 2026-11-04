@@ -26,7 +26,7 @@ Steps, in order:
   5. register the project in devkit's `workspace.jsonc` and the shared
      `alex-projects.code-workspace` (the one step that writes OUTSIDE the new
      directory; `--no-register` skips it)
-  6. create the private GitHub repo and push          <- outward-facing
+  6. create the public GitHub repo and push           <- outward-facing
 """
 
 from __future__ import annotations
@@ -492,7 +492,7 @@ def scripted_setup_env() -> dict[str, str]:
     The generator seeds a repo and pushes its default branch, which is precisely the
     "scripted repo setup" case that policy's `DEVKIT_SKIP_BRANCH_POLICY` exists for.
     Without it, the policy's pre-push hook blocks `gh repo create --push` and the
-    generator dies *after* creating the private GitHub repo — leaving an empty repo
+    generator dies *after* creating the GitHub repo — leaving an empty repo
     upstream and a local checkout that has to be pushed by hand.
 
     The hatch waives the branch checks only. The project's own pre-commit gate still
@@ -655,7 +655,8 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
 
 
 def create_remote(plan: Plan, dry_run: bool) -> None:
-    """Create the PRIVATE GitHub repo and push. The only outward-facing step."""
+    """Create the public GitHub repo and push (`devkit_project.CREATE_VISIBILITY`). The
+    only outward-facing step."""
     if not plan.remote:
         print("  skip    GitHub repo (--no-remote)")
         return
@@ -666,7 +667,7 @@ def create_remote(plan: Plan, dry_run: bool) -> None:
             "repo",
             "create",
             f"{owner}/{plan.name}",
-            "--private",
+            devkit_project.CREATE_VISIBILITY,
             "--source=.",
             "--remote=origin",
             "--push",

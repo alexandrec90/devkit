@@ -181,3 +181,30 @@ def test_a_pass_with_no_billing_refusal_retires_the_open_finding(tmp_path):
     assert line == f"retired [{item.id}] -- no gate was refused over billing on this pass"
     assert fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir)) == []
     assert fix_red.billing(ctx, journal, []) == []
+
+
+def test_a_stall_filed_over_a_billing_skip_is_retired_while_the_refusal_lasts(tmp_path):
+    """Five such stalls were open on 2026-11-01, each one more tray row for the account
+    finding's step; `fix_stall` files no new one, and these go on the next pass."""
+    ctx = _billing_ctx(tmp_path)
+    journal = fix_findings.Journal(ctx.devkit_dir)
+    stall = (
+        f"skipped since 2026-10-30T00:00: productivity-tracker #3 -- Lint / {fix_plan.NO_BILLING}"
+    )
+    journal.add(
+        fix_findings.Finding("stalled", "productivity-tracker", stall),
+        fix_findings.Finding("stalled", "carameli", "waiting since x: carameli #8 -- held"),
+    )
+    fix_loop.record(ctx, journal)
+    items = fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir))
+    [billed] = [item for item in items if fix_plan.NO_BILLING in item.fields["detail"]]
+    rehearsal = _billing_ctx(tmp_path, fix_cycle.PLAN)
+    assert fix_red.billing(rehearsal, fix_findings.Journal(ctx.devkit_dir), [_skipped(BILLED)]) == [
+        f"would retire [{billed.id}] -- the account's actions-billing-refused finding names this"
+    ]
+    fresh = fix_findings.Journal(ctx.devkit_dir)
+    [line] = fix_red.billing(ctx, fresh, [_skipped(BILLED)])
+    assert line.startswith(f"retired [{billed.id}]")
+    assert [f.kind for f in fresh.findings] == [fix_red.BILLING_KIND]
+    [left] = fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir))
+    assert "carameli #8" in left.fields["detail"], "a stall about anything else is kept"

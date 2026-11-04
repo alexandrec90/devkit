@@ -934,14 +934,19 @@ def retire_login(ctx: Context, signed_in: str) -> list[str]:
     return [f"retired [{item.id}] -- {note}" for item in stale]
 
 
+# Between a person's step and the command that retires its group: the tray cuts there
+# (`tray_state.RESOLVE_TAIL`), showing the step and leaving the command to the record.
+PERSON_RESOLVE_TAIL = " -- then: "
+
+
 def person_steps(ctx: Context) -> list[str]:
     """Each step the open ledger awaits a person for (`triage.awaiting_person`), with
     the command that retires its group once taken."""
     items = triage.open_items(triage.load(ctx.devkit_dir))
     awaiting = triage.awaiting_person(items)
     return [
-        f"{step} -- then: python scripts/harness_triage.py --resolve-like {bucket[0].id} "
-        "--note '<the step taken>'"
+        f"{step}{PERSON_RESOLVE_TAIL}python scripts/harness_triage.py --resolve-like "
+        f"{bucket[0].id} --note '<the step taken>'"
         for _, bucket in triage.groups(items)
         if (step := awaiting.get(bucket[0].signature))
     ]

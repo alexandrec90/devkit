@@ -8,6 +8,7 @@ would otherwise surface only when a human ran `docker compose up` in a brand-new
 repo.
 """
 
+import dataclasses
 import itertools
 import json
 import os
@@ -243,6 +244,22 @@ def test_a_plan_is_the_decisions_and_writes_nothing(tmp_path):
     assert not the_plan.root.exists()
     assert the_plan.files and all(len(entry) == 3 for entry in the_plan.files)
     assert isinstance(the_plan.remote, bool) and isinstance(the_plan.register, bool)
+
+
+def test_the_remote_is_created_public_so_its_gate_runs_free(tmp_path, monkeypatch):
+    """productivity-tracker and social-scraper were created `--private`, spent the free
+    plan's monthly Actions minutes, and GitHub refused every job after (2026-11-01)."""
+    the_plan = dataclasses.replace(
+        new_project.plan(make_args(parent=str(tmp_path)), registry()), remote=True
+    )
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        new_project, "run", lambda cmd, cwd, dry_run, check=True: ran.append(list(cmd)) or 0
+    )
+    new_project.create_remote(the_plan, dry_run=False)
+    [cmd] = ran
+    assert cmd[:3] == ["gh", "repo", "create"] and "--public" in cmd
+    assert "--private" not in cmd and "--internal" not in cmd
 
 
 def test_git_init_seeds_the_default_branch_and_the_first_commit(tmp_path, monkeypatch):

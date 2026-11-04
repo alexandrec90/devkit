@@ -104,6 +104,13 @@ class Action:
 PROJECT = "project"
 DEVKIT = "devkit"
 
+# The `gh repo create` visibility for every repo devkit creates (`new-project.py`,
+# `plug-projects.py`). Public, because every project it creates runs its PR gate in
+# Actions, and only a public repo's minutes are free and unlimited: productivity-tracker
+# and social-scraper were created private, spent the free plan's monthly allowance, and
+# GitHub refused every job after (2026-11-01). Spelled once so the two cannot differ.
+CREATE_VISIBILITY = "--public"
+
 # Project scopes for actions that only one repo can run.
 #
 # These were worktree *pairs* -- `("carameli", "carameli-b")` -- back when every repo was

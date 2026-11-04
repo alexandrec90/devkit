@@ -60,6 +60,10 @@ FAIL_MARKERS = ("last run failed", "disabled")
 # Shell_NotifyIcon's tooltip field is 128 wide **including the terminator**, and it
 # truncates without saying so.
 TOOLTIP_LIMIT = 127
+# A menu line has no such field, so nothing cuts it: a person's step with its retiring
+# command ran past 250 characters and widened the menu across the screen. The whole line
+# is in the record the row opens.
+MENU_DETAIL_LIMIT = 100
 
 COLOURS = {
     # Deliberately not pure red/green. These are picked to stay distinguishable against
@@ -179,8 +183,10 @@ def menu_label(item: JobState) -> str:
     indicator that has already made its point with the icon.
     """
     mark = {OK: "OK  ", WARN: "!   ", FAIL: "X   "}[item.state]
-    detail = f" -- {item.detail}" if item.detail else ""
-    return f"{mark}{item.name}{detail}"
+    detail = item.detail
+    if len(detail) > MENU_DETAIL_LIMIT:
+        detail = detail[: MENU_DETAIL_LIMIT - 1] + "…"
+    return f"{mark}{item.name}{f' -- {detail}' if detail else ''}"
 
 
 def refresh(now=None) -> list[JobState]:
@@ -220,6 +226,9 @@ STUCK_PASSES = 6
 # `fix_cycle.DISPATCH`, spelled here so the tray imports none of the pass; a test holds
 # the two equal.
 DISPATCH = "dispatch"
+# What `fix_loop.person_steps` puts between a step and the command that retires it; a
+# test holds it to the line that function writes.
+RESOLVE_TAIL = " -- then: "
 
 
 def read_history(path: Path) -> list[dict]:
@@ -248,9 +257,24 @@ def fix_pass_states(history: list[dict]) -> list[JobState]:
     if not history:
         return []
     record = FIX_RECORD.as_posix()
-    steps = history[-1].get("person") or []
-    person = [JobState(PERSON_ROW, FAIL, str(step), record) for step in steps]
+    person = [
+        JobState(PERSON_ROW, FAIL, step if count == 1 else f"{step} (x{count})", record)
+        for step, count in person_rows(history[-1].get("person") or []).items()
+    ]
     return [*person, fixers_state(history)]
+
+
+def person_rows(steps: list) -> dict[str, int]:
+    """Each distinct step, as a menu line says it, and how many ledger groups await it.
+
+    The menu says the step; the retiring command after `RESOLVE_TAIL` is in the record the
+    row opens. Kept, it made every row a paragraph, and made two groups awaiting one step
+    two rows that differed only in an id: six billing rows on 2026-11-01."""
+    counts: dict[str, int] = {}
+    for step in steps:
+        said = str(step).split(RESOLVE_TAIL, 1)[0]
+        counts[said] = counts.get(said, 0) + 1
+    return counts
 
 
 def _clock(when: object) -> str:

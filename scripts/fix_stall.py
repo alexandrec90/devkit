@@ -97,8 +97,14 @@ def stalled(
 
 
 def tracked(why: object) -> bool:
-    """Whether a wait's reason is one some other part of the loop already owns."""
-    return str(why).lower().startswith(TRACKED)
+    """Whether a wait's reason is one some other part of the loop already owns.
+
+    A wait that names a person's step (`harness_triage.PERSON_STEP`) is the person's, and
+    the finding that names it awaits them already (`fix_red.billing`'s, for a gate refused
+    over billing). Filed as a stall too, it is a second red tray row per PR for one step:
+    productivity-tracker and social-scraper's billing skips made six of one, 2026-11-01."""
+    text = str(why)
+    return text.lower().startswith(TRACKED) or fix_findings.triage.PERSON_STEP in text
 
 
 def _older(since: str, now: _dt.datetime, after: _dt.timedelta) -> bool:

@@ -1247,7 +1247,7 @@
 			// --- workspace-scoped: act across every checkout ---------------------
 			{
 				"label": "Project: New from devkit",
-				"detail": "Scaffold a whole new project — templates, Docker stack on registry-allocated ports, vendored devkit harness, parallel worktree, PR gate, and a PRIVATE GitHub repo. Registers it in this workspace's folder list and project picker. DRY RUN by default: pick 'Apply' to actually write.",
+				"detail": "Scaffold a whole new project — templates, Docker stack on registry-allocated ports, vendored devkit harness, parallel worktree, PR gate, and a PUBLIC GitHub repo (its Actions minutes are free only while public). Registers it in this workspace's folder list and project picker. DRY RUN by default: pick 'Apply' to actually write.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -2238,10 +2238,10 @@
 				// `--dry-run` and `--remote` flags alongside their negations.
 				"id": "newProjectRemote",
 				"type": "pickString",
-				"description": "Create a PRIVATE GitHub repo and push? (ignored on a dry run)",
+				"description": "Create a PUBLIC GitHub repo and push? (ignored on a dry run)",
 				"options": [
 					{
-						"label": "Yes — create alexandrec90/<name> as private, and push",
+						"label": "Yes — create alexandrec90/<name> as public, and push",
 						"value": "--remote"
 					},
 					{
