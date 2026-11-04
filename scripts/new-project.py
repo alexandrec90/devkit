@@ -72,19 +72,38 @@ SERVICE_BY_FEATURE = {
     "frontend": "frontend",
 }
 
-FEATURES = ("docker", "app_service", "postgres", "redis", "alembic", "frontend", "archive")
+STACK_FEATURES = ("docker", "app_service", "postgres", "redis", "alembic", "frontend", "archive")
+# A C#/WPF app shipped to users as a self-updating installer. Mutually exclusive with the
+# stack: an executable on a stranger's PC cannot depend on a compose stack, and skinamp
+# was generated as a `service` -- Postgres and all -- because no shape here fit it.
+DESKTOP_FEATURES = ("desktop", "updater")
+FEATURES = STACK_FEATURES + DESKTOP_FEATURES
 
 # Named feature bundles. These exist for the VS Code task: a task picker passes one
 # string, and VS Code cannot build a variable-length argument list from it. They are
 # also the honest answer to "what shapes do we actually build here" — the two
-# existing projects are `fullstack` (carameli) and `data` (ibkr_trader).
+# existing projects are `fullstack` (carameli) and `data` (ibkr_trader). The two desktop
+# shapes differ only in the updater, which is why that choice is a preset rather than a
+# second prompt every other shape would be asked too.
 PRESETS: dict[str, tuple[str, ...]] = {
     "bare": (),
     "service": ("docker", "app_service", "postgres", "alembic"),
     "service-redis": ("docker", "app_service", "postgres", "alembic", "redis"),
     "data": ("docker", "postgres", "archive"),
     "fullstack": ("docker", "app_service", "postgres", "alembic", "redis", "frontend"),
+    "desktop": ("desktop", "updater"),
+    "desktop-static": ("desktop",),
 }
+
+# Core templates a feature replaces. A desktop project's tests are C#, so the Python
+# smoke test -- which imports a package the desktop shape does not have -- stays behind.
+REPLACED_BY: dict[str, tuple[str, ...]] = {
+    "desktop": ("tests/test_smoke.py.tmpl",),
+}
+
+# A template path segment spelled `__<name>__` takes that context value, so a C# project
+# file can carry the project's name: `src/__desktop_name__/__desktop_name__.csproj`.
+PATH_PLACEHOLDER = re.compile(r"__([a-z][a-z0-9_]*?)__")
 
 
 # Fallback when git cannot answer (no tags, not a checkout, git absent). Only used
@@ -261,14 +280,49 @@ def validate_name(name: str) -> str:
     return name
 
 
+def pascal_case(name: str) -> str:
+    """`sports-betting` -> `SportsBetting`: the project's C# namespace and assembly name.
+
+    A C# identifier cannot open with a digit, which a project name may, so such a name
+    is prefixed rather than rejected.
+    """
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", name) if w]
+    joined = "".join(w[:1].upper() + w[1:] for w in words)
+    return f"App{joined}" if joined[:1].isdigit() else joined
+
+
+def resolve_features(args: argparse.Namespace) -> None:
+    """Turn on what the chosen features imply, and refuse a shape that cannot work.
+
+    Resolved once, here, so templates never re-derive them -- and so the test helper that
+    renders a tree resolves them exactly as `main` does.
+    """
+    if args.updater:
+        args.desktop = True
+    if args.alembic:
+        args.postgres = True
+    if args.app_service or args.postgres or args.redis or args.frontend:
+        args.docker = True
+    stack = [f for f in STACK_FEATURES if getattr(args, f)]
+    if args.desktop and stack:
+        raise GeneratorError(
+            f"the desktop shape cannot carry {', '.join(stack)}: it ships an executable to "
+            f"other people's machines, which has no compose stack to talk to. Keep its "
+            f"data local (a file, SQLite) or behind an HTTP API another project serves."
+        )
+
+
 def iter_template_files(features: dict[str, bool]) -> list[tuple[Path, Path]]:
     """`(source, relative destination)` for every template the feature set selects.
 
-    Selection is by directory: `templates/core/**` always, and
-    `templates/features/<f>/**` only when `<f>` is on. Inline `{{#flag}}` blocks
-    then handle the cross-cutting bits inside the files that survive.
+    Selection is by directory: `templates/core/**` always, minus what an enabled
+    feature replaces (`REPLACED_BY`), and `templates/features/<f>/**` only when `<f>`
+    is on. Inline `{{#flag}}` blocks then handle the cross-cutting bits inside the files
+    that survive.
     """
-    roots = [TEMPLATES / "core"]
+    core = TEMPLATES / "core"
+    replaced = {rel for f, on in features.items() if on for rel in REPLACED_BY.get(f, ())}
+    roots = [core]
     roots += [
         TEMPLATES / "features" / feature
         for feature, on in features.items()
@@ -278,11 +332,27 @@ def iter_template_files(features: dict[str, bool]) -> list[tuple[Path, Path]]:
     pairs: list[tuple[Path, Path]] = []
     for root in roots:
         for source in sorted(root.rglob("*")):
-            if source.is_dir() or _debris(source.relative_to(root)):
-                continue
             relative = source.relative_to(root)
+            if source.is_dir() or _debris(relative):
+                continue
+            if root == core and relative.as_posix() in replaced:
+                continue
             pairs.append((source, Path(_destination_name(relative))))
     return pairs
+
+
+def substitute_path(relative: Path, context: dict[str, object]) -> Path:
+    """`relative` with every `__<name>__` segment part replaced by its context value.
+
+    Only names the context defines are placeholders, so a Python dunder such as
+    `__init__.py` passes through untouched.
+    """
+
+    def value(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return str(context[key]) if key in context else match.group(0)
+
+    return Path(*(PATH_PLACEHOLDER.sub(value, part) for part in relative.parts))
 
 
 # What running a template leaves beside it, which is no template: 0929-8 loaded
@@ -320,6 +390,12 @@ def build_context(
     """The full template namespace. Flags and values share it deliberately."""
     package = slugify_package(args.name)
     features = {f: bool(getattr(args, f)) for f in FEATURES}
+    desktop_name = pascal_case(args.name)
+    if features["desktop"]:
+        # The app is the C# project; there is no Python package to point the harness at.
+        app_dir = f"src/{desktop_name}/"
+    else:
+        app_dir = f"src/{package}/" if args.src_layout else f"{package}/"
 
     context: dict[str, object] = {
         "name": args.name,
@@ -335,7 +411,10 @@ def build_context(
         "devkit_ref": args.devkit_ref,
         "slot": slot,
         "src_root": "src" if args.src_layout else ".",
-        "app_dir": f"src/{package}/" if args.src_layout else f"{package}/",
+        "app_dir": app_dir,
+        "desktop_name": desktop_name,
+        "desktop_solution": f"{desktop_name}.slnx",
+        "desktop_project": f"src/{desktop_name}/{desktop_name}.csproj",
         "tests_dir": "tests/",
         # The layout this generator actually produces is flat -- `tests/test_smoke.py`,
         # no unit/integration split -- so this must be `tests`, not `tests/unit`.
@@ -394,7 +473,7 @@ def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
 
     features = {f: bool(context[f]) for f in FEATURES}
     files = [
-        (source, root / relative, source.name.endswith(TEMPLATE_SUFFIX))
+        (source, root / substitute_path(relative, context), source.name.endswith(TEMPLATE_SUFFIX))
         for source, relative in iter_template_files(features)
     ]
 
@@ -469,18 +548,24 @@ def _render_or_die(source: Path, context: dict[str, object]) -> str:
 
 
 def write_package(plan: Plan, dry_run: bool) -> None:
-    """The importable package stub the smoke test and the Dockerfile CMD expect."""
+    """The importable package stub the smoke test and the Dockerfile CMD expect.
+
+    A desktop project gets none: its app is the C# project the templates render, and a
+    Python package beside it would be a second "app" for an agent to edit.
+    """
     app_dir = plan.root / str(plan.context["app_dir"])
-    init = app_dir / "__init__.py"
+    init = None if plan.context["desktop"] else app_dir / "__init__.py"
     body = f'"""{plan.context["display_name"]}."""\n\n__version__ = "0.1.0"\n'
     unit_tests = plan.root / str(plan.context["unit_tests"])
     if dry_run:
-        print(f"  write   {init.relative_to(plan.root)}")
+        if init is not None:
+            print(f"  write   {init.relative_to(plan.root)}")
         print(f"  write   {plan.context['unit_tests']}/.gitkeep")
         print("  write   logs/.gitkeep")
         return
     app_dir.mkdir(parents=True, exist_ok=True)
-    init.write_text(body, encoding="utf-8", newline="\n")
+    if init is not None:
+        init.write_text(body, encoding="utf-8", newline="\n")
     # The rendered manifest names this as `[paths] unit_tests`, and the Stop hook's
     # DB tier resolves an app/ change straight to it (`host_test_targets` returns
     # [CFG.unit_tests]). Generated without it, the tier ran `pytest tests/unit` against
@@ -993,10 +1078,21 @@ def trust_hint(plan: Plan) -> None:
     print(f"  run `claude` in {plan.root} once and accept the trust prompt")
 
 
+def desktop_hint(plan: Plan) -> None:
+    """The two things a desktop project cannot do for itself before its first release."""
+    if not plan.context["desktop"]:
+        return
+    print("\nNext: ship it — a tag is a release:")
+    print("  git tag v0.1.0 && git push origin v0.1.0   (release.yml publishes the installer)")
+    print("  add a VPK_SIGN_PARAMS repo secret once you have a code-signing certificate;")
+    print("  until then SmartScreen warns on every download")
+
+
 def next_steps(plan: Plan) -> None:
     """What the person who ran the generator still has to do, which it will not."""
     register_slot_hint(plan)
     trust_hint(plan)
+    desktop_hint(plan)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1037,6 +1133,8 @@ def main(argv: list[str] | None = None) -> int:
         ("alembic", "alembic.ini and the migration tasks (implies --with-postgres)"),
         ("frontend", "a Vite frontend service and its npm tasks"),
         ("archive", "the data-lake archive seam and its rule file"),
+        ("desktop", "a C#/WPF app shipped as an installer (excludes every stack feature)"),
+        ("updater", "Velopack self-update from GitHub Releases (implies --with-desktop)"),
     ]:
         parser.add_argument(
             f"--with-{feature}",
@@ -1100,13 +1198,8 @@ def main(argv: list[str] | None = None) -> int:
         for feature in PRESETS[args.preset]:
             setattr(args, feature, True)
 
-    # Implied features, resolved once so templates never re-derive them.
-    if args.alembic:
-        args.postgres = True
-    if args.app_service or args.postgres or args.redis or args.frontend:
-        args.docker = True
-
     try:
+        resolve_features(args)
         registry = devkit_ports.load(DEVKIT_ROOT)
         the_plan = plan(args, registry)
 

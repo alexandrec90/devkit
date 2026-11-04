@@ -18,10 +18,12 @@ from support import generate, harness_config, load_script
 new_project = load_script("scripts/new-project.py")
 structure_check = load_script("scripts/hooks/structure_check.py")
 
-# The two ends of the feature matrix: every template's `if` rendered false, then true.
+# The ends of the feature matrix: every template's `if` rendered false, then true. The
+# desktop shape excludes the stack, so "true" takes two trees to cover.
 SHAPES = [
     pytest.param({}, id="bare"),
-    pytest.param({f: True for f in new_project.FEATURES}, id="everything"),
+    pytest.param({f: True for f in new_project.STACK_FEATURES}, id="everything"),
+    pytest.param({f: True for f in new_project.DESKTOP_FEATURES}, id="desktop"),
 ]
 
 

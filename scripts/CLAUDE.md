@@ -51,12 +51,15 @@ what the hook runs and CI does not, are both held to a written reason by
   `MANIFEST` is unconditional -- every consumer holds every path -- which is right for
   the harness and wrong for `frontend/src/worktreePort.ts`, which is nonsense in devkit
   itself and in every stackless repo. The gated tier is keyed on a `.devkit.toml` section
-  (`[frontend] enabled`) and resolved per consumer at that section's `src`, so it is
+  (`[frontend] enabled`, `[desktop] enabled`) and resolved per consumer at that gate's
+  prefix -- the frontend's `src`, the repo root for the desktop's -- so it is
   drift-checked and `--pull`ed like everything else and simply absent where the tier is
   off. The gate reads the *consumer's* `harness_config.py` by path, so it answers "off"
   on the bootstrap pull that has not delivered that file yet; the second pull delivers
   what the gate selects. Spell the literal with string keys -- `structure_check` reads
-  it off the source with `ast.literal_eval` in every consumer.
+  it off the source with `ast.literal_eval` in every consumer. **A new gate is three
+  edits that must agree:** its entry here, its prefix in `sync-devkit.gate_prefixes` and
+  `DEFAULT_GATE_PREFIX`, and its arm in `structure_check._gate_prefixes`.
 - **Vendoring a generator does not vendor its output.** `.codex/hooks.json` is written by
   `sync-codex-hooks.py` from the project's own `.claude/settings.json`, so the script is
   in `MANIFEST` and the file it produces cannot be. No agent hook is wired, so today that

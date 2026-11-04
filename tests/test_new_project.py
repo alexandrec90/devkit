@@ -236,6 +236,152 @@ def test_explicit_flags_add_to_a_preset_rather_than_replacing_it(tmp_path):
     assert the_plan.context["redis"] is True  # from the explicit flag
 
 
+# --- the desktop shape ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("skinamp", "Skinamp"),
+        ("sports-betting", "SportsBetting"),
+        ("demo_project", "DemoProject"),
+        ("my-app2", "MyApp2"),
+        ("3d-tool", "App3dTool"),
+    ],
+)
+def test_the_csharp_name_is_a_valid_identifier(name, expected):
+    assert new_project.pascal_case(name) == expected
+
+
+def test_the_updater_brings_the_desktop_shape_with_it():
+    args = make_args(updater=True)
+    new_project.resolve_features(args)
+    assert args.desktop is True
+
+
+@pytest.mark.parametrize("stack", ["postgres", "docker", "frontend", "redis", "archive"])
+def test_a_desktop_project_cannot_carry_a_compose_stack(stack):
+    """skinamp's mistake, refused: an installer on a stranger's PC has no Postgres."""
+    args = make_args(desktop=True, **{stack: True})
+    with pytest.raises(new_project.GeneratorError, match="desktop"):
+        new_project.resolve_features(args)
+
+
+def test_the_refusal_reaches_the_cli_as_an_exit_code(tmp_path, capsys):
+    argv = ["demo_project", "--preset", "desktop", "--with-postgres", "--parent", str(tmp_path)]
+    assert new_project.main([*argv, "--no-remote"]) == 1
+    assert "compose stack" in capsys.readouterr().err
+
+
+def test_a_path_placeholder_takes_its_context_value_and_leaves_dunders_alone():
+    context = {"desktop_name": "Skinamp"}
+    path = Path("src/__desktop_name__/__desktop_name__.csproj")
+    assert new_project.substitute_path(path, context) == Path("src/Skinamp/Skinamp.csproj")
+    assert new_project.substitute_path(Path("pkg/__init__.py"), context) == Path("pkg/__init__.py")
+
+
+def test_a_desktop_project_is_a_csharp_solution_with_no_python_package(tmp_path):
+    root = generate(tmp_path, {"desktop": True, "updater": True})
+    for rel in (
+        "DemoProject.slnx",
+        "global.json",
+        "Directory.Build.props",
+        ".editorconfig",
+        "src/DemoProject/DemoProject.csproj",
+        "src/DemoProject/Program.cs",
+        "src/DemoProject/app.manifest",
+        "tests/DemoProject.Tests/DemoProject.Tests.csproj",
+        ".github/workflows/release.yml",
+    ):
+        assert (root / rel).is_file(), rel
+    assert not (root / "demo_project").exists(), "a second, Python 'app' beside the C# one"
+    assert not (root / "tests" / "test_smoke.py").exists(), "it imports a package not made"
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["uv"]["package"] is False
+    assert "build-system" not in pyproject
+    # No package of its own, so the pull links the checkout's `.venv` into worktrees,
+    # and the template already ignores the link (a `dir/` pattern never matches one).
+    settings = json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["worktree"]["symlinkDirectories"] == [".venv"]
+    assert "/.venv" in (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+
+def test_a_desktop_projects_manifest_names_files_that_exist(tmp_path):
+    root = generate(tmp_path, {"desktop": True})
+    desktop = harness_config.load(root).desktop
+    assert desktop.enabled is True
+    assert (root / desktop.solution).is_file() and (root / desktop.project).is_file()
+    assert desktop.pack_id == "DemoProject"
+    assert harness_config.load(root).app_dir == "src/DemoProject/"
+
+
+def test_the_updater_is_the_only_difference_between_the_desktop_presets(tmp_path):
+    full = generate(tmp_path / "full", {"desktop": True, "updater": True})
+    static = generate(tmp_path / "static", {"desktop": True})
+    project = "src/DemoProject/DemoProject.csproj"
+    assert 'Include="Velopack"' in (full / project).read_text(encoding="utf-8")
+    assert "Velopack" not in (static / project).read_text(encoding="utf-8")
+    assert "VelopackApp.Build().Run();" in (full / "src/DemoProject/Program.cs").read_text(
+        encoding="utf-8"
+    )
+    assert (full / "src/DemoProject/Updates/Updater.cs").is_file()
+    assert not (static / "src/DemoProject/Updates").exists()
+    # Both still ship an installer: the release workflow does not depend on the updater.
+    assert (static / ".github/workflows/release.yml").is_file()
+
+
+def test_the_update_feed_is_the_projects_own_repository(tmp_path):
+    root = generate(tmp_path, {"desktop": True, "updater": True})
+    feed = (root / "src/DemoProject/Updates/UpdateFeed.cs").read_text(encoding="utf-8")
+    assert '"https://github.com/alexandrec90/demo_project"' in feed
+
+
+def test_the_desktop_driver_arrives_through_the_gated_tier_only_where_it_is_on(tmp_path):
+    desktop = generate(tmp_path / "desk", {"desktop": True})
+    bare = generate(tmp_path / "bare", {})
+    assert (desktop / "scripts" / "desktop.py").is_file()
+    assert (desktop / "scripts" / "hooks" / "tests" / "test_desktop.py").is_file()
+    assert not (bare / "scripts" / "desktop.py").exists()
+
+
+def test_the_gate_builds_the_desktop_app_on_windows(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"desktop": True})
+    gate = yaml.safe_load((root / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8"))
+    job = gate["jobs"]["desktop"]
+    assert job["runs-on"] == "windows-latest"
+    runs = [step.get("run", "") for step in job["steps"]]
+    assert "python scripts/desktop.py lint --check" in runs
+    assert "python scripts/desktop.py test" in runs
+    bare = generate(tmp_path / "bare", {})
+    bare_gate = (bare / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
+    assert "desktop" not in yaml.safe_load(bare_gate)["jobs"]
+
+
+def test_only_a_desktop_project_is_told_how_to_ship(tmp_path, capsys):
+    desktop = new_project.plan(make_args(parent=str(tmp_path), desktop=True), registry())
+    new_project.desktop_hint(desktop)
+    out = capsys.readouterr().out
+    assert "git tag v0.1.0" in out and "VPK_SIGN_PARAMS" in out
+    bare = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    new_project.desktop_hint(bare)
+    assert capsys.readouterr().out == ""
+    new_project.next_steps(desktop)
+    assert "VPK_SIGN_PARAMS" in capsys.readouterr().out, "`main` ends on it"
+
+
+def test_a_release_is_a_tag_and_the_tag_never_reaches_the_shell_as_code(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"desktop": True})
+    release = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    # PyYAML reads the bare key `on` as True.
+    assert release[True]["push"]["tags"] == ["v*"]
+    assert release["permissions"] == {"contents": "write"}
+    step = next(s for s in release["jobs"]["release"]["steps"] if s.get("name") == "Release")
+    assert "${{" not in step["run"], "an expression in `run` is spliced in as script"
+    assert step["env"]["RELEASE_TAG"] == "${{ github.ref_name }}"
+
+
 def test_a_plan_is_the_decisions_and_writes_nothing(tmp_path):
     """`Plan` is the boundary between deciding and writing: every field the writers
     read is on it, and building one touches the disk not at all."""
@@ -344,9 +490,12 @@ FEATURE_MATRIX = [
     pytest.param({"postgres": True, "archive": True}, id="data"),
     pytest.param({"frontend": True, "postgres": True, "app_service": True}, id="fullstack"),
     pytest.param(
-        {f: True for f in new_project.FEATURES},
+        {f: True for f in new_project.STACK_FEATURES},
         id="everything",
     ),
+    # The desktop shape excludes the stack, so it is the matrix's other end.
+    pytest.param({"desktop": True, "updater": True}, id="desktop"),
+    pytest.param({"desktop": True}, id="desktop-static"),
 ]
 
 
@@ -1079,6 +1228,54 @@ def test_the_generated_diagnostic_scripts_actually_run_and_pass(tmp_path, featur
         assert result.returncode == 0, f"{script} failed in a fresh project:\n{detail}"
 
 
+def _desktop_runners(tmp_path, monkeypatch, *, windows: bool):
+    """A desktop project's two runners on a host with `dotnet`, and what they spawned."""
+    root = generate(tmp_path, {"desktop": True})
+    tests = _rendered(root, "scripts/run-tests.py", monkeypatch)
+    lint = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    spawned: list[str] = []
+
+    def spawn(command, **_kwargs):
+        spawned.append(command[-1])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def tool(name, _cmd, _hint):
+        spawned.append(name)
+        return ""
+
+    for runner in (tests, lint):
+        monkeypatch.setattr(runner, "WINDOWS", windows)
+        monkeypatch.setattr(runner.shutil, "which", lambda _name: "/usr/bin/dotnet")
+    monkeypatch.setattr(tests.subprocess, "run", spawn)
+    monkeypatch.setattr(lint, "run_tool", tool)
+    return root, tests, lint, spawned
+
+
+def test_the_desktop_tier_skips_a_host_that_is_not_windows_even_with_dotnet(
+    tmp_path, monkeypatch, capsys
+):
+    """PR 709: `ubuntu-latest` ships `dotnet`, so a skip keyed on the tool never fired.
+
+    The solution built, and `dotnet test` then died on the `Microsoft.WindowsDesktop.App`
+    runtime no Linux has, which would have reddened every desktop project's first PR.
+    """
+    root, tests, lint, spawned = _desktop_runners(tmp_path, monkeypatch, windows=False)
+
+    assert tests.run_desktop(root) == ""
+    assert "needs Windows" in capsys.readouterr().out
+    assert lint.desktop_section(object(), [], False) == ""
+    assert "needs Windows" in capsys.readouterr().out
+    assert spawned == []
+
+
+def test_the_desktop_tier_runs_on_windows(tmp_path, monkeypatch):
+    root, tests, lint, spawned = _desktop_runners(tmp_path, monkeypatch, windows=True)
+
+    assert tests.run_desktop(root) == ""
+    assert lint.desktop_section(object(), [], False) == ""
+    assert spawned == ["test", "desktop"]
+
+
 # The stand-in for a project's install command: a real venv, handed this interpreter's
 # site-packages through a `.pth` so the re-run has pytest without a network install.
 PROVISION_STUB = """\
@@ -1651,7 +1848,7 @@ def test_mypy_scope_excludes_the_vendored_harness(tmp_path):
 
 
 def test_no_template_references_a_requirements_file_it_never_generates(tmp_path):
-    root = generate(tmp_path, dict.fromkeys(new_project.FEATURES, True))
+    root = generate(tmp_path, dict.fromkeys(new_project.STACK_FEATURES, True))
     produced = {p.name for p in root.rglob("*")}
     assert not any(n.startswith("requirements") for n in produced)
     # Nothing may *instruct* the user to use one either -- that was the actual bug.
@@ -1844,13 +2041,18 @@ DEPENDABOT_ECOSYSTEMS = [
     pytest.param({}, {"uv", "github-actions"}, id="bare"),
     pytest.param({"docker": True}, {"uv", "github-actions", "docker"}, id="docker"),
     pytest.param({"frontend": True}, {"uv", "github-actions", "docker"}, id="frontend"),
+    # `uv` stays: the harness and scripts are Python, locked in `uv.lock`.
+    pytest.param({"desktop": True}, {"uv", "github-actions", "nuget"}, id="desktop"),
 ]
-# What Dependabot fetches for each ecosystem, under the entry's `directory`.
+# What Dependabot fetches for each ecosystem under the entry's `directory`, as a glob:
+# a solution is named after the project. dependabot-core's nuget discovery enters a
+# repository through a `.sln`, `.slnx` or `.proj`, so the root `.slnx` is that manifest.
 DEPENDABOT_MANIFESTS = {
     "uv": "pyproject.toml",
     "github-actions": ".github/workflows",
     "docker": "Dockerfile",
     "npm": "package.json",
+    "nuget": "*.slnx",
 }
 
 
@@ -1874,7 +2076,7 @@ def test_generated_dependabot_covers_exactly_the_manifests_the_project_has(
     assert {u["package-ecosystem"] for u in parsed["updates"]} == expected
     for update in parsed["updates"]:
         manifest = DEPENDABOT_MANIFESTS[update["package-ecosystem"]]
-        assert (root / update["directory"].lstrip("/") / manifest).exists(), update
+        assert any((root / update["directory"].lstrip("/")).glob(manifest)), update
 
 
 def test_the_frontend_npm_entry_is_one_uncomment_away_from_active(tmp_path):
@@ -2143,7 +2345,7 @@ def test_a_dry_run_warns_about_missing_commit_tooling_and_finishes(tmp_path, cap
 def test_compose_publishes_every_port_through_a_variable(tmp_path):
     # The whole reason parallel worktrees work. A literal host port here is the bug
     # that makes two checkouts un-runnable at the same time.
-    root = generate(tmp_path, {f: True for f in new_project.FEATURES})
+    root = generate(tmp_path, {f: True for f in new_project.STACK_FEATURES})
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     published = re.findall(r'^\s+- "([^"]+)"', compose, flags=re.MULTILINE)
     assert published, "no published ports found — the assertion is not testing anything"

@@ -164,3 +164,24 @@ typecheck_cmd = ["run", "typecheck"]
 [frontend]
 enabled = false
 {{/frontend}}
+
+{{#desktop}}
+# The desktop tier: a .NET app shipped as a Velopack installer. On, it vendors
+# `scripts/desktop.py` (lint, test, release) through the gated tier; the PR gate's
+# desktop job and `.github/workflows/release.yml` both run it.
+#
+# `pack_id` is the identity of every installed copy: an install only accepts updates
+# carrying the id it was installed with. It is fixed at the first release -- renaming
+# it strands every existing user on their current version.
+[desktop]
+enabled = true
+solution = "{{ desktop_solution }}"
+project = "{{ desktop_project }}"
+pack_id = "{{ desktop_name }}"
+pack_title = "{{ desktop_name }}"
+runtime = "win-x64"
+{{/desktop}}
+{{^desktop}}
+[desktop]
+enabled = false
+{{/desktop}}

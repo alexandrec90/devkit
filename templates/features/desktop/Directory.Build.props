@@ -1,0 +1,19 @@
+<Project>
+  <!--
+    Settings every project in the solution shares. The compiler is this project's type
+    checker, so its warnings are errors: a nullable dereference fails the build here the
+    way a mypy finding fails lint in a Python project, and `scripts/desktop.py lint` is
+    that build. Formatting is `dotnet format`'s, driven by `.editorconfig`.
+  -->
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- The analyzers that ship with the SDK, at their default (correctness) severity. -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <!-- Lets `dotnet restore` and `dotnet format` run on a Linux runner; building and
+         running the WPF app still needs Windows, which is where the gate's desktop job is. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+</Project>

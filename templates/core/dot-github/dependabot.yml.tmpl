@@ -95,6 +95,23 @@ updates:
   #         - "patch"
 {{/frontend}}
 
+{{#desktop}}
+  # The desktop app's NuGet packages. Velopack moves with `vpk`: `scripts/desktop.py`
+  # installs the packer at whatever version the app references, so a bump here moves
+  # both, and the in-app updater never reads a release format its packer did not write.
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+    assignees:
+      - {{ github_owner }}
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+{{/desktop}}
   # The actions the workflows pin. Majors land as individual PRs and the auto-merge
   # classifier holds them for review.
   - package-ecosystem: github-actions

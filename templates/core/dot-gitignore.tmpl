@@ -37,6 +37,20 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 {{/frontend}}
+{{#desktop}}
+# Claude Code links these into every `claude --worktree` tree (worktree.symlinkDirectories
+# in .claude/settings.json). A link is a file to git, which a `dir/` pattern never matches.
+/.venv
+
+# .NET build output, and what `scripts/desktop.py release` stages before upload.
+bin/
+obj/
+.vs/
+*.user
+publish/
+Releases/
+TestResults/
+{{/desktop}}
 {{#archive}}
 # Local data-lake staging. The lake itself lives in object storage; this is only
 # the scratch area a local ingest or restore writes through.

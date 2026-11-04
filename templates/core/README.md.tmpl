@@ -18,8 +18,30 @@ docker compose up -d
 {{#alembic}}
 alembic upgrade head
 {{/alembic}}
+{{^desktop}}
 pytest
+{{/desktop}}
+{{#desktop}}
+dotnet run --project {{ desktop_project }}   # the app, from source
+python scripts/desktop.py test               # its tests (and lint: format + build)
+{{/desktop}}
 ```
+{{#desktop}}
+
+## Releasing
+
+Push a tag: `git tag v0.1.0 && git push origin v0.1.0`. `.github/workflows/release.yml`
+builds the app, packs it with [Velopack](https://velopack.io) and publishes
+`{{ desktop_name }}-win-Setup.exe` as the GitHub release for that tag. That release is
+the download link to share.
+{{#updater}}
+Installed copies check the same releases on launch and offer a restart once the newer
+version has downloaded.
+{{/updater}}
+
+Until the `VPK_SIGN_PARAMS` repository secret holds a code-signing certificate's
+signtool arguments, the installer is unsigned and Windows SmartScreen warns on download.
+{{/desktop}}
 
 In VS Code, `Ctrl+Shift+B` runs the default build task and the task quick-pick
 (`Ctrl+Shift+P` → "Run Task") lists everything else, each with a one-line `detail`

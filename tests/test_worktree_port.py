@@ -83,11 +83,12 @@ def test_the_helper_and_its_test_stay_dependency_free():
     assert set(test_imports) == {"node:path", "vitest", "./worktreePort.ts"}, test_imports
 
 
-def test_the_gated_manifest_names_exactly_these_two_files():
+def test_the_frontend_gate_names_exactly_these_two_files():
     """The gate and the files are one thing: a rename on either side is a file the
     pull stops delivering with nothing red."""
-    assert sync.GATED_MANIFEST == {"frontend": ("worktreePort.ts", "worktreePort.test.ts")}
-    assert set(sync.gated_source_paths()) == {
+    assert sync.GATED_MANIFEST["frontend"] == ("worktreePort.ts", "worktreePort.test.ts")
+    frontend = {p for p in sync.gated_source_paths() if p.startswith(sync.DEFAULT_FRONTEND_SRC)}
+    assert frontend == {
         SOURCE.relative_to(REPO_ROOT).as_posix(),
         TEST.relative_to(REPO_ROOT).as_posix(),
     }

@@ -1,0 +1,11 @@
+namespace {{ desktop_name }}.Updates;
+
+/// <summary>Where installed copies look for a newer release.</summary>
+public static class UpdateFeed
+{
+    /// <summary>
+    /// The repository whose GitHub Releases are the feed: where the release workflow's
+    /// `scripts/desktop.py release --publish` uploads each tagged version.
+    /// </summary>
+    public const string Repository = "https://github.com/{{ github_owner }}/{{ name }}";
+}
