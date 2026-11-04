@@ -113,7 +113,7 @@ checkout's ports and credentials.
 > (or to CI). Run `docker ps` first — an `npipe`/daemon error means Desktop is stopped.
 {{/desktop}}
 {{#desktop}}
-> The app's checks need the .NET SDK `global.json` names. Without `dotnet` on PATH,
+> The app's checks need Windows and the .NET SDK `global.json` names. Without either,
 > `scripts/lint-all.py` and `scripts/run-tests.py` skip the desktop tier with a note
 > and the PR gate's Windows job is the only place it runs.
 {{/desktop}}

@@ -1228,6 +1228,54 @@ def test_the_generated_diagnostic_scripts_actually_run_and_pass(tmp_path, featur
         assert result.returncode == 0, f"{script} failed in a fresh project:\n{detail}"
 
 
+def _desktop_runners(tmp_path, monkeypatch, *, windows: bool):
+    """A desktop project's two runners on a host with `dotnet`, and what they spawned."""
+    root = generate(tmp_path, {"desktop": True})
+    tests = _rendered(root, "scripts/run-tests.py", monkeypatch)
+    lint = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    spawned: list[str] = []
+
+    def spawn(command, **_kwargs):
+        spawned.append(command[-1])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def tool(name, _cmd, _hint):
+        spawned.append(name)
+        return ""
+
+    for runner in (tests, lint):
+        monkeypatch.setattr(runner, "WINDOWS", windows)
+        monkeypatch.setattr(runner.shutil, "which", lambda _name: "/usr/bin/dotnet")
+    monkeypatch.setattr(tests.subprocess, "run", spawn)
+    monkeypatch.setattr(lint, "run_tool", tool)
+    return root, tests, lint, spawned
+
+
+def test_the_desktop_tier_skips_a_host_that_is_not_windows_even_with_dotnet(
+    tmp_path, monkeypatch, capsys
+):
+    """PR 709: `ubuntu-latest` ships `dotnet`, so a skip keyed on the tool never fired.
+
+    The solution built, and `dotnet test` then died on the `Microsoft.WindowsDesktop.App`
+    runtime no Linux has, which would have reddened every desktop project's first PR.
+    """
+    root, tests, lint, spawned = _desktop_runners(tmp_path, monkeypatch, windows=False)
+
+    assert tests.run_desktop(root) == ""
+    assert "needs Windows" in capsys.readouterr().out
+    assert lint.desktop_section(object(), [], False) == ""
+    assert "needs Windows" in capsys.readouterr().out
+    assert spawned == []
+
+
+def test_the_desktop_tier_runs_on_windows(tmp_path, monkeypatch):
+    root, tests, lint, spawned = _desktop_runners(tmp_path, monkeypatch, windows=True)
+
+    assert tests.run_desktop(root) == ""
+    assert lint.desktop_section(object(), [], False) == ""
+    assert spawned == ["test", "desktop"]
+
+
 # The stand-in for a project's install command: a real venv, handed this interpreter's
 # site-packages through a `.pth` so the re-run has pytest without a network install.
 PROVISION_STUB = """\

@@ -10,7 +10,7 @@ changed since the branch left `origin/<default>`, mapped to `tests/test_<stem>.p
 plus `CONTRACT_TESTS`, which read every module and instruction file. Where `.devkit.toml` turns the `[frontend]` tier on, a changed source under its `src`
 runs `vitest related` instead, which follows the imports to the tests that reach it.
 Where it turns the `[desktop]` tier on, a changed C# source runs the solution's tests
-through `scripts/desktop.py test`, and so does every whole-suite run.
+through `scripts/desktop.py test`, and so does every whole-suite run, on Windows alone.
 Named test files run with the contract tests too, unless `--only` says just these.
 The whole suite is CI's, the push gate's (`PRE_COMMIT` is in the environment under
 pre-commit) and `--all`'s. Where git cannot say what changed, the suite runs.
@@ -80,6 +80,7 @@ HARNESS_CONFIG = Path("scripts") / "hooks" / "harness_config.py"
 # the gated tier vendors. `dotnet test` takes the whole solution, never a file list.
 DESKTOP_SUFFIXES = (".cs", ".xaml", ".csproj", ".props", ".targets", ".slnx", ".sln")
 DESKTOP_DRIVER = Path("scripts") / "desktop.py"
+WINDOWS = os.name == "nt"
 # How much of a failed vitest run the artifact keeps: its summary is at the end.
 VITEST_TAIL_LINES = 120
 # The per-test timeout of this runner's own vitest run, which shares the machine with
@@ -339,13 +340,17 @@ def desktop_sources(paths: list[str]) -> list[str]:
 def run_desktop(root: Path) -> str:
     """`scripts/desktop.py test`; the artifact's text for a failure, empty for a pass.
 
-    No `dotnet` is a skip with a note, not a failure: a Linux runner has none, and the PR
-    gate's Windows job is where the tier is gated. No driver is a tree whose gated files
-    have not been pulled yet.
+    Off Windows, or with no `dotnet`, it is a skip with a note, not a failure: the PR
+    gate's Windows job is where the tier is gated. The host is asked first because a
+    Linux runner can carry `dotnet` and build the solution, and still has no WPF runtime
+    to run its tests on. No driver is a tree whose gated files have not been pulled yet.
     """
     driver = root / DESKTOP_DRIVER
     if not driver.is_file():
         print("run-tests: scripts/desktop.py missing; run sync-devkit.py --pull")
+        return ""
+    if not WINDOWS:
+        print("run-tests: the desktop tier needs Windows; desktop tests skipped")
         return ""
     if not shutil.which("dotnet"):
         print("run-tests: no dotnet on PATH; desktop tests skipped (global.json names the SDK)")

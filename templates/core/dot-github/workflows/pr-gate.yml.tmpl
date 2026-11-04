@@ -161,8 +161,8 @@ jobs:
 
   desktop:
     name: Desktop build and tests
-    # Windows, because WPF builds and runs only there. The Linux jobs above skip the
-    # desktop tier with a note for want of `dotnet`; this job is where it is gated.
+    # Windows, because WPF runs only there. The Linux jobs above skip the desktop tier
+    # with a note, whatever `dotnet` their image carries; this job is where it is gated.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7

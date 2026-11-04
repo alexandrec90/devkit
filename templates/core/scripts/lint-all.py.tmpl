@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -173,6 +174,7 @@ def frontend_tier() -> Any | None:
 DESKTOP_SUFFIXES = (".cs", ".xaml", ".csproj", ".props", ".targets", ".slnx", ".sln")
 DESKTOP_CONFIGS = ("global.json", ".editorconfig")
 DESKTOP_DRIVER = REPO_ROOT / "scripts" / "desktop.py"
+WINDOWS = os.name == "nt"
 
 
 def desktop_targets(paths: list[str], tier: Any | None) -> list[str]:
@@ -187,14 +189,18 @@ def desktop_targets(paths: list[str], tier: Any | None) -> list[str]:
 def desktop_section(tier: Any | None, changed: list[str], scoped: bool) -> str:
     """The desktop lint's artifact section, with its own log inlined on a failure.
 
-    No `dotnet` is a missing tool, not a finding -- the PR gate's Windows job is where
-    the tier is gated, and a Linux runner has none. No driver is a tree whose gated
-    files have not been pulled yet.
+    Off Windows, or with no `dotnet`, it is a missing host, not a finding: the PR gate's
+    Windows job, on the SDK `global.json` pins, is where the tier is gated, and a Linux
+    runner's own `dotnet` is whichever one its image carries. No driver is a tree whose
+    gated files have not been pulled yet.
     """
     if tier is None or (scoped and not changed):
         return ""
     if not DESKTOP_DRIVER.is_file():
         print("  desktop: scripts/desktop.py missing — skipped (run sync-devkit.py --pull)")
+        return ""
+    if not WINDOWS:
+        print("  desktop: the desktop tier needs Windows — skipped")
         return ""
     if not shutil.which("dotnet"):
         print("  desktop: no dotnet on PATH — skipped (install the SDK global.json names)")
