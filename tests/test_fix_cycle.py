@@ -689,6 +689,8 @@ def test_when_planning_raises_only_the_backlog_goes_to_the_devkit_session():
     assert [d.action for d in go] == [fix_plan.UPSTREAM] and go[0].failures == (backlog,)
     assert held == [] and skipped == []
     assert fix_cycle.only_the_harness(None)[1] == []
+    late = fix_cycle.only_the_harness(backlog, fix_cycle.PLAN_LATE)[0]
+    assert "raised" not in late.reasons[0] and fix_cycle.PLAN_LATE in late.reasons[0]
 
 
 def test_a_devkit_commit_the_commit_stage_refused_is_fixed_in_its_own_tree():

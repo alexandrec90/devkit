@@ -362,15 +362,21 @@ def _harness_first(harness_ones: list[fix_plan.Decision]) -> list[fix_plan.Decis
     return go
 
 
+PLAN_RAISED = "the plan step raised"
+PLAN_LATE = "the plan was left for the deadline"
+
+
 def only_the_harness(
     backlog: fix_plan.Failure | None,
+    why: str = PLAN_RAISED,
 ) -> tuple[Harness, list[fix_plan.Decision], list, list]:
-    """What the pass sends when planning itself raised: the backlog, and nothing else.
+    """What the pass sends with no plan, because planning raised or was never reached
+    (`why`): the backlog, and nothing else.
 
-    The crash is on that backlog by then, so the devkit session is what fixes the plan.
+    A crash is on that backlog by then, so the devkit session is what fixes the plan.
     Everything else waits a pass rather than going out on a plan nobody could make.
     """
-    harness = Harness(False, ("the plan step raised; only the devkit session goes",))
+    harness = Harness(False, (f"{why}; only the devkit session goes",))
     go = (
         [
             fold_harness(

@@ -6,7 +6,7 @@ The **inventory** merges sources that disagree, and a project missing from one o
 is the whole reason the script exists — so every combination of on-disk/on-GitHub is
 asserted, including the one that reads as "nothing to do" and is not.
 
-The **plan** decides an outward-facing act (creating a private GitHub repo) from a
+The **plan** decides an outward-facing act (creating a public GitHub repo) from a
 ticked checkbox, so it is pure and every step is asserted before anything can run it.
 
 And `edit_verdict` is the gate between this script and the file every window on the
@@ -268,7 +268,7 @@ def test_an_error_does_not_end_the_loop():
             "ticking clones acme/zeta here",
         ),
         (Candidate("gamma", plugged=False, on_disk=False, on_github=True), "clones acme/gamma"),
-        (Candidate("delta", plugged=False, on_disk=True, on_github=False), "CREATES the private"),
+        (Candidate("delta", plugged=False, on_disk=True, on_github=False), "CREATES the public"),
         (
             Candidate("eps", plugged=False, on_disk=True, on_github=True),
             "registers it, and nothing",
@@ -277,7 +277,7 @@ def test_an_error_does_not_end_the_loop():
 )
 def test_each_row_says_what_its_own_tick_costs(candidate, expected):
     """The task runs `--picks ... --yes`, so the quick-pick *is* the confirmation and
-    this line is the last thing anyone reads before a private GitHub repo is created.
+    this line is the last thing anyone reads before a public GitHub repo is created.
     A tick flips the row, so the two directions cost wildly different things and the
     sentence has to name the one THIS row is offering."""
     assert expected in toggle_detail(candidate, "acme")
@@ -556,11 +556,11 @@ def test_hazards_ride_on_the_unplug_step():
 
 
 def test_the_preview_names_every_outward_facing_act():
-    """Creating a private GitHub repo is the only step here anyone outside can see, so
+    """Creating a public GitHub repo is the only step here anyone outside can see, so
     it must be legible in the line printed before the confirmation."""
     candidates = inventory(REGISTRY, ["alpha", "beta", "gamma"], [])
     line = describe(plan(candidates, {"alpha", "beta", "gamma"})[0])
-    assert "create the PRIVATE GitHub repo" in line and "git init" in line
+    assert "create the PUBLIC GitHub repo" in line and "git init" in line
 
 
 # --- the gate ---------------------------------------------------------------
@@ -724,7 +724,8 @@ def test_creating_a_repo_initialises_commits_and_pushes(tmp_path):
     assert calls[0] == ["git", "init", "-b", "main"]
     assert ["git", "commit", "-m", "Initial commit"] in calls
     assert calls[-1][:4] == ["gh", "repo", "create", "owner/gamma"]
-    assert "--private" in calls[-1] and "--push" in calls[-1]
+    assert "--public" in calls[-1] and "--push" in calls[-1]
+    assert "--private" not in calls[-1], "a private repo's Actions minutes run out"
 
 
 def test_an_existing_repo_with_commits_is_only_pushed(tmp_path):

@@ -16,7 +16,7 @@ Three sources feed the list, because a project can be in any two of them:
 | --- | --- | --- | --- |
 | yes | yes | no  | registers it |
 | no  | yes | no  | clones it first |
-| yes | no  | no  | creates the private repo and pushes first |
+| yes | no  | no  | creates the public repo and pushes first |
 | no  | yes | yes | clones it onto this PC; the registry is untouched |
 | yes | yes | yes | nothing — it is already checked |
 
@@ -336,7 +336,7 @@ def toggle_detail(candidate: Candidate, owner: str) -> str:
     """What ticking this row will do, as the sentence under its label.
 
     The pick is the confirmation: the task runs `--picks ... --yes`, so this string is
-    the last thing anyone reads before a private GitHub repo is created. Every row says
+    the last thing anyone reads before a public GitHub repo is created. Every row says
     what its *own* tick does, because a tick now means "flip this" and the two
     directions cost wildly different things -- retiring a registry entry is reversible
     and touches no disk, while plugging one can clone, or create and push, a repository.
@@ -360,7 +360,7 @@ def toggle_detail(candidate: Candidate, owner: str) -> str:
     if not candidate.on_disk:
         return f"not on disk -- ticking clones {owner}/{candidate.name} first"
     if not candidate.on_github:
-        return f"no repo -- ticking CREATES the private {owner}/{candidate.name} and pushes it"
+        return f"no repo -- ticking CREATES the public {owner}/{candidate.name} and pushes it"
     return "on disk and on GitHub -- ticking registers it, and nothing else"
 
 
@@ -572,7 +572,7 @@ def describe(step: Step) -> str:
     if step.init_git:
         extra.append("git init + initial commit")
     if step.create_repo:
-        extra.append("create the PRIVATE GitHub repo and push")
+        extra.append("create the PUBLIC GitHub repo and push")
     detail = ", ".join(extra) if extra else "registry only"
     return f"  plug    {step.name}   {detail}"
 
@@ -688,7 +688,8 @@ def clone_repo(owner: str, name: str, root: Path, runner) -> None:
 
 
 def create_repo(owner: str, name: str, path: Path, runner, *, init: bool) -> None:
-    """Create the PRIVATE GitHub repo for an existing folder and push it.
+    """Create the public GitHub repo for an existing folder and push it
+    (`devkit_project.CREATE_VISIBILITY`).
 
     `gh repo create --source` needs a commit to push, so a folder that is not a repo at
     all — or is one with nothing committed — gets `git init` and one commit first. This
@@ -707,7 +708,7 @@ def create_repo(owner: str, name: str, path: Path, runner, *, init: bool) -> Non
         "repo",
         "create",
         f"{owner}/{name}",
-        "--private",
+        devkit_project.CREATE_VISIBILITY,
         "--source=.",
         "--remote=origin",
         "--push",
@@ -799,7 +800,7 @@ def _apply(steps: list[Step], owner: str, out) -> None:
             out(f"  clone   {owner}/{step.name}")
             clone_repo(owner, step.name, WORKSPACE_ROOT, _run)
         if step.create_repo:
-            out(f"  create  {owner}/{step.name} (private)")
+            out(f"  create  {owner}/{step.name} (public)")
             create_repo(owner, step.name, WORKSPACE_ROOT / step.name, _run, init=step.init_git)
 
     # A clone-only run edits nothing in the registry -- the project was registered

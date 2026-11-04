@@ -8,6 +8,7 @@ would otherwise surface only when a human ran `docker compose up` in a brand-new
 repo.
 """
 
+import dataclasses
 import itertools
 import json
 import os
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from support import (
@@ -389,6 +391,22 @@ def test_a_plan_is_the_decisions_and_writes_nothing(tmp_path):
     assert not the_plan.root.exists()
     assert the_plan.files and all(len(entry) == 3 for entry in the_plan.files)
     assert isinstance(the_plan.remote, bool) and isinstance(the_plan.register, bool)
+
+
+def test_the_remote_is_created_public_so_its_gate_runs_free(tmp_path, monkeypatch):
+    """productivity-tracker and social-scraper were created `--private`, spent the free
+    plan's monthly Actions minutes, and GitHub refused every job after (2026-11-01)."""
+    the_plan = dataclasses.replace(
+        new_project.plan(make_args(parent=str(tmp_path)), registry()), remote=True
+    )
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        new_project, "run", lambda cmd, cwd, dry_run, check=True: ran.append(list(cmd)) or 0
+    )
+    new_project.create_remote(the_plan, dry_run=False)
+    [cmd] = ran
+    assert cmd[:3] == ["gh", "repo", "create"] and "--public" in cmd
+    assert "--private" not in cmd and "--internal" not in cmd
 
 
 def test_git_init_seeds_the_default_branch_and_the_first_commit(tmp_path, monkeypatch):
@@ -2537,6 +2555,84 @@ def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path
     assert new_project.harness_files_matching_ref("v1.0.0", repo) == [
         "scripts/hooks/harness_config.py"
     ]
+
+
+def _pinned_plan(root: Path, parent: Path) -> SimpleNamespace:
+    return SimpleNamespace(root=parent / "fresh", context={"devkit_ref": "v1.0.0"})
+
+
+def _tree_past_its_pin(tmp_path, monkeypatch) -> Path:
+    """A devkit whose vendored file changed after its tag, and a workspace beside it."""
+    repo = _seed_fake_devkit(
+        tmp_path,
+        ("scripts/hooks/harness_config.py",),
+        {"scripts/hooks/harness_config.py": "x = 1\n"},
+    )
+    (repo / "scripts" / "hooks" / "harness_config.py").write_text("x = 2\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(new_project, "DEVKIT_ROOT", repo)
+    monkeypatch.setattr(
+        new_project.devkit_project, "DEFAULT_WORKSPACE", workspace / "all.code-workspace"
+    )
+    return repo
+
+
+def test_lands_in_the_workspace_is_being_beside_the_live_file(tmp_path, monkeypatch):
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    home = (tmp_path / "workspace").resolve()
+    assert new_project.lands_in_the_workspace(_pinned_plan(repo, home))
+    assert not new_project.lands_in_the_workspace(_pinned_plan(repo, tmp_path / "gen"))
+
+
+def test_a_project_for_the_workspace_vendors_the_tag_it_pins(tmp_path, monkeypatch):
+    """ebe2fa33: this tree past the tag, the project died in `git_init` on its own drift
+    hook, with no registration and no remote behind it."""
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    plan = _pinned_plan(repo, (tmp_path / "workspace").resolve())
+    with new_project.harness_source(plan, dry_run=False) as source:
+        assert source != repo
+        vendored = (source / "scripts" / "hooks" / "harness_config.py").read_text("utf-8")
+        assert vendored.replace("\r\n", "\n") == "x = 1\n", "the tag's bytes, not this tree's"
+    assert not source.exists(), "the clone is thrown away"
+
+
+def test_a_rehearsal_vendors_this_tree(tmp_path, monkeypatch):
+    """The generated-project gate renders under a temporary parent to test this tree."""
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    with new_project.harness_source(_pinned_plan(repo, tmp_path / "elsewhere"), False) as source:
+        assert source == repo
+
+
+def test_a_dry_run_clones_nothing(tmp_path, monkeypatch):
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    plan = _pinned_plan(repo, (tmp_path / "workspace").resolve())
+    with new_project.harness_source(plan, dry_run=True) as source:
+        assert source == repo
+
+
+def test_a_tree_at_its_pin_needs_no_clone(tmp_path, monkeypatch):
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    (repo / "scripts" / "hooks" / "harness_config.py").write_text("x = 1\n", encoding="utf-8")
+    plan = _pinned_plan(repo, (tmp_path / "workspace").resolve())
+    with new_project.harness_source(plan, dry_run=False) as source:
+        assert source == repo
+
+
+def test_a_pin_that_cannot_be_cloned_falls_back_to_this_tree(tmp_path, monkeypatch, capsys):
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    real = subprocess.run
+
+    def refused(argv, **kwargs):
+        if "clone" in argv:
+            return subprocess.CompletedProcess(argv, 128, "", "fatal: no")
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(new_project.subprocess, "run", refused)
+    plan = _pinned_plan(repo, (tmp_path / "workspace").resolve())
+    with new_project.harness_source(plan, dry_run=False) as source:
+        assert source == repo
+    assert "could not clone v1.0.0" in capsys.readouterr().out
 
 
 def test_harness_comparison_flags_a_manifest_file_absent_at_the_ref(tmp_path):

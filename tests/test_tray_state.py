@@ -20,6 +20,7 @@ import pytest
 from support import load_script
 
 fix_cycle = load_script("scripts/fix_cycle.py")
+fix_loop = load_script("scripts/fix_loop.py")
 schedule_health = load_script("scripts/schedule_health.py")
 tray_state = load_script("scripts/tray_state.py")
 
@@ -430,10 +431,36 @@ def test_a_machine_with_no_fix_pass_history_gets_no_fix_pass_rows():
 def test_each_step_awaiting_a_person_is_a_red_row_that_opens_the_record():
     """A step no fixer can take reached the person only through the morning toast, once
     a day: 26291670's `claude auth login` sat behind it for three days."""
-    step = "run `claude auth login` on this machine -- then: python scripts/harness_triage.py"
-    found = tray_state.fix_pass_states([pass_row(person=[step])])
+    step = "run `claude auth login` on this machine"
+    line = f"{step} -- then: python scripts/harness_triage.py --resolve-like ab12 --note '<x>'"
+    found = tray_state.fix_pass_states([pass_row(person=[line])])
     assert found[0] == tray_state.JobState("your step", tray_state.FAIL, step, "logs/fix-pass.log")
     assert tray_state.overall(found) == tray_state.FAIL
+
+
+def test_groups_awaiting_one_step_are_one_row_that_counts_them():
+    """2026-11-01: the account's billing finding and five per-PR stalls naming its step
+    were six red rows differing only in the id of the command that retires each."""
+    billing = "settle the GitHub account's Actions billing"
+    steps = [
+        f"{billing} -- then: python scripts/harness_triage.py --resolve-like {i}" for i in "abc"
+    ]
+    *person, _fixers = tray_state.fix_pass_states([pass_row(person=[*steps, "reboot"])])
+    assert [row.detail for row in person] == [f"{billing} (x3)", "reboot"]
+    assert tray_state.person_rows([*steps, "reboot"]) == {billing: 3, "reboot": 1}
+
+
+def test_the_resolve_tail_is_the_one_the_pass_writes():
+    """`fix_loop.person_steps` writes it; the tray cuts there and imports none of the pass."""
+    assert tray_state.RESOLVE_TAIL == fix_loop.PERSON_RESOLVE_TAIL
+
+
+def test_a_long_detail_is_cut_in_the_menu_with_a_mark():
+    long = tray_state.JobState("your step", tray_state.FAIL, "x" * 300)
+    label = tray_state.menu_label(long)
+    assert label.endswith("…") and len(label) == len("X   your step -- ") + 100
+    short = tray_state.JobState("your step", tray_state.FAIL, "x" * 100)
+    assert tray_state.menu_label(short).endswith("x")
 
 
 def test_the_fixers_row_says_what_is_at_work_waiting_owed_and_last_sent():

@@ -20,7 +20,8 @@ which survives this file crashing). Two rules hold it together:
 4. **Collect everything red** (`fix_red.py`), the harness-defect backlog included, and
    what Dependabot cannot do (`fix_dependabot.py`: failing update jobs, alerts no PR
    answers -- under its own daily cap), plan it (`fix_plan.py`) and classify it
-   (`fix_cycle.py`).
+   (`fix_cycle.py`). A gate refused over the account's billing, and a private repo that
+   runs Actions (`fix_visibility.py`), are each filed as its owner's step.
 5. **Harness first**: while anything harness-shaped is red, one devkit session gets
    all of it and project fixers are held, out loud. Only one at a time.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
@@ -72,6 +73,7 @@ import fix_plan
 import fix_release
 import fix_red
 import fix_send
+import fix_visibility
 import gate_evidence
 import git_trust
 import installers
@@ -540,7 +542,7 @@ def release_and_plan(
     backlog: fix_plan.Failure | None,
 ) -> tuple[str, tuple]:
     """Step 4's release and plan, each isolated: `(release line, decide's result)`, the
-    plan falling back to the harness alone when it raises."""
+    plan falling back to the harness alone when it raises or is left for the deadline."""
     step = journal.step
     newest = step("newest-release", gate_evidence.newest_release, ctx.devkit_dir, default="")
     dispatching = ctx.mode == fix_cycle.DISPATCH
@@ -559,9 +561,11 @@ def release_and_plan(
     )
     prefixes = fix_release.adoption_prefixes()
     fallback = fix_cycle.only_the_harness(backlog)
-    return release, step(
-        "plan", decide, failures, green, newest, adopting, prefixes, default=fallback
-    )
+    planned = step("plan", decide, failures, green, newest, adopting, prefixes, default=fallback)
+    if "plan" in journal.late:
+        # Not the step's fault: the record said it "raised", with nothing filed to match.
+        return release, fix_cycle.only_the_harness(backlog, fix_cycle.PLAN_LATE)
+    return release, planned
 
 
 def late_lines(journal: Journal) -> tuple[str, ...]:
@@ -615,6 +619,7 @@ def run(
         workspace, ctx, journal, failures, green, backlog
     )
     closed.verified += step("billing", fix_red.billing, ctx, journal, skipped, default=[])
+    closed.verified += step("visibility", fix_visibility.check, ctx, journal, default=[])
 
     # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current,
     # and the next fire routes a click's.
@@ -710,7 +715,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # The scheduled job that runs this pass: `install-fix-pass-task.py`'s `TASK_NAME`.
-SCHEDULED_TASK = "devkit-fix-pass"
+SCHEDULED_TASK = fix_loop.OWN_TASK
 
 
 def hand_to_scheduled_task() -> int:

@@ -1316,7 +1316,7 @@
 			// second ticked checkout could only queue behind the first or collide with it.
 			{
 				"label": "IBKR: Open Trader UI",
-				"detail": "Build the frontend if it is stale, then serve ibkr_trader's local web UI on 127.0.0.1:8001 (UI_PORT in .env overrides) and open the browser. Runs until you close the terminal; needs the db container up.",
+				"detail": "Build the frontend if it is stale, then serve ibkr_trader's local web UI on 127.0.0.1:8001 (UI_PORT in .env overrides) and open the browser. Runs until you close the terminal; its database pages are empty unless the db container is up.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1408,7 +1408,7 @@
 			// --- workspace-scoped: act across every checkout ---------------------
 			{
 				"label": "Project: New from devkit",
-				"detail": "Scaffold a whole new project — templates, Docker stack on registry-allocated ports, vendored devkit harness, parallel worktree, PR gate, and a PRIVATE GitHub repo. Registers it in this workspace's folder list and project picker. DRY RUN by default: pick 'Apply' to actually write.",
+				"detail": "Scaffold a whole new project — templates, Docker stack on registry-allocated ports, vendored devkit harness, parallel worktree, PR gate, and a PUBLIC GitHub repo (its Actions minutes are free only while public). Registers it in this workspace's folder list and project picker. DRY RUN by default: pick 'Apply' to actually write.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -2443,10 +2443,10 @@
 				// `--dry-run` and `--remote` flags alongside their negations.
 				"id": "newProjectRemote",
 				"type": "pickString",
-				"description": "Create a PRIVATE GitHub repo and push? (ignored on a dry run)",
+				"description": "Create a PUBLIC GitHub repo and push? (ignored on a dry run)",
 				"options": [
 					{
-						"label": "Yes — create alexandrec90/<name> as private, and push",
+						"label": "Yes — create alexandrec90/<name> as public, and push",
 						"value": "--remote"
 					},
 					{

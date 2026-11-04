@@ -817,7 +817,7 @@ class RecordingGit:
         self.fail_on = fail_on
         self.calls: list[tuple[str, ...]] = []
 
-    def __call__(self, *args: str):
+    def __call__(self, *args: str, env=None):
         self.calls.append(args)
         failed = bool(self.fail_on) and self.fail_on in " ".join(args)
         return subprocess.CompletedProcess(
@@ -1618,9 +1618,11 @@ class PushGit:
     def __init__(self, answers: list[tuple[int, str]]):
         self.answers = iter(answers)
         self.calls: list[tuple[str, ...]] = []
+        self.skipped: list[list[str]] = []
 
-    def __call__(self, *args: str):
+    def __call__(self, *args: str, env=None):
         self.calls.append(args)
+        self.skipped.append((env or {}).get("SKIP", "").split(","))
         code, err = next(self.answers)
         return subprocess.CompletedProcess(["git", *args], code, "", err)
 
@@ -1662,6 +1664,60 @@ def test_a_push_the_remote_or_a_hook_refused_is_not_retried(refusal):
     git, slept = PushGit([(1, refusal)]), []
     assert up.push_with_retry(git, "b", sleep=slept.append).returncode == 1
     assert len(git.calls) == 1 and slept == []
+
+
+def test_every_adoption_push_skips_the_local_gate():
+    """1720b7f4: v0.11.76's adoption stopped at `git push` in two consumers. The pre-push
+    gate ran the whole suite in a box with no stack, which productivity-tracker's
+    Postgres tests cannot pass, and homelab's went red on a run nothing reproduced. CI
+    judges the PR, so the push skips the gate as every other unattended push does, and
+    a retry after a lost connection must not bring it back."""
+    git = PushGit([(128, A1EDC2F7), (0, "")])
+    assert up.push_with_retry(git, "b", sleep=lambda _s: None).returncode == 0
+    assert len(git.skipped) == 2
+    assert all(up.release.SKIP_PUSH_GATE in skipped for skipped in git.skipped)
+
+
+def test_an_adoption_push_keeps_a_skip_the_caller_set(monkeypatch):
+    """`SKIP` is pre-commit's list, so a hook the operator skipped stays skipped."""
+    monkeypatch.setenv("SKIP", "ruff")
+    git = PushGit([(0, "")])
+    up.push_with_retry(git, "b", sleep=lambda _s: None)
+    assert git.skipped == [["ruff", up.release.SKIP_PUSH_GATE]]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "said"),
+    [
+        ("the hook's reason\n", "error: refused\n", "the hook's reason\nerror: refused"),
+        ("", "error: refused\n", "error: refused"),
+        ("the hook's reason\n", "", "the hook's reason"),
+        (None, None, ""),
+        ("  \n", "\n", ""),
+    ],
+)
+def test_said_by_keeps_both_streams_with_gits_error_last(stdout, stderr, said):
+    done = subprocess.CompletedProcess(["git"], 1, stdout, stderr)
+    assert up.said_by(done) == said
+
+
+def test_a_refused_push_reports_what_the_hook_printed(tmp_path, monkeypatch):
+    """1720b7f4 again: git puts a pre-push hook's output on stdout and only its own
+    `error: failed to push some refs` on stderr, so `stderr or stdout` kept the one line
+    that says nothing, and homelab's reason was gone when the box's next run passed."""
+    run = BoxRun(tmp_path, monkeypatch)
+    hook = "run-tests: FAILED -- details in logs/test-failures.log"
+    refused = "error: failed to push some refs to 'origin'"
+
+    def git(*args, env=None):
+        said = (hook, refused) if args[0] == "push" else ("", "")
+        return subprocess.CompletedProcess(["git", *args], int(args[0] == "push"), *said)
+
+    monkeypatch.setattr(up.sweep, "git_for", lambda _p: git)
+    outcome = run.run(tmp_path)
+    assert outcome.code == 2
+    assert hook in outcome.detail and refused in outcome.detail
+    assert outcome.detail.rstrip().endswith(refused), "log-wrap reads the cause off the end"
 
 
 # --- the failure artifact ----------------------------------------------------

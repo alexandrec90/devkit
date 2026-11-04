@@ -41,6 +41,24 @@ def test_env_for_emits_the_host_port_names_compose_reads():
     assert from_dict(BASE).env_for("beta") == {"APP_HOST_PORT": "8001", "DB_HOST_PORT": "5433"}
 
 
+def test_a_worktree_of_a_checkout_answers_with_that_checkout_and_says_so(tmp_path, capsys):
+    """b270d662: a photolab tree following `.env.example` got "no slot registered"."""
+    (tmp_path / "alpha" / ".claude" / "worktrees" / "sparkling-tree").mkdir(parents=True)
+    registry = from_dict(BASE)
+    assert devkit_ports.checkout_of("sparkling-tree", registry, tmp_path) == "alpha"
+    said = capsys.readouterr().err
+    assert "no slot of its own" in said and "collide" in said
+
+
+def test_a_registered_checkout_and_an_unknown_name_are_left_alone(tmp_path, capsys):
+    registry = from_dict(BASE)
+    assert devkit_ports.checkout_of("beta", registry, tmp_path) == "beta"
+    assert devkit_ports.checkout_of("nowhere", registry, tmp_path) == "nowhere"
+    assert capsys.readouterr().err == ""
+    with pytest.raises(devkit_ports.RegistryError, match="no slot registered"):
+        registry.env_for("nowhere")
+
+
 def test_cli_prints_each_comma_delimited_checkout(monkeypatch, capsys):
     monkeypatch.setattr(devkit_ports, "load", lambda _root: from_dict(BASE))
     assert devkit_ports.main(["alpha,beta"]) == 0
