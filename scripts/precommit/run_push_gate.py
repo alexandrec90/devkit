@@ -16,6 +16,10 @@ the one still on disk when the push is refused, plus one CI has no use for:
   3. `pytest scripts/hooks/tests/` -- the vendored harness tier
   4. `scripts/posix-rehearsal.py` -- the suite again, with the host's platform faked
 
+The wrappers write their own artifacts. Step 3 is the one bare pytest, so this file has it
+write CI's `logs/junit-hooks.xml`, and clears the last run's first: a refused push always
+has something on disk naming what failed, and never a stale report that says it passed.
+
 Lint is first because it auto-fixes: anything that can rewrite a file has to come after
 it, or the later step reports clean on what the earlier one just repaired. The two test
 tiers' order is free, and is deliberately not CI's -- the gate stops at the first failure,
@@ -49,6 +53,7 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import re
@@ -76,12 +81,26 @@ class Step:
     argv: tuple[str, ...]
     # The repo-relative path without which the step has nothing to run.
     requires: str
+    # The report this gate has the step write. Empty for a wrapper, which is project-owned
+    # and names its own artifact: this file has no business promising what one is called.
+    artifact: str = ""
 
+
+# The name CI's own run of this tier writes and uploads (`tests/test_gate_parity.py`), so
+# what reads that report reads this one. Handed over in `run_gate` beside `--basetemp`
+# rather than spelled in `argv`, where a second path would make the step's parity
+# signature ambiguous.
+HOOK_TESTS_ARTIFACT = "logs/junit-hooks.xml"
 
 STEPS: tuple[Step, ...] = (
     Step("lint", ("scripts/lint-all.py",), "scripts/lint-all.py"),
     Step("tests", ("scripts/run-tests.py",), "scripts/run-tests.py"),
-    Step("hook tests", ("-m", "pytest", "scripts/hooks/tests/", "-q"), "scripts/hooks/tests"),
+    Step(
+        "hook tests",
+        ("-m", "pytest", "scripts/hooks/tests/", "-q"),
+        "scripts/hooks/tests",
+        HOOK_TESTS_ARTIFACT,
+    ),
     Step("posix rehearsal", ("scripts/posix-rehearsal.py",), "scripts/posix-rehearsal.py"),
 )
 
@@ -366,6 +385,26 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     ]
 
 
+def clear_artifact(root: Path, step: Step) -> None:
+    """Drop the last run's report, so a step that dies before writing leaves none to misread.
+
+    An unlink that cannot run is left for pytest to report: this happens before the step,
+    and must not be the thing that fails the push.
+    """
+    if step.artifact:
+        with contextlib.suppress(OSError):
+            (root / step.artifact).unlink(missing_ok=True)
+
+
+def read_from(root: Path, step: Step) -> str:
+    """Where a refusal sends the reader for `step`: only ever a file that is really there."""
+    if not step.artifact:
+        return "the artifact under logs/"
+    if (root / step.artifact).is_file():
+        return step.artifact
+    return f"the output above (the step wrote no {step.artifact})"
+
+
 def run_gate(
     root: Path, runner: Runner = subprocess.run, release_prepare: str | None = None
 ) -> int:
@@ -396,17 +435,18 @@ def run_gate(
             print(f"push-gate: {step.name}: no {step.requires} in this project -- skipped")
             continue
         print(f"push-gate: {step.name}: {' '.join(command[1:])}", flush=True)
+        clear_artifact(root, step)
         # The one bare pytest here gets a temp root of its own, as `run-tests.py` gives
         # its suite: under the machine-wide one, another session's run holding its
         # `pytest-current` link failed a green suite at pytest's exit (97d20f01).
         with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as tmp:
             if step.name == PYTEST_STEP:
-                command = [*command, f"--basetemp={tmp}"]
+                command = [*command, f"--basetemp={tmp}", f"--junit-xml={step.artifact}"]
             result = runner(command, cwd=root, check=False, env=env)
         if result.returncode:
             print(
-                f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from the "
-                f"artifact under logs/, or push anyway with SKIP={HOOK_ID}."
+                f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from "
+                f"{read_from(root, step)}, or push anyway with SKIP={HOOK_ID}."
             )
             return int(result.returncode)
     print("push-gate: clean")
