@@ -93,6 +93,7 @@ from adoption_prs import (
     upgrade_branch_stem,
     upgrade_slug,
 )
+import release
 import sweep
 import task_branch as tb
 import task_input
@@ -739,16 +740,37 @@ TRANSPORT_FAILURE = re.compile(
 PUSH_WAITS = (30, 120)
 
 
+def said_by(done: subprocess.CompletedProcess[str]) -> str:
+    """Everything a git call printed, stdout first so git's own `error:` line stays last,
+    where `log-wrap.py` reads a job's cause.
+
+    Both streams, never `stderr or stdout`: git leaves a pre-push hook's output on stdout
+    and writes only `error: failed to push some refs` to stderr, which is always
+    non-empty on a refusal, so the hook's reason was dropped every time (1720b7f4).
+    """
+    return "\n".join(part.strip() for part in (done.stdout, done.stderr) if part and part.strip())
+
+
 def push_with_retry(git, branch: str, sleep=time.sleep) -> subprocess.CompletedProcess[str]:
-    """`git push -u origin <branch>`, pushed again after each `PUSH_WAITS` while git
-    says the transport failed; a remote's or a hook's refusal is returned at once."""
-    pushed = git("push", "-u", "origin", branch)
+    """`git push -u origin <branch>` past the local push gate, pushed again after each
+    `PUSH_WAITS` while git says the transport failed; a remote's or a hook's refusal is
+    returned at once.
+
+    **Past the gate** (`release.push_env`) as every other unattended push goes, and for
+    the same reasons: the adoption PR's CI gate is what judges it and a red there reaches
+    a fixer, while a local refusal leaves no PR for anything to read. The box cannot run
+    what the gate asks of it either: it has no stack and, where the checkout has no
+    `.env`, no database URL, so productivity-tracker's Postgres tests fail on
+    `DATABASE_URL is not set` whatever the release changed; and homelab's gate went red
+    on a run that passed when the same commit was run again (1720b7f4).
+    """
+    env = release.push_env()
+    pushed = git("push", "-u", "origin", branch, env=env)
     for wait in PUSH_WAITS:
-        said = f"{pushed.stderr or ''}\n{pushed.stdout or ''}"
-        if pushed.returncode == 0 or not TRANSPORT_FAILURE.search(said):
+        if pushed.returncode == 0 or not TRANSPORT_FAILURE.search(said_by(pushed)):
             return pushed
         sleep(wait)
-        pushed = git("push", "-u", "origin", branch)
+        pushed = git("push", "-u", "origin", branch, env=env)
     return pushed
 
 
@@ -795,7 +817,7 @@ def plan_lines(name: str, previous: str, tag: str, default_branch: str) -> list[
         f" ({template_refresh.__name__}.refresh)",
         f"  4. git add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths",
         f"  5. git commit -m {commit_message(tag, '<n>')!r}",
-        "  6. git push -u origin, then gh pr create",
+        f"  6. git push -u origin (SKIP={release.SKIP_PUSH_GATE}: CI is its gate), then gh pr create",
         "  7. leave the box; `worktree.py reconcile` reaps it when the PR merges",
     ]
 
@@ -940,12 +962,12 @@ def upgrade_one(
             2,
             f"upgrade: {name} -- FAILED at `git commit` "
             f"({'the hooks rewrote the tree and it still failed' if retried else 'a gate refused it'})",
-            committed.stderr or committed.stdout,
+            said_by(committed),
         )
 
     pushed = push_with_retry(box_git, spawn.box.branch)
     if pushed.returncode != 0:
-        return failed(2, f"upgrade: {name} -- FAILED at `git push`", pushed.stderr or pushed.stdout)
+        return failed(2, f"upgrade: {name} -- FAILED at `git push`", said_by(pushed))
 
     # Labelled `automerge` because an upgrade PR is upstream churn the gate already
     # judges: the diff is a vendored copy of an already-released devkit tag, so a
