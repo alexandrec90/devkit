@@ -1435,8 +1435,19 @@ because a window opened on the project it creates sees no task list at all.
 | `service-redis` | + redis | — |
 | `data` | docker, postgres, archive seam | `ibkr_trader` |
 | `fullstack` | + redis, frontend | `carameli` |
+| `desktop` | desktop, updater — a C#/WPF app, Velopack installer, self-update | `skinamp` |
+| `desktop-static` | desktop — the same app and installer, no updater | — |
 
-Individual `--with-*` flags add to a preset; they never subtract.
+Individual `--with-*` flags add to a preset; they never subtract. The desktop shape
+refuses every stack feature: an executable on someone else's PC has no compose stack.
+
+**The desktop shape** renders a .NET solution (`<Name>.slnx`, the app under
+`src/<Name>/`, xUnit tests under `tests/<Name>.Tests/`), a PR-gate job that builds and
+tests it on Windows, and `.github/workflows/release.yml`, which turns a `v*` tag into a
+GitHub release carrying the installer. The recipe all three run is
+`scripts/desktop.py` (`lint`, `test`, `release`). It is not templated: it reaches each
+project through the gated tier, keyed on `[desktop] enabled` in `.devkit.toml`, so a fix
+to how releases are built lands everywhere on the next `sync-devkit.py --pull`.
 
 Everything local and reversible happens before the two outward-facing steps
 (creating the GitHub repo, pushing). A failure before that leaves a directory you

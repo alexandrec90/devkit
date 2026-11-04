@@ -313,6 +313,11 @@ def vendor_manifest(root: Path) -> None:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
+    # The pull's settings pass too, which is how a tree gets what its shape implies but no
+    # template can spell: a project that installs no package of its own (the desktop
+    # shape) has Claude Code link its `.venv` into every worktree, and the template is
+    # strict JSON before rendering, with no room for a block that only one shape carries.
+    load_script("scripts/project_settings.py").settings_pass(root)
 
 
 def windows_layout(tmp_path, *names: str):
@@ -403,10 +408,8 @@ def generate(tmp_path: Path, features: dict) -> Path:
     """
     new_project = load_script("scripts/new-project.py")
     args = make_args(parent=str(tmp_path), **features)
-    if args.alembic:
-        args.postgres = True
-    if args.app_service or args.postgres or args.redis or args.frontend:
-        args.docker = True
+    # The generator's own resolution, so a test cannot render a shape `main` would refuse.
+    new_project.resolve_features(args)
     the_plan = new_project.plan(args, registry())
     the_plan.root.mkdir(parents=True, exist_ok=True)
     new_project.render_tree(the_plan, dry_run=False)

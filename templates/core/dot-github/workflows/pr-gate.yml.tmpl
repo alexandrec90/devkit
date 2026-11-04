@@ -157,6 +157,40 @@ jobs:
           path: |
             logs/test-failures.log
             logs/junit-hooks.xml
+{{#desktop}}
+
+  desktop:
+    name: Desktop build and tests
+    # Windows, because WPF builds and runs only there. The Linux jobs above skip the
+    # desktop tier with a note for want of `dotnet`; this job is where it is gated.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      # `scripts/desktop.py` is stdlib-only, vendored from devkit, so no project
+      # environment is built for it.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "{{ python_version }}"
+      - name: Format and build
+        id: desktop-lint
+        # `--check`: CI fails on a format change rather than making one.
+        run: python scripts/desktop.py lint --check
+      - name: Tests
+        # After a red build too, so one gate cycle names both.
+        if: success() || steps.desktop-lint.outcome == 'failure'
+        run: python scripts/desktop.py test
+      - name: Upload desktop artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-failures
+          path: |
+            logs/desktop-lint.log
+            logs/desktop-test.log
+{{/desktop}}
 
   devkit-drift:
     name: Vendored harness drift

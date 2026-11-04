@@ -1,0 +1,30 @@
+{{#updater}}
+using Velopack;
+
+{{/updater}}
+namespace {{ desktop_name }};
+
+/// <summary>The entry point, ahead of WPF's own so nothing draws before it decides.</summary>
+public static class Program
+{
+    [STAThread]
+    public static int Main(string[] args)
+    {
+{{#updater}}
+        // First, always: the installer runs the app with hook arguments on install,
+        // update and uninstall, and this answers them and exits before any window opens.
+        VelopackApp.Build().Run();
+
+{{/updater}}
+        // A copy of this app relaunched by `Elevation.RunElevated` does its one
+        // privileged job and exits, with no window.
+        if (args.Length > 0 && args[0] == Elevation.TaskSwitch)
+        {
+            return ElevatedTasks.Run(args[1..]);
+        }
+
+        var app = new App();
+        app.InitializeComponent();
+        return app.Run();
+    }
+}

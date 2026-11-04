@@ -1,0 +1,34 @@
+using System.Windows;
+{{#updater}}
+using {{ desktop_name }}.Updates;
+{{/updater}}
+
+namespace {{ desktop_name }};
+
+public partial class MainWindow : Window
+{
+{{#updater}}
+    private readonly Updater _updater = new(UpdateFeed.Repository);
+
+{{/updater}}
+    public MainWindow()
+    {
+        InitializeComponent();
+        TitleText.Text = AppInfo.Name;
+        StatusText.Text = $"Version {AppInfo.Version}";
+{{#updater}}
+        Loaded += async (_, _) => await CheckForUpdatesAsync();
+{{/updater}}
+    }
+{{#updater}}
+
+    private async Task CheckForUpdatesAsync()
+    {
+        var outcome = await _updater.CheckAndDownloadAsync();
+        StatusText.Text = $"Version {AppInfo.Version} - {outcome.Describe()}";
+        RestartButton.Visibility = outcome.ReadyToApply ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnRestartClicked(object sender, RoutedEventArgs e) => _updater.ApplyAndRestart();
+{{/updater}}
+}

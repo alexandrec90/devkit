@@ -140,11 +140,11 @@ FRONTEND_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs
 FRONTEND_CONFIGS = ("package.json", "tsconfig.json")
 
 
-def frontend_tier() -> Any | None:
-    """`.devkit.toml`'s `[frontend]` tier when it is on, else None.
+def harness_tier(name: str) -> Any | None:
+    """`.devkit.toml`'s `[<name>]` tier when it is on, else None.
 
     Read through the vendored `harness_config.py`, the same reader `stop.py` uses for
-    its typecheck, so the two can never disagree about where the frontend is. Loaded by
+    its typecheck, so the two can never disagree about where a tier is. Loaded by
     path, which mypy does not follow into the vendored tree, and registered before it
     runs: `@dataclass` looks its defining module up by name.
     """
@@ -156,10 +156,56 @@ def frontend_tier() -> Any | None:
     sys.modules[spec.name] = config
     try:
         spec.loader.exec_module(config)
-        tier = config.load(REPO_ROOT).frontend
+        tier = getattr(config.load(REPO_ROOT), name)
     except (ImportError, AttributeError):
         return None
     return tier if tier.enabled else None
+
+
+def frontend_tier() -> Any | None:
+    """`.devkit.toml`'s `[frontend]` tier when it is on, else None."""
+    return harness_tier("frontend")
+
+
+# What the desktop tier answers for. `scripts/desktop.py lint` is a whole-solution
+# command -- `dotnet format` then a build -- so a narrowed run only decides whether to
+# run it, never what it covers.
+DESKTOP_SUFFIXES = (".cs", ".xaml", ".csproj", ".props", ".targets", ".slnx", ".sln")
+DESKTOP_CONFIGS = ("global.json", ".editorconfig")
+DESKTOP_DRIVER = REPO_ROOT / "scripts" / "desktop.py"
+
+
+def desktop_targets(paths: list[str], tier: Any | None) -> list[str]:
+    """The paths among `paths` the desktop lint answers for; none with no tier."""
+    if tier is None:
+        return []
+    return [
+        n for n in paths if n.endswith(DESKTOP_SUFFIXES) or n.rsplit("/", 1)[-1] in DESKTOP_CONFIGS
+    ]
+
+
+def desktop_section(tier: Any | None, changed: list[str], scoped: bool) -> str:
+    """The desktop lint's artifact section, with its own log inlined on a failure.
+
+    No `dotnet` is a missing tool, not a finding -- the PR gate's Windows job is where
+    the tier is gated, and a Linux runner has none. No driver is a tree whose gated
+    files have not been pulled yet.
+    """
+    if tier is None or (scoped and not changed):
+        return ""
+    if not DESKTOP_DRIVER.is_file():
+        print("  desktop: scripts/desktop.py missing — skipped (run sync-devkit.py --pull)")
+        return ""
+    if not shutil.which("dotnet"):
+        print("  desktop: no dotnet on PATH — skipped (install the SDK global.json names)")
+        return ""
+    section = run_tool(
+        "desktop", [sys.executable, str(DESKTOP_DRIVER), "lint"], "python scripts/desktop.py lint"
+    )
+    log = REPO_ROOT / "logs" / "desktop-lint.log"
+    if section and log.is_file():
+        section = section.rstrip("\n") + "\n" + log.read_text(encoding="utf-8") + "\n"
+    return section
 
 
 def frontend_targets(paths: list[str], tier: Any | None) -> list[str]:
@@ -401,7 +447,9 @@ def main(argv: list[str] | None = None) -> int:
     envs = env_files(changed)
     tier = frontend_tier()
     scripts = frontend_targets(selected, tier)
-    if scoped and not (targets or envs or scripts):
+    desktop = harness_tier("desktop")
+    sources = desktop_targets(selected, desktop)
+    if scoped and not (targets or envs or scripts or sources):
         return nothing_to_do(selected)
 
     label = f"{len(selected)} file(s)" if scoped else "whole repo"
@@ -418,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
     sections += frontend_section(tier, scripts, scoped)
+    sections += desktop_section(desktop, sources, scoped)
     return _finish(sections)
 
 
@@ -504,11 +553,24 @@ def _python_passes(targets: list[str], scoped: bool) -> str:
         [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
         "ruff check . --fix --unsafe-fixes",
     )
+    scope_dirs = mypy_scope()
+    if not (targets or scope_dirs):
+        return sections
     return sections + run_tool(
         "mypy",
-        [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
+        [sys.executable, "-m", "mypy", *(targets or scope_dirs), "--show-error-codes"],
         f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
     )
+
+
+def mypy_scope() -> list[str]:
+    """`MYPY_SCOPE` minus the directories holding no Python.
+
+    mypy exits 2 on a directory with no `.py` in it, which would report a usage error no
+    source edit can fix -- and a desktop project's app and tests are C#, so a whole-repo
+    run there has nothing of its own to type-check. A changed script is still a target.
+    """
+    return [d for d in MYPY_SCOPE if next((REPO_ROOT / d).rglob("*.py"), None) is not None]
 
 
 def _write_artifact(sections: str) -> None:

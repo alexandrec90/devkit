@@ -1,0 +1,26 @@
+namespace {{ desktop_name }};
+
+/// <summary>
+/// The operations that run in an elevated copy of the app (see <see cref="Elevation"/>).
+/// </summary>
+public static class ElevatedTasks
+{
+    /// <summary>Exit code for a task name this build does not know.</summary>
+    public const int UnknownTask = 2;
+
+    /// <summary>Runs the task <c>arguments[0]</c> names, with the rest as its input.</summary>
+    public static int Run(string[] arguments)
+    {
+        if (arguments.Length == 0)
+        {
+            return UnknownTask;
+        }
+
+        return arguments[0] switch
+        {
+            // Add each privileged operation here, by name, and keep it small: this
+            // code runs as administrator.
+            _ => UnknownTask,
+        };
+    }
+}

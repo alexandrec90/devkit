@@ -1,0 +1,39 @@
+using Xunit;
+
+namespace {{ desktop_name }}.Tests;
+
+public class AppTests
+{
+    [Fact]
+    public void TheVersionIsTheReleaseNotTheCommit()
+    {
+        Assert.False(string.IsNullOrWhiteSpace(AppInfo.Version));
+        Assert.DoesNotContain("+", AppInfo.Version);
+    }
+
+    [Theory]
+    [InlineData("plain", "plain")]
+    [InlineData("two words", "\"two words\"")]
+    [InlineData("", "\"\"")]
+    [InlineData("say \"hi\"", "\"say \\\"hi\\\"\"")]
+    [InlineData(@"C:\dir with space\", "\"C:\\dir with space\\\\\"")]
+    public void AnElevatedRelaunchGetsBackTheArgumentsItWasGiven(string argument, string expected)
+    {
+        Assert.Equal(expected, Elevation.Quote(argument));
+    }
+
+    [Fact]
+    public void AnElevatedRelaunchNamesItsTask()
+    {
+        Assert.Equal(
+            "--elevated-task apply-theme \"Dark Mode\"",
+            Elevation.CommandLine([Elevation.TaskSwitch, "apply-theme", "Dark Mode"]));
+    }
+
+    [Fact]
+    public void AnUnknownElevatedTaskIsRefusedNotRun()
+    {
+        Assert.Equal(ElevatedTasks.UnknownTask, ElevatedTasks.Run([]));
+        Assert.Equal(ElevatedTasks.UnknownTask, ElevatedTasks.Run(["no-such-task"]));
+    }
+}

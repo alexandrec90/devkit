@@ -2219,6 +2219,14 @@
 						"value": "fullstack"
 					},
 					{
+						"label": "desktop — a C#/WPF Windows app: installer + auto-update from GitHub Releases",
+						"value": "desktop"
+					},
+					{
+						"label": "desktop-static — the same app and installer, without the auto-updater",
+						"value": "desktop-static"
+					},
+					{
 						"label": "bare — no Docker, no database; just the harness and CI",
 						"value": "bare"
 					}

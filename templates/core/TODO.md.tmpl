@@ -24,7 +24,19 @@ because guessing them wrong is worse than leaving them blank.
 ## First real work
 
 - [ ] Replace the placeholder in `{{ app_dir }}` with something that does the job
+{{^desktop}}
 - [ ] Delete `{{ tests_dir }}test_smoke.py` once real tests exist
+{{/desktop}}
+{{#desktop}}
+
+## Shipping
+
+- [ ] Buy a code-signing certificate and add its signtool arguments as the
+      `VPK_SIGN_PARAMS` repository secret — until then SmartScreen warns every download
+- [ ] Decide `[desktop] pack_id` in `.devkit.toml` before the first release: installed
+      copies only accept updates carrying the id they were installed with
+- [ ] Tag `v0.1.0` and push it: `.github/workflows/release.yml` publishes the installer
+{{/desktop}}
 
 ## Archive
 
