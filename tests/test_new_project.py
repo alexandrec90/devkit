@@ -1942,7 +1942,9 @@ def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
         "pull-requests": "write",
     }
     body = path.read_text(encoding="utf-8")
-    for label in ("automerge", "needs-manual-merge"):
+    applied = set(re.findall(r"--add-label\s+\"?([\w-]+)", body))
+    assert applied, "the classify job applies no label"
+    for label in applied:
         assert f"gh label create {label}" in body, f"{label} is applied but never created"
 
 
@@ -2004,28 +2006,28 @@ def test_generated_automerge_retries_on_a_schedule(tmp_path):
     assert parsed["concurrency"]["cancel-in-progress"] is False
 
 
-def test_generated_automerge_holds_runtime_majors_for_review(tmp_path):
-    """The classifier's whole point: only dev-scoped majors may merge unattended.
+def test_generated_automerge_labels_every_dependabot_pr_and_only_those(tmp_path):
+    """Every Dependabot PR is labelled `automerge`, majors and runtime deps included.
 
-    Written as one jq expression, so the risk of an edit widening it silently is
-    real. `length > 0` matters as much as the rest — `all` over an empty list is
-    true, so an empty metadata payload would otherwise classify as auto-mergeable.
+    The projects are agent-written, so no person holds a judgement on a major bump that
+    the gate does not already express; the `needs-manual-merge` hold (retired
+    2026-11-02) only stranded green PRs -- ibkr_trader #150, `actions/setup-node` 6 to
+    7, sat open with every check passing until it was merged by hand.
+
+    Unconditional labelling makes the job's `if:` the whole authorization: the label is
+    what the merge job trusts, so a classify job that ran for any other author would
+    hand its PR a merge nobody approved.
     """
+    yaml = pytest.importorskip("yaml")
     root = generate(tmp_path, {})
-    body = (root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
-    classify = body.split("  classify:", 1)[1].split("  merge:", 1)[0]
-    assert "length > 0 and all(.[];" in classify
-    assert '"needs-manual-merge"' in classify
-    # A dev dependency qualifies whatever its update type -- including none: carameli
-    # #393 held eleven classified updates for two days over one unclassified dev one.
-    # Only patch and minor admit anything else, so a runtime major still waits.
-    rule = classify.split("all(.[];", 1)[1].split(")", 1)[0]
-    clauses = {" ".join(c.split()) for c in re.split(r"\s+or\s+", rule)}
-    assert clauses == {
-        '.dependencyType == "direct:development"',
-        '.updateType == "version-update:semver-patch"',
-        '.updateType == "version-update:semver-minor"',
-    }, rule
+    path = root / ".github" / "workflows" / "dependabot-automerge.yml"
+    job = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]["classify"]
+    condition = " ".join(job["if"].split())
+    assert "github.actor == 'dependabot[bot]'" in condition
+    assert " || " not in condition, "the actor guard can be bypassed by another clause"
+    script = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "needs-manual-merge" not in script, "a hold label is back on Dependabot PRs"
+    assert re.search(r'--add-label "?automerge"?\s*$', script, re.M), script
 
 
 def test_lock_step_is_skipped_gracefully_without_uv(tmp_path, monkeypatch):

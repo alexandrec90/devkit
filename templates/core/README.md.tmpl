@@ -75,9 +75,10 @@ where `DEVKIT_DIR` is usually unset, `pre-commit run devkit-drift --all-files` i
 same check against the devkit rev pinned in `.pre-commit-config.yaml`.
 
 `.github/dependabot.yml` opens weekly dependency PRs, and
-`.github/workflows/dependabot-automerge.yml` merges them once the gate passes —
-patch/minor bumps of anything, plus majors confined to dev tooling. A major that
-touches a runtime dependency is labelled `needs-manual-merge` and waits for you.
+`.github/workflows/dependabot-automerge.yml` merges every one of them once the gate
+passes, majors included: the gate is the review, so keep it covering what you care
+about. To hold one bump back, close it or comment `@dependabot ignore this major
+version`: a removed `automerge` label comes back on Dependabot's next rebase.
 
 That auto-merge workflow is **vendored** from devkit, so `sync-devkit.py --check`
 compares it byte-for-byte and editing it here shows up as drift. Keep the gate's title
