@@ -566,3 +566,148 @@ def test_an_alert_whose_lock_cannot_be_read_is_sent_as_before(tmp_path, monkeypa
     assert failure is not None and len(failure.signature) == 2
     assert fd.base_locks(git_world(), "main", []) == {}
     assert fd.base_locks(git_world(), "main", [{"dependency": {}}]) == {}, "no file named"
+
+
+PHOTOLAB_CONFIG = """\
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+  # No npm entry: this repository has no `frontend/` yet.
+  - package-ecosystem: github-actions
+    directory: /
+  - package-ecosystem: docker
+    directory: /
+"""
+NPM_RAN = "2026-11-02T17:46:49Z"
+
+
+def photolab_runs() -> list[dict]:
+    """Its rounds of 11-04 and 11-02, cut down: #3 deleted the npm entry between them, so
+    the job's newest run is its last one, and that run failed."""
+    return [
+        run("github_actions in /.", "success", 9),
+        run("docker in /.", "success", 8),
+        run("uv in /.", "success", 7),
+        {
+            **run("npm_and_yarn in /frontend", "failure", 6),
+            "createdAt": NPM_RAN,
+            "headSha": "1047013" + "1" * 33,
+        },
+        {**run("npm_and_yarn in /frontend", "failure", 5), "createdAt": "2026-11-02T03:22:24Z"},
+    ]
+
+
+def test_a_job_whose_entry_left_the_config_sends_no_fixer(tmp_path, monkeypatch):
+    """bc515247: photolab's #3 deleted the npm entry, the job never ran again, and its
+    last failed run stood as `1 update job(s) failing` on every pass after."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, asked = gh_world(photolab_runs(), logs={"6": "x ERROR <job_1> No package.json\n"})
+    git = git_world({"origin/main:.github/dependabot.yml": PHOTOLAB_CONFIG})
+    failure, note = fd.read_project("photolab", checkout, tmp_path / "ev", NOW, gh, git)
+    assert failure is None
+    assert note == (
+        "photolab -- Dependabot Updates: npm_and_yarn in /frontend failed (run on 1047013 at "
+        f"{NPM_RAN}), and origin/main's config no longer runs it"
+    )
+    assert not [a for a in asked if a[:2] == ("run", "view")], "no log read for a retired job"
+
+
+def test_a_job_the_config_still_runs_is_sent_as_before(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([run("uv in /.", "failure", 3)])
+    git = git_world({"origin/main:.github/dependabot.yml": PHOTOLAB_CONFIG})
+    failure, note = fd.read_project("photolab", checkout, tmp_path / "ev", NOW, gh, git)
+    assert failure is not None and failure.signature == ("run uv in /.: failed",)
+    assert note == ""
+
+
+def test_a_config_git_cannot_show_retires_nothing(tmp_path, monkeypatch):
+    """An unread config says nothing about a job: one wrongly kept costs a fixer, one
+    wrongly dropped is a red nobody is sent at."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world(photolab_runs())
+    failure, note = fd.read_project("photolab", checkout, tmp_path / "ev", NOW, gh, git_world())
+    assert failure is not None and failure.signature == ("run npm_and_yarn in /frontend: failed",)
+    assert note == ""
+
+
+def test_a_green_project_never_fetches_for_a_config_it_has_no_use_for(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([run("uv in /.", "success", 3)])
+    looked: list = []
+    git = git_world({}, looked)
+    assert fd.read_project("photolab", checkout, tmp_path / "ev", NOW, gh, git) == (None, "")
+    assert looked == []
+
+
+def test_a_retired_job_leaves_a_log_slot_to_the_jobs_that_still_run():
+    """`LOGS_READ` caps what a pass reads, so a retired job must not take a slot."""
+    runs = [run(f"npm_and_yarn in /old{n}", "failure", n) for n in range(fd.LOGS_READ)]
+    gh, asked = gh_world([*runs, run("uv in /.", "failure", 9)])
+    failing, counted, notes = fd.read_runs(gh, lambda: [("uv", "/")], "main")
+    assert [r["databaseId"] for r, _ in failing] == [9]
+    assert [r["databaseId"] for r in counted] == [9] and len(notes) == fd.LOGS_READ
+    assert [a[2] for a in asked if a[:2] == ("run", "view")] == ["9"]
+
+
+def test_drop_retired_splits_the_runs_and_keeps_their_order():
+    runs = [run("docker in /.", "failure", 2), run("uv in /.", "failure", 1)]
+    kept, notes = fd.drop_retired(runs, [("uv", "/")], "trunk")
+    assert kept == [runs[1]]
+    assert notes == [
+        "docker in /. failed (run on an unknown commit at an unknown time), "
+        "and origin/trunk's config no longer runs it"
+    ]
+    assert fd.drop_retired(runs, [], "trunk") == (runs, [])
+
+
+def test_the_config_is_read_off_a_fresh_tip_under_either_of_its_names():
+    looked: list = []
+    git = git_world({"origin/main:.github/dependabot.yaml": PHOTOLAB_CONFIG}, looked)
+    assert ("uv", "/") in fd.base_entries(git, "main")
+    assert looked[0] == ("fetch", "--quiet", "origin", "main")
+    assert fd.base_entries(git_world(), "main") == []
+
+
+ENTRIES = [("uv", "/"), ("npm", "/frontend/"), ("github-actions", "/"), ("gomod", "/./svc")]
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        "uv in /.",
+        "npm_and_yarn in /frontend",
+        "github_actions in /.",
+        "go_modules in /svc",
+    ],
+)
+def test_a_job_an_entry_names_is_not_retired_under_either_spelling(job):
+    assert not fd.retired(job, ENTRIES)
+
+
+@pytest.mark.parametrize(
+    "job",
+    ["npm_and_yarn in /other", "docker in /.", "uv in /frontend", "go_modules in /."],
+)
+def test_a_job_no_entry_names_is_retired(job):
+    assert fd.retired(job, ENTRIES)
+
+
+@pytest.mark.parametrize(
+    ("job", "entries", "why"),
+    [
+        ("docker in /.", [], "no config read"),
+        ("npm_and_yarn in /gone for lodash", ENTRIES, "a security job runs off an alert"),
+        ("brand_new_manager in /.", ENTRIES, "an ecosystem this table cannot spell"),
+        ("Something else entirely", ENTRIES, "not a job title at all"),
+    ],
+)
+def test_what_the_config_cannot_speak_for_is_kept(job, entries, why):
+    assert not fd.retired(job, entries), why
+
+
+def test_an_entry_with_no_single_directory_answers_for_its_whole_ecosystem():
+    """`directories:` takes a list or a glob, whose jobs this cannot spell."""
+    assert not fd.retired("npm_and_yarn in /apps/web", [("npm", "")])
+    assert fd.retired("uv in /apps/web", [("npm", "")])

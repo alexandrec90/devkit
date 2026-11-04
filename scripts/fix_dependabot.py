@@ -13,7 +13,8 @@ Three of Dependabot's outputs are read here, per project:
 - **its update runs**: the newest run of each update job (`uv in /. for urllib3`), how
   many runs in a row that job has failed (`streak`), and the error its failed log names
   (`run_errors`), less a package's error that a PR merged since the run has answered
-  (`answered_since`);
+  (`answered_since`), and less a job the base's `dependabot.yml` no longer runs
+  (`retired`), whose last failed run would otherwise stand until it left the window;
 - **its open alerts that no open PR answers**, once Dependabot has had `ALERT_GRACE` to
   open one -- matched by the package's name in a PR's title, branch or body, so a
   fixer's hand bump answers it as well as Dependabot's own PR would -- less an alert
@@ -45,11 +46,12 @@ import sys
 import tomllib
 from collections.abc import Callable, Iterable
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fix_plan
 import gate_evidence
+import project_dependabot
 import sweep
 import task_branch as tb
 import worktree_env
@@ -72,9 +74,41 @@ MERGED_LIMIT = 30
 EVIDENCE_FILE = fix_plan.DEPENDABOT_EVIDENCE
 # What a held run's note says when the merged PRs could not be read (`_answer`).
 UNREAD = "the merged PRs could not be read, so whether a merge answered it is unknown"
+# GitHub reads either name for the config.
+CONFIG_FILES = (project_dependabot.DEPENDABOT_FILE, ".github/dependabot.yaml")
+# What a run's title calls an ecosystem -> what `dependabot.yml` calls it. A title not
+# listed here is never retired, so a missing row costs a fixer and nothing worse.
+JOB_ECOSYSTEMS = {
+    "bundler": "bundler",
+    "bun": "bun",
+    "cargo": "cargo",
+    "composer": "composer",
+    "devcontainers": "devcontainers",
+    "docker": "docker",
+    "docker_compose": "docker-compose",
+    "dotnet_sdk": "dotnet-sdk",
+    "elm": "elm",
+    "github_actions": "github-actions",
+    "go_modules": "gomod",
+    "gradle": "gradle",
+    "helm": "helm",
+    "hex": "mix",
+    "maven": "maven",
+    "npm_and_yarn": "npm",
+    "nuget": "nuget",
+    "pip": "pip",
+    "pub": "pub",
+    "rust_toolchain": "rust-toolchain",
+    "submodules": "gitsubmodule",
+    "swift": "swift",
+    "terraform": "terraform",
+    "uv": "uv",
+    "vcpkg": "vcpkg",
+}
 
 # `uv in /. for urllib3 - Update #1607644272`: the job is everything before the counter.
 _UPDATE_SUFFIX = re.compile(r"\s+-\s+Update\s+#\d+\s*$")
+_JOB = re.compile(r"(\S+) in (\S.*)")
 _ERROR = re.compile(r"\bERROR <job_\d+> (.+?)\s*$")
 _HANDLED = re.compile(r"Handled error whilst updating ([^:]+): (\w+)")
 # The signature entry `run_errors` makes of a handled error: `run sqlalchemy: <kind>`.
@@ -135,6 +169,36 @@ def failing_updates(runs: Iterable[dict]) -> list[dict]:
             count, since = streak(runs, job)
             failing.append({**run, "failedRuns": count, "failingSince": since})
     return failing
+
+
+def _directory(path: str) -> str:
+    """A directory as a title or an entry may spell it, compared: `/.` and `/` are one."""
+    return PurePosixPath("/" + path.strip().lstrip("/")).as_posix()
+
+
+def retired(job: str, entries: Iterable[tuple[str, str]]) -> bool:
+    """Whether `dependabot.yml`'s `(ecosystem, directory)` entries no longer run `job`.
+
+    A job whose entry was deleted never runs again, so its last failed run is its newest
+    for as long as `RUN_LIMIT` holds it. photolab's #3 dropped its npm entry, the next
+    round ran the three left, all green, and the pass kept reading `npm_and_yarn in
+    /frontend` as failing (bc515247). Removing the entry is often the fix, as it was there.
+
+    Anything the entries cannot speak for is kept: no entries read, a title this cannot
+    parse or an ecosystem `JOB_ECOSYSTEMS` does not list, and a security job (`... for
+    urllib3`), which runs off an alert with or without an entry. A red wrongly kept costs
+    a fixer; one wrongly dropped is a red nobody is sent at.
+    """
+    listed = list(entries)
+    parsed = _JOB.fullmatch(job)
+    ecosystem = JOB_ECOSYSTEMS.get(parsed[1]) if parsed else None
+    if parsed is None or ecosystem is None or not listed or " for " in parsed[2]:
+        return False
+    directory = _directory(parsed[2])
+    return not any(
+        name == ecosystem and (not where or _directory(where) == directory)
+        for name, where in listed
+    )
 
 
 def run_errors(log: str) -> list[str]:
@@ -385,6 +449,17 @@ def base_locks(git: Gh, base: str, alerts: Iterable[dict]) -> dict[str, dict[str
     return locks
 
 
+def base_entries(git: Gh, base: str) -> list[tuple[str, str]]:
+    """What `origin/<base>`'s `dependabot.yml` runs (`update_entries`); empty when no copy
+    of it can be shown, which `retired` reads as knowing nothing."""
+    git("fetch", "--quiet", "origin", base)
+    for name in CONFIG_FILES:
+        shown = git("show", f"origin/{base}:{name}")
+        if getattr(shown, "returncode", 1) == 0:
+            return project_dependabot.update_entries(str(getattr(shown, "stdout", "") or ""))
+    return []
+
+
 def unlanded(
     project: str, base: str, alerts: list[dict], locks: dict[str, dict[str, list[str]]]
 ) -> tuple[list[dict], str]:
@@ -436,9 +511,28 @@ def recurring(run: dict) -> str:
     return f"; its last {count} runs failed, the first at {run.get('failingSince', '')}"
 
 
-def read_runs(gh: Gh) -> tuple[list[tuple[dict, list[str]]], list[dict], list[str]]:
+def drop_retired(
+    runs: list[dict], entries: list[tuple[str, str]], base: str
+) -> tuple[list[dict], list[str]]:
+    """`(the runs of jobs `entries` still runs, a line per run of one it no longer does)`."""
+    gone = [run for run in runs if retired(update_job(run), entries)]
+    return [run for run in runs if run not in gone], [
+        f"{update_job(run)} failed ({ran_on(run)}), and origin/{base}'s config no longer runs it"
+        for run in gone
+    ]
+
+
+def read_runs(
+    gh: Gh,
+    read_entries: Callable[[], list[tuple[str, str]]] = list,
+    base: str = "main",
+) -> tuple[list[tuple[dict, list[str]]], list[dict], list[str]]:
     """`(failing jobs read, with what each still says; every failing run still counted;
-    a line per run a later merge answered)`.
+    a line per run a later merge answered or the config no longer runs)`.
+
+    A job `read_entries` no longer runs is a line for the record, before any log is read,
+    so it takes no slot from a job that still runs (`LOGS_READ`). It is asked only when
+    something is failing, because reading it fetches.
 
     A run's handled errors that a bump merged since answers are dropped
     (`answered_since`), and a run left saying nothing is not failing at all: it is a
@@ -447,10 +541,12 @@ def read_runs(gh: Gh) -> tuple[list[tuple[dict, list[str]]], list[dict], list[st
     next pass asks again.
     """
     failing_runs = failing_updates(update_runs(gh))
+    entries = read_entries() if failing_runs else []
+    failing_runs, notes = drop_retired(failing_runs, entries, base)
     read = [(run, run_errors(failed_log(gh, run))) for run in failing_runs[:LOGS_READ]]
     handled = any(_HANDLED_ENTRY.fullmatch(e) for _, said in read for e in said)
     merged = merged_prs(gh) if handled else []
-    failing, stale, notes = [], [], []
+    failing, stale = [], []
     for run, said in read:
         answered = {e: _answer(e, run, merged) for e in said}
         live = [e for e in said if not answered[e]]
@@ -512,13 +608,13 @@ def read_project(
     record when Dependabot is red on what no session can change or a merge has answered
     since its run or alert, neither when green."""
     git = git or sweep.git_for(project_dir)
-    failing, failing_runs, answered = read_runs(gh)
+    base = tb.detect_default_branch(git, fallback="main")
+    failing, failing_runs, answered = read_runs(gh, lambda: base_entries(git, base), base)
     stale = "; ".join(f"{project} -- {WORKFLOW}: {line}" for line in answered)
     errors = [e for _, run_said in failing for e in run_said] or [
         f"run {update_job(run)}: failed" for run, _ in failing
     ]
     alerts = open_alerts(gh)
-    base = tb.detect_default_branch(git, fallback="main")
     alerts, rescan = unlanded(project, base, alerts, base_locks(git, base, alerts))
     stale = "; ".join(filter(None, [stale, rescan]))
     prs = open_prs(gh) if alerts else []
