@@ -30,10 +30,6 @@ import fix_loop
 import sweep
 
 KIND = "private-repo-runs-ci"
-STEP = (
-    "make it public (check its history holds no secret first; `gh repo edit "
-    "--visibility public --accept-visibility-change-consequences`) or archive it"
-)
 WORKFLOWS = Path(".github") / "workflows"
 # Checkouts asked at once: each is one `gh repo view`, and the pass has a deadline.
 WORKERS = 8
@@ -60,11 +56,21 @@ def is_private(gh: Callable[..., object]) -> bool | None:
     return data["visibility"] != "PUBLIC" and not data.get("isArchived")
 
 
+def step(project: str) -> str:
+    """The person's step, naming the repo: it is all the tray row shows
+    (`harness_triage.person_step` reads only what follows `PERSON_STEP`), and an
+    unnamed "make it public" left homelab's row unanswerable (2026-11-04)."""
+    return (
+        f"make {project} public (check its history holds no secret first; `gh repo edit "
+        "--visibility public --accept-visibility-change-consequences`) or archive it"
+    )
+
+
 def detail(project: str) -> str:
     """The finding's line, stable across passes: no count, no date."""
     return (
         f"{project} is private and runs GitHub Actions, whose minutes are free only for a "
-        f"public repo -- {fix_findings.triage.PERSON_STEP} {STEP}"
+        f"public repo -- {fix_findings.triage.PERSON_STEP} {step(project)}"
     )
 
 
@@ -94,17 +100,31 @@ def ask(
 
 
 def retire(ctx: fix_loop.Context, keep: set[str]) -> list[str]:
-    """Resolve each open `KIND` finding about a project not in `keep`."""
+    """Resolve each open `KIND` finding about a project not in `keep`, and each worded
+    otherwise than `detail` says now: the pass files the current wording beside it, and
+    the old one would be a second row for the same repo."""
     marker = f"{KIND}: "
-    stale = [
+    found = [
         item
         for item in fix_findings.triage.open_items(
             fix_findings.triage.load(ctx.devkit_dir), (fix_findings.FINDING,)
         )
-        if item.fields.get("detail", "").startswith(marker) and item.project not in keep
+        if item.fields.get("detail", "").startswith(marker)
     ]
-    note = "the repo is public or archived, or runs no workflow, as of this pass"
-    if stale and ctx.writes:
-        fix_findings.triage.resolve([item.id for item in stale], note, root=ctx.devkit_dir)
+    cleared = [item for item in found if item.project not in keep]
+    reworded = [
+        item
+        for item in found
+        if item.project in keep and item.fields["detail"] != marker + detail(item.project)
+    ]
+    return _resolve(
+        ctx, cleared, "the repo is public or archived, or runs no workflow, as of this pass"
+    ) + _resolve(ctx, reworded, "superseded by the same finding in its current wording")
+
+
+def _resolve(ctx: fix_loop.Context, items: list, note: str) -> list[str]:
+    """Resolve `items` with `note` when the pass writes; lines for the record either way."""
+    if items and ctx.writes:
+        fix_findings.triage.resolve([item.id for item in items], note, root=ctx.devkit_dir)
     verb = "retired" if ctx.writes else "would retire"
-    return [f"{verb} [{item.id}] -- {note}" for item in stale]
+    return [f"{verb} [{item.id}] -- {note}" for item in items]

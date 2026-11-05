@@ -101,7 +101,35 @@ def test_a_private_repo_running_ci_is_filed_awaiting_its_owner(tmp_path):
     assert found.detail == fix_visibility.detail("social-scraper")
     fix_loop.record(ctx, journal)
     items = fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir))
-    assert list(fix_findings.triage.awaiting_person(items).values()) == [fix_visibility.STEP]
+    [step] = fix_findings.triage.awaiting_person(items).values()
+    assert step == fix_visibility.step("social-scraper")
+    assert step.startswith("make social-scraper public"), "the tray row shows only the step"
+
+
+def test_a_finding_in_an_older_wording_is_retired_beside_the_current_one(tmp_path):
+    """homelab, 2026-11-04: filed as "make it public", which the tray showed without a
+    repo name. Refiled in the new wording, the old row would have stayed beside it."""
+    _checkout(tmp_path, "homelab")
+    ctx = _ctx(tmp_path, ["homelab"])
+    journal = fix_findings.Journal(ctx.devkit_dir)
+    old = "homelab is private -- a person's step: make it public or archive it"
+    journal.add(fix_findings.Finding(fix_visibility.KIND, "homelab", old))
+    fix_loop.record(ctx, journal)
+    [stale] = fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir))
+    fresh = fix_findings.Journal(ctx.devkit_dir)
+    lines = fix_visibility.check(ctx, fresh, _gh({"homelab": PRIVATE}))
+    assert lines[-1] == (
+        f"retired [{stale.id}] -- superseded by the same finding in its current wording"
+    )
+    fix_loop.record(ctx, fresh)
+    [left] = fix_findings.triage.open_items(fix_findings.triage.load(ctx.devkit_dir))
+    assert left.fields["detail"] == f"{fix_visibility.KIND}: {fix_visibility.detail('homelab')}"
+    assert (
+        fix_visibility.check(ctx, fix_findings.Journal(ctx.devkit_dir), _gh({"homelab": PRIVATE}))[
+            1:
+        ]
+        == []
+    )
 
 
 def test_a_repo_made_public_is_retired_and_one_github_could_not_read_is_kept(tmp_path):
