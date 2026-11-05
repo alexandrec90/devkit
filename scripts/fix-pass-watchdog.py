@@ -324,6 +324,10 @@ THREAD_TRACE = re.compile(
     r"^Exception in thread [^\n]*\nTraceback \(most recent call last\):\n(?:[ \t][^\n]*\n)*(\S[^\n]*)",
     re.MULTILINE,
 )
+# Python's own, which starts at column 0. The words alone are not one: a finding the pass
+# files can quote a project's traceback on a line of the record, and the 01:30 fire of
+# 2026-11-05 finished cleanly, filed one, and had a rescue sent at it for doing so.
+TRACEBACK = re.compile(r"^Traceback \(most recent call last\):", re.MULTILINE)
 # What a session is sent at: the pass stopped. A refusal needs something outside the
 # repository and a thread error left the pass running, so both are only filed.
 RESCUED = ("pass-crashed", "pass-hung")
@@ -337,13 +341,13 @@ def judge(code: int | None, output: str) -> tuple[str, str]:
             f"the fix pass ran past {int(TIMEOUT.total_seconds() // 60)} minutes and was stopped",
         )
     threads = THREAD_TRACE.findall(output)
-    if code in REPORTED and "Traceback (most recent call last)" not in THREAD_TRACE.sub("", output):
+    if code in REPORTED and not TRACEBACK.search(THREAD_TRACE.sub("", output)):
         # A background thread's traceback -- a reader thread that could not decode a
         # child's output -- lost output but did not stop the pass: filed, not rescued.
         return ("pass-thread-error", threads[0].strip()[:240]) if threads else ("", "")
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     last = lines[-1] if lines else f"exit {code}"
-    kind = "pass-refused" if code == 2 and "Traceback" not in output else "pass-crashed"
+    kind = "pass-refused" if code == 2 and not TRACEBACK.search(output) else "pass-crashed"
     return kind, re.sub(r"\s+", " ", last)[:240]
 
 
