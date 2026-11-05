@@ -271,8 +271,12 @@ STATEMENTS = re.compile(r"&&?|\|\|?|[;\n]")
 
 # A command reading back text the harness wrote, which quotes the very patterns above:
 # the triage log, the ledger, a transcript, a friction file. Its output is never friction.
+# So for the pass's own record and what the triage script prints, which quote every
+# project's failure they filed: `grep psutil logs/fix-pass.log` beside a `git log` was
+# filed as devkit missing a module it never imports (8860784d).
 READS_HARNESS_TEXT = re.compile(
-    r"harness-triage\.log|harness-events[^\s'\"]*\.log|\.jsonl\b|friction[^\s'\"/\\]*\.md"
+    r"harness-triage\.log|harness-events[^\s'\"]*\.log|\.jsonl\b|friction[^\s'\"/\\]*\.md|"
+    r"fix-pass[\w.-]*\.log|harness_triage\.py|logs[\\/]findings[\\/]"
 )
 # The machine's interpreter by bare name, in command position. In a tree whose own
 # `.venv` is there, its "No module named pytest" is the session picking the wrong
@@ -1074,6 +1078,34 @@ def asks_for_targeted_runs(cwd: str, workspace_root: Path, project: str) -> bool
     return True
 
 
+# How a test file is spelled, and how many a project is generated with: `tests/test_smoke.py`.
+# The vendored tier's are not the project's suite, and no run of its own reads them.
+TEST_FILE = re.compile(r"(?:^|/)(?:test_[^/]*|[^/]*_test)\.py$")
+VENDORED_TESTS = "scripts/hooks/tests/"
+GENERATED_TEST_FILES = 1
+
+
+def suite_is_this_change(cwd: str, runner=sweep.run_windowless) -> bool:
+    """`cwd`'s HEAD holds no more of a suite than a project is generated with, so whatever
+    a whole run reads is the session's own unshipped work, and naming each file would
+    have run the same tests: 435e2137, an agent-terminal session running the 16 test files
+    it had written over a generated commit. Git unable to say: the finding stands."""
+    try:
+        done = runner(
+            ["git", "-C", cwd, "ls-tree", "-r", "--name-only", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if done.returncode != 0:
+        return False
+    tracked = (path for path in (done.stdout or "").splitlines() if TEST_FILE.search(path))
+    return sum(not path.startswith(VENDORED_TESTS) for path in tracked) <= GENERATED_TEST_FILES
+
+
 # The vendored rule's ban on writing a file through Bash, as it has led since #503. A tree
 # whose copy predates it was told only in passing, and the fix is the pull its project is
 # held from: 45bd36c5 was a sports_betting session on v0.11.32 (`devkit.onHold`), filed
@@ -1265,7 +1297,8 @@ def task_branch(cwd: str, runner=sweep.run_windowless) -> str:
 
 def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tuple[str, str, Event]]:
     """`detect`, judged against the tree the session ran in: whether its runner is
-    targeted bare, and whether it was asked for targeted runs at all. The one judgement
+    targeted bare, whether it was asked for targeted runs at all, and whether it had a
+    suite to narrow (`suite_is_this_change`). The one judgement
     both the pass's filing and `fix-pass-supervise.py`'s audit make, so they agree.
     A dispatched session was handed the ban in its system prompt (`agent_tabs.FILE_WRITES`),
     so a stale rule excuses none of its heredoc writes."""
@@ -1278,12 +1311,20 @@ def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tupl
         for row in outside_the_tree(detect(events, targeted), cwd)
         if not _environment_excused(row, cwd, roots, workspace_root)
     ]
-    if not asks_for_targeted_runs(cwd, workspace_root, project):
+    if _whole_run_excused(found, cwd, workspace_root, project):
         found = [row for row in found if row[0] != "full-suite"]
     dispatched = any(event.kind == "user" and DISPATCHED in event.text for event in events)
     if not dispatched and not bans_shell_writes(cwd, workspace_root, project):
         found = [row for row in found if row[0] != "heredoc-write"]
     return found
+
+
+def _whole_run_excused(found: list, cwd: str, workspace_root: Path, project: str) -> bool:
+    """`found` holds a whole run, and its tree never asked for a narrower one or had no
+    suite to narrow. Git is asked only once there is a whole run to judge."""
+    return any(row[0] == "full-suite" for row in found) and (
+        not asks_for_targeted_runs(cwd, workspace_root, project) or suite_is_this_change(cwd)
+    )
 
 
 def _environment_excused(
