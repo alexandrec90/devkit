@@ -71,7 +71,7 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -252,6 +252,8 @@ def running_stacks(tree: Tree, checkout: Path, run: Run) -> list[str]:
 
     Every project but the tree's own: a name of any other standing is not the throwaway
     copy this reap exists to remove, and an engine that cannot answer is running nothing.
+    The engine's path is read as Windows spells it, which also reads a forward slash:
+    the label is the engine's spelling, and `Path` on POSIX keeps a backslash in the name.
     """
     listed = run(RUNNING_STACKS)
     if listed.returncode != 0:
@@ -261,7 +263,7 @@ def running_stacks(tree: Tree, checkout: Path, run: Run) -> list[str]:
     found: set[str] = set()
     for line in (listed.stdout or "").splitlines():
         name, _, where = line.partition("\t")
-        where = Path(where.strip()).as_posix().lower().rstrip("/")
+        where = PureWindowsPath(where.strip()).as_posix().lower().rstrip("/")
         if name and (where == here or where.startswith(f"{here}/")):
             found.add(name)
     return sorted(found - ({own} if own and own != checkout.name else set()))

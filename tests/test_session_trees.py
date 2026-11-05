@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from support import load_script
 
@@ -589,6 +589,16 @@ def test_only_a_stack_working_from_the_tree_holds_it(tmp_path):
     spelled = f"carameli\t{str(one.path).upper()}\\deploy\n"
     run, _ = _serving(checkout, one, spelled)
     assert st.running_stacks(one, checkout, run) == ["carameli"], "any case, or a subdirectory"
+
+
+def test_a_backslash_in_the_engines_path_separates_on_a_posix_host_too(monkeypatch):
+    """The label is the engine's spelling, not this host's, so `Path` cannot read it: on
+    POSIX a backslash is a filename character and the subdirectory never matched."""
+    monkeypatch.setattr(st, "Path", PurePosixPath)
+    monkeypatch.setattr(st, "compose_name", lambda _: "")
+    one = st.Tree(path=PurePosixPath("/w/.claude/worktrees/x"), branch="b", head="h", locked=False)
+    listed = "carameli\t/w/.claude/worktrees/x\\deploy\n"
+    assert st.running_stacks(one, PurePosixPath("/w"), lambda _: done(out=listed)) == ["carameli"]
 
 
 def test_an_engine_that_cannot_list_containers_runs_no_stack(tmp_path):
