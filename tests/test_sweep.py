@@ -1817,6 +1817,14 @@ def test_a_failed_pr_creation_is_reported_not_swallowed():
         (EMPTY_REPLY, True),
         ("error: RPC failed; curl 56 Recv failure: Connection was reset", True),
         ("fatal: unable to access 'https://github.com/o/r.git/': error: 403", False),
+        # 9c48bdc9, 9cde3743: two carameli ships in one pass, each through on the next.
+        (
+            "pull request create failed: GraphQL: Something went wrong while executing your "
+            "query on 2026-11-05T16:03:03Z. Please include `39F5:2DD702` when reporting",
+            True,
+        ),
+        ("remote: fatal error in commit_refs\n ! [remote rejected] x -> x (failure)", True),
+        ("GraphQL: Resource not accessible by integration (createPullRequest)", False),
     ],
 )
 def test_transient_tells_githubs_failure_from_a_refusal(said, transient):
