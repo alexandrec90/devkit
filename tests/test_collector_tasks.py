@@ -519,18 +519,98 @@ def test_a_fire_landing_in_a_docker_desktop_update_skips_its_run(tmp_path, monke
     monkeypatch.setattr(tasks.os, "name", "nt")
     spawn = FakeSpawn(TIMED_OUT, *SILENT_THROUGH_WAIT, listing=(0, UPDATER))
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
-    assert code == 0 and spawn.listed == 1
+    assert code == 0 and spawn.listed == 1, "seen before the wait, so not asked again after it"
     assert len(spawn.calls) == 1 + len(SILENT_THROUGH_WAIT), "no second start, no command"
-    assert "Docker Desktop is installing an update" in lines[-1]
+    assert "Docker Desktop is installing or has just installed an update" in lines[-1]
     assert not any(line.startswith("error:") for line in lines)
+
+
+def test_an_update_that_ends_inside_the_wait_still_skips_the_run(tmp_path, monkeypatch, instant):
+    """7c00ca1a: 2026-11-05 Docker Desktop's installer ran until 17:33:42, the 17:30:01
+    fire waited to 17:36:02, and the updater was only looked for then: gone, so an update
+    the fire had landed in filed "the Docker engine did not answer". The listing is asked
+    before the wait as well, which is where this fire would have seen it."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+
+    class EndsInsideTheWait(FakeSpawn):
+        def __call__(self, argv, cwd, timeout, env=None):
+            answer = super().__call__(argv, cwd, timeout, env)
+            if list(argv) == list(tasks.UPDATE_LISTING):
+                self.listing = (0, NO_UPDATER)
+            return answer
+
+    spawn = EndsInsideTheWait(TIMED_OUT, *SILENT_THROUGH_WAIT, listing=(0, UPDATER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and spawn.listed == 1
+    assert "has just installed an update" in lines[-1]
+    assert not any(line.startswith("error:") for line in lines)
+
+
+def test_an_update_that_begins_inside_the_wait_skips_the_run(tmp_path, monkeypatch, instant):
+    """The ask after the wait stays: a start can fail before the installer has started."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+
+    class BeginsInsideTheWait(FakeSpawn):
+        def __call__(self, argv, cwd, timeout, env=None):
+            answer = super().__call__(argv, cwd, timeout, env)
+            if list(argv) == list(tasks.UPDATE_LISTING):
+                self.listing = (0, UPDATER)
+            return answer
+
+    spawn = BeginsInsideTheWait(TIMED_OUT, *SILENT_THROUGH_WAIT)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and spawn.listed == 2
+    assert "an update" in lines[-1]
+
+
+def test_an_engine_that_comes_back_after_an_update_runs_the_command(tmp_path, monkeypatch, instant):
+    """An update seen before the wait excuses only an engine still silent after it."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(SILENT, SILENT, ENGINE_UP, (0, ""), (0, "reddit: 40"), listing=(0, UPDATER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "reddit: 40" in lines and "started: db" in lines
 
 
 def test_a_silent_engine_with_no_update_running_still_fails(tmp_path, monkeypatch, instant):
     monkeypatch.setattr(tasks.os, "name", "nt")
     spawn = FakeSpawn(TIMED_OUT, *SILENT_THROUGH_WAIT)
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
-    assert code == tasks.TIMED_OUT and spawn.listed == 1
+    assert code == tasks.TIMED_OUT and spawn.listed == 2, "before the wait, and after it"
     assert lines[-1] == "error: the Docker engine did not answer"
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (r"C:\Windows", rf"C:\Windows;{tasks.DOCKER_BIN}"),
+        (r"C:\Windows;;C:\Git\cmd;", rf"C:\Windows;C:\Git\cmd;{tasks.DOCKER_BIN}"),
+        ("", tasks.DOCKER_BIN),
+        (rf"{tasks.DOCKER_BIN};C:\Windows", rf"{tasks.DOCKER_BIN};C:\Windows"),
+        (rf"C:\Windows;{tasks.DOCKER_BIN.upper()}\;", rf"C:\Windows;{tasks.DOCKER_BIN.upper()}\;"),
+    ],
+)
+def test_with_docker_bin_adds_the_directory_once_and_last(before, after):
+    assert tasks.with_docker_bin(before) == after
+
+
+def test_a_process_begun_inside_an_update_can_still_find_docker(monkeypatch):
+    """7c00ca1a: Docker Desktop's installer takes its bin directory off the machine PATH
+    at 17:23:17 and puts it back at 17:33:41. The 17:30:01 fire inherited the PATH without
+    it, and a process's PATH is fixed at its start, so all 24 of its polls said "docker is
+    not on PATH" long after docker.exe, there since 17:23, could have answered."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setenv("PATH", r"C:\Windows")
+    tasks.keep_docker_on_path()
+    assert tasks.os.environ["PATH"] == rf"C:\Windows;{tasks.DOCKER_BIN}"
+    tasks.keep_docker_on_path()
+    assert tasks.os.environ["PATH"] == rf"C:\Windows;{tasks.DOCKER_BIN}", "and only once"
+
+
+def test_docker_is_left_to_the_path_off_windows(monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "posix")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    tasks.keep_docker_on_path()
+    assert tasks.os.environ["PATH"] == "/usr/bin"
 
 
 def test_a_start_that_timed_out_on_an_engine_being_revived_waits_and_then_runs(tmp_path, instant):
@@ -601,13 +681,24 @@ def test_desktop_updating_is_never_asked_off_windows(tmp_path, monkeypatch):
 
 def test_start_needs_says_what_the_engine_answered_and_only_when_it_asked(tmp_path, instant):
     up = ["docker", "compose", "up", "-d", "--wait", "db"]
-    assert tasks.start_needs(("db",), tmp_path, FakeSpawn((0, "ok"))) == (0, "ok", None)
+    went_through = tasks.start_needs(("db",), tmp_path, FakeSpawn((0, "ok")))
+    assert went_through == (0, "ok", None, False)
     timed_out = tasks.start_needs(("db",), tmp_path, FakeSpawn(TIMED_OUT, ENGINE_UP, TIMED_OUT))
-    assert timed_out == (*TIMED_OUT, ENGINE_UP), "an answering engine is not waited for"
+    assert timed_out == (*TIMED_OUT, ENGINE_UP, False), "an answering engine is not waited for"
     spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
-    assert tasks.start_needs(("db",), tmp_path, spawn) == (*NO_IMAGE, ENGINE_UP)
+    assert tasks.start_needs(("db",), tmp_path, spawn) == (*NO_IMAGE, ENGINE_UP, False)
     assert spawn.calls[0] == (up, tmp_path.name, tasks.NEEDS_TIMEOUT)
     assert instant.slept == []
+
+
+def test_start_needs_says_an_update_was_running_when_its_wait_began(tmp_path, monkeypatch, instant):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(SILENT, SILENT, ENGINE_UP, (0, "ok"), listing=(0, UPDATER))
+    answer = tasks.start_needs(("db",), tmp_path, spawn)
+    assert answer == tasks.NeedsStart(0, "ok", None, updating=True)
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP, listing=(0, UPDATER))
+    assert tasks.start_needs(("db",), tmp_path, spawn) == (*NO_IMAGE, ENGINE_UP, False)
+    assert spawn.listed == 0, "only a silent engine is asked about"
 
 
 def test_probe_asks_docker_version_within_its_bound(tmp_path):

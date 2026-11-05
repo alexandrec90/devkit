@@ -43,7 +43,7 @@ import sys
 import time as _time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PureWindowsPath
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collectors_config as config
@@ -126,6 +126,14 @@ ENGINE_POLL = 15
 # prefixes, matched against `UPDATE_LISTING`'s image names.
 UPDATER_IMAGES = ("docker desktop installer", "docker desktop updater")
 UPDATE_LISTING = ("tasklist", "/FI", "IMAGENAME eq Docker Desktop*", "/FO", "CSV", "/NH")
+# Where Docker Desktop keeps its CLI, which its installer takes off the machine PATH early
+# in an update and puts back at the very end, though the new docker.exe is in place all
+# that while. 2026-11-05 4.98.0: off at 17:23:17, back at 17:33:41. A process's PATH is
+# fixed when it starts, so the 17:30:01 fire had none for its whole life: every poll of
+# its `ENGINE_WAIT` said "docker is not on PATH", past 17:36, with the engine up (7c00ca1a,
+# after 27 resolutions of the engine under it). `keep_docker_on_path` is why a run does
+# not depend on the moment it began.
+DOCKER_BIN = r"C:\Program Files\Docker\Docker\resources\bin"
 # How long the output of a child already killed at its timeout is waited for.
 REAP_TIMEOUT = 30
 # `spawn`'s code for a child it ended at its timeout, as `timeout(1)` reports one.
@@ -553,6 +561,22 @@ def desktop_updating(checkout: Path, run: Spawner) -> bool:
     return code == 0 and updater_listed(out)
 
 
+def with_docker_bin(path: str) -> str:
+    """`path`, a Windows PATH value, with `DOCKER_BIN` on it: last, where its installer
+    puts it, so a docker found earlier still wins. As given when it is already there."""
+    entries = [entry for entry in path.split(";") if entry]
+    if DOCKER_BIN.lower() in (entry.rstrip("\\").lower() for entry in entries):
+        return path
+    return ";".join([*entries, DOCKER_BIN])
+
+
+def keep_docker_on_path() -> None:
+    """Put `DOCKER_BIN` on this process's PATH, for every `docker` it runs and every child
+    that does, whatever an installer has done to the machine's; never off Windows."""
+    if os.name == "nt":
+        os.environ["PATH"] = with_docker_bin(os.environ.get("PATH", ""))
+
+
 def await_engine(checkout: Path, run: Spawner) -> tuple[int, str]:
     """`probe`, asked every `ENGINE_POLL` seconds until it answers or `ENGINE_WAIT` has
     passed; its last answer."""
@@ -566,10 +590,19 @@ def await_engine(checkout: Path, run: Spawner) -> tuple[int, str]:
     return answer
 
 
-def start_needs(
-    needs: Sequence[str], checkout: Path, run: Spawner
-) -> tuple[int, str, tuple[int, str] | None]:
-    """`compose up --wait` of `needs`: `(exit code, output, the engine's last answer)`.
+class NeedsStart(NamedTuple):
+    """`start_needs`'s answer. `engine` is the engine's last answer, None where nobody
+    asked -- a start that went through. `updating` is whether Docker Desktop was installing
+    an update when the wait for its silent engine began."""
+
+    code: int
+    out: str
+    engine: tuple[int, str] | None
+    updating: bool = False
+
+
+def start_needs(needs: Sequence[str], checkout: Path, run: Spawner) -> NeedsStart:
+    """`compose up --wait` of `needs`.
 
     A failed start is asked whether the engine answers. A silent one is waited for
     (`await_engine`) and the start tried once more once it answers: a fire landing in a
@@ -579,24 +612,26 @@ def start_needs(
     resetting, which answered two minutes after the fire gave up (37e9acee). A start that
     timed out on an answering engine is tried once more too: compose itself stalled, with
     the db up and healthy for days, and the next fire's start went through (2b286d27).
-    One that failed fast said why, and would say it again. The engine's answer is None
-    where nobody asked -- a start that went through.
+    One that failed fast said why, and would say it again. The installer is looked for
+    before the wait, since it can be gone by the end of it: 7c00ca1a's finished two
+    minutes before the wait did, so asking only afterwards read it as no update at all.
     """
     up = ["docker", "compose", "up", "-d", "--wait", *needs]
     code, out = run(up, checkout, NEEDS_TIMEOUT)
     if code == 0:
-        return code, out, None
+        return NeedsStart(code, out, None)
     engine = probe(checkout, run)
     if engine[0] == 0:
         if code != TIMED_OUT:
-            return code, out, engine
+            return NeedsStart(code, out, engine)
         code, out = run(up, checkout, NEEDS_TIMEOUT)
-        return code, out, None if code == 0 else engine
+        return NeedsStart(code, out, None if code == 0 else engine)
+    updating = desktop_updating(checkout, run)
     engine = await_engine(checkout, run)
     if engine[0] != 0:
-        return code, out, engine
+        return NeedsStart(code, out, engine, updating)
     code, out = run(up, checkout, NEEDS_TIMEOUT)
-    return code, out, None
+    return NeedsStart(code, out, None, updating)
 
 
 def needs_failed(
@@ -698,11 +733,12 @@ def fire(
     engine's log carries Docker Desktop's reason (`stop_reason`) from `desktop_logs`,
     where one is given, and one whose WSL service is stuck (`wsl_said`) is failed on that.
 
-    A `needs` that cannot start because Docker Desktop is installing an update
-    (`desktop_updating`) skips this run, exit 0: the update is Docker's maintenance, the
-    next fire runs on the new engine, and `collectors.revive_engine` fails an update that
-    outlasts its `HOLD_LIMIT`. So does a failed command whose `needs` the engine lost
-    under it (`restarted_under`), for `WENT_AWAY`'s reason.
+    A `needs` that cannot start because Docker Desktop is installing an update, or was when
+    the wait for its engine began (`NeedsStart.updating`), skips this run, exit 0: the
+    update is Docker's maintenance, the next fire runs on the new engine, and
+    `collectors.revive_engine` fails an update that outlasts its `HOLD_LIMIT`. So does a
+    failed command whose `needs` the engine lost under it (`restarted_under`), for
+    `WENT_AWAY`'s reason.
     """
     stamp = fired_env(fired or _dt.datetime.now(_dt.UTC))
     began = _time.monotonic()
@@ -710,15 +746,16 @@ def fire(
     if not (checkout / ".git").exists():
         return 2, [*lines, f"no checkout at {checkout} -- nothing to run"]
     if collector.needs:
-        code, out, engine = start_needs(collector.needs, checkout, run)
+        code, out, engine, updating = start_needs(collector.needs, checkout, run)
         if code != 0:
             engine = engine or probe(checkout, run)
-            if engine[0] != 0 and desktop_updating(checkout, run):
+            if engine[0] != 0 and (updating or desktop_updating(checkout, run)):
                 names = ", ".join(collector.needs)
                 return 0, [
                     *lines,
-                    f"Docker Desktop is installing an update, so {names} cannot start: "
-                    "this run is skipped, and the next fire runs on the updated engine",
+                    "Docker Desktop is installing or has just installed an update, so "
+                    f"{names} cannot start: this run is skipped, and the next fire runs on "
+                    "the updated engine",
                 ]
             *failed, cause = needs_failed(collector.needs, checkout, code, out, run, engine)
             said = desktop_said(engine, checkout, run, desktop_logs)
