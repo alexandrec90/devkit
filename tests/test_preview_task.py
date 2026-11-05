@@ -25,6 +25,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import socket
+import threading
 import tomllib
 import types
 
@@ -1160,6 +1161,30 @@ def test_collect_scans_only_the_checkouts_it_is_given(scan, monkeypatch):
     monkeypatch.setattr(preview_task, "open_prs", lambda d: scanned.append(d.name) or [])
     preview_task.collect(scan.workspace, fetch=False, projects=["ibkr_trader"])
     assert scanned == ["ibkr_trader"]
+
+
+def test_one_checkouts_network_reads_run_at_once(scan, monkeypatch):
+    """Night of 2026-11-05, previewCheckout at 8.1s against an 8s ceiling: the fan-out was
+    across checkouts, and inside each one a `git fetch` and two `gh pr list`s still ran one
+    after another. The two `gh` reads never needed the fetch, so a checkout costs its
+    slowest read, not all three. Each stub waits for the other two: run in turn, none
+    would ever arrive and the barrier breaks."""
+    arrived = threading.Barrier(3, timeout=20)
+
+    def together(answer):
+        def read(*_args, **_kwargs):
+            arrived.wait()
+            return answer
+
+        return read
+
+    monkeypatch.setattr(preview_task, "recent_branches", together([]))
+    monkeypatch.setattr(preview_task, "open_prs", together([]))
+    monkeypatch.setattr(preview_task, "merged_refs", together(set()))
+    assert preview_task.network_reads(scan.tmp, fetch=False) == ([], [], set())
+    assert [row.kind for row in preview_task.collect(scan.workspace, fetch=False)] == [
+        preview_task.KIND_TRUNK
+    ]
 
 
 def test_the_rows_path_scans_only_the_servable_checkouts(scan, monkeypatch, capsys):

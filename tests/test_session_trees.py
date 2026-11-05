@@ -8,6 +8,7 @@ tree could hold the only copy of something, and so must be kept.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -17,6 +18,7 @@ from support import load_script
 st = load_script("scripts/session_trees.py")
 
 QUIET = st.QUIET_HOURS * 3600 + 1
+NOW = _dt.datetime(2026, 11, 5, tzinfo=_dt.UTC)
 
 
 def done(code: int = 0, out: str = "", err: str = "") -> subprocess.CompletedProcess[str]:
@@ -84,6 +86,105 @@ def test_generated_files_and_line_ending_churn_are_noise_not_work(tmp_path):
 def test_a_clean_quiet_tree_whose_pr_merged_at_its_head_is_reaped(tmp_path):
     one = tree(tmp_path)
     assert st.verdict(one, tmp_path / "carameli", False, {one.branch: "abc"}, QUIET) == ""
+
+
+def stamped(tmp_path: Path, dead: str, sent: str = "2026-11-01T00:00:00+00:00", **kw):
+    """A tree carrying the stamp the pass leaves on a session it judged dead."""
+    one = tree(tmp_path, **kw)
+    (one.path / "logs").mkdir(parents=True, exist_ok=True)
+    (one.path / "logs" / "fix-dispatch.json").write_text(
+        json.dumps({"agent": "claude-bg", "dead": dead, "when": sent}), encoding="utf-8"
+    )
+    return one
+
+
+def on_origin(argv):
+    """git answering that every commit of the HEAD asked about is on a remote."""
+    return done(out="0\n" if "rev-list" in argv else "")
+
+
+def test_a_session_that_never_got_a_word_in_left_nothing_to_keep(tmp_path):
+    """94 of photolab's 96 trees: one a half hour for three days, each cut for a session
+    its launcher refused or never started, then kept for good, because no merged PR will
+    ever name them. Over the machine that was 150 of 272 trees, and every delete dropdown
+    and every reap pass read each one; worktreeRow went past its budget on them."""
+    assert len(st.STILLBORN) == 3
+    for dead in st.STILLBORN:
+        assert st.stillborn(stamped(tmp_path, dead), on_origin, NOW)
+
+
+def test_only_a_stale_stamp_on_a_session_that_never_spoke_is_stillborn(tmp_path):
+    no_stamp = tree(tmp_path, name="no-stamp")
+    assert not st.stillborn(no_stamp, on_origin, NOW), "a person's tree carries none"
+    spoke = stamped(tmp_path, st.fix_reports.NO_OUTCOME, name="spoke")
+    assert not st.stillborn(spoke, on_origin, NOW), "a session that worked may have left work"
+    alive = tree(tmp_path, name="alive")
+    (alive.path / "logs").mkdir(parents=True)
+    (alive.path / "logs" / "fix-dispatch.json").write_text("{}", encoding="utf-8")
+    assert not st.stillborn(alive, on_origin, NOW), "not judged dead"
+    untrusted = st.fix_reports.UNTRUSTED
+    recent = stamped(tmp_path, untrusted, sent=NOW.isoformat(), name="recent")
+    assert not st.stillborn(recent, on_origin, NOW), "the pass may send it again"
+    odd = stamped(tmp_path, untrusted, sent="soon", name="odd")
+    assert not st.stillborn(odd, on_origin, NOW), "an unreadable stamp keeps the tree"
+    naive = stamped(tmp_path, untrusted, sent="2026-11-01T00:00:00", name="naive")
+    assert not st.stillborn(naive, on_origin, NOW), "so does one with no offset"
+
+
+def test_a_commit_only_this_tree_holds_keeps_it_whatever_the_stamp_says(tmp_path):
+    """A resent session reuses a PR's tree, so the stamp alone does not prove it empty."""
+    one = stamped(tmp_path, st.fix_reports.NEVER_STARTED)
+    assert not st.stillborn(one, lambda argv: done(out="2\n"), NOW)
+    assert not st.stillborn(one, lambda argv: done(128), NOW), "git could not say"
+
+
+def test_a_stillborn_tree_needs_no_merged_pr_and_no_transcript(tmp_path):
+    one = tree(tmp_path)
+    checkout = tmp_path / "carameli"
+    assert st.verdict(one, checkout, False, {}, None, stillborn=True) == ""
+    assert st.verdict(one, checkout, False, {}, QUIET, stillborn=True) == ""
+    assert "within" in st.verdict(one, checkout, False, {}, 60, stillborn=True), "someone is in it"
+    assert "uncommitted" in st.verdict(one, checkout, True, {}, None, stillborn=True)
+    assert st.verdict(one, checkout, None, {}, None, stillborn=True), "status unreadable"
+    locked = tree(tmp_path, locked=True)
+    assert "locked" in st.verdict(locked, checkout, False, {}, None, stillborn=True)
+
+
+def _stillborn_checkout(tmp_path, count: int):
+    """A checkout with `count` stillborn trees, and the `run` that stands for its git."""
+    checkout = tmp_path / "carameli"
+    trees = [stamped(tmp_path, st.fix_reports.UNTRUSTED, name=f"t{n}") for n in range(count)]
+    listing = porcelain(
+        (str(checkout), "master", "000", False),
+        *((str(one.path), one.branch, one.head, False) for one in trees),
+    )
+    calls: list[list[str]] = []
+
+    def run(argv):
+        calls.append(argv)
+        if argv[-2:] == ["list", "--porcelain"]:
+            return done(out=listing)
+        return on_origin(argv)
+
+    return checkout, run, (lambda path: lambda *args: done(out="[]")), calls
+
+
+def test_a_pass_reaps_a_stillborn_tree_and_says_why(tmp_path):
+    checkout, run, gh, calls = _stillborn_checkout(tmp_path, 1)
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: None) == 0
+    assert said == ["session tree carameli:t0: its session never started at this HEAD -- reaped"]
+    assert any(argv[-3:-1] == ["worktree", "remove"] for argv in calls)
+
+
+def test_a_backlog_of_stillborn_trees_drains_over_passes(tmp_path):
+    """Each removal deletes a whole tree, and the first pass after this shipped found 150.
+    The scheduled job must still finish before its next fire."""
+    extra = st.STILLBORN_PER_PASS + 3
+    checkout, run, gh, _calls = _stillborn_checkout(tmp_path, extra)
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, False, said.append, run, gh, lambda p: None) == 0
+    assert len(said) == st.STILLBORN_PER_PASS
 
 
 def test_every_reason_to_keep_a_tree_keeps_it(tmp_path):

@@ -1763,6 +1763,48 @@ def test_held_on_branches_names_the_branch_holding_each_live_edit():
     assert devkit_project.held_on_branches(problems, payload, []) == {}
 
 
+def test_awaited_merge_answers_only_for_the_whole_of_the_live_edits():
+    """A branch holding one edit of two leaves the other a decision someone owes, and
+    drift with no live edit at all is a publish owed: neither is a merge awaited."""
+    payload = {"folders": [{"path": "devkit"}, {"path": "photolab"}], "settings": {"x": 1}}
+    folder = "folder in the workspace but not in devkit: photolab"
+    setting = "setting in the workspace but not in devkit: x"
+    ahead = f"{devkit_project.CANONICAL_AHEAD[0]}Some Task"
+    registers = ("origin/agent/register-photolab", {"folders": payload["folders"]})
+    keeps_both = ("origin/both", {"folders": payload["folders"], "settings": {"x": 1}})
+
+    assert devkit_project.awaited_merge([folder, setting], payload, [keeps_both]) == {
+        folder: "origin/both",
+        setting: "origin/both",
+    }
+    assert devkit_project.awaited_merge([folder, ahead], payload, [registers]) == {
+        folder: "origin/agent/register-photolab"
+    }, "what the canonical copy has ahead waits for that publish, not against it"
+    assert devkit_project.awaited_merge([folder, setting], payload, [registers]) == {}
+    assert devkit_project.awaited_merge([ahead], payload, [keeps_both]) == {}
+    assert devkit_project.awaited_merge([], payload, [keeps_both]) == {}
+
+
+def test_live_drift_reads_a_registration_on_its_branch_as_no_drift(workspace_pair, monkeypatch):
+    """agent-terminal's #729, green and waiting on a person: its live registration turned
+    Local E2E red and sent a fixer at a state nothing is wrong with, while the daily status
+    line read the same drift as a merge awaited. And #733 had moved a task meanwhile, which
+    only `judged_drift` can tell from a live edit."""
+    _canonical, live = workspace_pair
+    registered = devkit_project.register(live.read_text(encoding="utf-8"), ["agent-terminal"])
+    live.write_text(registered, encoding="utf-8", newline="\n")
+    (live.parent / "agent-terminal").mkdir()
+    assert devkit_project.canonical_view(live)[1] == [], "this machine holds the whole registry"
+    assert devkit_project.live_only(devkit_project.live_drift(live)), "no branch holds it yet"
+
+    branch = devkit_jsonc_loads(registered)
+    monkeypatch.setattr(devkit_project, "pending_copies", lambda _: iter([("origin/reg", branch)]))
+    assert devkit_project.live_drift(live) == []
+
+    _set_switches(live, **{"terminal.integrated.fontSize": 9})
+    assert devkit_project.live_drift(live), "an edit no branch holds is drift still"
+
+
 def test_pending_copies_are_the_pushed_commits_head_lacks(workspace_pair):
     canonical, live = workspace_pair
     assert list(devkit_project.pending_copies(live)) == [], "no repository, nothing pending"
@@ -3385,14 +3427,14 @@ def test_the_live_workspace_matches_the_canonical_copy():
     branch merges, so there the comparison asks whether an un-merged edit has already
     landed. See `support.needs_the_static_checkout` for why rendering early is not the
     way out of that.
+
+    Green while a pushed branch holds every live edit (`devkit_project.live_drift`): that
+    is `new-project.py`'s registration waiting on its PR, a merge and not a defect, and
+    the daily status line names the branch. Past `HELD_DAYS` it goes red here again.
     """
-    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     # This machine's view, as every real comparison is: a project registered from
     # another workstation and not cloned here is left out of the render, not drift.
-    problems = devkit_project.workspace_drift(
-        devkit_jsonc_loads(text),
-        devkit_jsonc_loads(devkit_project.canonical_view(LIVE_WORKSPACE)[0]),
-    )
+    problems = devkit_project.live_drift(LIVE_WORKSPACE)
     keep = (
         "or --adopt-workspace to keep the live edits"
         if not devkit_project.canonical_only(problems)
