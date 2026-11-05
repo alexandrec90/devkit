@@ -38,6 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fix_findings
+import project_settings
 import session_transcripts as st
 import sweep
 
@@ -253,6 +254,14 @@ SCRATCH_DIR = re.compile(
     r"(?:^|[\\/])(?:tmp\w*|temp)(?:[\\/]|$)|\$(?:env:)?\{?(?:TMP|TEMP|TMPDIR)\b", re.I
 )
 GIT_C = re.compile(r"\bgit\s(?:[^\n]*?\s)?-C\s+(\S+)")
+# What `taken_back` reads. A WIP commit is how a session carries a dirty tree over a rebase,
+# since the stash stack is shared: undone in the call that made it, it reached nothing a
+# hook guards (ded3ca52). `GIT_UNDO` is a `reset` to some steps behind `HEAD`.
+GIT_COMMIT = re.compile(r"\bgit\s(?:[^\n]*?\s)?commit\b")
+GIT_PUSH = re.compile(r"\bgit\s(?:[^\n]*?\s)?push\b")
+GIT_UNDO = re.compile(
+    r"\bgit\s+reset\b(?:\s+-\S+)*\s+(?:HEAD|@)(?:~(?P<steps>\d*)|(?P<carets>\^+))"
+)
 # A heredoc and the rest of its `<<TAG` line, which can name the file it writes
 # (`cat <<EOF > a.txt`); `printed_back` drops the body.
 HEREDOC_SPAN = re.compile(
@@ -288,6 +297,9 @@ READS_HARNESS_TEXT = re.compile(
 BARE_INTERPRETER = re.compile(
     r"(?:^|[;&|]\s*)(?:python3?|py)(?:\.exe)?" + INTERPRETER_FLAGS + r"\s+-[A-Za-z]*[mc]\s", re.M
 )
+# The same interpreter running anything at all: `_environment_excused` asks it of a
+# throwaway program, which may be a script by its path rather than a `-c`.
+MACHINE_INTERPRETER = re.compile(r"(?:^|[;&|]\s*)(?:python3?|py)(?:\.exe)?\s", re.M)
 # A command whose output is read for an environment failure even when it exited 0.
 SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pytest|git)\b", re.M)
 # A quoted argument, whose `|`, `;` and newlines separate no statements: the `\|pytest` of
@@ -613,6 +625,23 @@ def scratch_only(command: str) -> bool:
     return bool(verdicts) and all(verdicts)
 
 
+def taken_back(command: str) -> bool:
+    """Every `--no-verify` in `command` is on a commit a `git reset` later in the same call
+    undoes, with nothing pushed: work carried over a rebase, not a commit let past a hook."""
+    commits, undone, skipped = 0, 0, False
+    for part in STATEMENT.split(command):
+        if GIT_PUSH.search(part):
+            return False
+        if GIT_COMMIT.search(part):
+            commits += 1
+            skipped = skipped or bool(NO_VERIFY.search(part))
+        elif NO_VERIFY.search(part):
+            return False
+        elif commits and (undo := GIT_UNDO.search(part)):
+            undone += int(undo["steps"] or len(undo["carets"] or "^"))
+    return skipped and undone >= commits
+
+
 def changes_the_suite(event: Event) -> bool:
     """`event` changes what every test reads: it edits a `SUITE_WIDE_FILE`, or relocks.
     `Read` names a `file_path` too, and reading the lock changes nothing."""
@@ -653,7 +682,7 @@ def _command_classes(
     for cls, pattern in COMMAND_PATTERNS:
         if cls == "heredoc-write" and not damageable_heredoc(command):
             continue
-        if cls == "no-verify" and scratch_only(command):
+        if cls == "no-verify" and (scratch_only(command) or taken_back(command)):
             continue
         if pattern.search(command):
             yield cls, COMMAND_DETAIL[cls]
@@ -1257,6 +1286,18 @@ def reached_past_the_tree(row: tuple[str, str, Event], roots: list[Path]) -> boo
     )
 
 
+def builds_its_own_venv(cwd: str) -> bool:
+    """The tree is a project that installs a package of its own, so `claude --worktree` links
+    it no `.venv` (`project_settings.borrows_venv`) and it builds one on its first test or
+    lint run. Until then nothing is owed to a program that is neither of those."""
+    tree = Path(cwd) if cwd else None
+    return (
+        tree is not None
+        and (tree / "pyproject.toml").is_file()
+        and not project_settings.borrows_venv(tree)
+    )
+
+
 def runner_defaults_targeted(cwd: str, workspace_root: Path, project: str) -> bool:
     """The session's `RUNNER` takes `--all`, so a bare run of it is targeted: the tree's
     copy decides, its project's checkout once the tree is gone. Neither there to read,
@@ -1335,10 +1376,20 @@ def _environment_excused(
     has its own, or a package only the session's own program wanted. Or one with no tree
     to explain it: a module missing from a session at the workspace root, which no
     provisioner serves (308378fa, a scratch scan wanting `boto3`, which `imported_by_tree`
-    then found in a project under that root)."""
+    then found in a project under that root). Or a throwaway program on the machine's
+    interpreter in a tree that has not built its `.venv` yet (27c0d85a): a test run is not
+    throwaway, so one failing that way there is still filed."""
     if row[0] != "environment":
         return False
     if has_own_venv(cwd) and BARE_INTERPRETER.search(row[2].command):
+        return True
+    command = row[2].command
+    if (
+        MISSING_MODULE.search(row[1])
+        and ad_hoc_program(command)
+        and MACHINE_INTERPRETER.search(command)
+        and builds_its_own_venv(cwd)
+    ):
         return True
     if MISSING_MODULE.search(row[1]) and cwd and Path(cwd).resolve() == workspace_root.resolve():
         return True
