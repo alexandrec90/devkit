@@ -3151,7 +3151,9 @@
 				"service": "app",
 				"health": ["ibkr-trader", "health"],
 				"buildsFrom": ["data-lake"],
-				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"]
+				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"],
+				// Its `app` and `db` caps. Not `rebalance`: the move carries the whole database.
+				"memoryGb": 3
 			},
 			// `handoff`: as ibkr_trader's. The data-lake store it imports lazily is declared
 			// in no form (its pyproject says why), so the argv brings the sibling itself:
@@ -3162,7 +3164,10 @@
 				"health": ["sports-betting", "health", "--quiet"],
 				"handoff": [
 					"uv", "run", "--with-editable", "../data-lake[archive]", "python", "scripts/handoff.py"
-				]
+				],
+				// Its one container's cap. `rebalance`: the only collector whose move is cheap.
+				"memoryGb": 0.5,
+				"rebalance": true
 			},
 			// On the host, not in a container: it drives the installed Chrome with the
 			// browser profiles in its checkout. `handoff`: dumps its `db` through the
@@ -3171,7 +3176,10 @@
 				"command": ["uv", "run", "social-scraper", "scrape"],
 				"minutes": 30,
 				"needs": ["db"],
-				"handoff": ["uv", "run", "python", "scripts/handoff.py"]
+				"handoff": ["uv", "run", "python", "scripts/handoff.py"],
+				// An estimate of its `db` and Chrome, which `docker stats` sees only half of.
+				// Not `rebalance`: its browser logins belong to one machine.
+				"memoryGb": 2
 			}
 		},
 		// Options an installer should keep, keyed by installer file name. The daily

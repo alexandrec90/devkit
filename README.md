@@ -1095,6 +1095,29 @@ of the job. A scheduled one is judged from its task like any devkit job: red on 
 or missing run, amber when overdue. Clicking it opens that fire's log. Neither kind is in
 `schedule_health.report`, so a collector's failure is never filed as a devkit defect.
 
+#### Every PC at once: `fleet.py`
+
+`collectors.py` sees one machine and `move` has to be typed on the one that runs the
+collector. `scripts/fleet.py` asks every workstation on the tailnet instead:
+
+```bash
+python scripts/fleet.py                         # every PC's free memory and collectors
+python scripts/fleet.py move sports_betting --to desktop-ml5f3pj   # from any PC
+python scripts/fleet.py rebalance               # what would relieve the shortest PC
+python scripts/fleet.py rebalance --apply       # make that one move
+```
+
+There is no list of machines. A PC joins by being on the tailnet with this checkout at the
+same place under its home and accepting the SSH key of the PC you run this from. One that
+does not answer costs a row saying why, and changes nothing else: `fleet.py` holds no state
+and a move is still `collectors.py move`, run over SSH on the machine that owns the
+collector and picked up by the destination's next pass.
+
+`rebalance` picks only a collector declaring `"rebalance": true`, and only when the
+destination keeps at least four gigabytes afterwards. `memoryGb` declares what a collector
+costs where `docker stats` cannot see it. A named `move` needs only a `handoff`, and is
+refused unless the destination has the project's checkout and `.env`.
+
 #### Remote Control servers, and why keeping them up is a job
 
 `claude remote-control` puts a session running on this machine in front of the phone at

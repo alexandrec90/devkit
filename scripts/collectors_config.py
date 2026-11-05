@@ -98,6 +98,10 @@ class Collector:
     takes one: for the export a container collector has its service stopped, a scheduled
     one its task removed and any run in flight waited out, its `needs` left up for the
     dump (`collectors.stop_service`).
+
+    `memory_gb` (`memoryGb`) and `rebalance` are for `fleet.py`: what the collector costs a
+    machine where `docker stats` cannot see it, and whether a rebalance may pick it. Only
+    one whose move is cheap should say `rebalance`, and it takes a `handoff` to move.
     """
 
     project: str
@@ -109,6 +113,8 @@ class Collector:
     settle: int = DEFAULT_SETTLE
     builds_from: tuple[str, ...] = ()
     handoff: tuple[str, ...] = ()
+    memory_gb: float = 0.0
+    rebalance: bool = False
 
     @property
     def scheduled(self) -> bool:
@@ -135,6 +141,20 @@ def _argv(raw: object) -> tuple[str, ...] | None:
     return tuple(raw)
 
 
+def _placement(project: str, raw: dict) -> tuple[float, bool, str]:
+    """`memoryGb` and `rebalance`, and the reason either was refused."""
+    memory = raw.get("memoryGb", 0)
+    # `bool` is an `int`, as for `minutes`.
+    if isinstance(memory, bool) or not isinstance(memory, int | float) or memory < 0:
+        return 0.0, False, f"{project}: `memoryGb` must be a number of gigabytes, 0 or more"
+    rebalance = raw.get("rebalance", False)
+    if not isinstance(rebalance, bool):
+        return 0.0, False, f"{project}: `rebalance` must be true or false"
+    if rebalance and not raw.get("handoff"):
+        return 0.0, False, f"{project}: `rebalance` needs a `handoff` to carry its data"
+    return float(memory), rebalance, ""
+
+
 def _scheduled_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     """A `command` entry, or `None` and the reason it was refused."""
     if "service" in raw:
@@ -156,7 +176,18 @@ def _scheduled_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
         # The task is named after the collector, and `devkit-` is devkit's own jobs'
         # namespace: `schedule_health` and the fix pass would report it as a devkit job.
         return None, f"{project}: a collector's name may not start with `{DEVKIT_PREFIX}`"
-    return Collector(project, command=command, minutes=minutes, needs=needs, handoff=handoff), ""
+    memory_gb, rebalance, why = _placement(project, raw)
+    if why:
+        return None, why
+    return Collector(
+        project,
+        command=command,
+        minutes=minutes,
+        needs=needs,
+        handoff=handoff,
+        memory_gb=memory_gb,
+        rebalance=rebalance,
+    ), ""
 
 
 def _entry(project: str, raw: object) -> tuple[Collector | None, str]:
@@ -189,8 +220,18 @@ def _container_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     handoff = _argv(raw.get("handoff", []))
     if handoff is None:
         return None, f"{project}: `handoff` must be a list of strings (argv, not a shell line)"
+    memory_gb, rebalance, why = _placement(project, raw)
+    if why:
+        return None, why
     return Collector(
-        project, service, tuple(health), settle=settle, builds_from=builds_from, handoff=handoff
+        project,
+        service,
+        tuple(health),
+        settle=settle,
+        builds_from=builds_from,
+        handoff=handoff,
+        memory_gb=memory_gb,
+        rebalance=rebalance,
     ), ""
 
 
