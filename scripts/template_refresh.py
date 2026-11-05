@@ -16,8 +16,11 @@ its own artifact runner) is left alone and named, because what it chose instead 
 own. `upgrade-project.py` runs `refresh` in every adoption box, after the pull and
 before the commit, so the refresh reaches the project through its own gate.
 
-Only templates with no `{{ }}` substitution are listed: a rendered copy of one that has
-them differs per project, and nothing records the values it was rendered with.
+A rendered copy differs per project and nothing records the values it was rendered with,
+so a template with a `{{ }}` is listed only when every substitution sits on a line
+`RENDERED_LINES` names: that line is left out of the comparison, and the refreshed copy
+keeps the project's own. `lint-all.py.tmpl` gained that when its secrets pass reached five
+projects no other way (05000136); those whose copy differs anywhere else keep their own.
 `tests/test_template_refresh.py` holds `REFRESHED` to that.
 
 **A refresh that rewrote a file re-reconciles the untested-symbol ratchet.** The pull's
@@ -35,6 +38,7 @@ files devkit wrote, so they are not held back as the project's own uncommitted e
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -47,6 +51,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Project path -> the template it was rendered from, relative to the devkit checkout.
 REFRESHED: dict[str, str] = {
     "scripts/run-tests.py": "templates/core/scripts/run-tests.py.tmpl",
+    "scripts/lint-all.py": "templates/core/scripts/lint-all.py.tmpl",
+    ".vscode/tasks.json": "templates/core/dot-vscode/tasks.json.tmpl",
+}
+# The line of a project's copy that holds what it was rendered with, by target.
+RENDERED_LINES: dict[str, re.Pattern[str]] = {
+    "scripts/lint-all.py": re.compile(r"^MYPY_SCOPE = .*$", re.M),
 }
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -58,6 +68,19 @@ REFRESHED_LINE = "an untouched earlier template, refreshed to devkit's current o
 
 def _lf(text: str) -> str:
     return text.replace("\r\n", "\n")
+
+
+def without_rendered(target: str, text: str) -> str:
+    """`text` less the line `target` was rendered on: what two copies are compared by."""
+    line = RENDERED_LINES.get(target)
+    return line.sub("", text) if line else text
+
+
+def rendered_as(target: str, template: str, held: str) -> str:
+    """`template` carrying the line `held` was rendered with, where `target` has one."""
+    line = RENDERED_LINES.get(target)
+    found = line.search(held) if line else None
+    return line.sub(lambda _: found.group(), template) if line and found else template
 
 
 def past_versions(devkit: Path, template: str, runner: Runner = sweep.run_windowless) -> set[str]:
@@ -98,11 +121,17 @@ def refresh_one(
     except OSError:
         return f"{target}: not there, or no {template} to compare it with"
     text = _lf(held.decode("utf-8", errors="replace"))
-    if text == current:
+    compared = without_rendered(target, text)
+    if compared == without_rendered(target, current):
         return f"{target}: already devkit's current template"
-    if text not in past_versions(devkit, template, runner):
+    past = {
+        without_rendered(target, version) for version in past_versions(devkit, template, runner)
+    }
+    body = rendered_as(target, current, text)
+    # A copy with no rendered line to carry over would be written with its `{{ }}` bare.
+    if compared not in past or "{{" in body:
         return f"{target}: the project's own, left as it is"
-    body = current.replace("\n", "\r\n") if b"\r\n" in held else current
+    body = body.replace("\n", "\r\n") if b"\r\n" in held else body
     path.write_bytes(body.encode("utf-8"))
     return f"{target}: {REFRESHED_LINE}"
 

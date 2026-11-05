@@ -128,6 +128,12 @@ authority; this file does not repeat it.
 
 ### VS Code tasks
 
+- A task lives in the workspace file and dispatches through devkit's
+  `devkit_project.py`, never in `.vscode/tasks.json`; that file's comment says why.
+- A script a task runs starts as `python <script>` under the machine's `python`, not
+  this project's `.venv`, with no console. It imports only the standard library until
+  it has handed itself to the `.venv`, as `scripts/run-tests.py` does, and it cannot
+  rely on Ctrl+C: a task that serves until stopped has to watch for its parent going.
 - Use `"type": "process"` so VS Code monitors the process directly — that is what
   makes the spinner stop and the exit-code icon appear reliably.
 - Set `"close": false` in `presentation` so the terminal stays open for review.

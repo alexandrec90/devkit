@@ -528,6 +528,28 @@ def test_reading_the_harness_own_logs_back_is_not_the_friction_they_quote():
         assert classes(rows) == [], command
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git log --oneline -5 -- x.py; grep -n "psutil" /c/ws/devkit/logs/fix-pass.log | cut -c1-200',
+        "git status; tail -n 30 logs/fix-pass.watchdog.log",
+        "git log -1; python scripts/harness_triage.py 2>&1 | head -40",
+        "git status; cat ../../logs/findings/friction-b20a1de608.txt",
+        "git status; type logs\\findings\\friction-b20a1de608.txt",
+    ],
+)
+def test_the_passs_own_record_read_back_is_not_the_environment(command):
+    """8860784d: a rescue session's `git log` sat beside a grep of `logs/fix-pass.log`, whose
+    "filed" line quotes another project's traceback. It exited 0, the `git` put its output
+    in front of the environment check, and that line was filed as devkit missing psutil --
+    a module devkit does not import. The same goes for what the triage script prints."""
+    quoted = (
+        "359:filed    productivity-tracker environment: ModuleNotFoundError: "
+        "No module named 'psutil' Traceback (most recent call last): File"
+    )
+    assert classes([call(command, "1"), result(quoted, "1", error=False)]) == []
+
+
 def test_an_environment_failure_is_seen_through_a_pipe_that_hid_its_exit_code():
     """`python -m pytest ... | tail -3` exits 0 whatever pytest did, so "No module named
     pytest" went unfiled -- twice in one sweep. A test run or a git call is read for an
@@ -1294,6 +1316,61 @@ def test_a_whole_suite_under_a_scope_rule_older_than_its_spelling_is_the_pull_ow
     assert sf.asks_for_targeted_runs(str(REPO_ROOT), tmp_path, "devkit"), (
         "devkit's own rule carries the spelling the detector reads"
     )
+
+
+def fresh_project(root: Path, *committed: str) -> Path:
+    """A generated project's tree: the scope rule, and `committed` as its only history."""
+    (root / ".claude" / "rules").mkdir(parents=True)
+    (root / sf.SCOPE_RULE).write_text(SCOPE_RULE_TEXT, encoding="utf-8")
+    (root / "tests").mkdir()
+    for name in committed:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("def test_x():\n    pass\n", encoding="utf-8")
+    for command in (
+        ["init", "-q"],
+        ["config", "core.hooksPath", str(root / ".nohooks")],
+        ["add", "-A"],
+        ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "x"],
+    ):
+        subprocess.run(["git", *command], cwd=root, check=True, capture_output=True)
+    return root
+
+
+def test_a_whole_run_of_a_suite_the_session_is_writing_is_the_targeted_run(tmp_path):
+    """435e2137: an agent-terminal session building a project from its generated commit
+    ran `pytest tests` over the 16 test files it had written, the one `test_smoke.py` it
+    was generated with beside them. With no suite older than the work, naming every file
+    would have run the same tests: nothing was wasted, and nothing could have narrowed it."""
+    run = ".venv\\Scripts\\python.exe -m pytest tests -q --no-header 2>&1 | Select-Object -Last 2"
+    chunk = st.Chunk(((1, user("build me a terminal")), (2, call(run, "1"))), 0)
+
+    def kinds(cwd: Path) -> list[str]:
+        return [
+            f.kind for f in sf.session_findings(tmp_path / "s.jsonl", chunk, str(cwd), tmp_path)
+        ]
+
+    fresh = fresh_project(
+        tmp_path / "fresh", "tests/test_smoke.py", f"{sf.VENDORED_TESTS}test_vendored.py"
+    )
+    (fresh / "tests" / "test_app.py").write_text("def test_y():\n    pass\n", encoding="utf-8")
+    assert kinds(fresh) == []
+    grown = fresh_project(tmp_path / "grown", "tests/test_smoke.py", "tests/e2e/test_app.py")
+    assert kinds(grown) == ["full-suite"], "two committed test files are a suite to narrow"
+
+
+def test_a_suite_only_git_can_vouch_for_is_never_called_new(tmp_path):
+    """No repository, a tree gone or git failing says nothing about the suite's age, so
+    the finding stands -- and a hard failure must not cost the harvest."""
+    assert not sf.suite_is_this_change(str(tmp_path / "gone"))
+    (tmp_path / "plain").mkdir()
+    assert not sf.suite_is_this_change(str(tmp_path / "plain"))
+
+    def broken(*_args, **_kwargs):
+        raise OSError("no git")
+
+    assert not sf.suite_is_this_change(str(tmp_path), runner=broken)
+    empty = subprocess.CompletedProcess([], 0, "\n", "")
+    assert sf.suite_is_this_change(str(tmp_path), runner=lambda *a, **k: empty)
 
 
 def test_a_heredoc_write_is_friction_only_where_the_rule_bans_it(tmp_path):
