@@ -48,6 +48,30 @@ def test_a_crash_is_named_by_its_last_line():
     assert watchdog.judge(1, TRACE)[1] == "TypeError: run() got an unexpected keyword 'x'"
 
 
+# What the 01:30 fire of 2026-11-05 printed: a filed finding's detail, quoting a project's
+# traceback on the one line of the record that names it.
+QUOTED_TRACE = (
+    "filed    productivity-tracker environment: ModuleNotFoundError: No module named 'psutil' "
+    "Traceback (most recent call last): File\n"
+    "ledger   7 open on the harness-defect ledger\n"
+    "fix-pass: record at logs/fix-pass.log\n"
+)
+
+
+@pytest.mark.parametrize(("code", "kind"), [(0, ""), (1, ""), (2, "pass-refused")])
+def test_a_traceback_quoted_in_the_record_is_not_the_pass_crashing(code, kind):
+    """The pass finished, and a finding it filed quoted a traceback from a project. The
+    watchdog read those words as the pass's own, called "record at ..." the crash, and
+    cut a rescue at a pass that had nothing wrong with it. Python starts a traceback at
+    column 0; a line of the record never does."""
+    assert watchdog.judge(code, QUOTED_TRACE)[0] == kind
+
+
+def test_a_crash_after_a_quoted_traceback_is_still_a_crash():
+    assert watchdog.judge(1, QUOTED_TRACE + TRACE)[0] == "pass-crashed"
+    assert watchdog.judge(2, QUOTED_TRACE + TRACE)[0] == "pass-crashed"
+
+
 THREAD_TRACE = (
     "fix-pass: record at logs/fix-pass.log\n"
     "Exception in thread Thread-555 (_readerthread):\n"
