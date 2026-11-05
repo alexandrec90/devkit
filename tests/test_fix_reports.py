@@ -636,6 +636,35 @@ def test_the_rule_names_the_spelling_that_passes_both_tools():
     assert '"protected" host path' in rule
 
 
+def test_a_line_about_claude_codes_rm_check_is_not_filed(tmp_path):
+    """b945aedf: Claude Code's built-in check refused an `rm` whose target was built from
+    variables. Nothing in devkit changes what it accepts, its refusal names the rewrite,
+    and the rule below now carries it, so one more line could only be retired again."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        '- a `for` loop was refused: "Dangerous rm operation detected in `rm -f $B/$p/x`. '
+        "The target '$B/$p/x' is a shell variable expansion\"\n"
+        "- `run-tests.py --changed` skipped its only target\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "`run-tests.py --changed` skipped its only target",
+    )
+
+
+def test_the_rule_names_the_rewrite_the_rm_check_accepts():
+    """The filter above is only honest while the rule carries the way past the refusal,
+    and that way is the refusal's own: it forbids re-issuing through another tool, which
+    the table's "PowerShell for a compound statement" would otherwise read as allowing."""
+    root = Path(__file__).resolve().parents[1]
+    rule = (root / ".claude/rules/engineering.md").read_text(encoding="utf-8")
+    row = next(line for line in rule.splitlines() if "Dangerous rm operation" in line)
+    assert '`"${A:?}/${f:?}/x"`' in row and "literal path" in row
+    assert "never another tool" in row
+    evidence = (root / ".claude/engineering-evidence.md").read_text(encoding="utf-8")
+    assert "Dangerous rm operation" in evidence, "the reproduction the rule points at"
+
+
 @pytest.mark.parametrize(
     ("line", "fixed"),
     [

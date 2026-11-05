@@ -63,6 +63,20 @@ def test_claude_codes_isolation_guard_is_not_filed_on_devkits_ledger():
         assert classes([call("git -C .. status", "1"), result(refusal, "1")]) == []
 
 
+def test_claude_codes_rm_check_is_not_filed_on_devkits_ledger():
+    """b945aedf: the same reason as the guard above. Its wording says "requires explicit
+    approval", a near miss for `blocked-call`'s "requires approval"; if it ever reads as
+    that, every refusal reopens a group devkit cannot fix."""
+    refusal = (
+        "Permission for this command was denied by a built-in Claude Code safety check, not "
+        "by the user. What was flagged: Dangerous rm operation detected in `rm -f $A/$f/x`. "
+        "The target '$A/$f/x' is a shell variable expansion: when $A or $f is unset or empty "
+        "it becomes `/`, `/*` or a top-level path. This requires explicit approval and "
+        "cannot be auto-allowed by permission rules."
+    )
+    assert classes([call("rm -f $A/$f/x", "1"), result(refusal, "1")]) == []
+
+
 REJECTED = (
     "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if "
     "it was a file edit, the new_string was NOT written to the file)."
