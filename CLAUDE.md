@@ -14,20 +14,21 @@ it does today. This tier carries only what neither of those can.
 | [`.claude/rules/engineering.md`](.claude/rules/engineering.md) | baseline policy: testing, scripts, lint, the vendored harness |
 | [`.claude/rules/authoring.md`](.claude/rules/authoring.md) | writing rules, skills and instruction files |
 | [`.claude/rules/session-scope.md`](.claude/rules/session-scope.md) | what a session leaves to the fix pass: commit, push, PR, the full suite |
-| [`.claude/rules/local-e2e.md`](.claude/rules/local-e2e.md) | tests only this workstation can run || [`.claude/fixer.md`](.claude/fixer.md) | a fix-pass session, where it differs from the rules above |
+| [`.claude/rules/local-e2e.md`](.claude/rules/local-e2e.md) | tests only this workstation can run |
+| [`.claude/rules/task-scripts.md`](.claude/rules/task-scripts.md) | what a script a task runs starts as |
+| [`.claude/fixer.md`](.claude/fixer.md) | a fix-pass session, where it differs from the rules above |
 | [`.claude/rules/vscode-tasks.md`](.claude/rules/vscode-tasks.md) | the workspace task block and its dispatcher |
 | [`scripts/CLAUDE.md`](scripts/CLAUDE.md) | vendoring, the two channels, boxes, scheduled jobs, loading a module by path |
 
-The first five are vendored *out* of here, so **point at them, never restate them**:
+The first six are vendored *out* of here, so **point at them, never restate them**:
 `scripts/hooks/tests/test_repo_contract.py` fails a `CLAUDE.md` that paraphrases their
 clauses, because a second copy is not drift-checked.
 
 ## The docs are vibe-coded too
 
-Every file here was written by an agent, this one included. Prose is the only artifact in
-the repo with no compiler and no test, so a wrong sentence survives in a way wrong code
-cannot — and an instruction file is read as *authority*, which is what turns a stale
-paragraph into one agent talking the next one out of a correct change.
+Every file here was written by an agent, this one included. Prose has no compiler and no
+test, and an instruction file is read as *authority*, so a stale paragraph talks the next
+agent out of a correct change.
 
 **The code decides.** Where a document and the repo disagree, the document is the defect:
 fix it in the same change as the work that found it, and never let it veto a change you
