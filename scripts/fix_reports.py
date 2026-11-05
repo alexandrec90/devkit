@@ -67,11 +67,13 @@ REASON_LIMIT = 400
 # A launch's diagnosis is a status page, not a line: `claude daemon status` is ~800 chars.
 DIAGNOSIS_LIMIT = 2000
 
-# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words, and
-# of its PowerShell tool's protected-path check (9a2a5478: an `rm` inside `docker exec`).
+# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words, of
+# its PowerShell tool's protected-path check (9a2a5478: an `rm` inside `docker exec`), and
+# of its built-in `rm` check (b945aedf: a target built from variables).
 CLAUDE_CODE_GUARD = re.compile(
     r"too complex to verify|stays? inside the worktree|cannot be shown not to be git|"
-    r"isolated in the worktree|worktree isolation guard|protected from removal",
+    r"isolated in the worktree|worktree isolation guard|protected from removal|"
+    r"Dangerous rm operation",
     re.I,
 )
 

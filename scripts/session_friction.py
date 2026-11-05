@@ -54,7 +54,8 @@ SNIPPET = 90
 # missing. Each pattern names the class it files under; the first match wins.
 #
 # Claude Code's own worktree isolation guard ("session is isolated in the worktree",
-# "too complex to verify") is deliberately absent. `.claude/rules/engineering.md` says
+# "too complex to verify") and its `rm` check ("Dangerous rm operation", which says
+# "requires explicit approval") are deliberately absent. `.claude/rules/engineering.md` says
 # no setting and nothing in devkit changes what it accepts, and already carries the
 # spellings that get past it; filed here, every refusal reopened one group that each
 # sweep could only retire again with that same note.
