@@ -17,6 +17,7 @@ import pytest
 from support import load_script
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import e2e_results as fix_plan_e2e
 import fix_ledger
 import fix_plan
 
@@ -693,6 +694,18 @@ def test_a_local_e2e_red_whose_tip_git_cannot_read_is_still_dispatched():
     assert not fix_plan.is_stale_local(_local(tip=""))
     [decision] = fix_plan.plan([_local(tip="")], "v0-11-23", PREFIXES)
     assert decision.action == fix_plan.DISPATCH
+
+
+def test_a_missing_tier_in_many_projects_is_one_fixer_each_not_one_upstream_session():
+    """Each project writes its own tier: the shared signature names no vendored test, so
+    the fold that sends one shared vendored red to devkit must not take it."""
+    missing = (fix_plan_e2e.MISSING,)
+    reds = [_local(project=name, signature=missing) for name in ("carameli", "roguelike")]
+    decisions = fix_plan.plan(reds, "v0-11-23", PREFIXES)
+    assert [(d.action, d.failures[0].project) for d in decisions] == [
+        (fix_plan.DISPATCH, "carameli"),
+        (fix_plan.DISPATCH, "roguelike"),
+    ]
 
 
 def test_a_local_e2e_red_against_a_red_gate_waits_for_the_gates_fixer():

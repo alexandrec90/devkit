@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import e2e_results
 import fix_plan
 import fix_prompts
 import fix_reports
@@ -101,6 +102,7 @@ def every_prompt() -> list[str]:
         fix_prompts.branch_prompt(red_main(), "agent/fix"),
         fix_prompts.nightly_prompt(failure(kind=fix_plan.NIGHTLY, number=3), "agent/fix"),
         fix_prompts.local_prompt(local_red(), "agent/fix"),
+        fix_prompts.local_prompt(local_red(signature=(e2e_results.MISSING,)), "agent/fix"),
     ]
 
 
@@ -138,6 +140,25 @@ def test_the_local_prompt_says_it_ran_here_and_how_to_run_it_again(tmp_path):
         assert expected in text, expected
     assert fix_prompts.LINUX not in text
     assert "Its output did not come down" in fix_prompts.local_prompt(local_red(), "b")
+
+
+def test_a_missing_tier_sends_its_fixer_to_write_one_not_to_fix_a_run():
+    """Every project owes the tier; one without it is red with the one `MISSING`
+    signature, and its fixer has nothing to reproduce -- it has a tier to write."""
+    text = fix_prompts.local_prompt(local_red(signature=(e2e_results.MISSING,)), "agent/e2e")
+    for expected in (
+        "carameli has no local end-to-end tier",
+        "origin/main at 59a4ef5aaaaa carries no scripts/e2e.py",
+        fix_prompts.LOCAL_E2E_RULE,
+        "sync-devkit.py --pull",
+        "agent/e2e",
+    ):
+        assert expected in text, expected
+    assert "Fix what the run is failing on" not in text
+    body = fix_prompts.missing_tier(local_red(signature=(e2e_results.MISSING,)), "agent/e2e")
+    own = body.removesuffix(fix_prompts.FINISH)
+    assert own != body
+    assert not set("`'\"") & set(own), "the prompt crosses a wt command line"
 
 
 def test_a_devkit_local_red_folded_upstream_is_told_how_to_reproduce_it():

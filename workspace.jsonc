@@ -3108,6 +3108,15 @@
 			"permissionMode": "bypassPermissions",
 			"hosts": "desktop-b9fc8vp"
 		},
+		// Which machine runs each project's nightly local end-to-end tests
+		// (`devkit-local-e2e`, `scripts/e2e-pass.py`). Every PC registers the job; at fire
+		// time each tests only what `hosts` assigns it, so two PCs never test, record and
+		// send fixers at the same red. Same shape as `devkit.remoteControl`'s: one name for
+		// every project, or {"*": "pc-a", "carameli": "pc-b"} to spread them. Moving the
+		// job to another PC is editing this value -- nothing is re-registered.
+		"devkit.localE2e": {
+			"hosts": "desktop-b9fc8vp"
+		},
 		// Ingestion that runs with nobody connected, kept going by `devkit-collectors` --
 		// see README, "Ingestion collectors". Declared here for every machine; RUN on none
 		// until `collectors.py run-here` on that machine, which is recorded in devkit's

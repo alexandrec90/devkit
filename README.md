@@ -1587,10 +1587,11 @@ ten minutes, and a red one reaches the fix pass as that project's red default br
 
 | Piece | What it does |
 | --- | --- |
-| `scripts/e2e.py` in a project | **The contract.** Exit 0 green, anything else red; print each failure as pytest's `FAILED <id>` line. A project without it has no tier. |
+| `scripts/e2e.py` in a project | **The contract.** Exit 0 green, anything else red; print each failure as pytest's `FAILED <id>` line. Every project owes one: a project whose `origin/<default>` has none is recorded red (`e2e_results.MISSING`), and its fixer is sent to write the tier. |
 | `scripts/e2e-pass.py run` | Waits for idle, fast-forwards each static checkout to `origin/<default>` (skipping, with the reason, one a person is working in), runs its `scripts/e2e.py`, writes `logs/e2e/<project>/result.json` and `output.log` in devkit. Exits 0 on a red result. |
 | `scripts/e2e_results.py` | Turns a red result into a `fix_plan.LOCAL` failure, read by `fix_red.collect_red`. A result older than the tip is held until the next night. |
 | `scripts/e2e-pass.py status` | Each project's last result. |
+| `devkit.localE2e` in `workspace.jsonc` | **Which PC tests which project.** `hosts` takes `devkit.remoteControl`'s shape: one machine name, or `{"*": "pc-a", "carameli": "pc-b"}`. Every PC registers the job and tests only what this assigns it, so moving the job is editing this value. |
 
 devkit's own `scripts/e2e.py` runs every test marked `local`, and `needs_live_workspace` and
 `needs_the_static_checkout` in `tests/support.py` apply that mark themselves. Under the
@@ -1600,7 +1601,8 @@ every path and extension present) and `tests/test_vscode_tasks_e2e.py`, which cl
 every workspace task in an isolated VS Code. Set `DEVKIT_VSCODE_E2E_ONLY` to a
 comma-separated list of labels to drive just those.
 
-To give a project the tier, write its `scripts/e2e.py`. A pytest marker of its own,
+A project without the tier gets one from its fixer, sent the night the pass records it
+missing; to write it yourself, add its `scripts/e2e.py`. A pytest marker of its own,
 run the way devkit's is, is the usual shape. Then `python scripts/e2e-pass.py run --no-wait
 <project>` from devkit shows what the night will see.
 
