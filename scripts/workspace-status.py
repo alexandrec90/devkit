@@ -953,10 +953,8 @@ def held_line(workspace: Path, payload: dict, problems: list[str]) -> str:
     Still a line, naming the branch: a branch that never merges keeps it in the toast,
     and past `devkit_project.HELD_DAYS` the branch stops counting and the failure returns.
     """
-    held = devkit_project.held_on_branches(
-        problems, payload, devkit_project.pending_copies(workspace)
-    )
-    if not held or set(devkit_project.live_only(problems)) - held.keys():
+    held = devkit_project.awaited_merge(problems, payload, devkit_project.pending_copies(workspace))
+    if not held:
         return ""
     return (
         f"{workspace.name}: {len(problems)} difference(s), not published -- its own edits "

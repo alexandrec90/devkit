@@ -1437,6 +1437,23 @@ def ui_projects(workspace: Path) -> list[str]:
     ]
 
 
+def network_reads(
+    project_dir: Path, fetch: bool
+) -> tuple[list[tuple[str, str, str]], list[dict], set[str]]:
+    """One checkout's `recent_branches`, `open_prs` and `merged_refs`, all at once.
+
+    `collect` fans out across checkouts, and these three were what each thread then paid
+    in turn: a `git fetch` and two `gh pr list`s, which put previewCheckout past its
+    budget at 8.1s. Neither `gh` read looks at a ref the fetch moves, so a checkout costs
+    the slowest of the three. What reads a ref the fetch moved runs after this returns.
+    """
+    with futures.ThreadPoolExecutor(max_workers=3) as pool:
+        recent = pool.submit(recent_branches, project_dir, fetch=fetch)
+        prs = pool.submit(open_prs, project_dir)
+        merged = pool.submit(merged_refs, project_dir)
+    return recent.result(), prs.result(), merged.result()
+
+
 def collect(
     workspace: Path,
     fetch: bool = True,
@@ -1471,16 +1488,14 @@ def collect(
 
     def scan(project: str) -> list[Candidate]:
         project_dir = root / project
-        branches = [
-            entry for entry in recent_branches(project_dir, fetch=fetch) if fresh(entry[1], now=now)
-        ]
+        recent, prs, merged = network_reads(project_dir, fetch)
         found = merge_candidates(
             project,
             [box for box in boxes.values() if box.project == project],
-            open_prs(project_dir),
-            branches,
+            prs,
+            [entry for entry in recent if fresh(entry[1], now=now)],
             local_branch_dates(project_dir),
-            merged_refs(project_dir),
+            merged,
         )
         trunk = trunk_row(project, project_dir)
         if not any(candidate.ref == trunk.ref for candidate in found):

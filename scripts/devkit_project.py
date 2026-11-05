@@ -1451,6 +1451,35 @@ def held_on_branches(
     return held
 
 
+def awaited_merge(
+    problems: list[str], payload: dict, pending: Iterable[tuple[str, dict]]
+) -> dict[str, str]:
+    """`held_on_branches`, when it accounts for every `live_only` line; else nothing.
+
+    The one reading of "this drift is a merge awaited, not a defect". The daily line had
+    it and the nightly test did not, so agent-terminal's #729, green and waiting on a
+    person, turned Local E2E red and sent a fixer at a state nothing is wrong with: the
+    live file cannot publish until that branch merges, and everything it carries is in
+    git. Drift with no live edit is no such thing: that is a publish owed, not a merge.
+    """
+    edits = set(live_only(problems))
+    held = held_on_branches(problems, payload, pending) if edits else {}
+    return held if edits and not edits - held.keys() else {}
+
+
+def live_drift(live: Path) -> list[str]:
+    """What the live file owes the canonical copy, as the check every copy agrees on reads
+    it: `judged_drift`, and nothing at all while `awaited_merge` explains it.
+
+    `workspace_drift` alone is the wrong question for a verdict. A task devkit changed
+    last week reads as "definition differs" until git is asked who moved it, and past
+    `HELD_DAYS` the branch stops counting, so a PR nobody merges goes red by itself.
+    """
+    payload = devkit_jsonc.loads(live.read_text(encoding="utf-8"))
+    problems = judged_drift(live, payload, devkit_jsonc.loads(canonical_view(live)[0]))
+    return [] if awaited_merge(problems, payload, pending_copies(live)) else problems
+
+
 def stamp_path(workspace: Path) -> Path:
     """Where the render stamp for `workspace` lives.
 

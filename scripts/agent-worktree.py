@@ -64,6 +64,7 @@ import json
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -85,6 +86,17 @@ import worktree
 # checkout and a `git status` per worktree found, which is seconds in a row; the picker
 # runs it while somebody watches.
 SCAN_WORKERS = 8
+
+# How many `git status` calls run at once, across every checkout. Wider than `SCAN_WORKERS`
+# because the wait is on the disk and not on a core: 96 cold trees took 25s at a width of
+# 8 and 8s at 32, and warm ones 2.1s at any width. Shared, because eight checkouts with a
+# pool each would be a hundred git processes on eight cores for one dropdown.
+STATUS_WORKERS = 24
+STATUS_SLOTS = threading.BoundedSemaphore(STATUS_WORKERS)
+# `--no-optional-locks`: a bare `git status` refreshes the index and takes `index.lock`
+# to do it, in trees a live session may be committing from. A dropdown opening must not
+# be able to fail somebody's `git add`.
+STATUS = ("--no-optional-locks", "status", "--porcelain")
 
 # What the `new` picker offers. `none` is CLI-only and deliberately not a row: the task's
 # whole purpose is opening an agent, and a worktree with nothing in it is `git worktree
@@ -150,7 +162,8 @@ def trees_for(project_dir: Path) -> list[aw.Tree]:
     def read(entry: tuple[str, str, str]) -> aw.Tree:
         name, path, branch = entry
         inner = sweep.git_for(Path(path))
-        status = inner("status", "--porcelain")
+        with STATUS_SLOTS:
+            status = inner(*STATUS)
         dirty = len((status.stdout or "").strip().splitlines()) if status.returncode == 0 else 0
         if ahead is not None and (not branch or branch in ahead):
             unpushed = ahead.get(branch, 0)
@@ -160,7 +173,7 @@ def trees_for(project_dir: Path) -> list[aw.Tree]:
 
     # Fanned out for `scan`'s reason, one level in: a checkout with eight worktrees is
     # eight `git status` calls, and this runs while somebody watches a quick-pick open.
-    with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(nested))) as pool:
+    with futures.ThreadPoolExecutor(max_workers=min(STATUS_WORKERS, len(nested))) as pool:
         return list(pool.map(read, nested))
 
 

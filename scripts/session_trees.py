@@ -22,6 +22,16 @@ The verdict is deliberately narrow, because a tree can hold the only copy of wor
 - its branch has a **merged** PR whose head is the tree's `HEAD`, so every commit in the
   tree is on the remote and in the default branch.
 
+**A tree whose session never got a word in is the one other tree that may go.** The pass
+cuts a tree, then sends a session at it; when the launcher refuses or the login has
+lapsed it judges the session dead and sends again, in a new tree. Those trees hold
+nothing, and no PR will ever name them, so the verdict above kept them for good: 150 of
+the machine's 272 on 2026-11-05, 94 of them photolab's, one a half hour for three days.
+Each was a `git status` in every delete dropdown and every pass here, until worktreeRow
+went past its budget. `stillborn` asks for the pass's own stamp saying so, `QUIET_HOURS`
+old, and for every commit of its `HEAD` to be on origin. The rest of the verdict still
+holds, and `STILLBORN_PER_PASS` bounds what one pass spends on a backlog.
+
 Anything else keeps the tree, with the reason. The compose project goes first, scoped
 with `-p` to the tree's own name; a name equal to the checkout's would be the static
 checkout's stack and is refused. The worktree is removed without `--force`, so git's
@@ -65,6 +75,7 @@ Tested in `tests/test_session_trees.py`.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import subprocess
 import sys
@@ -76,6 +87,7 @@ from pathlib import Path, PureWindowsPath
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import box_teardown
+import fix_reports
 import rc_machine
 import sweep
 import worktree_tiers as wt
@@ -95,6 +107,15 @@ GENERATED = frozenset({"AGENTS.md", ".codex/config.toml"})
 # How long a tree's sessions must have been silent. A session resumed in a finished tree
 # to start the next piece of work is clean and merged until its first edit.
 QUIET_HOURS = 12
+
+# The states `fix_reports` judges a session dead in without its having done anything.
+# `NO_OUTCOME` and `INTERRUPTED` are not here: those sessions worked, and may have left work.
+STILLBORN = (fix_reports.NEVER_STARTED, fix_reports.LOGGED_OUT, fix_reports.UNTRUSTED)
+# How many stillborn trees one pass of one checkout removes. Each deletes a whole tree,
+# and the job has to finish before its next fire whatever backlog it finds.
+STILLBORN_PER_PASS = 10
+MERGED_SAID = "its PR merged"
+STILLBORN_SAID = "its session never started"
 
 # `reap`'s answer when `compose down` could not reach Docker's engine. The tree is kept
 # whole rather than removed: its stack's containers and volumes would outlive it with
@@ -223,16 +244,46 @@ def idle_seconds(tree: Path, store: Path | None = None, now: float | None = None
     return None if last is None else (time.time() if now is None else now) - last
 
 
+def stillborn(tree: Tree, run: Run, now: _dt.datetime | None = None) -> bool:
+    """Whether the pass cut `tree` for a session that never spoke, and no commit is only here.
+
+    Read from the stamp the pass wrote, so a tree a person made never qualifies. The commit
+    check is not redundant: a re-send reuses a PR's tree, whose commits a stamp knows
+    nothing about. Anything unreadable answers False, and that keeps the tree.
+    """
+    stamp = fix_reports.read_stamp(tree.path)
+    if stamp.get("dead") not in STILLBORN:
+        return False
+    try:
+        sent = _dt.datetime.fromisoformat(str(stamp.get("when", "")))
+        age = (now or _dt.datetime.now(_dt.UTC)) - sent
+    except (ValueError, TypeError):  # TypeError: a stamp with no offset, against an aware now
+        return False
+    if age < _dt.timedelta(hours=QUIET_HOURS):
+        return False
+    only_here = run(
+        ["git", "-C", str(tree.path), "rev-list", "--count", tree.head, "--not", "--remotes=origin"]
+    )
+    return only_here.returncode == 0 and only_here.stdout.strip() == "0"
+
+
 def verdict(
-    tree: Tree, checkout: Path, dirty: bool | None, merged: dict[str, str], idle: float | None
+    tree: Tree,
+    checkout: Path,
+    dirty: bool | None,
+    merged: dict[str, str],
+    idle: float | None,
+    stillborn: bool = False,
 ) -> str:
     """`""` when the tree may be reaped, else why it is kept. None for `dirty` or `idle`
-    means the question could not be answered, and an unanswered question keeps the tree."""
+    means the question could not be answered, and an unanswered question keeps the tree --
+    except `idle` on a `stillborn` tree, where no transcript is what never starting looks
+    like, and which needs no merged PR because no commit of it is anywhere but on origin."""
     if wt.same_dir(tree.path, checkout) or wt.tier_of(tree.path) is None:
         return "not a session worktree"
     if tree.locked:
         return "locked -- a session is using it"
-    if idle is None or idle < QUIET_HOURS * 3600:
+    if not (stillborn and idle is None) and (idle is None or idle < QUIET_HOURS * 3600):
         return f"a session wrote in it within {QUIET_HOURS}h, or the store could not be read"
     if dirty is None:
         return "its status could not be read"
@@ -240,6 +291,8 @@ def verdict(
         return "holds uncommitted or untracked files"
     if not tree.branch:
         return "detached HEAD"
+    if stillborn:
+        return ""
     if tree.branch not in merged:
         return f"no merged PR for {tree.branch}"
     if merged[tree.branch] != tree.head:
@@ -448,27 +501,31 @@ def sweep_checkout(
         say(f"session trees in {checkout.name}: merged PRs could not be read -- all kept")
         return failures
     merged = merged_heads(prs.stdout)
+    allowance = STILLBORN_PER_PASS
     for tree in trees:
         found = changes(tree.path, run)
         work, noise = found if found is not None else ([], [])
         dirty = None if found is None else bool(work)
-        why = verdict(tree, checkout, dirty, merged, idle(tree.path))
+        unborn = allowance > 0 and stillborn(tree, run)
+        why = verdict(tree, checkout, dirty, merged, idle(tree.path), stillborn=unborn)
         label = f"session tree {checkout.name}:{wt.label(tree.path)}"
         if why:
             continue  # kept trees are the ordinary case; the artifact names only reaps
+        reason = STILLBORN_SAID if unborn else MERGED_SAID
         if stacks := running_stacks(tree, checkout, run):
-            say(f"{label}: its PR merged, but {', '.join(stacks)} runs from it -- kept")
+            say(f"{label}: {reason}, but {', '.join(stacks)} runs from it -- kept")
             continue
+        allowance -= unborn
         if not apply:
-            say(f"{label}: its PR merged at this HEAD -- would reap")
+            say(f"{label}: {reason} at this HEAD -- would reap")
             continue
-        line, failed = reap_outcome(tree.path, reap(tree, checkout, run, noise))
+        line, failed = reap_outcome(tree.path, reap(tree, checkout, run, noise), reason)
         failures += failed
         say(f"{label}: {line}")
     return failures
 
 
-def reap_outcome(path: Path, error: str) -> tuple[str, bool]:
+def reap_outcome(path: Path, error: str, reason: str = MERGED_SAID) -> tuple[str, bool]:
     """What a reap's `error` reads as in the artifact, and whether it is a failure.
 
     Two refusals keep the tree without counting one, because no fixer can act on
@@ -477,7 +534,7 @@ def reap_outcome(path: Path, error: str) -> tuple[str, bool]:
     an administrator may delete (`admin_only`).
     """
     if not error:
-        return "its PR merged at this HEAD -- reaped", False
+        return f"{reason} at this HEAD -- reaped", False
     if error == ENGINE_DOWN:
         return error, False
     why = admin_only(path)
