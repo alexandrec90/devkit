@@ -1309,6 +1309,12 @@ def test_the_rule_sends_an_editor_to_the_canonical_copy_first():
 
 # --- the whole file: drift, render, adopt ------------------------------------
 
+# A project no `workspace.jsonc` will ever hold. The real file is the fixture's seed, so a
+# test that registered the name of a PR still open went red the moment that PR merged:
+# `workspace_pair` had made its directory, and `register` no-ops on a known name. #729 did
+# exactly that to `agent-terminal`, on the default branch.
+UNREGISTERED = "a-project-on-no-default-branch"
+
 
 @pytest.fixture
 def workspace_pair(tmp_path, monkeypatch):
@@ -1794,8 +1800,8 @@ def test_live_drift_against_a_named_copy_ignores_the_unmerged_edit_on_disk(works
     canonical.write_text(devkit_project.unregister(merged, ["carameli"]), encoding="utf-8")
     assert devkit_project.live_drift(live), "the branch's edit reads as drift on disk"
     assert devkit_project.live_drift(live, merged) == []
-    behind = devkit_project.register(merged, ["agent-terminal-2"])
-    (live.parent / "agent-terminal-2").mkdir()
+    behind = devkit_project.register(merged, [UNREGISTERED])
+    (live.parent / UNREGISTERED).mkdir()
     assert devkit_project.live_drift(live, behind), "merged, and not in the live file yet"
 
 
@@ -1823,9 +1829,9 @@ def test_live_drift_reads_a_registration_on_its_branch_as_no_drift(workspace_pai
     line read the same drift as a merge awaited. And #733 had moved a task meanwhile, which
     only `judged_drift` can tell from a live edit."""
     _canonical, live = workspace_pair
-    registered = devkit_project.register(live.read_text(encoding="utf-8"), ["agent-terminal"])
+    registered = devkit_project.register(live.read_text(encoding="utf-8"), [UNREGISTERED])
     live.write_text(registered, encoding="utf-8", newline="\n")
-    (live.parent / "agent-terminal").mkdir()
+    (live.parent / UNREGISTERED).mkdir()
     assert devkit_project.canonical_view(live)[1] == [], "this machine holds the whole registry"
     assert devkit_project.live_only(devkit_project.live_drift(live)), "no branch holds it yet"
 
