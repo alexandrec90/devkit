@@ -112,8 +112,8 @@ updates:
           - "patch"
 
 {{/desktop}}
-  # The actions the workflows pin. Majors land as individual PRs and the auto-merge
-  # classifier holds them for review.
+  # The actions the workflows pin. Majors land as individual PRs, and auto-merge takes
+  # each one the gate passes.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -129,7 +129,10 @@ updates:
 
   # The base image in the Dockerfile. Compose service images (postgres, redis, …)
   # are pinned to the majors production runs and are bumped deliberately, not by
-  # bot, so they are not listed here.
+  # bot, so they are not listed here. A `docker-compose` entry added later must `ignore`
+  # `version-update:semver-major`: auto-merge takes what the gate passes, and a gate that
+  # starts no container says nothing about a database major. The vendored
+  # `test_ci_workflow_contract.py` fails one that does not.
   - package-ecosystem: docker
     directory: /
     schedule:

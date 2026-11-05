@@ -338,6 +338,42 @@ def test_stack_actions_are_devkit_owned_with_a_project_override(checkouts, tmp_p
         plan_command(ACTIONS[key], checkouts / "beta", [], devkit_root)
 
 
+def test_the_template_names_the_cli_contract_the_dispatcher_demands():
+    """d02a3ddd: the template still owed `docker-up.py` and `docker-down.py`, which are
+    DEVKIT-owned now and which photolab, correctly, has neither of. The comment is the
+    only place a generated project reads its contract, so it is held to `ACTIONS`."""
+    template = support.REPO_ROOT / "templates" / "core" / "dot-vscode" / "tasks.json.tmpl"
+    text = template.read_text(encoding="utf-8")
+    contract = text[text.index("the CLI CONTRACT") : text.index("`devkit_project.py --check`")]
+    owed = {
+        action.script
+        for action in ACTIONS.values()
+        if action.owner == devkit_project.PROJECT and not action.projects
+    }
+    assert set(re.findall(r"`(scripts/[\w-]+\.py)`", contract)) == owed
+
+
+def test_the_generated_instructions_say_how_a_task_runs_a_script(checkouts, tmp_path):
+    """f33fd4ed: photolab's `scripts/album.py` was written importing `dotenv` and relying
+    on Ctrl+C, then rewritten once a task was asked for, since its `CLAUDE.md` said neither
+    where tasks live nor what a dispatched script starts as. This holds those words to
+    the argv that is their whole basis, and `log-wrap.py`'s windowless spawn."""
+    devkit_root = tmp_path / "devkit"
+    (devkit_root / "scripts").mkdir(parents=True)
+    command = plan_command(ACTIONS["test"], checkouts / "alpha", [], devkit_root)
+    assert command[-2:] == ["python", "scripts/run-tests.py"], "not the machine's `python`"
+    log_wrap = (support.REPO_ROOT / "scripts" / "log-wrap.py").read_text(encoding="utf-8")
+    assert "creationflags=NO_WINDOW" in log_wrap
+
+    core = support.REPO_ROOT / "templates" / "core"
+    for name in ("CLAUDE.md.tmpl", "dot-vscode/tasks.json.tmpl"):
+        said = " ".join((core / name).read_text(encoding="utf-8").replace("//", " ").split())
+        assert "under the machine's `python`, not" in said, name
+        assert "no console" in said and "Ctrl+C" in said, name
+    claude = (core / "CLAUDE.md.tmpl").read_text(encoding="utf-8")
+    assert "A task lives in the workspace file" in claude
+
+
 def test_hook_tests_is_devkit_owned_so_every_checkout_can_run_it(checkouts, tmp_path):
     """`pytest scripts/hooks/tests/ -q` is byte-identical in every consumer.
 
@@ -3753,3 +3789,25 @@ def test_a_kept_failure_never_overwrites_the_one_log_wrap_keeps(tmp_path, ledger
     assert artifact is not None
     assert artifact != "logs/lint-run.failed.log"
     assert (tmp_path / artifact).is_file()
+
+
+def test_every_project_is_told_what_a_task_script_starts_as(checkouts, tmp_path):
+    """983bc6e6: "instruction budget: hot 5547/5550 tok" left `engineering.md` no room for
+    this, so the fact reached only projects generated after the fix. A path-scoped rule in
+    the `MANIFEST` reaches every project at its next pull and costs the hot tier nothing.
+    The words are held to the argv that is their whole basis, and to the windowless spawn."""
+    devkit_root = tmp_path / "devkit"
+    (devkit_root / "scripts").mkdir(parents=True)
+    command = plan_command(ACTIONS["test"], checkouts / "alpha", [], devkit_root)
+    assert command[-2:] == ["python", "scripts/run-tests.py"], "not the machine's `python`"
+    log_wrap = (support.REPO_ROOT / "scripts" / "log-wrap.py").read_text(encoding="utf-8")
+    assert "creationflags=NO_WINDOW" in log_wrap
+
+    rel = ".claude/rules/task-scripts.md"
+    manifest = (support.REPO_ROOT / "scripts" / "devkit_manifest.py").read_text(encoding="utf-8")
+    assert f'"{rel}"' in manifest, "not vendored, so no existing project ever reads it"
+    text = (support.REPO_ROOT / rel).read_text(encoding="utf-8")
+    assert re.search(r"^paths:$", text, re.M), "unscoped, so it is back on the hot budget"
+    said = " ".join(text.split())
+    assert "under the machine's `python`, not this project's `.venv`" in said
+    assert "no console" in said and "Ctrl+C" in said

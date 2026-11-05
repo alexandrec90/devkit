@@ -44,7 +44,8 @@ what the hook runs and CI does not, are both held to a written reason by
 - **`templates/` is a one-shot copy.** `--pull` never looks at a template again, so every
   fix made here after a project was generated stays here. The one exception is a copy the
   project never edited: `template_refresh.py`, run in every adoption box, replaces one
-  byte-identical to an earlier version of a template it lists. A project's own edits
+  byte-identical to an earlier version of a template it lists, a rendered line it names
+  (`RENDERED_LINES`) aside. A project's own edits
   keep it out of reach, so when a file stops having a per-project value, move it into
   `MANIFEST` rather than leaving it rendered.
 - **A file that only one tier can use goes in `GATED_MANIFEST`, not in `templates/`.**

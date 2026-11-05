@@ -59,7 +59,7 @@ def test_an_untouched_earlier_template_is_refreshed(tmp_path):
         seen.append((project, rewritten))
         return 0, 2
 
-    line, ratchet = refresh.refresh(root, source, reconcile=reconcile)
+    line, *_, ratchet = refresh.refresh(root, source, reconcile=reconcile)
     assert "refreshed" in line
     assert (root / TARGET).read_text(encoding="utf-8") == NEW
     assert seen == [(root, (TARGET,))]
@@ -127,7 +127,7 @@ def test_the_projects_own_runner_is_left_alone(tmp_path):
     """carameli's runs in a container and ibkr_trader's delegates to its own artifact
     runner: what they chose instead of the template is theirs."""
     source, root = devkit(tmp_path), project(tmp_path, b"print('in the container')\n")
-    [line] = refresh.refresh(root, source)
+    line, *_ = refresh.refresh(root, source)
     assert "the project's own" in line
     assert (root / TARGET).read_bytes() == b"print('in the container')\n"
 
@@ -151,13 +151,83 @@ def test_a_devkit_git_cannot_read_refreshes_nothing(tmp_path):
     assert "the project's own" in refresh.refresh(root, source)[0]
 
 
-def test_only_templates_with_nothing_to_substitute_are_refreshed():
-    """A rendered copy of a template with `{{ }}` differs per project, and nothing
-    records what it was rendered with, so it can never match a past version."""
+def test_only_templates_whose_every_substitution_is_a_named_line_are_refreshed():
+    """A rendered copy differs per project and nothing records what it was rendered with,
+    so a `{{ }}` can match a past version only on a line `RENDERED_LINES` takes from the
+    project's own copy. A substitution anywhere else would never match, silently."""
     for target, template in refresh.REFRESHED.items():
         text = (REPO_ROOT / template).read_text(encoding="utf-8")
-        assert "{{" not in text, template
+        assert "{{" not in refresh.without_rendered(target, text), template
         assert not target.startswith("templates/")
+
+
+LINT_TARGET = "scripts/lint-all.py"
+LINT_TEMPLATE = refresh.REFRESHED[LINT_TARGET]
+LINT_OLD = 'MYPY_SCOPE = ["{{ app_dir }}", "{{ tests_dir }}"]\nprint("no secrets pass")\n'
+LINT_NEW = 'MYPY_SCOPE = ["{{ app_dir }}", "{{ tests_dir }}"]\nprint("scans for secrets")\n'
+
+
+def lint_devkit(tmp_path: Path, *versions: str) -> Path:
+    """A devkit whose lint template went through `versions`, the last one current."""
+    root = tmp_path / "devkit"
+    (root / LINT_TEMPLATE).parent.mkdir(parents=True)
+    git(root, "init", "-q")
+    for text in versions:
+        (root / LINT_TEMPLATE).write_text(text, encoding="utf-8", newline="\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "template")
+    return root
+
+
+def rendered(text: str) -> str:
+    return text.replace("{{ app_dir }}", "homelab/").replace("{{ tests_dir }}", "tests/")
+
+
+def test_a_rendered_copy_is_refreshed_and_keeps_the_values_it_was_rendered_with(tmp_path):
+    """05000136: homelab, photolab and three others hold `lint-all.py` as the template stood
+    at 62b4aa95, whose only difference from it is `MYPY_SCOPE`. Their commit's secrets
+    hook refused what their lint had just passed, and a template fix alone reaches none."""
+    source = lint_devkit(tmp_path, LINT_OLD, LINT_NEW)
+    root = project(tmp_path, rendered(LINT_OLD).encode())
+    (root / LINT_TARGET).write_bytes(rendered(LINT_OLD).encode())
+    assert refresh.refresh_one(root, LINT_TARGET, source).endswith(refresh.REFRESHED_LINE)
+    assert (root / LINT_TARGET).read_text(encoding="utf-8") == rendered(LINT_NEW)
+    assert "already" in refresh.refresh_one(root, LINT_TARGET, source)
+
+
+def test_rendered_as_carries_the_projects_line_and_nothing_else():
+    held = 'MYPY_SCOPE = ["homelab/"]\n'
+    assert refresh.rendered_as(LINT_TARGET, LINT_NEW, held).startswith(held)
+    assert refresh.rendered_as(LINT_TARGET, LINT_NEW, "no scope line\n") == LINT_NEW
+    assert refresh.rendered_as(TARGET, NEW, held) == NEW, "no rendered line for this target"
+
+
+def test_a_rendered_copy_edited_off_its_named_line_is_the_projects_own(tmp_path):
+    """The named line is the only one a project's copy may differ on and still be devkit's."""
+    source = lint_devkit(tmp_path, LINT_OLD, LINT_NEW)
+    root = project(tmp_path, None)
+    edited = rendered(LINT_OLD) + "print('a pass this project added')\n"
+    (root / LINT_TARGET).write_bytes(edited.encode())
+    assert "the project's own" in refresh.refresh_one(root, LINT_TARGET, source)
+    assert (root / LINT_TARGET).read_bytes() == edited.encode()
+
+
+def test_a_copy_with_no_line_to_keep_is_never_written_with_a_bare_substitution(tmp_path):
+    """The template before its rendered line existed: a match, and nothing to render with."""
+    bare = 'print("no scope line yet")\n'
+    source = lint_devkit(tmp_path, bare, LINT_NEW)
+    root = project(tmp_path, None)
+    (root / LINT_TARGET).write_bytes(bare.encode())
+    assert "the project's own" in refresh.refresh_one(root, LINT_TARGET, source)
+    assert (root / LINT_TARGET).read_bytes() == bare.encode()
+
+
+def test_the_task_file_every_project_holds_untouched_is_refreshed(tmp_path):
+    """d02a3ddd: `.vscode/tasks.json` carries nothing per-project, and all eight consumers
+    hold an earlier version, so a stale comment in it stays until this reaches them."""
+    target = ".vscode/tasks.json"
+    assert refresh.REFRESHED[target] == "templates/core/dot-vscode/tasks.json.tmpl"
+    assert refresh.without_rendered(target, "any\ntext\n") == "any\ntext\n"
 
 
 def test_the_cli_refreshes_the_named_project(tmp_path, capsys):

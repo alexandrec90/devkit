@@ -41,13 +41,17 @@
   // moment an agent box is cut against the project, which is the whole problem.
   //
   // What this project owes the arrangement instead is the CLI CONTRACT: keep
-  // `scripts/run-tests.py`, `scripts/lint-all.py`, `scripts/docker-up.py`,
-  // `scripts/docker-down.py`, `scripts/sync-codex-context.py` and
-  // `scripts/sync-devkit.py` at those paths, accepting their usual arguments.
+  // `scripts/run-tests.py`, `scripts/lint-all.py` and `scripts/sync-codex-context.py`
+  // at those paths, accepting their usual arguments.
   // `devkit_project.py --check` reports any checkout that has stopped satisfying it.
-  // The scripts stay per-project on purpose — lint scope, test scope and compose
-  // topology genuinely differ — which is why they live in `templates/` and not in
-  // `sync-devkit.py`'s MANIFEST.
+  // The Docker tasks ask nothing of this project: devkit's `docker-maint.py` runs them,
+  // and hands over to a `scripts/docker-up.py` or `docker-down.py` only where one exists.
+  //
+  // A SCRIPT A TASK RUNS STARTS BARE. The dispatcher runs it as `python <script>` under
+  // the machine's `python`, not this project's `.venv`, through `log-wrap.py`, which
+  // gives it no console. So it imports only the standard library until it has handed
+  // itself to the `.venv` (as `run-tests.py` and `lint-all.py` do), and Ctrl+C never
+  // reaches it: a task that serves until stopped has to watch for its parent going.
   //
   // Conventions, wherever a task ends up living: label `"Domain: Title Case Action"`;
   // every task carries a `detail` (the second line of the quick-pick, and the only

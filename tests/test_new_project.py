@@ -1489,6 +1489,40 @@ def _frontend_project(tmp_path: Path, typecheck: str, node_modules: bool = True)
     return root, generated
 
 
+def test_generated_lint_runner_scans_what_the_commit_will_scan(tmp_path, monkeypatch, capsys):
+    """05000136: every generated project's commit runs `detect-secrets`, and its lint
+    runner did not -- devkit's own copy gained the pass (08654413) and the template said
+    "no detect-secrets pass to skip". So homelab's and photolab's sessions ran clean,
+    and `ship.py` then refused `tests\\test_envfile.py` at `fixers`, a dispatch later. A
+    Markdown or env file a Python-only pass would skip is the case that matters."""
+    root = generate(tmp_path, {})
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    (root / "logs").mkdir(exist_ok=True)
+    (root / "notes.md").write_text("x\n", encoding="utf-8")
+    assert "detect-secrets" in lint_all.REQUIRED_TOOLS
+
+    assert lint_all.secrets_targets(["a.md", "b.py"], skip=False) == ["a.md", "b.py"]
+    assert lint_all.secrets_targets(["a.md"], skip=True) == [], "--no-secrets"
+    assert lint_all.secrets_targets([], skip=False) == []
+    assert lint_all.secrets_section([]) == ""
+
+    ran: list[tuple[str, list[str]]] = []
+
+    def tool(name, cmd, _hint):
+        ran.append((name, cmd))
+        return "# detect-secrets\nnotes.md\n" if name == "detect-secrets" else ""
+
+    monkeypatch.setattr(lint_all, "run_tool", tool)
+    assert lint_all.main(["--paths", "notes.md"]) == 1, "only a Markdown file, and it scanned"
+    assert "FAILED" in capsys.readouterr().out
+    scan = next(cmd for name, cmd in ran if name == "detect-secrets")
+    assert scan[1:] == ["-m", "pre_commit", "run", "detect-secrets", "--files", "notes.md"]
+
+    ran.clear()
+    assert lint_all.main(["--paths", "notes.md", "--no-secrets"]) == 0
+    assert not any(name == "detect-secrets" for name, _ in ran)
+
+
 def test_generated_lint_runner_typechecks_a_typescript_only_change(tmp_path, monkeypatch):
     """2ed077d6: in roguelike, a TypeScript-only `--changed` printed "no changed files
     this run lints; nothing to do", so the fixer's lint step checked nothing. With the
@@ -1499,7 +1533,7 @@ def test_generated_lint_runner_typechecks_a_typescript_only_change(tmp_path, mon
     )
     monkeypatch.setattr(generated.shutil, "which", lambda name: sys.executable)
 
-    assert generated.main(["--paths", "src/a.ts"]) == 1
+    assert generated.main(["--paths", "src/a.ts", "--no-secrets"]) == 1
     artifact = (root / "logs" / "lint-errors.log").read_text(encoding="utf-8")
     assert "# typecheck\n" in artifact and "error TS2322" in artifact
 
@@ -1511,7 +1545,7 @@ def test_generated_lint_runner_skips_a_typecheck_with_no_node_modules(
     root, generated = _frontend_project(tmp_path, "raise SystemExit(2)", node_modules=False)
     monkeypatch.setattr(generated.shutil, "which", lambda name: sys.executable)
 
-    assert generated.main(["--paths", "src/a.ts"]) == 0
+    assert generated.main(["--paths", "src/a.ts", "--no-secrets"]) == 0
     assert "no node_modules" in capsys.readouterr().out
     assert (root / "logs" / "lint-errors.log").read_text(encoding="utf-8") == ""
 
@@ -1522,7 +1556,7 @@ def test_generated_lint_runner_names_the_files_it_has_no_linter_for(tmp_path, ca
     root, generated = _frontend_project(tmp_path, "raise SystemExit(2)")
     (root / "notes.md").write_text("x\n", encoding="utf-8")
 
-    assert generated.main(["--paths", "notes.md"]) == 0
+    assert generated.main(["--paths", "notes.md", "--no-secrets"]) == 0
     out = capsys.readouterr().out
     assert "notes.md" in out and "nothing to do" in out
 
