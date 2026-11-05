@@ -21,8 +21,10 @@ from support import REPO_ROOT, load_script
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import fix_cycle
+import fix_findings
 import fix_ledger
 import fix_plan
+import fix_stall
 import ship_intent
 
 fix_pass = load_script("scripts/fix-pass.py")
@@ -1382,6 +1384,49 @@ def test_every_step_says_when_it_starts(world, capsys):
     out = capsys.readouterr().out
     for name in ("ship", "read-back", "collect", "plan", "send", "drift", "issues", "migrate"):
         assert f"fix-pass: step {name} at " in out
+
+
+def _untrusted_ledger(ctx, project: str = "carameli") -> list:
+    """The history `send_all` is handed, holding one open untrusted refusal of `project`."""
+    detail = fix_pass.fix_loop.untrusted_detail(ctx.root / project)
+    found = fix_findings.Finding(fix_pass.fix_loop.UNTRUSTED_KIND, project, detail)
+    row = fix_findings.harness_events.event_line(NOW.isoformat(), found.event, found.fields())
+    logs = ctx.devkit_dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "harness-events.log").write_text(row + "\n", encoding="utf-8")
+    return fix_pass.fix_loop.triage.load(ctx.devkit_dir)
+
+
+def test_a_checkout_nobody_trusted_is_sent_nothing_until_someone_does(world, tmp_path, monkeypatch):
+    """0edfe2b4: one refusal was 94 photolab trees over three days, a fresh one each half
+    hour, for a step only a person can take. The first refusal says so; the rest wait."""
+    ctx = _ctx(tmp_path)
+    history = _untrusted_ledger(ctx)
+    monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "trusted", lambda _checkout: False)
+    go = [fix_plan.Decision(fix_plan.DISPATCH, "red", (failure(),))]
+    sent, capped, worst = fix_pass.fix_send.send_all(go, ctx, "claude", items=history)
+    assert sent == [] and world["dispatched"] == [] and worst == fix_pass.fix_send.EXIT_OK
+    assert capped[0][1] == "held: " + fix_pass.fix_loop.untrusted_detail(ctx.root / "carameli")
+    assert fix_stall.tracked(capped[0][1]), "a person's step, never a stale wait"
+
+
+def test_a_checkout_trusted_since_its_refusal_is_sent_at_once(world, tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    history = _untrusted_ledger(ctx)
+    monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "trusted", lambda _checkout: True)
+    go = [fix_plan.Decision(fix_plan.DISPATCH, "red", (failure(),))]
+    sent, capped, _ = fix_pass.fix_send.send_all(go, ctx, "claude", items=history)
+    assert len(sent) == 1 and capped == []
+
+
+def test_what_an_untrusted_checkout_cannot_stop(world, tmp_path, monkeypatch):
+    """An update is one `gh` call, and the devkit session opens its tree in devkit."""
+    ctx = _ctx(tmp_path)
+    history = _untrusted_ledger(ctx)
+    monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "trusted", lambda _checkout: False)
+    for action in (fix_plan.UPDATE, fix_plan.UPSTREAM):
+        decision = fix_plan.Decision(action, "n", (failure(),))
+        assert fix_pass.fix_send._untrusted(decision, ctx, history) == ""
 
 
 def test_a_second_devkit_session_waits_for_the_one_still_working(world, tmp_path):

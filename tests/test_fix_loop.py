@@ -407,7 +407,9 @@ def test_a_launch_refused_as_untrusted_is_sent_again_and_awaits_a_person(ctx, mo
     done = subprocess.CompletedProcess(["claude"], 1, "", said)
     fix_reports.record_launch(path, ["claude", "--bg", "--", "fix it all"], done)
     closed, journal = close(ctx)
-    assert closed.lines == [f"carameli agent/x-0919 -- {fix_reports.UNTRUSTED}; sent again"]
+    assert closed.lines == [
+        f"carameli agent/x-0919 -- {fix_reports.UNTRUSTED}; held until carameli is trusted"
+    ]
     [found] = journal.findings
     assert (found.kind, found.project) == (fix_loop.UNTRUSTED_KIND, "carameli")
     assert found.detail == fix_loop.untrusted_detail(ctx.root / "carameli")
@@ -577,6 +579,44 @@ def test_retire_login_with_no_sign_in_or_nothing_older_resolves_nothing(ctx):
     [line] = fix_loop.retire_login(ctx, later)
     assert line.startswith(f"retired [{triage.item_id(row)}] -- the login works again")
     assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
+def untrusted_row(ctx, project: str, when: _dt.datetime = NOW) -> str:
+    """A `fixer-workspace-untrusted` ledger row, as `judge_dead` and `fix_send` file it."""
+    detail = fix_loop.untrusted_detail(ctx.root / project)
+    found = fix_findings.Finding(fix_loop.UNTRUSTED_KIND, project, detail)
+    return fix_findings.harness_events.event_line(when.isoformat(), found.event, found.fields())
+
+
+def test_awaiting_trust_names_each_project_with_an_open_refusal(ctx):
+    row = untrusted_row(ctx, "photolab")
+    seed(ctx, row, untrusted_row(ctx, "carameli"), login_row(NOW))
+    history = triage.load(ctx.devkit_dir)
+    assert fix_loop.awaiting_trust(history) == {"photolab", "carameli"}
+    triage.resolve([triage.item_id(row)], "trusted", root=ctx.devkit_dir)
+    assert fix_loop.awaiting_trust(triage.load(ctx.devkit_dir)) == {"carameli"}
+
+
+def test_retire_trusted_retires_only_a_checkout_now_trusted(ctx, monkeypatch):
+    """1d0d0887: photolab's launches stopped being refused by 2026-11-04, and the group
+    stayed open telling the morning toast to trust it. Nothing else retires one."""
+    row = untrusted_row(ctx, "photolab")
+    other = untrusted_row(ctx, "carameli")
+    seed(ctx, row, other)
+    monkeypatch.setattr(fix_reports, "trusted", lambda checkout: checkout.name == "photolab")
+    [line] = fix_loop.retire_trusted(ctx)
+    assert line.startswith(f"retired [{triage.item_id(row)}] -- ")
+    assert "photolab is trusted now" in line
+    left = triage.open_items(triage.load(ctx.devkit_dir))
+    assert [item.id for item in left] == [triage.item_id(other)]
+
+
+def test_retire_trusted_with_nothing_open_reads_nothing(ctx, monkeypatch):
+    def asked(_checkout):
+        raise AssertionError("no row, no read of the login's own file")
+
+    monkeypatch.setattr(fix_reports, "trusted", asked)
+    assert fix_loop.retire_trusted(ctx) == []
 
 
 def test_a_plan_retires_no_login_refusal(ctx, monkeypatch):

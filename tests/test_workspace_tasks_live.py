@@ -37,8 +37,9 @@ import os
 import re
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,11 @@ SHELL_INPUT = "shellCommand.execute"
 # (`.claude/rules/vscode-tasks.md`). The ceiling is wider than that ask so a cold disk
 # does not fail a night, and a picker past it is a defect to fix, not a ceiling to raise.
 PICKER_SECONDS = 8.0
+# How many more draws a picker past that gets, and the pause before each. The fastest
+# counts: the wait is the picker's only when no draw beats it. 0d70f0f6: one drew in 2.3 s
+# quiet and 24.0 s under the night's load, and that verdict measured what else was running.
+REDRAWS = 2
+REDRAW_PAUSE = 5.0
 # A cancelled task runs nothing, so anything slower than this did work it should not have.
 CANCEL_SECONDS = 8.0
 # `picker_rows`: value|label|description|detail. A fifth field is a separator that leaked
@@ -150,6 +156,18 @@ def draw(spec: dict, answers: Mapping[str, str]) -> Drawn:
     return Drawn(done.returncode, time.monotonic() - started, rows, done.stderr.strip())
 
 
+def fastest(first: Drawn, again: Callable[[], Drawn], pause: float = REDRAW_PAUSE) -> Drawn:
+    """`first`, or the quickest of `REDRAWS` more of a picker `first` ran past its budget:
+    the budget is held to what the picker does, not to the worst moment of the machine."""
+    best = first
+    for _ in range(REDRAWS):
+        if best.code != 0 or best.seconds <= PICKER_SECONDS:
+            break
+        time.sleep(pause)
+        best = min(best, again(), key=lambda drawn: (drawn.code != 0, drawn.seconds))
+    return best
+
+
 def defaults(inputs: Mapping[str, dict]) -> dict[str, str]:
     """An answer for every input a person would type or pick from a fixed list."""
     answers: dict[str, str] = {}
@@ -203,6 +221,27 @@ def test_a_chain_is_drawn_upstream_first_and_a_loop_is_refused():
         chain_order({"a": live("${input:b}"), "b": live("${input:a}")})
 
 
+def _drawn(seconds: float, code: int = 0) -> Drawn:
+    return Drawn(code, seconds, (("row",),), "")
+
+
+def test_a_picker_within_budget_or_failed_is_not_drawn_again():
+    def again() -> Drawn:
+        raise AssertionError("no second draw")
+
+    assert fastest(_drawn(PICKER_SECONDS), again, pause=0).seconds == PICKER_SECONDS
+    assert fastest(_drawn(30.0, code=1), again, pause=0).code == 1
+
+
+def test_a_slow_draw_counts_only_if_no_redraw_beats_it():
+    quiet = iter([_drawn(9.0), _drawn(2.3)])
+    assert fastest(_drawn(24.0), lambda: next(quiet), pause=0).seconds == 2.3
+    slow = iter([_drawn(20.0), _drawn(30.0)])
+    assert fastest(_drawn(24.0), lambda: next(slow), pause=0).seconds == 20.0
+    broke = iter([_drawn(1.0, code=1), _drawn(12.0)])
+    assert fastest(_drawn(24.0), lambda: next(broke), pause=0).seconds == 12.0
+
+
 def test_fixed_inputs_are_answered_with_their_default_or_first_option():
     inputs = {
         "a": {"type": "pickString", "options": ["x", "y"]},
@@ -248,7 +287,7 @@ def test_every_live_picker_draws_parseable_rows_in_time():
     answers = defaults(inputs)
     problems: list[str] = []
     for key in chain_order(inputs):
-        drawn = draw(inputs[key], answers)
+        drawn = fastest(draw(inputs[key], answers), partial(draw, inputs[key], answers))
         where = f"{key} ({drawn.seconds:.1f}s)"
         if drawn.code != 0:
             problems.append(f"{where}: exited {drawn.code}: {drawn.stderr[-300:]}")

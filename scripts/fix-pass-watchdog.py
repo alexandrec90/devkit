@@ -158,10 +158,13 @@ _SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
 # `pass-stale` rows it has filed (7599a153, a 2026-10-02 TLS reset, 6d06634e) healed at a
 # later fire on its own, each after sending a session at nothing. The pass still runs and
 # the note is still in its record; the next fire is the fix, and only one that is not
-# says anything about the machine.
+# says anything about the machine. Two fires are half an hour, which a stall can span:
+# 2026-11-05 two fires running timed out up to 02:30 local and the next one's went through
+# (bb04d04d), its cause never found. Six are three hours: a lost login or remote still
+# files, and a stall that lasts that long is worth a session.
 FETCH_FAILED = "could not fetch"
 FETCH_STREAK = "fetch_failures"
-FETCH_FIRES = 2
+FETCH_FIRES = 6
 
 
 def fetch(root: Path, base: str) -> str:

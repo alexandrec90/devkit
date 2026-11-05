@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import support
@@ -86,6 +87,32 @@ def test_the_run_selects_the_local_tier_and_writes_a_report_naming_files():
     assert argv[:4] == ["py", "-m", "pytest", "tests"]
     assert argv[argv.index("-m", 2) + 1] == "local and not paid"
     assert f"--junitxml={Path('logs/r.xml')}" in argv
+
+
+def test_named_tests_are_run_in_the_tiers_place_and_stay_in_the_tier():
+    """A fixer sent at one red spent 2143 s on the whole tier and began a second run on
+    the machine the night's jobs run on (42c3bba5, 50917bb2). The marker stays, so a name
+    outside the tier deselects to nothing, which `verdict` reads as no pass."""
+    named = "tests/test_x.py::test_y"
+    argv = e2e.pytest_argv("py", Path("logs/r.xml"), [named])
+    assert argv[:4] == ["py", "-m", "pytest", named] and "tests" not in argv
+    assert argv[argv.index("-m", 2) + 1] == "local and not paid"
+
+
+def test_main_hands_its_arguments_to_pytest(monkeypatch, tmp_path, capsys):
+    seen = {}
+
+    def run(argv, **_kwargs):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(e2e, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(e2e, "cases", lambda _report: [PASS])
+    monkeypatch.setattr(e2e.sweep, "run_windowless", run)
+    monkeypatch.delenv(e2e.ENV_FLAG, raising=False)
+    assert e2e.main(["tests/test_x.py::test_y"]) == 0
+    assert seen["argv"][3] == "tests/test_x.py::test_y"
+    capsys.readouterr()
 
 
 def test_only_the_scheduled_run_is_strict():

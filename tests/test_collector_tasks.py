@@ -602,7 +602,7 @@ def test_desktop_updating_is_never_asked_off_windows(tmp_path, monkeypatch):
 def test_start_needs_says_what_the_engine_answered_and_only_when_it_asked(tmp_path, instant):
     up = ["docker", "compose", "up", "-d", "--wait", "db"]
     assert tasks.start_needs(("db",), tmp_path, FakeSpawn((0, "ok"))) == (0, "ok", None)
-    timed_out = tasks.start_needs(("db",), tmp_path, FakeSpawn(TIMED_OUT, ENGINE_UP))
+    timed_out = tasks.start_needs(("db",), tmp_path, FakeSpawn(TIMED_OUT, ENGINE_UP, TIMED_OUT))
     assert timed_out == (*TIMED_OUT, ENGINE_UP), "an answering engine is not waited for"
     spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
     assert tasks.start_needs(("db",), tmp_path, spawn) == (*NO_IMAGE, ENGINE_UP)
@@ -818,15 +818,35 @@ def test_a_need_that_timed_out_with_the_engine_answering_says_the_service_stalle
     Desktop was running, while the db had been up and healthy for hours. The re-ask says
     which stalled, and the cause no longer reads as the scrape's own timeout."""
     healthy = "NAME STATUS\nsocial-scraper-db-1 Up 4 hours (healthy)"
-    spawn = FakeSpawn(TIMED_OUT, (0, "28.4.0\n"), (0, healthy))
+    spawn = FakeSpawn(TIMED_OUT, (0, "28.4.0\n"), TIMED_OUT, (0, healthy))
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
-    assert code == tasks.TIMED_OUT and len(spawn.calls) == 3
+    assert code == tasks.TIMED_OUT and len(spawn.calls) == 4
     assert spawn.calls[1] == (list(tasks.ENGINE_PROBE), "social-scraper", tasks.PROBE)
-    assert spawn.calls[2][0] == ["docker", "compose", "ps", "--all", "db"]
+    assert spawn.calls[2] == (spawn.calls[0][0], "social-scraper", tasks.NEEDS_TIMEOUT)
+    assert spawn.calls[3][0] == ["docker", "compose", "ps", "--all", "db"]
     assert not any("Docker Desktop running" in line for line in lines), lines
     assert any("server 28.4.0" in line for line in lines), lines
     assert "social-scraper-db-1 Up 4 hours (healthy)" in lines
     assert lines[-1] == "error: db did not come up healthy within the compose timeout"
+
+
+def test_a_need_that_timed_out_on_an_answering_engine_is_started_once_more(tmp_path):
+    """2b286d27: at 02:00 on 2026-11-05 `up --wait db` printed nothing for 600 s with the
+    db up and healthy for three days; `ps` hung beside it, and the next fire's start went
+    through. A stalled compose is a fire minutes late, as a silent engine's is, and a
+    start that stalls twice running is the one worth filing."""
+    spawn = FakeSpawn(TIMED_OUT, (0, "28.4.0\n"), (0, "started"), (0, "ok"))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "started: db" in lines
+    assert spawn.calls[2][0] == spawn.calls[0][0] and spawn.calls[3][0] != spawn.calls[0][0]
+
+
+def test_a_need_that_failed_fast_on_an_answering_engine_is_not_started_again(tmp_path):
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == NO_IMAGE[0], "compose said why, and the same start says it again"
+    assert [call[0][:3] for call in spawn.calls].count(["docker", "compose", "up"]) == 1
+    assert lines[-1] == "error: docker compose up failed for db"
 
 
 def test_a_need_that_timed_out_with_the_engine_silent_blames_the_engine(tmp_path, instant):
@@ -841,7 +861,7 @@ def test_a_need_that_timed_out_with_the_engine_silent_blames_the_engine(tmp_path
     ("answers", "cause"),
     [
         ([TIMED_OUT, *SILENT_THROUGH_WAIT], "error: the Docker engine did not answer"),
-        ([TIMED_OUT, (0, "28"), (0, "")], "error: db did not come up healthy within the"),
+        ([TIMED_OUT, (0, "28"), TIMED_OUT, (0, "")], "error: db did not come up healthy within"),
         ([NO_IMAGE, ENGINE_UP], "error: docker compose up failed"),
     ],
 )

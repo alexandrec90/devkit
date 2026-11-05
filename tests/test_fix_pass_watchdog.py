@@ -292,9 +292,19 @@ def test_worth_filing_counts_only_fetches_and_only_in_a_row():
     state: dict = {}
     assert not watchdog.worth_filing(state, False, FETCH_DOWN)
     assert not watchdog.worth_filing(state, True, "current")
-    assert not watchdog.worth_filing(state, False, FETCH_DOWN), "the count restarted"
+    for _ in range(watchdog.FETCH_FIRES - 1):
+        assert not watchdog.worth_filing(state, False, FETCH_DOWN), "the count restarted"
     assert watchdog.worth_filing(state, False, FETCH_DOWN)
     assert watchdog.worth_filing({}, False, "on agent/x, not main"), "no network in that one"
+
+
+def test_a_stall_across_two_half_hourly_fires_files_nothing():
+    """bb04d04d: two fires running timed out on 2026-11-05, the next one's fetch went
+    through, and the filing sent a session to find nothing. A stale pass that lasts is
+    what this finding is for, and three hours is that."""
+    state: dict = {}
+    assert not any(watchdog.worth_filing(state, False, FETCH_DOWN) for _ in range(2))
+    assert watchdog.FETCH_FIRES * 30 >= 3 * 60, "minutes of half-hourly fires before it files"
 
 
 def test_a_fetch_that_fails_on_one_fire_alone_files_nothing(watched, monkeypatch):
@@ -307,10 +317,10 @@ def test_a_fetch_that_fails_on_one_fire_alone_files_nothing(watched, monkeypatch
     assert findings(watched["devkit"]) == [], "a success between two failures restarts the count"
 
 
-def test_a_fetch_that_fails_two_fires_running_is_filed(watched, monkeypatch):
+def test_a_fetch_that_fails_fire_after_fire_is_filed(watched, monkeypatch):
     monkeypatch.setattr(watchdog, "self_update", lambda root: (False, FETCH_DOWN))
-    assert watchdog.watch(watched["argv"], NOW) == 0
-    assert watchdog.watch(watched["argv"], NOW) == 0
+    for _ in range(watchdog.FETCH_FIRES):
+        assert watchdog.watch(watched["argv"], NOW) == 0
     [found] = findings(watched["devkit"])
     assert found.detail == f"pass-stale: {FETCH_DOWN}"
 

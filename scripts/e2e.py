@@ -20,6 +20,10 @@ reproducing what it can, and the scheduled run re-tests the rest.
 **A run that executed nothing is red**, whoever ran it: a green from zero tests is the
 skip-as-pass `hook-tests-live.py` exists to refuse.
 
+**Test ids on the command line run those alone, still inside the tier.** The whole tier
+holds this machine for over half an hour and opens VS Code; the scheduled pass names
+nothing, and a fixer reproducing one `FAILED` line names that line's id.
+
 **Under the scheduler it publishes the workspace file first.** The live file is rendered
 from the canonical copy once a day (`devkit-workspace-status`), so a task merged in the
 afternoon is unrendered at night and the drift check would send a fixer at the normal
@@ -37,6 +41,7 @@ import html
 import os
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -126,12 +131,12 @@ def publish(live: Path = devkit_project.DEFAULT_WORKSPACE) -> str:
     return f"e2e: workspace publish -- {outcome}" + "".join(f"\n  {d}" for d in differences)
 
 
-def pytest_argv(python: str, report: Path) -> list[str]:
+def pytest_argv(python: str, report: Path, named: Sequence[str] = ()) -> list[str]:
     return [
         python,
         "-m",
         "pytest",
-        "tests",
+        *(named or ["tests"]),
         "-m",
         f"{MARKER} and not paid",
         "-rfE",
@@ -142,7 +147,7 @@ def pytest_argv(python: str, report: Path) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    del argv  # no options: the scheduled pass and a fixer run it the same way
+    named = sys.argv[1:] if argv is None else argv
     strict = scheduled()
     if strict:
         print(publish(), flush=True)
@@ -156,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     # nothing writes to the hidden console it was given, not to the pipe the pass reads,
     # and the result's `output.log` would hold none of pytest's `FAILED` lines.
     done = sweep.run_windowless(
-        pytest_argv(python, report),
+        pytest_argv(python, report, named),
         cwd=str(REPO_ROOT),
         capture_output=True,
         encoding="utf-8",
