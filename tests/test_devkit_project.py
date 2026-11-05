@@ -21,6 +21,7 @@ from support import (
     in_an_ephemeral_box,
     needs_live_workspace,
     needs_the_static_checkout,
+    on_a_task_branch,
     worktree,
     worktree_tiers,
 )
@@ -1092,12 +1093,10 @@ def test_a_workspace_without_a_folders_array_is_refused():
 def test_registering_against_the_real_workspace_file():
     """The shape assertions above are on a fixture; this proves them on the live file.
 
-    Skipped from a box for the reason `test_the_live_workspace_matches_the_canonical_copy`
-    is: the live file is main's render, so a branch that ADDS a picker is asserting here
-    that its own un-merged edit has already landed. That is not hypothetical — adding
-    `adoptProjects` reddened exactly this test and its retirement twin, at the Stop gate,
-    with nothing wrong. The marker's comment in `support.py` describes the drift check
-    alone; the pair below reads the same file and needed it just as much.
+    Skipped from a box: the live file is main's render, so a branch that ADDS a picker is
+    asserting here that its own un-merged edit has already landed. That is not
+    hypothetical — adding `adoptProjects` reddened exactly this test and its retirement
+    twin, at the Stop gate, with nothing wrong.
     """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     updated = register(text, ["probe", "probe-b"])
@@ -1783,6 +1782,39 @@ def test_awaited_merge_answers_only_for_the_whole_of_the_live_edits():
     assert devkit_project.awaited_merge([folder, setting], payload, [registers]) == {}
     assert devkit_project.awaited_merge([ahead], payload, [keeps_both]) == {}
     assert devkit_project.awaited_merge([], payload, [keeps_both]) == {}
+
+
+def test_live_drift_against_a_named_copy_ignores_the_unmerged_edit_on_disk(workspace_pair):
+    """42c3bba5: from a box this check could only skip, so the command a fixer is told to
+    run before and after could not show the failure it was sent at. Handed what has merged,
+    a branch's own edit is no drift and a live file behind `main` still is."""
+    canonical, live = workspace_pair
+    merged = canonical.read_text(encoding="utf-8")
+    assert devkit_project.live_drift(live) == []
+    canonical.write_text(devkit_project.unregister(merged, ["carameli"]), encoding="utf-8")
+    assert devkit_project.live_drift(live), "the branch's edit reads as drift on disk"
+    assert devkit_project.live_drift(live, merged) == []
+    behind = devkit_project.register(merged, ["agent-terminal-2"])
+    (live.parent / "agent-terminal-2").mkdir()
+    assert devkit_project.live_drift(live, behind), "merged, and not in the live file yet"
+
+
+def test_merged_canonical_reads_the_default_branch_or_says_it_cannot(monkeypatch):
+    calls = []
+
+    def git(*args):
+        calls.append(args)
+        if args[0] == "symbolic-ref":
+            return subprocess.CompletedProcess(args, 0, "origin/trunk\n", "")
+        code = 0 if answers else 128
+        return subprocess.CompletedProcess(args, code, "merged text" if answers else "", "")
+
+    monkeypatch.setattr(devkit_project.sweep, "git_for", lambda _root: git)
+    answers = True
+    assert devkit_project.merged_canonical() == "merged text"
+    assert calls[-1] == ("show", "origin/trunk:workspace.jsonc")
+    answers = False
+    assert devkit_project.merged_canonical() == ""
 
 
 def test_live_drift_reads_a_registration_on_its_branch_as_no_drift(workspace_pair, monkeypatch):
@@ -3414,7 +3446,6 @@ def test_a_checkout_git_cannot_answer_for_is_not_treated_as_pre_merge(tmp_path, 
 
 
 @needs_live_workspace
-@needs_the_static_checkout
 def test_the_live_workspace_matches_the_canonical_copy():
     """The check `--check-workspace` runs, as a test so devkit's own gate catches drift.
 
@@ -3423,18 +3454,22 @@ def test_the_live_workspace_matches_the_canonical_copy():
     project existed only in the copy with no history — and that list is what every
     sweep, status line and `--project` picker resolves against.
 
-    Skipped from a box: the live file is rendered from the static checkout *after* a
-    branch merges, so there the comparison asks whether an un-merged edit has already
-    landed. See `support.needs_the_static_checkout` for why rendering early is not the
-    way out of that.
+    From a box it compares what has merged, not this tree's copy: the live file is
+    rendered from the static checkout *after* a branch merges, so the tree's own copy
+    would ask whether an un-merged edit has already landed. It used to skip there, and a
+    fixer sent at this very test could not see it fail (42c3bba5).
 
     Green while a pushed branch holds every live edit (`devkit_project.live_drift`): that
     is `new-project.py`'s registration waiting on its PR, a merge and not a defect, and
     the daily status line names the branch. Past `HELD_DAYS` it goes red here again.
     """
+    merged = ""
+    if in_an_ephemeral_box(REPO_ROOT) or on_a_task_branch(REPO_ROOT):
+        merged = devkit_project.merged_canonical()
+        assert merged, "this tree cannot read workspace.jsonc off origin's default branch"
     # This machine's view, as every real comparison is: a project registered from
     # another workstation and not cloned here is left out of the render, not drift.
-    problems = devkit_project.live_drift(LIVE_WORKSPACE)
+    problems = devkit_project.live_drift(LIVE_WORKSPACE, merged)
     keep = (
         "or --adopt-workspace to keep the live edits"
         if not devkit_project.canonical_only(problems)

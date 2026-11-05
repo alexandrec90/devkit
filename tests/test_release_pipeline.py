@@ -464,6 +464,78 @@ def test_a_pushed_tag_is_confirmed_only_when_git_can_see_it(
     assert (expected in missing) if expected else missing == ""
 
 
+def _tag_step(monkeypatch, *, running=(), watch=0, tagged=False):
+    """`run_pipeline` past its merge: a resume, on a `gh` and a `git` that answer as told."""
+    calls = []
+    runs = [{"databaseId": 7, "status": status} for status in running]
+
+    def run(cmd, *_args, **_kwargs):
+        calls.append(list(cmd))
+        if cmd[:3] == ["gh", "run", "watch"]:
+            return subprocess.CompletedProcess(cmd, watch, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(rp, "_run", run)
+    monkeypatch.setattr(rp, "_gh_json", lambda *_args: runs)
+    monkeypatch.setattr(rp, "main_fallback", lambda _devkit: "v1.0.0")
+    monkeypatch.setattr(rp, "dispatch_tag_workflow", lambda *_args: (9, ""))
+    monkeypatch.setattr(rp, "existing_tags", lambda _devkit: ["v1.0.0"] if tagged else [])
+    return calls
+
+
+def test_a_resume_while_another_machines_tag_run_is_going_leaves_it_to_that_run(monkeypatch):
+    """28102da8: the 02:00 job fires on both workstations. desktop-ml5f3pj's merged the
+    bump and dispatched the tag at 07:08; this one's read the bump on main with no tag
+    yet, took that for a release to resume, and failed on "already exists" at 07:20. The
+    gap between that merge and the tag has neither a PR nor a tag to see, only the run."""
+    calls = _tag_step(monkeypatch, running=["in_progress", "completed"])
+    assert rp.run_pipeline(Path("devkit"), "v1.0.0", True, None) == 0
+    assert not [c for c in calls if c[:3] == ["gh", "run", "watch"]], "nothing of its own to watch"
+
+
+def test_a_resume_with_no_tag_run_going_dispatches_its_own(monkeypatch):
+    calls = _tag_step(monkeypatch, running=["completed"], watch=1)
+    assert rp.run_pipeline(Path("devkit"), "v1.0.0", True, None) == 1
+    assert ["gh", "run", "watch", "9", "--exit-status"] in calls
+
+
+def test_a_tag_run_that_lost_to_another_pushing_the_same_tag_is_no_failure(monkeypatch, capsys):
+    """Two runs dispatched inside the same seconds both pass the check above, and the
+    loser's run fails on "releases are immutable" with the release it wanted cut."""
+    _tag_step(monkeypatch, watch=1, tagged=True)
+    assert rp.run_pipeline(Path("devkit"), "v1.0.0", True, None) == 0
+    assert "another run pushed v1.0.0" in capsys.readouterr().out
+
+
+def test_push_tag_goes_on_only_once_the_tag_landed(monkeypatch):
+    _tag_step(monkeypatch, tagged=True)
+    assert rp.push_tag(Path("devkit"), "v1.0.0") is None
+    _tag_step(monkeypatch, tagged=False)
+    assert rp.push_tag(Path("devkit"), "v1.0.0") == 1, "a green run with no tag to show for it"
+    monkeypatch.setattr(rp, "dispatch_tag_workflow", lambda *_args: (0, "HTTP 403"))
+    assert rp.push_tag(Path("devkit"), "v1.0.0") == 2
+
+
+def test_a_tag_run_that_failed_with_no_tag_is_still_stopped(monkeypatch, capsys):
+    _tag_step(monkeypatch, watch=1, tagged=False)
+    assert rp.run_pipeline(Path("devkit"), "v1.0.0", True, None) == 1
+    assert "v1.0.0 was NOT pushed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        (None, 0),
+        ([], 0),
+        ([{"databaseId": 3, "status": "completed"}], 0),
+        ([{"databaseId": 3, "status": "completed"}, {"databaseId": 4, "status": "queued"}], 4),
+    ],
+)
+def test_a_tag_run_in_flight_is_any_release_run_not_completed(monkeypatch, answer, expected):
+    monkeypatch.setattr(rp, "_gh_json", lambda *_args: answer)
+    assert rp.tag_run_in_flight(Path("devkit")) == expected
+
+
 def test_the_default_branch_gate_is_run_again_once_the_tag_exists(monkeypatch):
     """The merge's gate runs before the tag is pushed, so `test_fallback_devkit_ref_tracks
     _the_newest_tag` fails there by construction: v0.11.31 left main red on GitHub until

@@ -576,8 +576,11 @@ def start_needs(
     Docker Desktop restart is a fire minutes late, not one lost. That holds for a start
     that timed out as much as for one that failed fast: 2026-10-09 the 21:00 fire's
     `up --wait db` hung its whole `NEEDS_TIMEOUT` on an engine the collectors pass was
-    resetting, which answered two minutes after the fire gave up (37e9acee). The engine's
-    answer is None where nobody asked -- a start that went through.
+    resetting, which answered two minutes after the fire gave up (37e9acee). A start that
+    timed out on an answering engine is tried once more too: compose itself stalled, with
+    the db up and healthy for days, and the next fire's start went through (2b286d27).
+    One that failed fast said why, and would say it again. The engine's answer is None
+    where nobody asked -- a start that went through.
     """
     up = ["docker", "compose", "up", "-d", "--wait", *needs]
     code, out = run(up, checkout, NEEDS_TIMEOUT)
@@ -585,7 +588,10 @@ def start_needs(
         return code, out, None
     engine = probe(checkout, run)
     if engine[0] == 0:
-        return code, out, engine
+        if code != TIMED_OUT:
+            return code, out, engine
+        code, out = run(up, checkout, NEEDS_TIMEOUT)
+        return code, out, None if code == 0 else engine
     engine = await_engine(checkout, run)
     if engine[0] != 0:
         return code, out, engine

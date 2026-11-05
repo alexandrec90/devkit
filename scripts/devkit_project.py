@@ -1467,17 +1467,28 @@ def awaited_merge(
     return held if edits and not edits - held.keys() else {}
 
 
-def live_drift(live: Path) -> list[str]:
+def live_drift(live: Path, canonical: str = "") -> list[str]:
     """What the live file owes the canonical copy, as the check every copy agrees on reads
-    it: `judged_drift`, and nothing at all while `awaited_merge` explains it.
+    it: `judged_drift`, and nothing at all while `awaited_merge` explains it. `canonical`
+    is the copy to read in place of this tree's own (`merged_canonical`).
 
     `workspace_drift` alone is the wrong question for a verdict. A task devkit changed
     last week reads as "definition differs" until git is asked who moved it, and past
     `HELD_DAYS` the branch stops counting, so a PR nobody merges goes red by itself.
     """
     payload = devkit_jsonc.loads(live.read_text(encoding="utf-8"))
-    problems = judged_drift(live, payload, devkit_jsonc.loads(canonical_view(live)[0]))
+    problems = judged_drift(live, payload, devkit_jsonc.loads(canonical_view(live, canonical)[0]))
     return [] if awaited_merge(problems, payload, pending_copies(live)) else problems
+
+
+def merged_canonical() -> str:
+    """`workspace.jsonc` on `origin/<default>`, or "" where git cannot say: what the live
+    file is rendered from, for a tree whose own copy may carry an un-merged edit."""
+    git = sweep.git_for(CANONICAL_WORKSPACE.parent)
+    head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    branch = (head.stdout or "").strip() if head.returncode == 0 else ""
+    shown = git("show", f"{branch or 'origin/main'}:{CANONICAL_WORKSPACE.name}")
+    return shown.stdout if shown.returncode == 0 else ""
 
 
 def stamp_path(workspace: Path) -> Path:
@@ -1800,15 +1811,16 @@ def machine_view(text: str, root: Path) -> tuple[str, list[str]]:
     return unregister(text, absent), absent
 
 
-def canonical_view(live: Path) -> tuple[str, list[str]]:
-    """`machine_view` of devkit's copy, for the workstation `live` belongs to.
+def canonical_view(live: Path, canonical: str = "") -> tuple[str, list[str]]:
+    """`machine_view` of devkit's copy, or of the `canonical` text handed in, for the
+    workstation `live` belongs to.
 
     Every comparison of the live file against the canonical copy goes through here --
     the publish, the check, the adopt, the session-start sync line and the plug
     script's early refusal -- because a comparison against the unfiltered copy reports
     every project this machine does not hold as drift, on every run, forever.
     """
-    return machine_view(canonical_text(), live.parent)
+    return machine_view(canonical or canonical_text(), live.parent)
 
 
 def left_out_line(left_out: list[str]) -> str:

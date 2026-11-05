@@ -256,9 +256,11 @@ def _local_logs(failure: Failure) -> str:
 LOCAL_RERUN = (
     f" A Local E2E run happened on this machine, from the static checkout, as python "
     f"{E2E_CONTRACT}; run that same command in the worktree you fix it in, before changing "
-    "anything and again after, and say in the intent what it printed. The PR gate does "
-    "not run these tests, so its green is no evidence about them; the scheduled local run "
-    "re-tests once the fix merges."
+    "anything and again after, and say in the intent what it printed. devkit's takes the "
+    "failing test ids as arguments: name them, since its whole tier holds this machine for "
+    "over half an hour while the scheduled jobs run. The PR gate does not run these tests, "
+    "so its green is no evidence about them; the scheduled local run re-tests once the fix "
+    "merges."
 )
 
 

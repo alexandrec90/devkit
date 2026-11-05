@@ -295,7 +295,7 @@ def send_all(
     room = host_memory.available_mb()
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
-        if why := _occupied(decision, closed):
+        if why := _held(decision, ctx, closed, items or []):
             capped.append((decision, why))
             continue
         problem = fix_ledger.problem_key(decision)
@@ -341,6 +341,13 @@ def _no_time(decision: fix_plan.Decision, left: Callable[[], float] | None) -> s
     return f"{HELD_FOR_TIME}: this pass is past its send deadline; the next pass sends it"
 
 
+def _held(
+    decision: fix_plan.Decision, ctx: fix_loop.Context, closed: fix_loop.Closed, history: list
+) -> str:
+    """Why this decision goes nowhere this pass whatever its budget says, or ""."""
+    return _occupied(decision, closed) or _untrusted(decision, ctx, history)
+
+
 def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
     """Why a session is already where this one would go, or "": the one devkit session
     at the harness, or any live session in the branch's own tree.
@@ -361,6 +368,24 @@ def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
         else None
     )
     return f"a session is working in {tree}" if tree else ""
+
+
+def _untrusted(decision: fix_plan.Decision, ctx: fix_loop.Context, history: list) -> str:
+    """Why this session would only be refused, or "": its checkout has a launch refusal
+    open and is not trusted yet. The reason names a person's step, so it is no stale wait
+    (`fix_stall.tracked`).
+
+    Each re-send cut a fresh tree and was refused the same way, and a failure with no PR
+    has no tree to find again: 94 under photolab in three days (0edfe2b4). The devkit
+    session opens its tree in devkit, whatever projects its failures name.
+    """
+    if decision.action in (*fix_plan.NO_SESSION, fix_plan.UPSTREAM):
+        return ""
+    project = decision.failures[0].project
+    checkout = ctx.root / project
+    if project not in fix_loop.awaiting_trust(history) or fix_reports.trusted(checkout):
+        return ""
+    return f"held: {fix_loop.untrusted_detail(checkout)}"
 
 
 def named_by(decision: fix_plan.Decision, fixes: tuple[tuple[int, str], ...]) -> str:

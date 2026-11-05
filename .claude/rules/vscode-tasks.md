@@ -147,13 +147,12 @@ on a task branch, ship it, and publish after it merges.
 drift as the daily line does (`devkit_project.live_drift`): every live edit on a pushed
 branch is a merge awaited, green until `HELD_DAYS` runs out.
 
-**Red there is not evidence of drift.** The live file is rendered from a *merged* canonical
-copy, so from a box on an open task branch the test reports your own unlanded edit every
-time — an added task as `missing from the workspace`, a changed one as `definition
-differs`. Another branch's edit reads the same way once its PR lands and this box has not
-merged main yet. With several boxes open that is the normal state, not a defect. What the
-live file should match is `workspace.jsonc` **as it stands on `origin/main`** — `git show`
-that revision, and the difference against your own copy is what your branch adds.
+**From a box it compares what has merged.** The live file is rendered from a *merged*
+canonical copy, so the test reads `workspace.jsonc` **as it stands on `origin/main`** there
+(`devkit_project.merged_canonical`), never the tree's own: your unlanded edit is not
+drift, and a red is the one the static checkout sees. `--check-workspace` still reads the
+tree's own copy, so from a box on an open task branch it reports your edit — an added task
+as `missing from the workspace`, a changed one as `definition differs`.
 
 **And the adopt direction is the wrong one here.** `--adopt-workspace` takes the *live*
 file — still main's render — over your canonical copy, so running it in a box to get green

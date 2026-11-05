@@ -242,6 +242,32 @@ def untrusted(said: str) -> bool:
     return UNTRUSTED_SAID in said
 
 
+# Where Claude Code keeps the answer to its trust prompt, per directory.
+CLAUDE_CONFIG = Path.home() / ".claude.json"
+
+
+def trusted(checkout: Path, config: Path | None = None) -> bool:
+    """Whether Claude Code holds a yes to its trust prompt for `checkout` or a parent.
+
+    A parent's yes covers what is under it, and an entry's own `False` is only what any
+    first visit writes, so only a yes says anything. A file that cannot say is not a yes:
+    the hold this feeds (`fix_send._untrusted`) lasts while a refusal is open, and the
+    person's documented step of resolving that group still ends it."""
+    try:
+        text = (config or CLAUDE_CONFIG).read_text(encoding="utf-8")
+        projects = json.loads(text).get("projects")
+    except (OSError, ValueError, AttributeError):
+        return False
+    if not isinstance(projects, dict):
+        return False
+    accepted = {
+        Path(key)
+        for key, entry in projects.items()
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+    }
+    return checkout in accepted or not accepted.isdisjoint(checkout.parents)
+
+
 def launch_untrusted(tree: Path) -> bool:
     """This dispatch's launcher refused the tree's checkout as untrusted (`untrusted`)."""
     record = _launch_record(tree)

@@ -147,6 +147,7 @@ def test_a_devkit_local_red_folded_upstream_is_told_how_to_reproduce_it():
     assert "devkit origin/main (local e2e) -- Local E2E failing" in text
     assert text.count(fix_prompts.LOCAL_RERUN.strip()) == 1
     assert fix_prompts.LOCAL_RERUN.strip() not in fix_prompts.upstream_prompt((failure(),), "b")
+    assert "takes the failing test ids" in text, "not a half-hour run per red, before and after"
 
 
 def test_every_prompt_ends_on_the_one_narrow_exit():
