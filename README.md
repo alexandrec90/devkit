@@ -1228,7 +1228,8 @@ The same pass reaps a session worktree (`.claude/worktrees/<name>`, and Codex's)
 merged at the tree's `HEAD`, once it is clean and no transcript has moved in it for
 twelve hours, taking down the compose project it named in its `.env` with it
 (`scripts/session_trees.py`). `worktree.py reconcile` covers only the box tier, and a fixer's
-stack otherwise outlived its PR by days. A tree holding something only an administrator
+stack otherwise outlived its PR by days. Any other stack running from the tree keeps it,
+and `logs/reap-stale.log` names that tree until the stack moves to the checkout. A tree holding something only an administrator
 may open -- pytest run elevated leaves such a `.pytest_cache` -- is not counted as a
 failure: its line in `logs/reap-stale.log` gives the command to run from an elevated
 shell. The settings sit beside

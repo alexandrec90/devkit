@@ -521,6 +521,96 @@ def test_apply_reaps_and_a_kept_tree_is_not_mentioned(tmp_path):
     assert said == []
 
 
+def _serving(checkout, one, listing_stacks: str, ps_code: int = 0):
+    """`run` for a checkout whose engine lists `listing_stacks` as running."""
+    listing = porcelain(
+        (str(checkout), "master", "000", False), (str(one.path), one.branch, "abc", False)
+    )
+    calls: list[list[str]] = []
+
+    def run(argv):
+        calls.append(argv)
+        if argv[-2:] == ["list", "--porcelain"]:
+            return done(out=listing)
+        if argv[:2] == ["docker", "ps"]:
+            return done(ps_code, out=listing_stacks)
+        return done()
+
+    return run, calls
+
+
+def _gh(one):
+    return lambda path: (
+        lambda *args: done(out=json.dumps([{"headRefName": one.branch, "headRefOid": "abc"}]))
+    )
+
+
+def test_a_stack_under_the_projects_own_name_keeps_its_merged_tree(tmp_path):
+    """74eb1164: productivity-tracker's long-lived stack was brought up from a session
+    tree, under the project's own name, so `down_stack` rightly never downs it -- and the
+    reap then removed the tree and the bind mount from under the running containers."""
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    stacks = f"carameli\t{one.path}\n"
+    run, calls = _serving(checkout, one, stacks)
+    said: list[str] = []
+
+    failures = st.sweep_checkout(checkout, True, said.append, run, _gh(one), lambda _: QUIET)
+
+    assert failures == 0
+    assert not [c for c in calls if "remove" in c or "down" in c], "tree and stack both stand"
+    assert len(said) == 1 and "kept" in said[0] and "carameli" in said[0]
+    assert st.running_stacks(one, checkout, run) == ["carameli"]
+
+
+def test_the_trees_own_stack_still_comes_down_with_it(tmp_path):
+    """The tree's own `COMPOSE_PROJECT_NAME` is the throwaway copy the reap exists to
+    remove (`carameli-fix-nightly-0919`, 1.3 GB for days), and running does not save it."""
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+    own = "carameli-fix"
+    (one.path / ".env").write_text(f"COMPOSE_PROJECT_NAME={own}\n", encoding="utf-8")
+    run, calls = _serving(checkout, one, f"{own}\t{one.path}\n")
+
+    failures = st.sweep_checkout(checkout, True, lambda _: None, run, _gh(one), lambda _: QUIET)
+
+    assert failures == 0
+    assert ["docker", "compose", "-p", own, "down", "-v"] in calls
+    assert any("remove" in call for call in calls)
+
+
+def test_only_a_stack_working_from_the_tree_holds_it(tmp_path):
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    elsewhere = f"carameli\t{checkout}\nother\t{one.path}-2\n\n"
+    run, _ = _serving(checkout, one, elsewhere)
+    assert st.running_stacks(one, checkout, run) == []
+    spelled = f"carameli\t{str(one.path).upper()}\\deploy\n"
+    run, _ = _serving(checkout, one, spelled)
+    assert st.running_stacks(one, checkout, run) == ["carameli"], "any case, or a subdirectory"
+
+
+def test_an_engine_that_cannot_list_containers_runs_no_stack(tmp_path):
+    """A stopped engine serves nothing, and asking that of every machine with no Docker
+    would otherwise keep each merged tree there for good."""
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    run, calls = _serving(checkout, one, "", ps_code=1)
+    assert st.running_stacks(one, checkout, run) == []
+    assert st.sweep_checkout(checkout, True, lambda _: None, run, _gh(one), lambda _: QUIET) == 0
+    assert any("remove" in call for call in calls)
+
+
+def test_a_status_pass_names_the_tree_a_stack_keeps(tmp_path):
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    run, _ = _serving(checkout, one, f"carameli\t{one.path}\n")
+    said: list[str] = []
+    st.sweep_checkout(checkout, False, said.append, run, _gh(one), lambda _: QUIET)
+    assert len(said) == 1 and "would reap" not in said[0] and "kept" in said[0]
+
+
 def test_an_unreadable_pr_list_keeps_everything_and_says_so(tmp_path):
     checkout, run, _gh, calls = _checkout(tmp_path)
     said: list[str] = []

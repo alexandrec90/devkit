@@ -329,6 +329,33 @@ def test_no_verify_in_a_scratch_repository_is_a_fixture_not_a_bypass():
         assert classes([call(command, "1")]) == ["no-verify"], command
 
 
+def test_a_no_verify_commit_the_same_call_takes_back_is_not_a_bypass():
+    """ded3ca52: a session carried a dirty tree over a rebase in a WIP commit -- the exact
+    call -- since the stash stack is shared. The commit never outlived its call, so no
+    hook guarded anything it skipped."""
+    carried = (
+        'git add -A; git commit -q -m "WIP e2e missing tier" --no-verify; '
+        "git rebase origin/main 2>&1 | Select-Object -Last 3; git log --oneline -3; "
+        "git reset --soft HEAD~1; git reset -q; git status --short"
+    )
+    assert classes([call(carried, "1")]) == []
+    for undo in ("git reset HEAD^", "git reset -q --soft HEAD~", "git reset --mixed @~1"):
+        assert sf.taken_back(f"git commit --no-verify -m wip && {undo}"), undo
+    assert sf.taken_back(
+        "git commit --no-verify -m a; git commit --no-verify -m b; git reset HEAD~2"
+    )
+    for command in (
+        "git commit --no-verify -m x",
+        "git reset HEAD~1; git commit --no-verify -m x",
+        "git commit --no-verify -m wip; git push; git reset --soft HEAD~1",
+        "git commit --no-verify -m wip; git commit -m real; git reset --soft HEAD~1",
+        "git push --no-verify; git reset --soft HEAD~1",
+        "git merge --no-verify topic; git reset --soft HEAD~1",
+    ):
+        assert classes([call(command, "1")]) == ["no-verify"], command
+    assert not sf.taken_back("git status"), "no --no-verify, nothing to excuse"
+
+
 def test_the_prescribed_wait_and_a_sleep_in_source_text_are_not_polls():
     """`gh pr checks --watch` is the one wait the engineering rule prescribes, and a
     test written through a heredoc naming `sleep 99` is text, not a command -- the
@@ -1896,6 +1923,43 @@ def test_a_scratch_program_reaching_for_a_package_its_tree_never_imports_is_not_
     [row] = sf.detect(events)
     assert sf.reached_past_the_tree(row, [roguelike])
     assert not sf.reached_past_the_tree(("poll", row[1], row[2]), [roguelike]), "its class only"
+
+
+def test_a_scratch_program_on_the_machines_python_never_asked_the_trees_environment(tmp_path):
+    """27c0d85a: a productivity-tracker session ran a scratchpad script under the bare
+    `python` -- the exact call -- in a `claude --worktree` tree, which builds its `.venv` on
+    its first test run. The tree imports psutil, so the import excuse did not hold; but
+    the machine's interpreter lacking it says nothing of any environment the tree is owed."""
+    ran = (
+        "$p = Get-Command python | Select-Object -First 1 -ExpandProperty Source; $p; "
+        'python -c "import psutil; print(psutil.__version__)"; '
+        f'python "{SCRATCH}\\sess.py"'
+    )
+    said = (
+        "Exit code 1\nC:\\Users\\a\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe\n"
+        'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n'
+        "    import psutil; print(psutil.__version__)\n"
+        "ModuleNotFoundError: No module named 'psutil'\n"
+    )
+    files = {"src/host.py": "import psutil\n", "pyproject.toml": "[build-system]\n"}
+    tree = _git_tree(tmp_path / "productivity-tracker", files)
+    borrowing = _git_tree(
+        tmp_path / "borrows", {"host.py": "import psutil\n", "pyproject.toml": ""}
+    )
+    assert sf.builds_its_own_venv(str(tree)) and not sf.builds_its_own_venv(str(borrowing))
+    assert not sf.builds_its_own_venv(""), "no tree to read"
+
+    def judged(command: str) -> list[str]:
+        rows = [call(command, "1"), result(said, "1")]
+        events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+        return [row[0] for row in sf.judged(events, str(tree), tmp_path)]
+
+    assert classes([call(ran, "1"), result(said, "1")]) == ["environment"], "the premise"
+    assert judged(ran) == []
+    assert judged(f'python "{SCRATCH}\\sess.py"') == [], "the script alone"
+    assert judged("python -m pytest tests/test_host.py") == ["environment"], "not throwaway"
+    own = '.venv/Scripts/python.exe -c "import psutil; psutil.cpu_count()"'
+    assert judged(own) == ["environment"], "its own interpreter"
 
 
 def _bash_spelling(path: Path) -> str:

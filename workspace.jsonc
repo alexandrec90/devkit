@@ -1319,7 +1319,7 @@
 			// second ticked checkout could only queue behind the first or collide with it.
 			{
 				"label": "IBKR: Open Trader UI",
-				"detail": "Build the frontend if it is stale, then serve ibkr_trader's local web UI on 127.0.0.1:8001 (UI_PORT in .env overrides) and open the browser. Runs until you close the terminal; its database pages are empty unless the db container is up.",
+				"detail": "Build the frontend if it is stale, then serve ibkr_trader's local web UI on 127.0.0.1:8001 (UI_PORT in .env overrides) and open the browser. Runs until you close the terminal; ibkr_trader's scripts/ui-task.py says what else it needs.",
 				"type": "process",
 				"command": "python",
 				"args": [
