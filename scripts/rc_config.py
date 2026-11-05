@@ -162,11 +162,13 @@ def host_key(typed: str) -> str:
     return harness_events.host_slug(typed.strip().split(".")[0])
 
 
-def _hosts(value: object) -> tuple[tuple[str, str], ...]:
+def parse_hosts(value: object) -> tuple[tuple[str, str], ...]:
     """`hosts` as pairs. A bare string is the one-machine shorthand for `{"*": name}`.
 
     An entry that names no usable host is dropped, which leaves its project unassigned
     and so served nowhere -- the same direction every other malformed value here falls.
+    Public because `devkit.localE2e` assigns its nightly run to a machine the same way
+    (`e2e-pass.py`): one spelling of "which PC does this" across the workspace file.
     """
     if isinstance(value, str):
         value = {ANY_PROJECT: value}
@@ -247,7 +249,7 @@ def parse_config(text: str) -> Config:
         # power-saving mode nobody asked for starts destroying sessions.
         power_saving=raw.get("powerSaving") is True,
         away_minutes=_positive_int(raw.get("awayMinutes"), DEFAULT_AWAY_MINUTES),
-        hosts=_hosts(raw.get("hosts")),
+        hosts=parse_hosts(raw.get("hosts")),
     )
 
 
@@ -277,7 +279,9 @@ def host_for(config: Config, project: str) -> str:
     return hosts.get(project, hosts.get(ANY_PROJECT, ""))
 
 
-def assigned_here(config: Config, names: Sequence[str], host: str) -> tuple[list[str], list[str]]:
+def assigned_here(
+    config: Config, names: Sequence[str], host: str, verb: str = "served"
+) -> tuple[list[str], list[str]]:
     """`(here, elsewhere)` -- the projects this machine serves, and a line for each it
     leaves to another one (or to none).
 
@@ -285,6 +289,7 @@ def assigned_here(config: Config, names: Sequence[str], host: str) -> tuple[list
     project another machine serves is this one working as configured. They are still
     written, because a mistyped host serves nothing on every machine, and the artifact
     naming the host it waited for is how that reads differently from a quiet desk.
+    `verb` is what the lines say the machine does with a project: `e2e-pass.py` tests.
     """
     if not config.hosts:
         return list(names), []
@@ -295,9 +300,9 @@ def assigned_here(config: Config, names: Sequence[str], host: str) -> tuple[list
         if owner == host:
             here.append(name)
         elif owner:
-            elsewhere.append(f"{name}: served by {owner}, not here ({host})")
+            elsewhere.append(f"{name}: {verb} by {owner}, not here ({host})")
         else:
-            elsewhere.append(f"{name}: no machine assigned in `hosts` -- served nowhere")
+            elsewhere.append(f"{name}: no machine assigned in `hosts` -- {verb} nowhere")
     return here, elsewhere
 
 

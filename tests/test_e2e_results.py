@@ -49,6 +49,21 @@ def test_a_red_run_naming_no_test_is_signed_by_its_exit_code_never_empty():
     assert not fix_plan.names_nothing(sig)
 
 
+def test_a_missing_tier_is_its_own_signature_and_one_the_plan_reads(tmp_path):
+    """Stable, so the ledger dedupes it per commit; named, so the plan does not hold it as
+    unread; and told apart from a red run's, so the prompt asks for a tier."""
+    assert e2e_results.is_missing((e2e_results.MISSING,))
+    assert not e2e_results.is_missing(("tests/t.py::test_a",))
+    assert not e2e_results.is_missing((e2e_results.MISSING, "tests/t.py::test_a"))
+    assert not fix_plan.names_nothing((e2e_results.MISSING,))
+    assert not fix_plan.is_vendored((e2e_results.MISSING,))
+    red = e2e_results.Result(
+        "roguelike", e2e_results.FAILED, sha="abc", signature=(e2e_results.MISSING,)
+    )
+    failure = e2e_results.to_failure(red, "abc", tmp_path)
+    assert failure is not None and failure.signature == (e2e_results.MISSING,)
+
+
 def test_a_result_round_trips_through_its_file(tmp_path):
     path = e2e_results.write(red(), tmp_path)
     assert path == tmp_path / "logs" / "e2e" / "carameli" / "result.json"

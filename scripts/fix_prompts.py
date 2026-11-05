@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
 from e2e_results import CONTRACT as E2E_CONTRACT
+from e2e_results import is_missing
 from fix_plan import (
     ALERT_ENTRY,
     COMMIT,
@@ -537,14 +538,42 @@ def local_prompt(failure: Failure, branch: str) -> str:
     """A default branch red in the scheduled local end-to-end run: fix on a fresh branch.
 
     `fix_plan.is_stale_local` holds a run older than the tip, so the run was at the tip
-    this tree was cut from, and the failure reproduces here.
+    this tree was cut from, and the failure reproduces here. A project with no tier at
+    all (`e2e_results.MISSING`) is sent to write one instead.
     """
+    if is_missing(failure.signature):
+        return _framed(missing_tier(failure, branch))
     return _framed(
         f"The {failure.workflow} run in {failure.project} -- the tests no hosted runner can "
         f"run, run on this machine -- is red on origin/{failure.base} at "
         f"{failure.sha[:12] or 'its head'}. Failing: {_ids(failure.signature)}. "
         f"{_logs(failure)} This worktree is on the fresh branch {branch} off "
         f"origin/{failure.base}. Fix what the run is failing on. {FINISH}"
+    )
+
+
+LOCAL_E2E_RULE = ".claude/rules/local-e2e.md"
+
+
+def missing_tier(failure: Failure, branch: str) -> str:
+    """The body of a fixer's prompt for a project that owes a local end-to-end tier.
+
+    No quotes or backticks, for `_unfetchable_note`'s reason: the prompt crosses a `wt`
+    command line.
+    """
+    return (
+        f"{failure.project} has no local end-to-end tier: origin/{failure.base} at "
+        f"{failure.sha[:12] or 'its head'} carries no {E2E_CONTRACT}, so the tests no hosted "
+        "runner can run -- a browser, the Docker stack, a credential, a GUI, live services "
+        "-- run nowhere, and every project owes them. Write the tier as "
+        f"{LOCAL_E2E_RULE} says; if that rule is not in this tree, run python "
+        "scripts/sync-devkit.py --pull first. Put the tests that need this machine behind "
+        "a marker the default run deselects, add a real end-to-end test where there is "
+        f"none, and write {E2E_CONTRACT} to run exactly that tier. Then run python "
+        f"{E2E_CONTRACT} here and say in the intent what it printed; a red it finds that "
+        "is not a mistake in the tier itself is for the next night to send a fixer at, "
+        f"not for this change. This worktree is on the fresh branch {branch} off "
+        f"origin/{failure.base}. {FINISH}"
     )
 
 

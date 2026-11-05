@@ -26,10 +26,15 @@ reached a verdict, and the verdict travels here.
 **The CLI contract a project owes** is `scripts/e2e.py`: exit 0 green, anything else
 red, run with the checkout as the cwd. Name each failing test the way pytest's short
 summary does (`FAILED tests/x.py::test_y`) -- that is what the signature is read from,
-and a run that names nothing is signed by its exit code alone. A project without the
-script has no end-to-end tier, which is a skip by design (`engineering.md`). A run that
-executed nothing must not exit 0: that is the script's to enforce, as devkit's own
+and a run that names nothing is signed by its exit code alone. A run that executed
+nothing must not exit 0: that is the script's to enforce, as devkit's own
 `scripts/e2e.py` does.
+
+**Every project owes the script, so its absence is red too** (`MISSING`). A missing tier
+used to be a skip by design, which is the state the tier exists to end: every project
+has tests only this machine can run, and a skip reads as green. So a project whose
+`origin/<default>` carries no `scripts/e2e.py` is recorded red with the one signature
+`MISSING`, and the fix pass sends its fixer to write the tier (`fix_prompts.local_prompt`).
 
 Stdlib plus `fix_plan`. Tested in `tests/test_e2e_results.py`.
 """
@@ -60,6 +65,10 @@ CONTRACT = "scripts/e2e.py"
 # How a `LOCAL` failure names its source in the plan and the prompt, where a gate's
 # failure names its workflow.
 WORKFLOW = "Local E2E"
+
+# The whole signature of a project with no tier: one stable line, so the ledger dedupes
+# it per commit like any red, and the prompt can tell "write the tier" from "fix it".
+MISSING = f"{CONTRACT} is missing: no local end-to-end tier"
 
 PASSED = "passed"
 FAILED = "failed"
@@ -97,6 +106,11 @@ def venv_interpreter(root: Path, fallback: str) -> str:
     """`root`'s own `.venv` interpreter, else `fallback`: what a contract script runs under."""
     found = next((root / rel for rel in VENV_INTERPRETERS if (root / rel).is_file()), None)
     return str(found) if found is not None else fallback
+
+
+def is_missing(signature: Iterable[str]) -> bool:
+    """True when `signature` is a missing tier's rather than a red run's."""
+    return tuple(signature) == (MISSING,)
 
 
 def result_dir(project: str, root: Path = REPO_ROOT) -> Path:
