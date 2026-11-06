@@ -2455,6 +2455,30 @@ def test_a_bounded_run_ends_a_grandchild_holding_its_pipes():
     assert done.returncode == sweep.TIMED_OUT and "timed out after 2s" in done.stderr
 
 
+def test_a_command_is_over_when_it_exits_whatever_child_it_left_holding_its_output():
+    """A pipe stays open while anything holds its write end, so `run_bounded` reads a
+    command that started a server and exited 0 as a hang until its timeout."""
+    child = "import time; time.sleep(8)"
+    leaves = (
+        "import subprocess, sys; print('started'); sys.stdout.flush(); "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+        "stdout=sys.stdout, stderr=sys.stderr)"
+    )
+    started = time.monotonic()
+    done = sweep.run_to_files([sys.executable, "-c", leaves], 30)
+    assert time.monotonic() - started < 6
+    assert done.returncode == 0 and "started" in done.stdout
+
+
+def test_a_command_still_running_at_its_timeout_is_ended_with_what_it_said():
+    hang = "import time; print('working', flush=True); time.sleep(60)"
+    started = time.monotonic()
+    done = sweep.run_to_files([sys.executable, "-c", hang], 2)
+    assert time.monotonic() - started < 30
+    assert done.returncode == sweep.TIMED_OUT and "timed out after 2s" in done.stderr
+    assert "working" in done.stdout
+
+
 def test_until_ends_a_call_at_its_deadline_whatever_the_call_allows():
     """2e2e7804: a fix-pass step made `gh` calls each bounded at 600 s, and the step ran
     past the watchdog's stop. Inside `until`, the deadline ends the call -- a local git

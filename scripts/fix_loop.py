@@ -46,6 +46,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import after_merge
 import bg_sessions
 import collector_tasks
 import collectors
@@ -366,6 +367,11 @@ def judge_dead(
     login or an untrusted checkout is filed once, for a person, and not as the fixer's;
     the lines for the record."""
     key = str(tree.stamp.get("key", ""))
+    if key.startswith(after_merge.SESSION_KEY):
+        # The queue's attempts, not this ledger's: the pass reads its own trees back on the
+        # machine that holds them, whatever `devkit.fixPass` says there. Nothing here could
+        # re-send one, and a record saying so would lose the task.
+        return [f"{where} -- {state}; the after-merge queue offers it again"]
     if ctx.writes:
         fix_reports.note_on_stamp(tree.path, "dead", state)
     if state in (fix_reports.INTERRUPTED, fix_reports.LOGGED_OUT, fix_reports.UNTRUSTED):

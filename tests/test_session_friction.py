@@ -18,6 +18,7 @@ import pytest
 from support import REPO_ROOT
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import fix_reports
 import session_friction as sf
 import session_transcripts as st
 
@@ -1795,6 +1796,211 @@ def test_a_dispatched_session_ending_on_a_decision_for_someone_else_is_friction(
     assert classes(working) == [], "a harvest mid-session: it went on working"
     asked = [opening, say("This needs your decision."), _tool("AskUserQuestion", "2")]
     assert classes(asked) == ["asked-user", "handed-back"]
+
+
+# Real endings, each read off a session on this machine. The detector's job is to file the
+# first list and none of the second, so a change to it is measured against both.
+TO_DOS = (
+    "## What you need to do",
+    "**One thing you need to do:** run `claude` in `C:/x` once and accept the trust prompt.",
+    "**What you need to do:** run `Restart-Service WslService -Force`, or reboot.",
+    "- **You need to act:** WSL on this machine is still hung.",
+    "One thing needs your action: production has to be migrated by hand (see the end).",
+    "The one other group needs you to run `claude auth login` on this machine.",
+    "Run `uv sync` on each PC, because there's a new Windows dependency.",
+    "Once it merges, tell the devkit session to ship and publish it.",
+    "Once it merges and the live file is updated, reload the window to pick it up.",
+    "So once PR #115 merges, the tables won't exist until you run `alembic upgrade` yourself.",
+    "Your defects only reach this pass once you run one command on each machine.",
+    "You'll need to rebuild the image after this lands.",
+)
+NOT_TO_DOS = (
+    "Nothing is committed yet, so run `/ship` when you're happy with it.",
+    "Run `/ship auto` if you want this one to merge itself once green.",
+    "The fix pass will commit it and open the PR, which waits for you to merge it.",
+    "It isn't set to merge on its own, so you'll need to review and merge it.",
+    "Nothing for you to run: the next pass picks it up.",
+    "Run `docker desktop restart` yourself if you need containers back sooner.",
+    "If you want it automatic, the cleanest fix is to apply migrations on start.",
+    "I ran `docker desktop restart` once by hand; the engine came back.",
+    "`test_devkit_ports.py` had to be run by hand.",
+    "- **`requirements-dev.txt`:** regenerated with the script, not edited by hand.",
+    "I was wrong to tell you to restart it by hand.",
+    "| **`bare`** (unchanged) | A tool you run yourself | Harness and CI only. |",
+    "Once this merges, #438 is left with only its `happy-dom` patch.",
+    "Once this merges, the pass will try a Docker restart on its own.",
+    "A run by hand, or a bad timestamp, falls back to the process start as before.",
+    "You don't need to run anything after this merges.",
+    # A report of a to-do someone else had said, which is what a session sent at a
+    # `left-to-do` row writes; filed, each would send a session at its own report.
+    "Retired the group: the session had said 'You need to run the migration', and I ran it.",
+    'The left-to-do row quoted "you need to restart the service"; done here, intent left.',
+    "Did the job the row named (once this merges, run scripts/x.py) myself.",
+    "Nothing else. The ledger row said: until you run install-foo.py nothing works.",
+    "The old doc said you need to run X by hand; I removed that sentence.",
+)
+
+
+@pytest.mark.parametrize("ending", TO_DOS)
+def test_a_session_ending_on_a_job_for_the_person_is_filed(ending):
+    """Nothing may depend on the operator remembering, and they forget: the job goes to a
+    session instead, whatever else the message said around it."""
+    assert sf.left_to_do(f"The fix is in.\n\n{ending}\n\nThat is all.") == ending
+    assert classes([user("go"), say(ending)]) == ["left-to-do"]
+
+
+@pytest.mark.parametrize("ending", NOT_TO_DOS)
+def test_a_session_ending_on_anything_else_is_not(ending):
+    """A crude pattern matched 54 of 393 endings, and every false one costs a session."""
+    assert sf.left_to_do(ending) == ""
+    assert classes([user("go"), say(ending)]) == []
+
+
+@pytest.mark.parametrize(
+    "opening",
+    [
+        "Fix it. Then ship: the fix pass commits, pushes, opens or updates the PR",
+        "You are a fixer session, dispatched by the fix pass. Read .claude/fixer.md first",
+    ],
+)
+def test_a_session_the_pass_dispatched_is_not_filed_for_its_ending(opening):
+    """It already answers to the pass: a blocked file or a finding is where its job goes,
+    and a person's step it names is on the ledger, so this would send a session at that."""
+    assert classes([user(opening), say("You need to run `make db`.")]) == []
+
+
+def test_a_tree_the_pass_cut_is_not_filed_for_its_ending(tmp_path, monkeypatch):
+    """The opening message can be gone from the chunk being read; the tree's mark is not."""
+    monkeypatch.setattr(sf, "queue_file_in_tree", lambda cwd: False)
+    events = [st.Event("say", 1, "You need to run `make`.")]
+    assert [row[0] for row in sf.judged(events, str(tmp_path), tmp_path)] == ["left-to-do"]
+    (tmp_path / sf.ORIGIN_FILE).parent.mkdir(parents=True)
+    (tmp_path / sf.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+    assert sf.judged(events, str(tmp_path), tmp_path) == []
+
+
+def test_the_mark_read_is_the_one_the_pass_writes():
+    assert sf.ORIGIN_FILE == fix_reports.ORIGIN_FILE
+
+
+def test_a_fenced_command_is_the_jobs_body_not_a_second_job():
+    text = "Here is how it ran:\n```\nyou need to run this\n```\nAll done."
+    assert sf.left_to_do(text) == ""
+    assert (
+        sf.left_to_do("Run it\n```\nx\n```\nYou need to run `make`.") == "You need to run `make`."
+    )
+
+
+def test_a_session_that_queued_the_job_may_say_so():
+    """The whole of what the ship skill asks. Written through Edit or the shell alike."""
+    ending = say("Run `uv sync` on each PC, because of a new dependency.")
+    wrote = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "1",
+                    "name": "Write",
+                    "input": {"file_path": "C:/x/.devkit-queue/sync.toml", "content": "x"},
+                }
+            ]
+        },
+    }
+    assert classes([user("go"), wrote, ending]) == []
+
+
+def test_a_job_handed_over_mid_session_is_not_how_it_ended():
+    working = [user("go"), say("You need to run `make`."), call("make", "1")]
+    assert classes(working) == []
+
+
+def test_each_job_files_under_its_own_words_so_a_second_is_not_dropped():
+    """The ledger files one open row per detail: two jobs under one detail is one job lost."""
+    first = sf.detect([st.Event("say", 1, "You need to run `make db`.")])
+    second = sf.detect([st.Event("say", 1, "You need to run `make web`.")])
+    assert first[0][1] != second[0][1] and first[0][0] == second[0][0] == "left-to-do"
+
+
+def test_a_queue_file_changed_in_the_tree_excuses_the_ending(tmp_path):
+    def listed(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, "?? .devkit-queue/x.toml\n", "")
+
+    def clean(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def gone(argv, **_kwargs):
+        raise OSError("no git")
+
+    assert sf.queue_file_in_tree(str(tmp_path), listed)
+    assert not sf.queue_file_in_tree(str(tmp_path), clean)
+    assert not sf.queue_file_in_tree(str(tmp_path), gone)
+
+
+def test_a_tree_holding_the_queue_file_is_read_by_the_judgement(tmp_path, monkeypatch):
+    events = [st.Event("say", 1, "You need to run `make`.")]
+    monkeypatch.setattr(sf, "queue_file_in_tree", lambda cwd: True)
+    assert sf.judged(events, str(tmp_path), tmp_path) == []
+    monkeypatch.setattr(sf, "queue_file_in_tree", lambda cwd: False)
+    assert [row[0] for row in sf.judged(events, str(tmp_path), tmp_path)] == ["left-to-do"]
+
+
+def _todo_session(tmp_path: Path, text: str) -> Path:
+    workspace = tmp_path / "ws"
+    return transcript(
+        tmp_path / "projects" / "ws-carameli" / "s.jsonl",
+        [user("go"), say(text)],
+        str(workspace / "carameli"),
+    )
+
+
+def _carry_on(session: Path, row: dict) -> None:
+    with session.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({**row, "cwd": "x"}) + "\n")
+
+
+def test_a_to_do_is_filed_once_its_transcript_has_stayed_quiet(tmp_path):
+    """A live session's last words read just like an ending."""
+    session = _todo_session(tmp_path, "You need to run `make db`.")
+    cursor = tmp_path / "cursor.json"
+    assert sf.harvest(tmp_path / "ws", cursor, NOW, [session]) == []
+    soon = NOW + sf.ENDING_QUIET - _dt.timedelta(minutes=1)
+    assert sf.harvest(tmp_path / "ws", cursor, soon, [session]) == []
+    [found] = sf.harvest(tmp_path / "ws", cursor, NOW + sf.ENDING_QUIET, [session])
+    assert found.kind == "left-to-do" and found.project == "carameli"
+    assert "make db" in found.detail
+    assert found.command.startswith("said in ") and "make db" in found.command
+    assert sf.harvest(tmp_path / "ws", cursor, NOW + 2 * sf.ENDING_QUIET, [session]) == [], "once"
+
+
+def test_a_to_do_the_session_went_on_from_is_dropped(tmp_path):
+    session = _todo_session(tmp_path, "You need to run `make db`.")
+    cursor = tmp_path / "cursor.json"
+    sf.harvest(tmp_path / "ws", cursor, NOW, [session])
+    _carry_on(session, user("no, do it yourself"))
+    assert sf.harvest(tmp_path / "ws", cursor, NOW + sf.ENDING_QUIET, [session]) == []
+    later = NOW + 3 * sf.ENDING_QUIET
+    assert sf.harvest(tmp_path / "ws", cursor, later, [session]) == []
+
+
+def test_held_ending_keeps_the_newest_job_and_files_nothing_else_late():
+    job = sf.fix_findings.Finding("left-to-do", "p", "run x", event="session-friction")
+    other = sf.fix_findings.Finding("poll", "p", "slept", event="session-friction")
+    filed, held = sf.held_ending({}, [job, other], True, NOW)
+    assert filed == [other] and held and held["finding"]["detail"] == "run x"
+    assert sf.held_ending({"ending": held}, [], False, NOW) == ([], held)
+    assert sf.held_ending({"ending": held}, [], True, NOW + sf.ENDING_QUIET) == ([], None)
+    assert sf.held_ending({"ending": held}, [], False, NOW + sf.ENDING_QUIET) == ([job], None)
+
+
+def test_a_to_do_held_survives_a_line_that_is_nobodys_words(tmp_path):
+    """`claude stop` appends rows no event comes of, to a session already over."""
+    session = _todo_session(tmp_path, "You need to run `make db`.")
+    cursor = tmp_path / "cursor.json"
+    sf.harvest(tmp_path / "ws", cursor, NOW, [session])
+    _carry_on(session, {"type": "last-prompt"})
+    [found] = sf.harvest(tmp_path / "ws", cursor, NOW + sf.ENDING_QUIET, [session])
+    assert found.kind == "left-to-do"
 
 
 def test_the_same_test_run_three_times_with_no_edit_between_is_a_rerun():

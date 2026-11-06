@@ -151,6 +151,7 @@ ARTIFACTS: dict[str, str] = {
     "devkit-fix-pass": "logs/fix-pass.log",
     "devkit-collectors": "logs/collectors.log",
     "devkit-local-e2e": "logs/scheduled-local-e2e.log",
+    "devkit-after-merge": "logs/scheduled-after-merge.log",
 }
 
 

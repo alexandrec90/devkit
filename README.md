@@ -898,6 +898,17 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
 | `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, behind `devkit.fixPass` | `logs/fix-pass.log` |
 | `devkit-collectors` | `scripts/install-collectors.py` | every 15 min, and at logon; acts only where `run-here`/`stop-here` assigned | `logs/collectors.log` |
+| `devkit-after-merge` | `scripts/install-after-merge-schedule.py` | every 5 min, on every PC | `logs/scheduled-after-merge.log`, each task under `logs/after-merge/` |
+
+#### What happens after a merge, with nobody remembering
+
+A session that needs something done later commits a task file in `.devkit-queue/`, in the
+PR that needs it: when it is due, which machine takes it, and a command, a session prompt
+or an elevated verb. `devkit-after-merge` reads every project's queue off
+`origin/<default>` on every PC, one PC claims each task with a ref on GitHub
+(`scripts/job_claims.py`), and a failure goes to an agent rather than to a log.
+`scripts/after-merge-pass.py status` says what is due and what this machine would do.
+The format is the ship skill's last section; the decisions are `scripts/after_merge.py`.
 
 #### The one installer you run by hand
 
