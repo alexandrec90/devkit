@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import tomllib
 from pathlib import Path
 
 import support
@@ -42,6 +43,17 @@ def test_the_report_is_read_into_ids_pytest_s_summary_would_print(tmp_path):
         ),
         e2e.Case("tests/test_c.py::TestD::test_broke", "failed", "fixture blew up"),
     ]
+
+
+def test_the_marker_says_the_tier_is_deselected_not_skipped():
+    """`addopts` is what keeps the tier out of a default run. A marker saying "skipped"
+    sent a project's fixer to write a skip the structural ratchet then refused."""
+    config = tomllib.loads((support.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    pytest_config = config["tool"]["pytest"]["ini_options"]
+    assert f"not {e2e.MARKER}" in pytest_config["addopts"]
+    described = next(m for m in pytest_config["markers"] if m.startswith(f"{e2e.MARKER}:"))
+    assert "deselected" in described
+    assert "skipped" not in described
 
 
 def test_an_unreadable_report_is_no_cases(tmp_path):

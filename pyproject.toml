@@ -60,7 +60,7 @@ markers = [
   "claude_live: paid opt-in smoke tests that launch an authenticated Claude Code CLI session",
   "codex_live: paid opt-in smoke tests that launch an authenticated Codex CLI session",
   "paid: tests that may consume paid live infrastructure and are excluded by default",
-  "local: needs this workstation, not a runner; run nightly by scripts/e2e.py, skipped where it cannot run",
+  "local: needs this workstation, not a runner; deselected by addopts, run nightly by scripts/e2e.py",
 ]
 
 [tool.mypy]
