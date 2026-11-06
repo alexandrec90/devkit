@@ -12,7 +12,8 @@ split into the ones every installer owes and the ones only a job does.
 
 So the properties are asserted for every installer at once, found rather than listed:
 
-1. `installers.py` discovers it, so the scheduled pass reaches it.
+1. `installers.py` discovers it, so the scheduled pass reaches it -- bar the one in
+   `ELEVATED_EXEMPTION`, which no unelevated pass can install.
 2. It answers `--check` and `--yes`, and `--check` answers 1 when nothing is registered.
 3. If it registers a job, it says which group that job belongs to, it checks through the
    one shared implementation, and it consults the ledger so a stood-down job lands
@@ -30,7 +31,7 @@ import re
 from xml.sax.saxutils import unescape
 
 import pytest
-from support import REPO_ROOT, load_script
+from support import ELEVATED_EXEMPTION, REPO_ROOT, load_script
 
 installers = load_script("scripts/installers.py")
 switch = load_script("scripts/harness-switch.py")
@@ -58,7 +59,15 @@ def test_there_are_installers_to_hold_to_this():
 
 
 def test_every_installer_is_discovered_by_the_pass():
-    assert [p.name for p in installers.discover(REPO_ROOT)] == IDS
+    """Every one but `ELEVATED_EXEMPTION`, which needs an administrator this pass is not."""
+    assert [p.name for p in installers.discover(REPO_ROOT)] == [
+        name for name in IDS if name not in ELEVATED_EXEMPTION
+    ]
+
+
+def test_the_pass_holds_out_exactly_the_elevated_exemption():
+    assert installers.HELD_OUT == set(ELEVATED_EXEMPTION)
+    assert all(reason.strip() for reason in ELEVATED_EXEMPTION.values())
 
 
 @pytest.mark.parametrize("name", IDS)
@@ -188,6 +197,20 @@ def test_every_job_is_registrable_without_elevation(name, module, monkeypatch):
     assert "<BootTrigger>" not in registered, name
     for trigger in re.findall(r"<LogonTrigger>.*?</LogonTrigger>", registered, re.S):
         assert "<UserId>" in trigger, name
+    # A principal at the highest level is the third shape only an administrator may
+    # register. This installer is the one exemption, and its reason is beside its name.
+    assert ("<RunLevel>HighestAvailable" in registered) == (name in ELEVATED_EXEMPTION), name
+
+
+def test_only_the_exempt_installer_can_spell_an_elevated_task():
+    """Read off every script rather than off what each `--check` happens to build, so a
+    helper that gained the spelling, or a task built some other way, fails here too."""
+    spelled = {
+        path.name
+        for path in (REPO_ROOT / "scripts").rglob("*.py")
+        if "HighestAvailable" in path.read_text(encoding="utf-8")
+    }
+    assert spelled == set(ELEVATED_EXEMPTION)
 
 
 # --- every failure of every job reaches the ledger ------------------------------------
@@ -213,6 +236,11 @@ OFF_THE_LEDGER: dict[str, str] = {
         "outcomes already on the ledger, so a wrapper filed each a second time under a "
         "generic group. Its own crash, the one thing neither files, is a failed run of an "
         "unwrapped job, which fix_loop.job_findings files off the scheduler"
+    ),
+    "devkit-elevated": (
+        "runs nothing from a checkout, as support.ELEVATED_EXEMPTION says, and log-wrap.py "
+        "is checkout code. A failed run exits non-zero, which fix_loop.job_findings files "
+        "off the scheduler, and the account is the worker's own log"
     ),
 }
 

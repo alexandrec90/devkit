@@ -13,8 +13,9 @@ workstation two jobs had never been registered, and nothing anywhere could say s
 So this asks every installer the one question they all answer -- `--check`, exit 0
 current, 1 needs (re)installing, 2 left alone -- and in `maintain` mode runs `--yes` on
 each one that answered 1. It is itself a scheduled job (`install-installers-schedule.py`
-registers it, daily and at logon), which makes that installer the one a machine ever
-needs run by hand, and only once.
+registers it, daily and at logon), which makes that installer the one a machine needs run
+by hand, and only once. `HELD_OUT` is the single exception: the elevated worker's
+installer needs an administrator, which this unelevated pass is not.
 
 **Which checkout.** Always the static one (`sweep.source_checkout`), whatever checkout
 this file is run from: the registered command lines name the static checkout's scripts,
@@ -86,6 +87,11 @@ SETTING = "devkit.installers"
 # Found, never listed: a new installer is in scope the moment the file exists, which is
 # the property `tests/test_installer_contract.py` holds every installer to.
 INSTALLER_GLOB = "scripts/install-*.py"
+# Found by that glob and not driven, by name, with the reason. Its `--yes` takes an
+# administrator, so from this pass it could only ever fail, every day, on every PC, and
+# `uninstall` could only refuse it. `fix_elevated.py` is what asks after it: a person
+# installs it, and the morning list says when one needs to.
+HELD_OUT = frozenset({"install-elevated-worker.py"})
 
 # Per installer. Generous because `install-git-policy.py --yes` reads a tag out of git
 # and the docker installers may wait on `schtasks` behind a busy scheduler; still finite,
@@ -141,8 +147,8 @@ class Outcome:
 
 
 def discover(root: Path) -> list[Path]:
-    """Every installer under `root`, in name order so the report is stable."""
-    return sorted(root.glob(INSTALLER_GLOB))
+    """Every installer under `root` bar `HELD_OUT`, in name order so the report is stable."""
+    return sorted(path for path in root.glob(INSTALLER_GLOB) if path.name not in HELD_OUT)
 
 
 def task_name(script: Path) -> str:
@@ -343,7 +349,7 @@ def decommission(
 def stood_down_without_installer(names: frozenset[str], root: Path) -> list[str]:
     """Ledger entries no installer here registers -- a job renamed or retired after it
     was stood down, which nothing else would ever mention again."""
-    known = {task_name(script) for script in discover(root)}
+    known = {task_name(script) for script in root.glob(INSTALLER_GLOB)}
     return sorted(name for name in names if name not in known)
 
 

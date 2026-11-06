@@ -185,6 +185,28 @@ log. Four things a change must keep:
   user; `devkit_schtasks.secured` names the user, and
   `tests/test_installer_contract.py` fails a document that would need elevation.
 
+**One job is the exception to that rule and to "scheduled jobs run unelevated", and there
+can only be one.** `devkit-elevated` (`install-elevated-worker.py`) is
+`support.ELEVATED_EXEMPTION`, reason beside it: restarting WSL's and Docker's services is
+refused to every unelevated token, and a dispatcher running tasks as admin would run
+merged code as admin. A second elevated job is a design change, not a second entry; the
+contract test holds `HighestAvailable` to that one file. What a change there must keep,
+because each looks like the house pattern and is a privilege escalation here:
+
+- **Nothing elevated comes from a folder the user can write.** Not the checkout, and not
+  the interpreter, which sits under the user's `AppData` on a typical PC: both are copied
+  to `C:\ProgramData\devkit\elevated\`, so upgrading the worker is an administrator
+  re-running `--yes`. `elevated_request.state` reports a copy the repo has moved past,
+  and `fix_elevated.py` puts it on the morning list. It stays out of `installers.py`
+  (`HELD_OUT`), which runs unelevated.
+- **Not `secured`, not `logged`.** `secured` grants the user full access to the task,
+  which on an elevated task lets them rewrite its action; `logged` would run `log-wrap.py`
+  from the checkout as admin. Its document carries a read-only descriptor, it is
+  `OFF_THE_LEDGER`, and its artifact is the one outside `logs/`.
+- **The name of an empty file is the whole interface** (`elevated_worker.py`): no content
+  read, no argument, nothing from the environment, which here is the user's. It is
+  Windows-only, and elsewhere each part says so and exits 0.
+
 Every installer declares `TASK_NAME` and `ARTIFACT`, because `pythonw.exe` sends stdout
 nowhere and a job leaves exactly what it writes itself;
 [`tests/test_scheduled_jobs.py`](../tests/test_scheduled_jobs.py) fails one that skips
@@ -192,12 +214,12 @@ either. **And every job's arguments go through `devkit_schtasks.logged`**, which
 them under `log-wrap.py --always` -- a runner that writes its own artifact included,
 because that artifact is overwritten by the next run and the wrapper's ledger event is
 not. Its label must not slug to the runner's own artifact. The exemptions -- the
-resident tray, and the fix pass, whose runner files its own -- are `OFF_THE_LEDGER` in
-`tests/test_installer_contract.py`, each with its reason.
+resident tray, the fix pass, whose runner files its own, and the elevated worker -- are
+`OFF_THE_LEDGER` in `tests/test_installer_contract.py`, each with its reason.
 
 **An installer is driven, not remembered.** `scripts/installers.py` runs every
-`scripts/install-*.py`'s `--check` on a schedule and `--yes` on each that needs it, so
-an installer is only as good as its answer to `--check`: exit 0 current, 1 needs
+`scripts/install-*.py`'s `--check` on a schedule, bar `HELD_OUT`, and `--yes` on each that
+needs it, so an installer is only as good as its answer to `--check`: exit 0 current, 1 needs
 (re)installing, 2 left alone. Answer it through `devkit_schtasks.run_check`, handing it
 the same document `--yes` registers, never a private parse of `schtasks` output — six
 installers each carried one, all six compared only the script path, and none could see

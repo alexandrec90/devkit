@@ -8,7 +8,9 @@ reap can never remove that tree; `session_trees.admin_only` names each such tree
 elevated command that clears it. Seven were cut between 2026-09-15 and 2026-09-29, and
 cleared by hand on 2026-10-02.
 
-Since then nothing runs elevated, so one created after `UNELEVATED_SINCE` is not routine:
+Since then nothing that writes an agent tree runs elevated (`elevated_worker.py` does run
+elevated, and writes only under `C:\\ProgramData\\devkit`), so one created after
+`UNELEVATED_SINCE` is not routine:
 something started elevated again. A launcher, a scheduled task, a terminal profile -- and
 naming the tree alone would leave the cause standing. So each new one is filed as an
 `elevated-write` finding on the harness-defect ledger, and the fix pass sends the devkit
