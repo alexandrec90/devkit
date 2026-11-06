@@ -187,22 +187,32 @@ log. Four things a change must keep:
 
 **One job is the exception to that rule and to "scheduled jobs run unelevated", and there
 can only be one.** `devkit-elevated` (`install-elevated-worker.py`) is
-`support.ELEVATED_EXEMPTION`, reason beside it: restarting WSL's and Docker's services is
-refused to every unelevated token, and a dispatcher running tasks as admin would run
-merged code as admin. A second elevated job is a design change, not a second entry; the
-contract test holds `HighestAvailable` to that one file. What a change there must keep,
-because each looks like the house pattern and is a privilege escalation here:
+`support.ELEVATED_EXEMPTION`, reason beside it: ending a stuck `WSLService` is refused to
+every unelevated token, and a dispatcher running tasks as admin would run merged code as
+admin. A second elevated job is a design change, not a second entry; the contract test
+holds `HighestAvailable` to that one file. What a change there must keep, because each
+looks like the house pattern and is a privilege escalation here:
 
-- **Nothing elevated comes from a folder the user can write.** Not the checkout, and not
-  the interpreter, which sits under the user's `AppData` on a typical PC: both are copied
-  to `C:\ProgramData\devkit\elevated\`, so upgrading the worker is an administrator
-  re-running `--yes`. `elevated_request.state` reports a copy the repo has moved past,
-  and `fix_elevated.py` puts it on the morning list. It stays out of `installers.py`
-  (`HELD_OUT`), which runs unelevated.
-- **Not `secured`, not `logged`.** `secured` grants the user full access to the task,
-  which on an elevated task lets them rewrite its action; `logged` would run `log-wrap.py`
-  from the checkout as admin. Its document carries a read-only descriptor, it is
-  `OFF_THE_LEDGER`, and its artifact is the one outside `logs/`.
+- **The residual risk, which cannot be closed.** The installer and the interpreter it
+  copies are read from places the user can write, the checkout and on a typical PC an
+  `AppData` Python, so the install assumes a clean machine at that moment. What runs
+  afterwards is a copy in `C:\ProgramData\devkit\elevated\`, so a merged change cannot
+  reach it. Upgrading is an administrator re-running `--yes` by choice.
+- **The harness never prompts for it.** An unreviewed merge plus a prompted admin paste
+  is the dispatcher this design refused. `--check` reports a missing or outdated worker;
+  `fix_elevated.py` files a person's step only for a real request waiting on a PC with no
+  worker, never for an upgrade, and a working installed worker keeps working. It stays
+  out of `installers.py` (`HELD_OUT`), which runs unelevated.
+- **Not `register`, `secured` or `logged`.** `register` hands an elevated `schtasks` a file
+  in the user's temp folder; `secured` grants the user full access to the task, which lets
+  them rewrite its action; `logged` would run `log-wrap.py` from the checkout as admin.
+  Its document is written into the locked folder and carries a read-only descriptor, read
+  back after registering and by `elevated_request.state` every pass. It is
+  `OFF_THE_LEDGER`, its artifact is the one outside `logs/`, and a failed or refused run
+  reaches the pass through `elevated_request.results`.
+- **`ROOT` is never `mkdir` then ACL.** `make_protected` creates it with its descriptor
+  in one call, and `tree_problems` reads back the owner and ACL of everything beneath
+  before anything there runs, on a reinstall too, refusing rather than reusing.
 - **The name of an empty file is the whole interface** (`elevated_worker.py`): no content
   read, no argument, nothing from the environment, which here is the user's. It is
   Windows-only, and elsewhere each part says so and exits 0.

@@ -89,8 +89,8 @@ SETTING = "devkit.installers"
 INSTALLER_GLOB = "scripts/install-*.py"
 # Found by that glob and not driven, by name, with the reason. Its `--yes` takes an
 # administrator, so from this pass it could only ever fail, every day, on every PC, and
-# `uninstall` could only refuse it. `fix_elevated.py` is what asks after it: a person
-# installs it, and the morning list says when one needs to.
+# `uninstall` could only refuse it. A person installs it by choice; its own `--check` says
+# how it stands, and `fix_elevated.py` asks only when a request is waiting on a PC with none.
 HELD_OUT = frozenset({"install-elevated-worker.py"})
 
 # Per installer. Generous because `install-git-policy.py --yes` reads a tag out of git

@@ -988,17 +988,11 @@ a job registered by hand, or one that leaves nothing behind, fails the suite.
 
 #### The elevated worker: one admin action per PC
 
-Every job above runs unelevated, and a few recoveries cannot: the DACLs on `WSLService`
-and `com.docker.service` grant an unelevated token neither start nor stop. A dispatcher
-running tasks as admin would run merged, unreviewed code as admin, so there is no
-dispatcher. Each PC gets `devkit-elevated`, a worker with a fixed list of verbs that take
-no arguments:
-
-| Verb | What it does | Why it is here |
-| --- | --- | --- |
-| `restart-wsl-service` | ends `WSLService`'s process and starts the service | stopping a service takes an administrator, and `sc stop` cannot reach one stuck in `STOP_PENDING`. It ends every distro, Docker's included, and `collectors.py` brings Docker Desktop back unelevated |
-| `restart-docker-service` | stops and starts `com.docker.service` | start and stop take an administrator. This is Docker Desktop's service, not its engine |
-| `reboot-when-idle` | `shutdown /r /t 120`, after 30 minutes with no input, no `claude` or `codex` process and no docker build; otherwise the request waits | not elevation, which a reboot does not need: this is the one path to a reboot, with a limit no unelevated bug can reset |
+Every job above runs unelevated, and one recovery cannot: the DACL on `WSLService` grants
+an unelevated token neither start nor stop, and a service stuck in `STOP_PENDING` hangs
+every `wsl` call until an administrator ends it. A dispatcher running tasks as admin would
+run merged, unreviewed code as admin, so there is no dispatcher. Each PC gets
+`devkit-elevated`, a worker with one verb that takes no arguments:
 
 ```bash
 python scripts/elevated_request.py restart-wsl-service   # from any unelevated process
@@ -1006,26 +1000,39 @@ python scripts/elevated_request.py restart-wsl-service   # from any unelevated p
 
 Or `elevated_request.request(verb)` from Python. Either way the only thing crossing to the
 elevated side is the name of an empty file in `C:\ProgramData\devkit\requests\`: the worker
-never opens one, and anything else it finds there is deleted and logged. Each verb has a
-rate limit (`RESTART_EVERY`, `REBOOT_EVERY`), kept in the admin-only folder.
+never opens one, and anything else it finds there is deleted and logged.
+
+A request is not an instruction. The worker first asks whether WSL is actually unhealthy,
+with the checks `docker-maint.py recover-wsl` uses, each bounded and needing no elevation,
+and a healthy service is left alone and logged. A stuck one gets what `recover-wsl`'s
+elevated half does: its process ended, a wait for it to settle, and `wsl --update`, so
+Windows Update has no install left to retry and hang on. That ends every distro, Docker's
+included, and `collectors.py` brings Docker Desktop back, unelevated. It runs at most once
+in six hours (`RESTART_EVERY`, kept in the admin-only folder). A run that fails or is
+refused reaches the pass through `elevated_request.results`, and is filed for a fixer.
 
 **Installing takes an administrator, once per PC, and cannot be automated.** That is why
 `installers.py` holds this one out of its pass. From an elevated terminal:
 
 ```bash
-python scripts/install-elevated-worker.py          # the plan, changing nothing
-python scripts/install-elevated-worker.py --yes    # install or upgrade; elevated only
-python scripts/install-elevated-worker.py --check  # is it current; needs no elevation
+python scripts/install-elevated-worker.py                 # the plan, changing nothing
+python -I -S scripts/install-elevated-worker.py --yes     # install or upgrade; elevated only
+python scripts/install-elevated-worker.py --check         # is it current; needs no elevation
 ```
 
 The task runs a copy of the worker and a private copy of the interpreter (about 36 MB,
-stdlib only) in `C:\ProgramData\devkit\elevated\`, which only administrators can write,
-because a task pointed at the auto-updating checkout, or at a Python under the user's
-`AppData`, would hand admin to whatever can write those. So **a merged change to the worker
-does not reach a PC until someone re-runs that `--yes`**, deliberately. Until then each
-fix pass files a person's step in the morning list, naming the machine and the exact
-command, and retires it once it is no longer true. A missing worker is said the same way,
-and until it is installed `request` says so rather than leaving a file nobody will read.
+stdlib only) in `C:\ProgramData\devkit\elevated\`, which only administrators can write, so
+a merged change cannot rewrite what runs as admin. **The install itself cannot have that
+property:** it reads the checkout and the Python it copies from places the user can write,
+so it assumes a clean machine at that moment.
+
+So the harness never prompts for it. A merged change to the worker does not reach a PC
+until someone chooses to re-run `--yes`, a working installed worker keeps working, and only
+`--check` reports that its copy is behind. An unreviewed merge plus a prompted admin paste
+would be the dispatcher this design refused. The one person's step is for a real request
+waiting on a PC with no worker: `request` says so and leaves a dated note, the fix pass
+names the machine and the exact command, and the step goes once a worker appears or a
+day passes with nobody asking again.
 
 The installed task is read-only to the user, so `harness-switch.py --off --job
 devkit-elevated` is refused unelevated, as is `--uninstall --yes`. `installers.py uninstall`

@@ -239,8 +239,9 @@ OFF_THE_LEDGER: dict[str, str] = {
     ),
     "devkit-elevated": (
         "runs nothing from a checkout, as support.ELEVATED_EXEMPTION says, and log-wrap.py "
-        "is checkout code. A failed run exits non-zero, which fix_loop.job_findings files "
-        "off the scheduler, and the account is the worker's own log"
+        "is checkout code. A failed or refused run goes in the worker's results file, which "
+        "fix_elevated.py files from every pass, so it outlasts the exit code the next fire "
+        "overwrites"
     ),
 }
 

@@ -1,9 +1,9 @@
 """`scripts/elevated_worker.py`: the one thing devkit runs as an administrator.
 
 Each `# ---` block below is one line of the threat model, in the order the module states
-them, then the gate on a reboot. Every test here drives `cycle` over a temporary layout:
-nothing touches `C:\\ProgramData`, no service and no `shutdown`, and the real `main` is
-never entered on a machine that could be running the real thing.
+them, then the recovery itself. Every test here drives `cycle` over a temporary layout:
+nothing touches `C:\\ProgramData` or a service, and the real `main` is never entered on a
+machine that could be running the real thing.
 """
 
 from __future__ import annotations
@@ -27,15 +27,19 @@ SOURCE = (REPO_ROOT / "scripts" / "elevated_worker.py").read_text(encoding="utf-
 TREE = ast.parse(SOURCE)
 NOW = 1_800_000_000.0
 RESTART = "restart-wsl-service"
-REBOOT = "reboot-when-idle"
+RECOVERY = [worker.WSL_KILL, worker.WSL_UPDATE, worker.WSL_LIST]
 # Real NTFS and Win32: the local tier, which CI deselects and `scripts/e2e.py` runs nightly.
 windows_only = pytest.mark.local
 
 
-class Rig:
-    """A temporary layout and a `Machine` that records what it was told to run."""
+def listing(state: str) -> str:
+    return f"\r\nSERVICE_NAME: WSLService \r\n        STATE              : 3  {state}  \r\n"
 
-    def __init__(self, tmp_path: Path, refusal: str = "", code: int = 0):
+
+class Rig:
+    """A temporary layout, and a `Machine` over a service that is stuck until it is killed."""
+
+    def __init__(self, tmp_path: Path, stuck: bool = True, cured: bool = True):
         self.root = tmp_path / "devkit"
         self.spool = self.root / "requests"
         self.home = self.root / "elevated"
@@ -44,19 +48,31 @@ class Rig:
         (self.spool / worker.SENTINEL).touch()
         self.layout = worker.Layout(str(self.root), str(self.spool), str(self.home))
         self.ran: list[tuple[str, ...]] = []
+        self.timeouts: list[int] = []
         self.clock = NOW
-        self.refusal = refusal
-        self.code = code
+        self.stuck = stuck
+        self.cured = cured
+        self.hung = False
 
-    def run(self, argv):
+    def run(self, argv, timeout):
         self.ran.append(tuple(argv))
-        return self.code
+        self.timeouts.append(timeout)
+        if tuple(argv) == worker.WSL_KILL and self.cured:
+            self.stuck = self.hung = False
+        if tuple(argv) == worker.WSL_LIST and (self.stuck or self.hung):
+            return worker.TIMED_OUT
+        return 0
+
+    def query(self, argv, timeout):
+        assert tuple(argv) == worker.WSL_QUERY
+        self.timeouts.append(timeout)
+        return listing("STOP_PENDING" if self.stuck else "RUNNING")
 
     @property
     def machine(self):
-        return worker.Machine(self.run, lambda: self.refusal, lambda: self.clock, lambda _s: None)
+        return worker.Machine(self.run, self.query, lambda: self.clock, lambda _s: None)
 
-    def ask(self, verb: str, content: bytes = b"") -> Path:
+    def ask(self, verb: str = RESTART, content: bytes = b"") -> Path:
         path = self.spool / f"{verb}.request"
         path.write_bytes(content)
         return path
@@ -64,9 +80,20 @@ class Rig:
     def cycle(self):
         return worker.cycle(self.layout, self.machine)
 
+    def fire(self) -> int:
+        return worker.guarded(self.layout, self.machine)
+
+    @property
+    def killed(self) -> int:
+        return self.ran.count(worker.WSL_KILL)
+
     @property
     def left(self) -> list[str]:
         return sorted(name for name in os.listdir(self.spool) if name != worker.SENTINEL)
+
+    @property
+    def results(self) -> dict:
+        return json.loads((self.home / worker.RESULTS_NAME).read_text(encoding="utf-8"))
 
 
 @pytest.fixture
@@ -74,39 +101,49 @@ def rig(tmp_path):
     return Rig(tmp_path)
 
 
-def test_the_verbs_are_the_contracts_and_the_request_modules():
-    assert set(worker.VERBS) == set(request.VERBS)
-    assert set(worker.VERBS) == {"restart-wsl-service", "restart-docker-service", REBOOT}
+def test_there_is_one_verb_and_it_is_the_request_modules():
+    assert list(worker.VERBS) == [RESTART]
+    assert worker.VERBS.keys() == set(request.VERBS)
 
 
-def test_the_layout_is_the_contracts_and_the_request_modules():
+def test_the_layout_is_the_request_modules():
     assert worker.SPOOL == r"C:\ProgramData\devkit\requests" == request.SPOOL
     assert worker.HOME == r"C:\ProgramData\devkit\elevated" == request.HOME
     assert worker.REQUEST_SUFFIX == request.REQUEST_SUFFIX == ".request"
+    assert worker.RESULTS_NAME == Path(request.RESULTS.replace("\\", "/")).name
+    assert (worker.FAILED, worker.REFUSED) == (request.FAILED, request.REFUSED)
 
 
-def test_the_services_are_the_ones_the_repo_already_names():
-    """`collector_tasks` is what detects a stuck WSL and `docker-maint` what starts Docker's
-    service, and both were read off this machine's SCM. A worker restarting a third
-    spelling would fail at 03:00 with nobody watching."""
-    assert worker.WSL_SERVICE == load_script("scripts/collector_tasks.py").WSL_QUERY[-1]
-    assert worker.DOCKER_SERVICE == load_script("scripts/docker-maint.py").DOCKER_SERVICE
+def test_the_copies_of_the_recovery_match_what_they_were_copied_from():
+    """It cannot import them, and a worker drifting from `recover-wsl` is one nobody sees
+    until the service sticks."""
+    tasks = load_script("scripts/collector_tasks.py")
+    maint = load_script("scripts/docker-maint.py")
+    assert worker.WSL_SERVICE == tasks.WSL_QUERY[-1] == maint.WSL_SERVICE
+    assert worker.WSL_QUERY[1:] == tasks.WSL_QUERY[1:]
+    assert worker.WSL_SETTLE == tasks.WSL_SETTLE
+    assert worker.SERVICE_STATE.pattern == tasks.SERVICE_STATE.pattern
+    assert list(worker.WSL_KILL[1:]) == maint.WSL_KILL[1:]
+    assert worker.WSL_SETTLED == maint.WSL_SETTLED
+    assert worker.WSL_SETTLE_WAIT == maint.WSL_SETTLE_WAIT
+    assert worker.WSL_ANSWER_TIMEOUT == maint.WSL_ANSWER_TIMEOUT
+    assert worker.WSL_UPDATE_TIMEOUT == maint.WSL_UPDATE_TIMEOUT
+    assert worker.TIMED_OUT == maint.TIMED_OUT
 
 
-# --- 1. a fixed argv per verb, and only an exact name selects one ------------------
+# --- 1. a fixed argv, and only an exact name selects a verb --------------------------
 
 
-@pytest.mark.parametrize("verb", sorted(worker.VERBS))
-def test_a_verb_runs_exactly_its_literal_argv(rig, verb):
-    rig.ask(verb)
+def test_a_stuck_service_gets_exactly_its_literal_argvs(rig):
+    rig.ask()
     report = rig.cycle()
-    assert rig.ran == [step.argv for step in worker.VERBS[verb].steps]
+    assert rig.ran == RECOVERY
     assert not report.failed
     assert rig.left == []
 
 
 @pytest.mark.parametrize(
-    "argv", [step.argv for verb in worker.VERBS.values() for step in verb.steps]
+    "argv", [worker.WSL_QUERY, worker.WSL_KILL, worker.WSL_LIST, worker.WSL_UPDATE]
 )
 def test_every_program_is_a_literal_absolute_path_under_system32(argv):
     """A bare `sc` would be found through the user's PATH or cwd, and `%SystemRoot%` is an
@@ -115,38 +152,23 @@ def test_every_program_is_a_literal_absolute_path_under_system32(argv):
     assert all(isinstance(part, str) and "%" not in part for part in argv)
 
 
-def test_the_argv_is_data_no_function_can_build():
-    """The table is a module-level literal; `serve` indexes it and passes `spec.steps`
-    through. No f-string in a step takes anything but a module constant."""
+def test_the_argvs_are_data_built_from_constants():
+    """No function builds one: each module-level `WSL_*` argv takes module constants."""
     names = {
         node.id
         for assign in TREE.body
-        if isinstance(assign, ast.AnnAssign) and getattr(assign.target, "id", "") == "VERBS"
+        if isinstance(assign, ast.Assign)
+        and getattr(assign.targets[0], "id", "")
+        in {"WSL_QUERY", "WSL_KILL", "WSL_LIST", "WSL_UPDATE"}
         for node in ast.walk(assign.value)
         if isinstance(node, ast.Name)
     }
-    assert names == {
-        "ALREADY_RUNNING",
-        "DOCKER_SERVICE",
-        "NOT_STARTED",
-        "REBOOT_DELAY",
-        "REBOOT_EVERY",
-        "REBOOT_NOTICE",
-        "RESTART_EVERY",
-        "SC",
-        "SHUTDOWN",
-        "Step",
-        "TASKKILL",
-        "Verb",
-        "WSL_SERVICE",
-        "frozenset",
-        "str",
-    }
+    assert names == {"SC", "TASKKILL", "WSL", "WSL_SERVICE"}
 
 
 def test_a_requests_content_is_never_opened(rig, monkeypatch):
     """Not merely unused: a parser that looks at it is one bug from obeying it."""
-    rig.ask(RESTART, b"& calc.exe\n--service evil\n")
+    rig.ask(content=b"& calc.exe\n--service evil\n")
     opened: list[str] = []
     real_open, real_os_open = open, os.open
 
@@ -161,18 +183,18 @@ def test_a_requests_content_is_never_opened(rig, monkeypatch):
     monkeypatch.setattr("builtins.open", spy)
     monkeypatch.setattr(os, "open", os_spy)
     rig.cycle()
-    assert rig.ran == [step.argv for step in worker.VERBS[RESTART].steps], "it still ran"
+    assert rig.ran == RECOVERY, "it still ran"
     assert not [path for path in opened if "request" in Path(path).name], opened
 
 
 def test_content_changes_nothing(tmp_path):
     def ran_with(content: bytes, name: str):
         rig = Rig(tmp_path / name)
-        rig.ask(RESTART, content)
+        rig.ask(content=content)
         rig.cycle()
         return rig.ran
 
-    assert ran_with(b"", "empty") == ran_with(b"reboot-when-idle", "hostile")
+    assert ran_with(b"", "empty") == ran_with(b"--update --web-download", "hostile")
 
 
 @pytest.mark.parametrize(
@@ -185,7 +207,8 @@ def test_content_changes_nothing(tmp_path):
         "restart-wsl-service.request ",
         " restart-wsl-service.request",
         "RESTART-WSL-SERVICE.REQUEST",
-        "Reboot-When-Idle.request",
+        "reboot-when-idle.request",
+        "restart-docker-service.request",
         "..\\restart-wsl-service.request",
         "../restart-wsl-service.request",
         "sub\\restart-wsl-service.request",
@@ -196,6 +219,7 @@ def test_content_changes_nothing(tmp_path):
         "x:restart-wsl-service.request",
         "r\N{CYRILLIC SMALL LETTER IE}start-wsl-service.request",
         "restart\N{EN DASH}wsl-service.request",
+        "restart-wsl-service.request\N{ZERO WIDTH SPACE}",
         "RESTAR~1.REQ",
         "NUL",
         "",
@@ -205,9 +229,8 @@ def test_only_the_exact_name_selects_a_verb(name):
     assert worker.verb_of(name) is None
 
 
-@pytest.mark.parametrize("verb", sorted(worker.VERBS))
-def test_the_exact_name_does_select_it(verb):
-    assert worker.verb_of(f"{verb}.request") == verb
+def test_the_exact_name_does_select_it():
+    assert worker.verb_of(f"{RESTART}.request") == RESTART
 
 
 def test_anything_else_in_the_spool_is_deleted_logged_and_ignored(rig):
@@ -215,13 +238,21 @@ def test_anything_else_in_the_spool_is_deleted_logged_and_ignored(rig):
     (rig.spool / "restart-wsl-service.req").touch()
     (rig.spool / "notes.txt").touch()
     (rig.spool / "a-folder").mkdir()
-    (rig.spool / "restart-docker-service.request").mkdir()
+    (rig.spool / "restart-wsl-service.request").mkdir()
     report = rig.cycle()
     assert rig.ran == [], "a directory with a verb's name is not a request"
     assert rig.left == []
-    assert sum("deleted" in line for line in report.lines) == 5
+    assert sum(line.endswith(": deleted") for line in report.lines) == 5
     assert "'whoami.request'" in " ".join(report.lines)
     assert not report.failed
+
+
+def test_a_failed_delete_is_not_logged_as_deleted(rig, monkeypatch):
+    (rig.spool / "junk").touch()
+    monkeypatch.setattr(worker, "remove", lambda _entry: False)
+    report = rig.cycle()
+    assert report.lines == ["ignored 'junk': could not be deleted"]
+    assert report.failed
 
 
 def test_a_folder_with_something_in_it_stays_and_says_so(rig):
@@ -231,6 +262,7 @@ def test_a_folder_with_something_in_it_stays_and_says_so(rig):
     (folder / "x").touch()
     report = rig.cycle()
     assert report.failed
+    assert "could not be deleted" in report.lines[0]
     assert (folder / "x").exists()
 
 
@@ -241,11 +273,11 @@ def test_a_name_cannot_forge_a_log_line():
 
 @windows_only
 def test_a_stream_on_a_valid_request_is_neither_read_nor_left(rig):
-    path = rig.ask(RESTART)
+    path = rig.ask()
     with open(f"{path}:payload", "w", encoding="utf-8") as handle:
-        handle.write("restart-docker-service")
+        handle.write("something else")
     rig.cycle()
-    assert rig.ran == [step.argv for step in worker.VERBS[RESTART].steps]
+    assert rig.ran == RECOVERY
     assert rig.left == []
 
 
@@ -253,9 +285,9 @@ def test_a_stream_on_a_valid_request_is_neither_read_nor_left(rig):
 def test_a_stream_named_like_a_request_selects_nothing(rig):
     host = rig.spool / "junk"
     host.touch()
-    with open(f"{host}:reboot-when-idle.request", "w", encoding="utf-8") as handle:
+    with open(f"{host}:restart-wsl-service.request", "w", encoding="utf-8") as handle:
         handle.write("x")
-    with open(f"{rig.spool}:reboot-when-idle.request", "w", encoding="utf-8") as handle:
+    with open(f"{rig.spool}:restart-wsl-service.request", "w", encoding="utf-8") as handle:
         handle.write("x")
     report = rig.cycle()
     assert rig.ran == []
@@ -267,13 +299,50 @@ def test_a_stream_named_like_a_request_selects_nothing(rig):
 def test_a_name_win32_would_rewrite_is_that_name(rig):
     """`\\\\?\\` makes this entry reachable, and a Win32 path would strip its dot and hit
     the real request beside it."""
-    real = rig.ask(RESTART)
+    real = rig.ask()
     dotted = "\\\\?\\" + str(rig.spool / "restart-wsl-service.request.")
     with open(dotted, "w", encoding="utf-8"):
         pass
     entries = {entry.name: entry for entry in worker.scan(str(rig.spool))}
     assert worker.remove(entries["restart-wsl-service.request."])
     assert real.exists()
+
+
+# --- a read-only request cannot jam the spool --------------------------------------
+
+
+@windows_only
+def test_a_read_only_request_runs_and_goes(rig):
+    """Review, 2026-11-06: `0o444` on the create needs nothing but `(WD)`, and a read-only
+    file refuses a delete even to an administrator, so the verb never ran again."""
+    path = "\\\\?\\" + str(rig.spool / f"{RESTART}.request")
+    os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o444))
+    assert os.stat(path).st_file_attributes & stat.FILE_ATTRIBUTE_READONLY
+    report = rig.cycle()
+    assert rig.ran == RECOVERY
+    assert rig.left == []
+    assert not report.failed
+
+
+@windows_only
+def test_read_only_junk_goes_too(rig):
+    path = "\\\\?\\" + str(rig.spool / "junk")
+    os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o444))
+    assert rig.cycle().lines == ["ignored 'junk': deleted"]
+    assert rig.left == []
+
+
+def test_the_attribute_is_only_cleared_on_a_plain_file(rig, monkeypatch):
+    """A link's attribute call could land on what it names."""
+    cleared = []
+    monkeypatch.setattr(worker, "clear_readonly", cleared.append)
+    plain = rig.spool / "a"
+    plain.touch()
+    assert worker.remove(worker.Entry("a", str(plain), regular=True, directory=False))
+    link = rig.spool / "b"
+    link.touch()
+    assert worker.remove(worker.Entry("b", str(link), regular=False, directory=False))
+    assert cleared == [str(plain)]
 
 
 # --- 2. no command, path, environment or parameter from an unelevated process ------
@@ -320,9 +389,11 @@ def test_no_shell_anywhere():
             pytest.fail("a shell would parse an argument")
 
 
-def test_a_child_gets_the_fixed_environment_not_this_one(monkeypatch):
+@pytest.mark.parametrize("spawn", ["run_step", "query_step"])
+def test_a_child_gets_the_fixed_environment_not_this_one(monkeypatch, spawn):
     monkeypatch.setenv("PATH", r"C:\evil")
     monkeypatch.setenv("SystemRoot", r"C:\evil")
+    monkeypatch.setenv("TEMP", r"C:\evil")
     seen = {}
 
     def fake_run(argv, **kwargs):
@@ -330,20 +401,45 @@ def test_a_child_gets_the_fixed_environment_not_this_one(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(worker.subprocess, "run", fake_run)
-    assert worker.run_step((worker.SC, "query", "x")) == 0
+    getattr(worker, spawn)((worker.SC, "query", "x"), 5)
     assert seen["env"] == worker.CHILD_ENV
     assert seen["cwd"] == worker.SYSTEM32
     assert seen["stdin"] == subprocess.DEVNULL
+    assert seen["timeout"] == 5
     assert "shell" not in seen
 
 
-def test_a_program_that_will_not_start_is_a_failed_step(monkeypatch):
+def test_the_update_downloads_only_into_the_admin_only_folder():
+    assert worker.CHILD_ENV["TEMP"] == worker.CHILD_ENV["TMP"] == worker.SCRATCH
+    assert worker.SCRATCH.startswith(worker.HOME)
+
+
+def test_a_step_captures_nothing_so_a_grandchild_cannot_outlast_its_timeout(monkeypatch):
+    """A killed `wsl.exe` whose child still holds a pipe would hold the wait open."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    worker.run_step(worker.WSL_LIST, 5)
+    assert seen["stdout"] == seen["stderr"] == subprocess.DEVNULL
+
+
+def test_a_timeout_and_a_spawn_failure_are_told_apart(monkeypatch):
+    def expired(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 5)
+
     def refused(*_a, **_k):
         raise OSError("no")
 
+    monkeypatch.setattr(worker.subprocess, "run", expired)
+    assert worker.run_step(worker.WSL_LIST, 5) == worker.TIMED_OUT
+    assert worker.query_step(worker.WSL_QUERY, 5) == ""
     monkeypatch.setattr(worker.subprocess, "run", refused)
-    assert worker.run_step((worker.SC, "query", "x")) == -1
-    assert worker.process_listing() is None
+    assert worker.run_step(worker.WSL_LIST, 5) == worker.SPAWN_FAILED
+    assert worker.query_step(worker.WSL_QUERY, 5) == ""
 
 
 def test_the_worker_imports_nothing_of_ours():
@@ -416,11 +512,12 @@ def test_a_directory_carrying_the_reparse_flag_is_not_plain(monkeypatch):
     assert not worker.plain_directory("x")
 
 
-def test_a_missing_spool_is_refused(tmp_path):
+def test_a_missing_spool_is_refused_and_says_so_to_the_pass(tmp_path):
     rig = Rig(tmp_path)
     os.unlink(rig.spool / worker.SENTINEL)
     os.rmdir(rig.spool)
-    assert rig.cycle().failed
+    assert rig.fire() == 1
+    assert rig.results[worker.WORKER]["result"] == worker.REFUSED
 
 
 def test_the_sentinel_stays_and_runs_nothing(rig):
@@ -438,15 +535,18 @@ def test_nothing_is_deleted_by_a_walk():
 
 
 def test_a_full_cycle_writes_only_in_its_folder(rig):
-    for verb in worker.VERBS:
-        rig.ask(verb)
+    rig.ask()
     before = set(rig.root.parent.iterdir())
-    assert not worker.guarded(rig.layout, rig.machine)
+    assert rig.fire() == 0
     assert set(rig.root.parent.iterdir()) == before
-    assert {path.name for path in rig.home.iterdir()} == {worker.LOG_NAME, worker.LIMITS_NAME}
+    assert {path.name for path in rig.home.iterdir()} == {
+        worker.LOG_NAME,
+        worker.LIMITS_NAME,
+        worker.RESULTS_NAME,
+    }
 
 
-def test_every_path_literal_is_its_own_folder_or_system32():
+def test_every_path_literal_is_its_own_folder_or_the_system():
     literals = {
         node.value
         for node in ast.walk(TREE)
@@ -454,7 +554,13 @@ def test_every_path_literal_is_its_own_folder_or_system32():
         and isinstance(node.value, str)
         and re.match(r"^[A-Za-z]:\\", node.value)
     }
-    assert literals == {worker.ROOT, r"C:\Windows\System32", r"C:\Windows"}
+    assert literals == {
+        worker.ROOT,
+        r"C:\Windows\System32",
+        r"C:\Windows",
+        r"C:\ProgramData",
+        r"C:\Program Files",
+    }
 
 
 def test_the_worker_never_starts_docker_desktop_or_the_cli():
@@ -462,82 +568,155 @@ def test_the_worker_never_starts_docker_desktop_or_the_cli():
     assert not re.search(r"Docker Desktop\.exe|docker\.exe", SOURCE.split('"""', 2)[2])
 
 
-# --- 5. a rate limit per verb, kept where a loop cannot reset it --------------------
+# --- 5. a healthy service is left alone ---------------------------------------------
 
 
-def test_each_verb_names_its_limit():
+def test_a_healthy_service_is_left_alone_and_that_is_logged(tmp_path):
+    rig = Rig(tmp_path, stuck=False)
+    rig.ask()
+    assert rig.fire() == 0
+    assert worker.WSL_KILL not in rig.ran
+    assert worker.WSL_UPDATE not in rig.ran
+    assert rig.left == [], "the request is answered, not held"
+    assert "healthy; left alone" in (rig.home / worker.LOG_NAME).read_text(encoding="utf-8")
+    assert rig.results[RESTART]["result"] == worker.HEALTHY
+
+
+def test_a_healthy_service_spends_no_window(tmp_path):
+    rig = Rig(tmp_path, stuck=False)
+    rig.ask()
+    rig.cycle()
+    assert not (rig.home / worker.LIMITS_NAME).exists()
+    rig.stuck = True
+    rig.ask()
+    rig.cycle()
+    assert rig.killed == 1
+
+
+@pytest.mark.parametrize(
+    ("states", "code", "unhealthy"),
+    [
+        (["RUNNING"], 0, ""),
+        (["STOPPED"], 0, ""),
+        ([""], 0, ""),
+        (["RUNNING"], 1, ""),
+        (["RUNNING"], worker.SPAWN_FAILED, ""),
+        (["START_PENDING", "RUNNING"], 0, ""),
+        (["STOP_PENDING", "STOPPED"], 0, ""),
+        (["STOP_PENDING", "STOP_PENDING"], 0, "WSLService is stuck in STOP_PENDING"),
+        (["START_PENDING", "START_PENDING"], 0, "WSLService is stuck in START_PENDING"),
+        (
+            ["RUNNING"],
+            worker.TIMED_OUT,
+            "WSLService is RUNNING and wsl --list does not answer",
+        ),
+        (
+            [""],
+            worker.TIMED_OUT,
+            "WSLService is in an unknown state and wsl --list does not answer",
+        ),
+    ],
+)
+def test_what_reads_as_unhealthy(states, code, unhealthy):
+    """`docker-maint.wsl_stuck`'s verdicts: a start in progress is not stuck, and only
+    silence is hung, since any exit code is WSL answering."""
+    answers = iter(states)
+    pauses = []
+    machine = worker.Machine(
+        lambda argv, timeout: code,
+        lambda argv, timeout: listing(next(answers)),
+        lambda: NOW,
+        pauses.append,
+    )
+    assert worker.wsl_unhealthy(machine) == unhealthy
+    if len(states) == 2:
+        assert pauses == [worker.WSL_SETTLE]
+
+
+def test_each_query_has_a_bound(rig):
+    rig.stuck = False
+    rig.hung = True
+    assert worker.wsl_unhealthy(rig.machine)
+    assert sorted(rig.timeouts) == [worker.QUERY_TIMEOUT, worker.WSL_ANSWER_TIMEOUT]
+
+
+def test_nothing_in_the_health_check_changes_anything(tmp_path):
+    rig = Rig(tmp_path, stuck=False)
+    worker.wsl_unhealthy(rig.machine)
+    assert rig.ran == [worker.WSL_LIST]
+    assert "--list" in worker.WSL_LIST and "--quiet" in worker.WSL_LIST
+
+
+# --- 6. a rate limit, kept where a loop cannot reset it -----------------------------
+
+
+def test_the_limit_is_six_hours():
+    assert worker.RESTART_EVERY == 6 * 60 * 60
     assert worker.VERBS[RESTART].every == worker.RESTART_EVERY
-    assert worker.VERBS["restart-docker-service"].every == worker.RESTART_EVERY
-    assert worker.VERBS[REBOOT].every == worker.REBOOT_EVERY == 24 * 60 * 60
 
 
-def test_a_loop_reboots_once(rig):
-    """An unelevated bug writing the request every cycle for a day."""
-    for _cycle in range(288):
-        rig.ask(REBOOT)
+def test_a_loop_restarts_once_while_the_service_stays_stuck(tmp_path):
+    """An unelevated bug writing the request every cycle for most of the limit, on a
+    service the restart did not cure."""
+    rig = Rig(tmp_path, cured=False)
+    for _cycle in range(60):
+        rig.ask()
         rig.cycle()
         rig.clock += 300
-    assert rig.ran == [step.argv for step in worker.VERBS[REBOOT].steps]
+    assert rig.killed == 1
 
 
-def test_it_runs_again_once_the_window_has_passed(rig):
-    rig.ask(REBOOT)
+def test_it_runs_again_once_the_window_has_passed(tmp_path):
+    rig = Rig(tmp_path, cured=False)
+    rig.ask()
     rig.cycle()
-    rig.clock += worker.REBOOT_EVERY
-    rig.ask(REBOOT)
+    rig.clock += worker.RESTART_EVERY
+    rig.ask()
     rig.cycle()
-    assert len(rig.ran) == 2
+    assert rig.killed == 2
 
 
-def test_a_limited_request_is_dropped_not_held(rig):
+def test_a_limited_request_is_dropped_and_reported_refused(tmp_path):
     """Held, a restart would fire hours later into whatever is running by then."""
-    rig.ask(RESTART)
+    rig = Rig(tmp_path, cured=False)
+    rig.ask()
     rig.cycle()
     rig.ran.clear()
     rig.clock += 60
-    rig.ask(RESTART)
-    report = rig.cycle()
-    assert rig.ran == []
+    rig.ask()
+    assert rig.fire() == 0, "a refusal is not the job failing"
+    assert worker.WSL_KILL not in rig.ran
     assert rig.left == []
-    assert "rate limit" in " ".join(report.lines)
+    held = rig.results[RESTART]
+    assert held["result"] == worker.REFUSED
+    assert held["detail"] == "WSLService is stuck in STOP_PENDING, inside its 6-hour rate limit"
 
 
-def test_one_verbs_limit_is_not_anothers(rig):
-    rig.ask(RESTART)
-    rig.cycle()
-    rig.ask("restart-docker-service")
-    rig.cycle()
-    assert rig.ran[-1][1:] == ("start", worker.DOCKER_SERVICE)
-
-
-def test_the_limit_is_kept_in_the_admin_only_folder_across_runs(rig):
-    rig.ask(RESTART)
+def test_the_limit_is_kept_in_the_admin_only_folder_across_runs(tmp_path):
+    rig = Rig(tmp_path, cured=False)
+    rig.ask()
     rig.cycle()
     saved = json.loads((rig.home / worker.LIMITS_NAME).read_text(encoding="utf-8"))
     assert saved == {RESTART: NOW}
-    fresh = worker.Machine(rig.run, lambda: "", lambda: NOW + 60, lambda _s: None)
-    rig.ran.clear()
-    rig.ask(RESTART)
-    worker.cycle(rig.layout, fresh)
-    assert rig.ran == [], "a new process read the same window"
-
-
-def test_the_limit_is_not_in_the_spool(rig):
-    rig.ask(RESTART)
-    rig.cycle()
     assert worker.LIMITS_NAME not in os.listdir(rig.spool)
+    rig.ran.clear()
+    rig.clock += 60
+    rig.ask()
+    worker.cycle(rig.layout, rig.machine)
+    assert worker.WSL_KILL not in rig.ran, "a new process read the same window"
 
 
-@pytest.mark.parametrize("broken", ["not json", "[1]", '{"reboot-when-idle": "soon"}'])
-def test_a_broken_record_fails_closed_for_one_window(rig, broken):
+@pytest.mark.parametrize("broken", ["not json", "[1]", '{"restart-wsl-service": "soon"}'])
+def test_a_broken_record_fails_closed_for_one_window(tmp_path, broken):
+    rig = Rig(tmp_path, cured=False)
     (rig.home / worker.LIMITS_NAME).write_text(broken, encoding="utf-8")
-    rig.ask(REBOOT)
+    rig.ask()
     rig.cycle()
-    assert rig.ran == [], "unreadable reads as just ran"
-    rig.clock += worker.REBOOT_EVERY
-    rig.ask(REBOOT)
+    assert rig.killed == 0, "unreadable reads as just ran"
+    rig.clock += worker.RESTART_EVERY
+    rig.ask()
     rig.cycle()
-    assert len(rig.ran) == 1, "and it heals, rather than locking the verb for good"
+    assert rig.killed == 1, "and it heals, rather than locking the verb for good"
 
 
 def test_a_clock_set_back_does_not_open_the_window():
@@ -551,183 +730,150 @@ def test_a_window_that_cannot_be_saved_means_it_does_not_run(rig, monkeypatch):
         raise PermissionError("no")
 
     monkeypatch.setattr(worker, "write_limits", refused)
-    rig.ask(RESTART)
-    report = rig.cycle()
-    assert rig.ran == []
-    assert report.failed
+    rig.ask()
+    assert rig.fire() == 1
+    assert rig.killed == 0
+    assert rig.results[RESTART]["result"] == worker.REFUSED
+
+
+def test_a_broken_record_that_will_not_rewrite_runs_nothing(rig, monkeypatch):
+    def refused(*_a, **_k):
+        raise PermissionError("no")
+
+    (rig.home / worker.LIMITS_NAME).write_text("not json", encoding="utf-8")
+    monkeypatch.setattr(worker, "write_limits", refused)
+    rig.ask()
+    with pytest.raises(PermissionError):
+        rig.cycle()
+    assert rig.killed == 0
 
 
 def test_the_window_is_saved_before_anything_runs(rig):
     """So a run that dies half way leaves the verb spent, not ready to go again."""
     seen = []
 
-    def run(argv):
-        seen.append(json.loads((rig.home / worker.LIMITS_NAME).read_text(encoding="utf-8")))
+    def run(argv, timeout):
+        if tuple(argv) == worker.WSL_KILL:
+            seen.append(json.loads((rig.home / worker.LIMITS_NAME).read_text(encoding="utf-8")))
         return 0
 
-    machine = worker.Machine(run, lambda: "", lambda: NOW, lambda _s: None)
-    rig.ask(REBOOT)
+    machine = worker.Machine(run, rig.query, lambda: NOW, lambda _s: None)
+    rig.ask()
     worker.cycle(rig.layout, machine)
-    assert seen == [{REBOOT: NOW}]
+    assert seen == [{RESTART: NOW}]
 
 
 def test_a_request_that_will_not_delete_does_not_run(rig, monkeypatch):
     """Or it would run again every window, for as long as it would not go."""
     monkeypatch.setattr(worker, "remove", lambda _entry: False)
-    rig.ask(RESTART)
-    report = rig.cycle()
-    assert rig.ran == []
-    assert report.failed
+    rig.ask()
+    assert rig.fire() == 1
+    assert rig.killed == 0
+    assert rig.results[RESTART]["detail"] == "its request could not be deleted"
 
 
-# --- the steps of a verb -----------------------------------------------------------
+# --- 7. the recovery, and what the pass hears ----------------------------------------
 
 
-def test_a_failed_step_is_a_failure_and_does_not_stop_the_next(tmp_path):
-    rig = Rig(tmp_path, code=5)
-    rig.ask("restart-docker-service")
-    assert rig.cycle().failed
-    assert len(rig.ran) == 2, "a stop refused must still reach its start"
+def test_the_recovery_runs_in_recover_wsls_order(rig):
+    """End it, wait for it, then update, so Windows Update has nothing left to retry."""
+    rig.ask()
+    rig.cycle()
+    assert rig.ran == [worker.WSL_KILL, worker.WSL_UPDATE, worker.WSL_LIST]
 
 
-def test_a_service_already_in_the_state_is_not_a_failure(tmp_path):
-    steps = worker.VERBS["restart-docker-service"].steps
-    assert worker.NOT_STARTED in steps[0].accepted
-    assert worker.ALREADY_RUNNING in steps[1].accepted
+def test_the_update_gets_recover_wsls_timeout(rig):
+    rig.ask()
+    rig.cycle()
+    assert worker.WSL_UPDATE_TIMEOUT in rig.timeouts
 
 
-def test_wsl_is_ended_by_process_because_a_stop_is_refused_while_one_is_pending():
-    """The case the verb exists for: STOP_PENDING, which `sc stop` cannot reach."""
-    first = worker.VERBS[RESTART].steps[0].argv
-    assert Path(first[0].replace("\\", "/")).name == "taskkill.exe"
-    assert first[-1] == f"SERVICES eq {worker.WSL_SERVICE}"
-
-
-def test_steps_settle_between_each_other(rig):
+def test_it_polls_until_the_service_settles(rig):
+    """Up to `WSL_SETTLE_WAIT`, and no further: it goes on to the update regardless."""
+    states = iter(["STOP_PENDING", "STOP_PENDING", "STOPPED"])
     pauses = []
-    machine = worker.Machine(rig.run, lambda: "", lambda: NOW, pauses.append)
-    rig.ask(RESTART)
-    worker.cycle(rig.layout, machine)
-    assert pauses == [worker.SETTLE_SECONDS]
-
-
-def test_nothing_else_in_scripts_may_reboot():
-    """The reboot needs no elevation, so the limit only means anything if this is the
-    one path to it. Whole string literals, so `wsl --shutdown` and prose stay out of it."""
-
-    def names_it(path: Path) -> bool:
-        return any(
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, str)
-            and node.value.lower().split("\\")[-1] in ("shutdown", "shutdown.exe")
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-        )
-
-    found = {path.name for path in (REPO_ROOT / "scripts").rglob("*.py") if names_it(path)}
-    assert found == {"elevated_worker.py"}
-
-
-# --- the gate on a reboot ----------------------------------------------------------
-
-
-def test_a_reboot_refused_by_the_gate_stays_for_the_next_cycle(tmp_path):
-    rig = Rig(tmp_path, refusal="input 12s ago")
-    rig.ask(REBOOT)
-    report = rig.cycle()
-    assert rig.ran == []
-    assert rig.left == [f"{REBOOT}.request"]
-    assert "deferred, input 12s ago" in report.lines[0]
-    assert not report.failed
-
-
-def test_a_deferred_reboot_does_not_spend_its_window(tmp_path):
-    rig = Rig(tmp_path, refusal="busy")
-    rig.ask(REBOOT)
-    rig.cycle()
-    rig.refusal = ""
-    rig.cycle()
-    assert len(rig.ran) == 1
-    assert rig.left == []
-
-
-def test_only_the_reboot_is_gated(tmp_path):
-    rig = Rig(tmp_path, refusal="busy")
-    rig.ask(RESTART)
-    rig.cycle()
-    assert rig.ran
-
-
-IDLE = worker.IDLE_SECONDS
-
-
-def test_the_gate_is_thirty_minutes():
-    assert worker.IDLE_SECONDS == 30 * 60
-
-
-@pytest.mark.parametrize(
-    ("idle", "listing", "refused"),
-    [
-        (IDLE, '"explorer.exe","1"\n', False),
-        (IDLE - 1, '"explorer.exe","1"\n', True),
-        (IDLE, '"claude.exe","1"\n', True),
-        (IDLE, '"codex.exe","1"\n', True),
-        (IDLE, '"CLAUDE.EXE","1"\n', True),
-        (IDLE, '"docker-buildx.exe","1"\n', True),
-        (IDLE, '"docker-compose.exe","1"\n', True),
-        (None, '"explorer.exe","1"\n', True),
-        (IDLE, None, True),
-    ],
-)
-def test_the_gate(idle, listing, refused):
-    assert bool(worker.refusal_of(idle, listing)) is refused
-
-
-def test_what_is_resident_does_not_read_as_busy():
-    """Both were running on the machine this was written on, all day, doing no work: a
-    substring match would mean this PC never reads idle."""
-    listing = '"com.docker.build.exe","1"\n"codex-windows-sandbox-service.exe","2"\n'
-    assert worker.busy_images(listing) == []
-
-
-def test_the_gate_names_what_is_running():
-    assert worker.refusal_of(IDLE, '"claude.exe","1"\n"codex.exe","2"\n') == (
-        "running: claude.exe, codex.exe"
+    machine = worker.Machine(
+        rig.run, lambda argv, timeout: listing(next(states)), lambda: NOW, pauses.append
     )
+    worker.wsl_recover(machine)
+    assert pauses == [worker.WSL_POLL, worker.WSL_POLL]
 
 
-def test_no_listing_is_spawned_for_a_machine_in_use(monkeypatch):
-    monkeypatch.setattr(worker, "idle_seconds", lambda: 5.0)
-    monkeypatch.setattr(worker, "process_listing", lambda: pytest.fail("spawned"))
-    assert worker.reboot_refusal() == "input 5s ago"
+def test_a_service_that_never_settles_is_bounded(tmp_path):
+    rig = Rig(tmp_path, cured=False)
+    pauses = []
+    machine = worker.Machine(rig.run, rig.query, lambda: NOW, pauses.append)
+    recovered, lines = worker.wsl_recover(machine)
+    assert sum(pauses) == worker.WSL_SETTLE_WAIT
+    assert not recovered
+    assert "WSLService after the kill: STOP_PENDING" in lines
 
 
-def test_the_idle_clock_survives_the_tick_counter_wrapping():
-    assert worker.elapsed_seconds(1_000, 0xFFFFFFFF - 999) == 2.0
-    assert worker.elapsed_seconds(61_000, 1_000) == 60.0
-    assert worker.elapsed_seconds(-1, 0xFFFFFFFF - 2000) == 2.0, "ctypes hands back a signed int"
+def test_a_recovered_run_is_reported(rig):
+    rig.ask()
+    assert rig.fire() == 0
+    assert rig.results[RESTART]["result"] == worker.RECOVERED
 
 
-@windows_only
-def test_this_session_answers_the_idle_question():
-    assert isinstance(worker.idle_seconds(), float)
+def test_a_failed_run_is_the_exit_code_and_lasts_past_it(tmp_path):
+    """The next fire overwrites the exit code; the pass reads `RESULTS`."""
+    rig = Rig(tmp_path, cured=False)
+    rig.ask()
+    assert rig.fire() == 1
+    held = rig.results[RESTART]
+    assert held["result"] == worker.FAILED
+    assert held["detail"] == (
+        "WSLService is stuck in STOP_PENDING, and a restart did not bring it back"
+    )
+    assert rig.fire() == 0
+    assert rig.results[RESTART]["result"] == worker.FAILED, "a quiet fire does not clear it"
 
 
-@windows_only
-def test_the_fixed_environment_is_enough_for_the_programs_on_this_machine():
-    """Read-only: the listing the gate reads, under exactly what a child is given."""
-    listing = worker.process_listing()
-    assert listing and ".exe" in listing
-    for program in (worker.SC, worker.TASKKILL, worker.TASKLIST, worker.SHUTDOWN):
-        assert os.path.isfile(program)
+def test_a_failed_update_alone_is_not_a_failed_recovery(tmp_path):
+    """`recover-wsl` judges by whether WSL answers, and offline the update just fails."""
+    rig = Rig(tmp_path)
+    real = rig.run
+    machine = worker.Machine(
+        lambda argv, timeout: 5 if tuple(argv) == worker.WSL_UPDATE else real(argv, timeout),
+        rig.query,
+        lambda: NOW,
+        lambda _s: None,
+    )
+    assert worker.wsl_recover(machine)[0] is True
+
+
+def test_a_wsl_that_cannot_be_started_afterwards_is_not_recovered(rig):
+    real = rig.run
+    machine = worker.Machine(
+        lambda argv, timeout: (
+            worker.SPAWN_FAILED if tuple(argv) == worker.WSL_LIST else real(argv, timeout)
+        ),
+        rig.query,
+        lambda: NOW,
+        lambda _s: None,
+    )
+    assert worker.wsl_recover(machine)[0] is False
+
+
+def test_a_result_is_written_only_when_it_changed(rig):
+    rig.fire()
+    first = (rig.home / worker.RESULTS_NAME).stat().st_mtime_ns
+    held = rig.results
+    rig.clock += 300
+    rig.fire()
+    assert rig.results == held
+    assert (rig.home / worker.RESULTS_NAME).stat().st_mtime_ns == first
+
+
+def test_a_result_the_pass_can_read_is_what_is_written(rig):
+    rig.ask()
+    rig.fire()
+    read = request.results(str(rig.home / worker.RESULTS_NAME))
+    assert read[RESTART] == (worker.RECOVERED, "answers again")
+    assert read[worker.WORKER][0] == worker.HEALTHY
 
 
 # --- the run -----------------------------------------------------------------------
-
-
-def test_a_failure_is_the_exit_code_because_it_cannot_reach_the_ledger(rig):
-    (rig.spool / "full").mkdir()
-    (rig.spool / "full" / "x").touch()
-    assert worker.guarded(rig.layout, rig.machine) == 1
 
 
 def test_a_crash_is_logged_and_left_to_be_the_exit_code(rig, monkeypatch):
@@ -738,18 +884,7 @@ def test_a_crash_is_logged_and_left_to_be_the_exit_code(rig, monkeypatch):
     with pytest.raises(RuntimeError):
         worker.guarded(rig.layout, rig.machine)
     assert "the unexpected" in (rig.home / worker.LOG_NAME).read_text(encoding="utf-8")
-
-
-def test_a_broken_record_that_will_not_rewrite_runs_nothing(rig, monkeypatch):
-    def refused(*_a, **_k):
-        raise PermissionError("no")
-
-    (rig.home / worker.LIMITS_NAME).write_text("not json", encoding="utf-8")
-    monkeypatch.setattr(worker, "write_limits", refused)
-    rig.ask(REBOOT)
-    with pytest.raises(PermissionError):
-        rig.cycle()
-    assert rig.ran == []
+    assert rig.results[worker.WORKER]["detail"] == "it crashed: RuntimeError"
 
 
 def test_a_log_that_cannot_be_written_is_a_failure(rig, monkeypatch):
@@ -757,11 +892,11 @@ def test_a_log_that_cannot_be_written_is_a_failure(rig, monkeypatch):
         raise OSError("no")
 
     monkeypatch.setattr(worker, "append_log", refused)
-    assert worker.guarded(rig.layout, rig.machine) == 1
+    assert rig.fire() == 1
 
 
 def test_a_quiet_cycle_leaves_no_log(rig):
-    assert worker.guarded(rig.layout, rig.machine) == 0
+    assert rig.fire() == 0
     assert not (rig.home / worker.LOG_NAME).exists()
 
 
@@ -793,3 +928,13 @@ def test_it_says_windows_only_and_exits_clean_elsewhere(monkeypatch, capsys):
     monkeypatch.setattr(worker.os, "name", "posix")
     assert worker.main() == 0
     assert "Windows-only" in capsys.readouterr().out
+
+
+@windows_only
+def test_the_fixed_environment_is_enough_for_the_health_check_here():
+    """Read-only, under exactly what a child is given. `wsl --update` is not run here: it
+    changes the machine, and that it works under `CHILD_ENV` is unproven until a real run."""
+    assert worker.service_state(worker.query_step(worker.WSL_QUERY, worker.QUERY_TIMEOUT))
+    assert worker.run_step(worker.WSL_LIST, worker.WSL_ANSWER_TIMEOUT) == 0
+    for program in (worker.SC, worker.TASKKILL, worker.WSL):
+        assert os.path.isfile(program)

@@ -36,13 +36,13 @@ TEMPLATES = REPO_ROOT / "templates"
 # nothing else: a second name here is a second elevated job, which is a design change.
 ELEVATED_EXEMPTION: dict[str, str] = {
     "install-elevated-worker.py": (
-        "Restarting WSL's and Docker's services is refused to every unelevated token (their "
-        "DACLs grant no start or stop), and those are the recoveries that otherwise wait on "
-        "a person. A central admin dispatcher was refused because it would run merged code "
-        "as admin. So this one job runs a fixed list of verbs, from a copy in an admin-only "
-        "folder, under an interpreter copied there too, and takes no input but a file name. "
-        "An administrator registers it once per PC, so nothing unelevated maintains it; it "
-        "runs nothing from a checkout, so it cannot be wrapped by log-wrap.py or write logs/."
+        "Ending a stuck WSLService is refused to every unelevated token (its DACL grants no "
+        "start or stop), and that recovery otherwise waits on a person. A central admin "
+        "dispatcher was refused because it would run merged code as admin. So this one job "
+        "has one verb, run from a copy in an admin-only folder, under an interpreter copied "
+        "there too, and takes no input but a file name. An administrator registers it once "
+        "per PC, so nothing unelevated maintains it; it runs nothing from a checkout, so it "
+        "cannot be wrapped by log-wrap.py or write logs/."
     ),
 }
 

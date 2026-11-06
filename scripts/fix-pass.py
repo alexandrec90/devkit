@@ -21,8 +21,8 @@ which survives this file crashing). Two rules hold it together:
    what Dependabot cannot do (`fix_dependabot.py`: failing update jobs, alerts no PR
    answers -- under its own daily cap), plan it (`fix_plan.py`) and classify it
    (`fix_cycle.py`). A gate refused over the account's billing, a private repo that
-   runs Actions (`fix_visibility.py`), and a PC whose elevated worker is missing or
-   outdated (`fix_elevated.py`), are each filed as its owner's step.
+   runs Actions (`fix_visibility.py`), and a request waiting on a PC with no elevated
+   worker (`fix_elevated.py`), are each filed as its owner's step.
 5. **Harness first**: while anything harness-shaped is red, one devkit session gets
    all of it and project fixers are held, out loud. Only one at a time.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
