@@ -70,6 +70,9 @@ AUTOMERGE_LABEL = "automerge"
 MERGE_NOW_LABEL = "merge-now"
 MERGE_LABELS = (AUTOMERGE_LABEL, MERGE_NOW_LABEL)
 
+# `green-ref.py`'s branch, which a PR's head must never be deleted as.
+GREEN_BRANCH = "green"
+
 # The gate's file, the path every consumer's lives at (`sync-devkit.py`'s `PR_GATE_FILE`):
 # the dispatch endpoint takes a file name, not a workflow's title.
 GATE_FILE = "pr-gate.yml"
@@ -108,14 +111,23 @@ MERGEABLE_WAIT = 3.0
 
 
 class GhError(RuntimeError):
-    """A `gh` invocation that failed, with its stderr attached."""
+    """A `gh` invocation that failed, with its stderr attached.
+
+    `stderr` alone is GitHub's answer. The message also quotes the command, so anything
+    judging what GitHub said has to read this: the argv of a squash contains "squash".
+    """
+
+    def __init__(self, message: str, stderr: str = ""):
+        super().__init__(message)
+        self.stderr = stderr
 
 
 def gh(args: list[str], run) -> str:
     """Run `gh` and return stdout, raising with stderr attached on a non-zero exit."""
     result = run(["gh", *args], capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        raise GhError(f"gh {' '.join(args)} exited {result.returncode}: {result.stderr.strip()}")
+        said = result.stderr.strip()
+        raise GhError(f"gh {' '.join(args)} exited {result.returncode}: {said}", said)
     return result.stdout
 
 
@@ -181,8 +193,10 @@ def merge_pr(repo: str, number: int, run, title: str = "", body: str = "") -> No
     is retrying.
 
     The title and body are given because GitHub's default for a squash can be a list of
-    the branch's commits, and the PR body is the only changelog a consumer gets. A
-    repository with squash switched off refuses with a 405, and takes a merge commit.
+    the branch's commits, and the PR body is the only changelog a consumer gets. A merge
+    commit is the answer only to a refusal of squashing itself (`squash_refused`): any
+    other refusal is a PR that cannot merge right now, which a merge commit would not fix
+    and which would break one PR, one commit whenever the retry happened to succeed.
     """
     path = f"repos/{repo}/pulls/{number}/merge"
     squash = ["api", "--method", "PUT", path, "-f", "merge_method=squash"]
@@ -191,9 +205,40 @@ def merge_pr(repo: str, number: int, run, title: str = "", body: str = "") -> No
     try:
         gh(squash, run)
     except GhError as refused:
-        if "405" not in str(refused) or "squash" not in str(refused).lower():
+        if not squash_refused(refused):
             raise
         gh(["api", "--method", "PUT", path, "-f", "merge_method=merge"], run)
+
+
+def squash_refused(error: GhError) -> bool:
+    """GitHub refused to squash here, rather than refusing this PR.
+
+    Two ways: the repository has squash switched off, and `GITHUB_TOKEN` writing a new
+    commit that touches a workflow file, which this token is known to merge as a merge
+    commit (an adoption PR always carries one).
+    """
+    said = error.stderr.lower()
+    return "squash merges are not allowed" in said or ("403" in said and "workflow" in said)
+
+
+def delete_branch(repo: str, pr: dict, run) -> None:
+    """Delete a merged PR's head branch, as a squash through `gh` does with `--delete-branch`.
+
+    A merge commit leaves the branch an ancestor of the base, so `sweep` reads a checkout
+    still on it as spent. A squash does not: with the branch alive on origin the checkout
+    reads as `needs-pr`, which has no way out, and its home branch stops advancing. Most
+    repositories here do not delete on merge. A failure costs that one branch and says so.
+    """
+    head = pr.get("head") or {}
+    ref = str(head.get("ref") or "")
+    if not ref or ref == GREEN_BRANCH or ref == default_branch_of(pr):
+        return
+    if (head.get("repo") or {}).get("full_name") != repo:
+        return  # a fork's branch is not this repository's to delete
+    try:
+        gh(["api", "--method", "DELETE", f"repos/{repo}/git/refs/heads/{ref}"], run)
+    except GhError as failed:
+        print(f"Could not delete {ref}: {failed}")
 
 
 def dispatch_gate(repo: str, branch: str, run) -> None:
@@ -248,14 +293,16 @@ def write_outputs(env: dict[str, str], outputs: dict[str, str]) -> None:
         handle.writelines(f"{key}={value}\n" for key, value in outputs.items())
 
 
-def verdict(repo: str, pr: dict, run, env_sha: str = "") -> tuple[bool, str]:
+def verdict(repo: str, pr: dict, run, env_sha: str = "", queue: bool = False) -> tuple[bool, str]:
     """`(should_merge, why)` for one open PR. Every guard re-derived from scratch.
 
     `env_sha` is the commit the triggering gate run actually tested, and is passed only in
     branch mode; the sweep has no such commit and judges the head as it finds it.
 
     `merge-now` skips the gate and nothing else: a draft is still unfinished, and a merge
-    nobody can compute is still a conflict.
+    nobody can compute is still a conflict. It counts only in `queue`, the job a direct
+    project's merges go through: anywhere else it would merge outside the one-at-a-time
+    group and with no tidy behind it, and in a gated project it would merge with no gate.
     """
     # No author guard, deliberately: only write access can apply the label, so the label
     # is the whole authorization -- see the module docstring. The head-SHA check below is
@@ -273,7 +320,7 @@ def verdict(repo: str, pr: dict, run, env_sha: str = "") -> tuple[bool, str]:
     if pr.get("mergeable") is not True:
         state = pr.get("mergeable_state") or "undecided"
         return False, f"not known-mergeable ({state})"
-    if MERGE_NOW_LABEL in labels:
+    if queue and MERGE_NOW_LABEL in labels:
         return True, f"labelled {MERGE_NOW_LABEL}: its checks run after it lands"
     return gate_verdict(repo, pr, run, env_sha)
 
@@ -352,58 +399,66 @@ def default_branch_of(pr: dict) -> str:
     return ref if ref and ref == default else ""
 
 
-def in_line(found: list[dict]) -> list[dict]:
-    """The PRs either label covers, oldest first: the listing is newest first, and a queue
+def in_line(found: list[dict], queue: bool = False) -> list[dict]:
+    """The PRs this job may merge, oldest first: the listing is newest first, and a queue
     is the other way round. On the label only, so the per-PR read that follows is spent on
     candidates alone; `verdict` re-checks it against the fresh detail regardless."""
-    labelled = (pr for pr in found if any(label in labels_of(pr) for label in MERGE_LABELS))
+    labels = MERGE_LABELS if queue else (AUTOMERGE_LABEL,)
+    labelled = (pr for pr in found if any(label in labels_of(pr) for label in labels))
     return sorted(labelled, key=lambda pr: pr.get("number") or 0)
 
 
-def take_turn(repo: str, pr: dict, run, sleep, gated_sha: str) -> tuple[str, dict]:
-    """Judge and merge one PR: `(MERGED, REFUSED or LEFT, the PR as last read)`."""
+def take_turn(
+    repo: str, pr: dict, run, sleep, gated_sha: str, queue: bool = False
+) -> tuple[str, dict]:
+    """Judge and merge one PR: `(MERGED, REFUSED or LEFT, the PR as last read)`.
+
+    One failed call must not cost the PRs behind it their merge, nor the job the outputs
+    that say what already landed. The job still ends red, so the failure is on record, and
+    the next pass retries this one.
+    """
     number = int(pr["number"])
-    # The listing endpoint omits `mergeable`, so re-read each PR on its own. It is also the
-    # freshest possible view, which matters on a pass that may have spent a while on the
-    # PRs before this one.
-    fresh = gh_json(f"repos/{repo}/pulls/{number}", run) or pr
-    detail = settled(repo, number, run, sleep, fresh)
-    should_merge, why = verdict(repo, detail, run, gated_sha)
-    if not should_merge:
-        print(f"#{number}: leaving open -- {why}.")
-        return LEFT, detail
-    print(f"#{number}: {why}; merging.")
-    title, body = str(detail.get("title") or ""), str(detail.get("body") or "")
+    detail = pr
     try:
+        # The listing endpoint omits `mergeable`, so re-read each PR on its own. It is also
+        # the freshest possible view, which matters on a pass that may have spent a while
+        # on the PRs before this one.
+        detail = gh_json(f"repos/{repo}/pulls/{number}", run) or pr
+        detail = settled(repo, number, run, sleep, detail)
+        should_merge, why = verdict(repo, detail, run, gated_sha, queue)
+        if not should_merge:
+            print(f"#{number}: leaving open -- {why}.")
+            return LEFT, detail
+        print(f"#{number}: {why}; merging.")
+        title, body = str(detail.get("title") or ""), str(detail.get("body") or "")
         merge_pr(repo, number, run, title, body)
     except GhError as failed:
-        # One refusal must not cost the PRs behind it their merge. The job still ends red,
-        # so the failure is on record, and the next pass retries this one.
-        print(f"#{number}: the merge was refused: {failed}", file=sys.stderr)
+        print(f"#{number}: {failed}", file=sys.stderr)
         return REFUSED, detail
+    delete_branch(repo, detail, run)
     return MERGED, detail
 
 
 def drain(
-    repo: str, line: list[dict], run, sleep, gated_sha: str, tidies: bool
+    repo: str, line: list[dict], run, sleep, gated_sha: str, queue: bool
 ) -> tuple[int, int, str]:
     """Give each PR its turn: `(merged, refused, the default branch that moved, or "")`.
 
-    Each merge to the default branch gets its gate here, unless the job goes on to tidy,
-    in which case the gate follows that (`main`'s comment says why)."""
+    Each merge to the default branch gets its gate here, unless this is the queue, whose
+    tidy job starts the gate after it (`main`'s comment says why)."""
     merged, refused, moved = 0, 0, ""
     for pr in line:
         if pr.get("number") is None:
             print("A PR arrived with no number; skipping it rather than guessing.")
             continue
-        outcome, detail = take_turn(repo, pr, run, sleep, gated_sha)
+        outcome, detail = take_turn(repo, pr, run, sleep, gated_sha, queue)
         refused += outcome == REFUSED
         if outcome != MERGED:
             continue
         merged += 1
         branch = default_branch_of(detail)
         moved = branch or moved
-        if branch and not tidies:
+        if branch and not queue:
             dispatch_gate(repo, branch, run)
     return merged, refused, moved
 
@@ -425,22 +480,23 @@ def main(
         return 0
 
     found, scope = candidates(env, repo, run)
-    considered = in_line(found)
+    # The `sweep` job in a direct project, and nothing else: it is one at a time and has
+    # tidy behind it. Tidying first means the gate reads the tree tidy leaves, so a
+    # formatter's work never comes back as a red main.
+    settings = project_settings(root)
+    queue = flows_directly(settings) and bool(env.get("MERGE_QUEUE", "").strip())
+    considered = in_line(found, queue)
     if not considered:
         print(f"No open {AUTOMERGE_LABEL!r}-labelled PRs for {scope}; nothing to do.")
         return 0
 
-    # Tidying first means the gate reads the tree the tidy job leaves, so a formatter's
-    # work never comes back as a red main; only a job that goes on to tidy may hold it.
-    settings = project_settings(root)
-    tidies = flows_directly(settings) and bool(env.get("TIDY_AFTER", "").strip())
     # Only branch mode has a gated commit of the PR's: a sweep's run gated the base.
     gated_sha = "" if scope.startswith("sweep") else env.get("RUN_HEAD_SHA", "").strip()
-    merged, refused, moved = drain(repo, considered, run, sleep, gated_sha, tidies)
+    merged, refused, moved = drain(repo, considered, run, sleep, gated_sha, queue)
     write_outputs(
         env,
         {
-            "tidy": "true" if tidies and moved else "false",
+            "tidy": "true" if queue and moved else "false",
             "branch": moved,
             "python": python_version(settings),
         },

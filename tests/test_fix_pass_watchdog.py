@@ -542,11 +542,33 @@ def test_a_failed_green_fetch_stays_on_the_last_green(checkout, monkeypatch):
 def test_a_green_a_day_behind_is_filed_while_the_checkout_stays_on_it(checkout):
     start = _git(checkout, "rev-parse", "HEAD")
     _publish_green(checkout, start)
-    target = watchdog.update_target(checkout, "main")
+    watchdog.update_target(checkout, "main")
     _git(checkout, "fetch", "--quiet", "origin", "main")
-    assert watchdog.stale_green(checkout, "main", target) == ""
-    said = watchdog.stale_green(checkout, "main", target, limit=-1)
-    assert "behind origin/main" in said
+    assert watchdog.stale_green(checkout, "main") == "", "a commit minutes old is just waiting"
+    a_day_on = time.time() + watchdog.GREEN_STALE_SECONDS + 60
+    said = watchdog.stale_green(checkout, "main", clock=lambda: a_day_on)
+    assert "has not reached" in said
+    assert watchdog.self_update(checkout)[0] is True, "filed apart, or the rerun would stop"
+
+
+def test_a_quiet_weekend_before_one_merge_is_not_stale(checkout):
+    """Measured between the two commits, Friday's green and Monday's merge read as 63 hours
+    behind while Monday's gate was still running."""
+    start = _git(checkout, "rev-parse", "HEAD")
+    _publish_green(checkout, start)
+    watchdog.update_target(checkout, "main")
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    tip = int(_git(checkout, "log", "-1", "--format=%ct", "origin/main"))
+    an_hour_on = tip + 3600
+    assert watchdog.stale_green(checkout, "main", clock=lambda: an_hour_on) == ""
+
+
+def test_no_green_or_nothing_waiting_is_never_stale(checkout):
+    assert watchdog.stale_green(checkout, "main", limit=-1, clock=lambda: 1e12) == ""
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    _publish_green(checkout, _git(checkout, "rev-parse", "origin/main"))
+    watchdog.update_target(checkout, "main")
+    assert watchdog.stale_green(checkout, "main", limit=-1, clock=lambda: 1e12) == ""
 
 
 def test_a_dirty_checkout_is_left_and_said(checkout):

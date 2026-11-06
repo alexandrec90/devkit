@@ -94,8 +94,14 @@ def test_git_runs_in_the_repository_and_never_raises_on_a_refusal():
 
 def test_push_gives_up_on_a_branch_that_keeps_moving():
     run = FakeRun(refuse={"push": 99})
-    assert "still behind" in tidy.push(run, "main")
+    assert "still refused" in tidy.push(run, "main")
     assert run.did("push") == tidy.PUSH_TRIES
+
+
+def test_a_push_refused_for_good_is_not_called_left_for_later():
+    """A rebase that succeeds and a push that keeps failing is not a race, so retrying on
+    the next merge would only repeat it. The job has to go red to be seen."""
+    assert tidy.main(ENV, FakeRun(refuse={"push": 99})) == 1
 
 
 def test_it_refuses_to_guess_where_to_push():

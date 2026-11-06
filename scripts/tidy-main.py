@@ -11,8 +11,9 @@ rewrite of this kind has no later moment that would suit it better. The subject 
 `Tidy:`, which is how a search for the commit that broke `main` knows to step over it.
 
 A push that loses to a merge is rebased and tried again. One that conflicts is dropped: the
-merge that beat it starts this job again, over a tree that includes it. A workflow file is
-never pushed, because `GITHUB_TOKEN` is refused for that whole push and the rest would go
+next merge starts this job again, over a tree that includes both. A push still refused after
+that is not a race, so the job goes red rather than call it left for later. A workflow file
+is never pushed, because `GITHUB_TOKEN` is refused for that whole push and the rest would go
 with it.
 
 Vendored from devkit (`sync-devkit.py`'s MANIFEST) and byte-identical everywhere: what to
@@ -34,6 +35,7 @@ WORKFLOWS = ".github/workflows"
 BOT_NAME = "github-actions[bot]"
 BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 PUSH_TRIES = 4
+CONFLICTED = "a merge conflicts with it"
 
 
 def git(run, *args: str):
@@ -50,8 +52,8 @@ def push(run, branch: str) -> str:
         said = (done.stderr or done.stdout or "").strip()
         if git(run, "pull", "--rebase", "origin", branch).returncode != 0:
             git(run, "rebase", "--abort")
-            return f"a merge conflicts with it: {said}"
-    return f"still behind after {PUSH_TRIES} tries: {said}"
+            return f"{CONFLICTED}: {said}"
+    return f"still refused after {PUSH_TRIES} tries: {said}"
 
 
 def main(env: dict[str, str] | None = None, run=None) -> int:
@@ -78,10 +80,14 @@ def main(env: dict[str, str] | None = None, run=None) -> int:
     if committed.returncode != 0:
         print(f"Could not commit: {committed.stderr}", file=sys.stderr)
         return 1
-    if why := push(run, branch):
+    why = push(run, branch)
+    if why.startswith(CONFLICTED):
         # Not a failure of anything: the next merge's tidy covers this one's files too.
         print(f"Left for the next tidy: {why}")
         return 0
+    if why:
+        print(f"Could not push: {why}", file=sys.stderr)
+        return 1
     print(f"Tidied {branch}.")
     return 0
 

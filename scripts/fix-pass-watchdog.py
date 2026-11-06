@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -230,26 +231,34 @@ def update_target(root: Path, base: str) -> str:
     return f"origin/{GREEN}" if known.returncode == 0 else f"origin/{base}"
 
 
-def stale_green(root: Path, base: str, target: str, limit: float = GREEN_STALE_SECONDS) -> str:
-    """What to file when `green` trails `origin/<base>` by more than `limit`, else "".
+def stale_green(
+    root: Path,
+    base: str,
+    limit: float = GREEN_STALE_SECONDS,
+    clock: Callable[[], float] = time.time,
+) -> str:
+    """What to file when a commit has waited more than `limit` to reach `green`, else "".
 
     Following `green` means a broken gate stops the machine updating, quietly. Nothing
-    should act on the tip while that lasts, but the job that says so is the point at
-    which the wait stops being the safe answer and becomes the failure.
+    should act on the tip while that lasts, but past this the wait stops being the safe
+    answer and becomes the failure.
+
+    Measured from the oldest commit `green` has not reached, against the clock. The gap
+    between the two commits would call a quiet weekend followed by one merge days stale
+    while that merge's gate was still running. Filed apart from `self_update`, whose False
+    would also stop the rerun: the checkout is up to date with everything judged good.
     """
-    if target == f"origin/{base}":
+    ref = f"refs/remotes/origin/{GREEN}"
+    if git(root, "rev-parse", "--verify", "--quiet", ref).returncode != 0:
         return ""
-    stamps = (
-        git(root, "log", "-1", "--format=%ct", target),
-        git(root, "log", "-1", "--format=%ct", f"origin/{base}"),
-    )
+    waiting = git(root, "log", "--reverse", "--format=%ct", f"{ref}..origin/{base}").stdout.split()
     try:
-        behind = int(stamps[1].stdout.strip()) - int(stamps[0].stdout.strip())
+        oldest = int(waiting[0]) if waiting else 0
     except ValueError:
         return ""
-    if behind <= limit:
+    if not oldest or clock() - oldest <= limit:
         return ""
-    return f"{target} is {behind // 3600}h behind origin/{base}: its gate has not passed since"
+    return f"origin/{base} has commits {GREEN} has not reached in a day: its gate is not passing"
 
 
 def self_update(root: Path) -> tuple[bool, str]:
@@ -273,8 +282,6 @@ def self_update(root: Path) -> tuple[bool, str]:
     if git(root, "merge", "--ff-only", "--quiet", target).returncode != 0:
         return False, f"{base} has diverged from {target}"
     after = git(root, "rev-parse", "HEAD").stdout.strip()
-    if stale := stale_green(root, base, target):
-        return False, stale
     return True, "current" if before == after else f"updated {before[:9]}..{after[:9]}"
 
 
@@ -593,6 +600,9 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
             file_once(
                 state, signature("pass-stale", what, head), "pass-stale", what, str(REPO_ROOT), now
             )
+        if stale := stale_green(REPO_ROOT, default_branch(REPO_ROOT)):
+            sig = signature("green-stale", stale, head)
+            file_once(state, sig, "green-stale", stale, str(REPO_ROOT), now)
     code, output = run_current(argv, mode, notes, began)
     print(output, end="")  # pythonw.exe runs this job with sys.stdout None
     kind, detail = judge(code, output)
