@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tomllib
 from pathlib import Path
 
+import pytest
 import support
 from support import load_script
 
@@ -54,6 +56,25 @@ def test_the_marker_says_the_tier_is_deselected_not_skipped():
     described = next(m for m in pytest_config["markers"] if m.startswith(f"{e2e.MARKER}:"))
     assert "deselected" in described
     assert "skipped" not in described
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".claude/rules/vscode-tasks.md",
+        "README.md",
+        "scripts/e2e.py",
+        "tests/support.py",
+        "tests/test_workspace_task_index.py",
+        "tests/test_workspace_tasks_live.py",
+    ],
+)
+def test_nothing_describing_the_tier_says_ci_skips_it(path):
+    """No tier test can skip in CI: `addopts` deselects the marker first. homelab's fixer
+    read that framing in the rule, wrote a skip, and was refused by the ratchet; the rule
+    is corrected, and devkit's own `scripts/e2e.py` is the model a project's tier resembles."""
+    text = (support.REPO_ROOT / path).read_text(encoding="utf-8")
+    assert not re.search(r"(?i)\bCI skips\b|\bskip\w*\s+in\s+CI\b", text)
 
 
 def test_an_unreadable_report_is_no_cases(tmp_path):

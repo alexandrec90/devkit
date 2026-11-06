@@ -538,7 +538,7 @@ def test_the_canonical_workspace_renders():
 
 @needs_live_workspace
 def test_the_live_workspace_renders():
-    """The default target. Skipped in CI, where the live file does not exist."""
+    """The default target. Deselected from CI, where the live file does not exist."""
     report = index.build_report(index.LIVE_WORKSPACE, "live", "markdown", 120)
     assert "## Parameters" in report
 

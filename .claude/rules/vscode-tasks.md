@@ -143,7 +143,7 @@ half. **The merge that state needs is by hand:** copy the live edit into `worksp
 on a task branch, ship it, and publish after it merges.
 
 `test_the_live_workspace_matches_the_canonical_copy` holds the pairing and is
-`@needs_live_workspace`: skipped in CI, so drift is caught locally or not at all. It reads
+`@needs_live_workspace`: deselected from CI, so drift is caught locally or not at all. It reads
 drift as the daily line does (`devkit_project.live_drift`): every live edit on a pushed
 branch is a merge awaited, green until `HELD_DAYS` runs out.
 
