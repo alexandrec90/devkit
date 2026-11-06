@@ -151,6 +151,8 @@ ARTIFACTS: dict[str, str] = {
     "devkit-fix-pass": "logs/fix-pass.log",
     "devkit-collectors": "logs/collectors.log",
     "devkit-local-e2e": "logs/scheduled-local-e2e.log",
+    # Absolute, the one job here that may not write in a checkout (`elevated_worker.py`).
+    "devkit-elevated": "C:/ProgramData/devkit/elevated/worker.log",
 }
 
 

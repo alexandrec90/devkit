@@ -898,6 +898,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
 | `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, behind `devkit.fixPass` | `logs/fix-pass.log` |
 | `devkit-collectors` | `scripts/install-collectors.py` | every 15 min, and at logon; acts only where `run-here`/`stop-here` assigned | `logs/collectors.log` |
+| `devkit-elevated` | `scripts/install-elevated-worker.py` | every 5 min, elevated; installed once per PC by an administrator, never by a job | `C:\ProgramData\devkit\elevated\worker.log` |
 
 #### The one installer you run by hand
 
@@ -909,8 +910,9 @@ asks every `scripts/install-*.py` the one question they all answer — `--check`
 current, 1 needs (re)installing, 2 left alone — and in `maintain` mode runs `--yes` on
 each that answered 1: a job never installed, a checkout that moved, an installer that
 gained a flag, a task disabled by nobody. `devkit-installers` runs it daily and two
-minutes after every logon, so registering *that* job is the only install a machine ever
-needs done by hand:
+minutes after every logon, so registering *that* job is the only install a machine
+needs done by hand, bar the [elevated worker](#the-elevated-worker-one-admin-action-per-pc),
+which this pass holds out because no unelevated job can install it:
 
 ```bash
 python scripts/install-installers-schedule.py --yes   # once per machine
@@ -962,8 +964,8 @@ on — found by name, answers `--check` and `--yes`, names its group, checks thr
 `devkit_schtasks.run_check`, consults the ledger, and has a row in the table above — so a
 new installer joins the pass by existing, and one that cannot be driven fails the suite.
 
-The last of those is the workspace's own health report, and it is a scheduled job for a
-reason worth knowing before you move it: `workspace-status.py` was written as a
+`devkit-workspace-status` is the workspace's own health report, and it is a scheduled job
+for a reason worth knowing before you move it: `workspace-status.py` was written as a
 SessionStart line, every document here called it one, and **nothing ever ran it** — so a
 missing `uv`, an unset git identity, a stranded checkout and an uninstalled picker
 extension were all reported to nobody until the extension surfaced as `command
@@ -983,6 +985,62 @@ in (`GROUP`), which is what the switch's list is held to.
 — and names the file above when one exits non-zero, so the reported line is a
 pointer rather than a bare exit code. `tests/test_scheduled_jobs.py` holds the contract:
 a job registered by hand, or one that leaves nothing behind, fails the suite.
+
+#### The elevated worker: one admin action per PC
+
+Every job above runs unelevated, and one recovery cannot: the DACL on `WSLService` grants
+an unelevated token neither start nor stop, and a service stuck in `STOP_PENDING` hangs
+every `wsl` call until an administrator ends it. A dispatcher running tasks as admin would
+run merged, unreviewed code as admin, so there is no dispatcher. Each PC gets
+`devkit-elevated`, a worker with one verb that takes no arguments:
+
+```bash
+python scripts/elevated_request.py restart-wsl-service   # from any unelevated process
+```
+
+Or `elevated_request.request(verb)` from Python. Either way the only thing crossing to the
+elevated side is the name of an empty file in `C:\ProgramData\devkit\requests\`: the worker
+never opens one, and anything else it finds there is deleted and logged.
+
+A request is not an instruction. The worker first asks whether WSL is actually unhealthy,
+with the checks `docker-maint.py recover-wsl` uses, each bounded and needing no elevation,
+and a healthy service is left alone and logged. A stuck one gets what `recover-wsl`'s
+elevated half does: its process ended, a wait for it to settle, and `wsl --update`, so
+Windows Update has no install left to retry and hang on. That ends every distro, Docker's
+included, and `collectors.py` brings Docker Desktop back, unelevated. It runs at most once
+in six hours (`RESTART_EVERY`, kept in the admin-only folder). A run that fails or is
+refused reaches the pass through `elevated_request.results`, and is filed for a fixer.
+
+**Installing takes an administrator, once per PC, and cannot be automated.** That is why
+`installers.py` holds this one out of its pass. From an elevated terminal:
+
+```bash
+python scripts/install-elevated-worker.py                 # the plan, changing nothing
+python -I -S scripts/install-elevated-worker.py --yes     # install or upgrade; elevated only
+python scripts/install-elevated-worker.py --check         # is it current; needs no elevation
+```
+
+The task runs a copy of the worker and a private copy of the interpreter (about 36 MB,
+stdlib only) in `C:\ProgramData\devkit\elevated\`, which only administrators can write, so
+a merged change cannot rewrite what runs as admin. **The install itself cannot have that
+property:** it reads the checkout and the Python it copies from places the user can write,
+so it assumes a clean machine at that moment.
+
+So the harness never prompts for it. A merged change to the worker does not reach a PC
+until someone chooses to re-run `--yes`, a working installed worker keeps working, and only
+`--check` reports that its copy is behind. An unreviewed merge plus a prompted admin paste
+would be the dispatcher this design refused. The one person's step is for a real request
+waiting on a PC with no worker: `request` says so and leaves a dated note, the fix pass
+names the machine and the exact command, and the step goes once a worker appears or a
+day passes with nobody asking again.
+
+The installed task is read-only to the user, so `harness-switch.py --off --job
+devkit-elevated` is refused unelevated, as is `--uninstall --yes`. `installers.py uninstall`
+does not reach it either: take it off a decommissioned PC with `--uninstall --yes` from
+an elevated terminal.
+
+Windows-only. Everywhere else the worker and the installer say so and exit 0, `request`
+says so and writes nothing, and no step is ever filed.
 
 #### Ingestion collectors, and which machine runs them
 
