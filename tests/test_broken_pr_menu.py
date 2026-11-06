@@ -63,6 +63,15 @@ def test_a_dirty_merge_is_broken_without_failed_checks(mergeable, rollup):
     assert menu.broken_reason(entry) == "merge conflict"
 
 
+def test_nothing_about_a_merge_label_keeps_a_conflict_from_the_pass():
+    """The drain skips a conflicted `merge-now` PR, so the resolver is all it has. Neither
+    the scan nor the plan asks for labels: such a PR is broken like any other."""
+    assert "labels" not in menu.PR_LIST_FIELDS.split(",")
+    labelled = pr(mergeable="CONFLICTING", labels=[{"name": "merge-now"}])
+    assert menu.broken_reason(labelled) == menu.broken_reason(pr(mergeable="CONFLICTING"))
+    assert "merge conflict" in menu.broken_reason(labelled)
+
+
 @pytest.mark.parametrize("state", ["UNKNOWN", "BLOCKED", "BEHIND", "UNSTABLE", "CLEAN", None])
 def test_other_merge_states_are_not_conflicts(state):
     assert menu.broken_reason(pr(mergeable="UNKNOWN", mergeStateStatus=state)) == ""

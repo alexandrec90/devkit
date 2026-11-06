@@ -38,6 +38,8 @@ shapes `gh` returns, so `tests/test_fix_plan.py` drives every branch without a n
 - **A PR against a red default branch is held**, out loud, for the base's fixer: it
   inherits the base's failure, and one pass sent a base and two of its PRs three
   sessions in one second for one cause.
+- **The direct flow differs twice** (`plan`'s `direct`): a resolver is not held behind a
+  red base, and a default branch red on nothing but what tidy rewrites sends no one.
 - **The ledger** (`fix_ledger.py`) is what makes a second click safe: every dispatch is
   recorded against the commit it was observed on, so clicking again sends nothing at a
   failure an agent is already on.
@@ -49,6 +51,7 @@ is the half that asks GitHub.
 from __future__ import annotations
 
 import ast
+import datetime as _dt
 import functools
 import re
 import sys
@@ -170,10 +173,51 @@ JS_FAIL_LINE = re.compile(r"^\s*FAIL\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?(?: > .+
 # What `gh run view --log-failed` puts before each line -- `job<TAB>step<TAB>timestamp ` --
 # and the colour codes a runner leaves in. Stripped before the patterns above are tried,
 # since every one of them is anchored at the line's start.
-LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ?")
+LOG_PREFIX = re.compile(r"^([^\t]*)\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # What a job with no steps at all carries after its name in a signature.
 UNSTARTED = "(never started a step)"
+
+# What `is_tidy_owned` recognises: what the post-merge tidy of a direct-flow project
+# rewrites, so a red default branch made of nothing else needs no session. The step of
+# devkit's own gate that runs `ruff format --check`; the vendored test that compares the
+# Codex mirror with its source, and the one hook that says the same in devkit's config.
+FORMAT_STEP = "Format"
+MIRROR_TEST = (
+    "scripts/hooks/tests/test_sync_codex_context.py"
+    "::test_the_committed_mirror_is_its_source_byte_for_byte"
+)
+# A generated gate has no step of its own for formatting: it fails in a step that runs
+# many checks, whose name says nothing of which (`job / Run every hook over the whole
+# repo`, `job / Lint`). Those are read by the hooks their own job's log names
+# (`failed_hooks`).
+HOOK_STEPS = (
+    "Run every hook over the whole repo",
+    "Lint",
+    "Lint + typecheck via the wrapper devkit ships",
+)
+TIDY_HOOKS = frozenset(
+    {
+        "ruff-format",
+        "trailing-whitespace",
+        "end-of-file-fixer",
+        "mixed-line-ending",
+        "codex-skill-mirror",
+    }
+)
+# pre-commit's report of a hook that failed, and `ruff format --check`'s of a file it
+# would change, which `lint-all.py` prints without naming a hook.
+HOOK_ID_LINE = re.compile(r"^- hook id: (\S+)")
+WOULD_REFORMAT = re.compile(r"^Would reformat: ")
+# `lint-all.py`'s artifact, which carries no log prefix to say whose it is, and the job a
+# generated gate runs it in. Any other text with no prefix belongs to no job.
+LINT_ARTIFACT = "# source: scripts/lint-all.py"
+LINT_JOB = "Lint"
+# How long a direct-flow default branch red on what tidy rewrites waits for tidy, from when
+# a pass first saw it (`red_seen.py`). Tidy cannot land everything: it restores
+# `.github/workflows` before staging, so whitespace there stays red through every merge,
+# and past this it is a failure like any other.
+TIDY_GRACE = _dt.timedelta(hours=1)
 
 
 @dataclass(frozen=True)
@@ -222,6 +266,12 @@ class Failure:
     # Red, and `gh` answered nothing for its run's jobs (`gate_evidence.reread`): a read
     # that failed, not a run that names nothing, so it is skipped and read again.
     unread: bool = False
+    # BRANCH only: `(job, hook)` for each pre-commit hook its logs name as failed
+    # (`failed_hooks`), which a step-level signature cannot say. Read by `is_tidy_owned`.
+    hooks: tuple[tuple[str, str], ...] = ()
+    # BRANCH only: red on what tidy rewrites for longer than `TIDY_GRACE`, so it is an
+    # ordinary failure now. Set by the pass, which holds the first-seen state.
+    tidy_lapsed: bool = False
 
 
 @dataclass(frozen=True)
@@ -405,6 +455,55 @@ def is_release_red(sig: tuple[str, ...]) -> bool:
     return bool(sig) and all(entry.rsplit("::", 1)[-1] == RELEASE_TEST for entry in sig)
 
 
+def failed_hooks(texts: Iterable[str]) -> tuple[tuple[str, str], ...]:
+    """`(job, hook)` for each pre-commit hook these logs name as failed, sorted, deduped;
+    `ruff format --check` reporting a file counts as its hook. The job is the log prefix's,
+    "" for a text that has none and says nothing else. Kept out of the signature, which
+    groups failures across every project: only the direct flow asks which hook it was."""
+    found: set[tuple[str, str]] = set()
+    for text in texts:
+        fallback = LINT_JOB if str(text).startswith(LINT_ARTIFACT) else ""
+        for raw in str(text).splitlines():
+            prefixed = LOG_PREFIX.match(raw)
+            job = prefixed.group(1) if prefixed else fallback
+            line = ANSI.sub("", LOG_PREFIX.sub("", raw))
+            if hook := HOOK_ID_LINE.match(line):
+                found.add((job, hook.group(1)))
+            elif WOULD_REFORMAT.match(line):
+                found.add((job, "ruff-format"))
+    return tuple(sorted(found))
+
+
+def is_tidy_owned(sig: tuple[str, ...], hooks: Iterable[tuple[str, str]] = ()) -> bool:
+    """Every entry is formatting or the Codex mirror, both of which the post-merge tidy of
+    a direct-flow project rewrites. `hooks` is `failed_hooks`' answer: an entry for a
+    step that runs many checks counts only when its own job's logs name hooks and each is
+    tidy's, so a log that says nothing reads as not tidy's, and a fixer goes. A hook another
+    job names says nothing about this one."""
+    by_job: dict[str, set[str]] = {}
+    for job, hook in hooks:
+        by_job.setdefault(job, set()).add(hook)
+
+    def tidy(entry: str) -> bool:
+        job, _, step = entry.rpartition(" / ")
+        named = by_job.get(job, set())
+        hooks_are_tidy = step in HOOK_STEPS and bool(named) and named <= TIDY_HOOKS
+        return entry == MIRROR_TEST or step == FORMAT_STEP or hooks_are_tidy
+
+    return bool(sig) and all(tidy(entry) for entry in sig)
+
+
+def owned_by_tidy(failure: Failure, direct: frozenset[str]) -> bool:
+    """A red default branch of a direct-flow project that only tidy has to answer, for as
+    long as `TIDY_GRACE` lasts: past it (`Failure.tidy_lapsed`) it is anyone's."""
+    return (
+        failure.kind == BRANCH
+        and failure.project in direct
+        and not failure.tidy_lapsed
+        and is_tidy_owned(failure.signature, failure.hooks)
+    )
+
+
 def name_of(failure: Failure) -> str:
     """How a failure is named in a record: `#412`, the branch it sits on, or `origin/main`."""
     if failure.kind == BRANCH:
@@ -486,32 +585,37 @@ def plan(
     failures: Iterable[Failure],
     latest_tag: str,
     adoption_prefixes: Iterable[str],
+    direct: Iterable[str] = (),
 ) -> list[Decision]:
     """Every failure placed under exactly one decision, in a stable order.
 
     `latest_tag` is devkit's newest release as written (`v0.11.21`) or already as a
     branch slug; it is compared to adoption branch names, so it is slugified here.
     Empty means "cannot tell", in which case no adoption PR is called superseded: an
-    unknown newest tag must not silently skip every adoption on the machine.
+    unknown newest tag must not silently skip every adoption on the machine. `direct`
+    names the projects in the direct flow (`delivery.py`), where `_place` differs.
     """
     prefixes = tuple(adoption_prefixes)
     latest = tb.slugify(latest_tag) if latest_tag else ""
+    flow = frozenset(direct)
     grouped: dict[tuple[str, ...], list[Failure]] = {}
     decisions: list[Decision] = []
     listed = list(failures)
     # An unread branch is skipped and still red: its PRs stay held behind it. A branch
-    # refused over billing is skipped and holds nothing: its PRs are refused alike.
+    # refused over billing is skipped and holds nothing: its PRs are refused alike, and
+    # so is one no fixer is coming for because tidy owns it.
     red_bases = {
         (f.project, f.base)
         for f in listed
         if f.kind == BRANCH
         and not is_release_red(f.signature)
         and not is_billing_refused(f.signature)
+        and not owned_by_tidy(f, flow)
     }
     for failure in sorted(listed, key=lambda f: (f.kind, f.project, f.number)):
         if why := skip_reason(failure, latest, prefixes):
             decisions.append(Decision(SKIP, why, (failure,)))
-        elif placed := _place(failure, red_bases):
+        elif placed := _place(failure, red_bases, flow):
             decisions.append(placed)
         else:
             grouped.setdefault(failure.signature, []).append(failure)
@@ -532,7 +636,9 @@ def plan(
     return decisions
 
 
-def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None:
+def _place(
+    failure: Failure, red_bases: set[tuple[str, str]], direct: frozenset[str] = frozenset()
+) -> Decision | None:
     """The decision a failure gets on its own, before any grouping; None to group it.
 
     A conflict is decided first: its gate has no merge ref to run against, GitHub
@@ -560,12 +666,19 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     A run GitHub refused to start over billing (`is_billing_refused`) is skipped, naming
     the person's step, before the hold: a re-run is refused the same way, and a fixer
     can only find the annotation.
+
+    In the `direct` flow two of these differ. A resolver is not held by a red base: nothing
+    waits on the base being green, and a conflicted PR is the one thing that cannot merge.
+    And a red default branch made of nothing but what tidy rewrites (`owned_by_tidy`) is
+    skipped for `TIDY_GRACE`: the post-merge job answers it, and a fixer would race that job.
     """
     against_red = (
         failure.kind in (PR, NIGHTLY, LOCAL) and (failure.project, failure.base) in red_bases
     )
-    if CONFLICT in failure.signature and not against_red:
+    if CONFLICT in failure.signature and (not against_red or failure.project in direct):
         return Decision(RESOLVE, describe(failure), (failure,))
+    if owned_by_tidy(failure, direct):
+        return Decision(SKIP, tidy_note(failure), (failure,))
     if failure.behind and CONFLICT not in failure.signature:
         why = (
             f"GitHub says conflicting, git merges it with origin/{failure.base} cleanly"
@@ -617,6 +730,14 @@ def billing_note(failure: Failure) -> str:
     return (
         f"{describe(failure)}; GitHub refused to start its jobs over the account's billing "
         f"-- {harness_triage.PERSON_STEP} {BILLING_STEP}"
+    )
+
+
+def tidy_note(failure: Failure) -> str:
+    """Why a default branch red on formatting or the Codex mirror gets no fixer yet."""
+    return (
+        f"{describe(failure)}; nothing but what tidy rewrites, which runs on every merge: "
+        "a fixer goes if it outlasts the grace"
     )
 
 
