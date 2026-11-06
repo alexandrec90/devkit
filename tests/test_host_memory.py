@@ -18,6 +18,16 @@ def test_linux_reads_available_not_free():
     assert host_memory.meminfo_mb("MemAvailable:\n") is None
 
 
+def test_a_session_needs_its_own_size_above_the_floor():
+    floor = host_memory.MEMORY_FLOOR_MB + host_memory.SESSION_MB
+    assert host_memory.room_for_session(floor)
+    assert not host_memory.room_for_session(floor - 1)
+
+
+def test_a_probe_that_failed_guards_nothing():
+    assert host_memory.room_for_session(None)
+
+
 def test_this_machine_answers_with_a_plausible_figure():
     """The one probe a stub cannot vouch for: the platform call on the machine running it."""
     free = host_memory.available_mb()

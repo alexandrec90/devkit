@@ -9,15 +9,18 @@ several racing to write the one file the pass reads.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import after_merge
 import ship_intent
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / ".claude" / "skills" / "ship" / "SKILL.md"
 SCOPE = ROOT / ".claude" / "rules" / "session-scope.md"
+QUEUE_SECTION = "## Never end by telling the person to do something"
 
 
 def _frontmatter() -> dict[str, str]:
@@ -43,6 +46,55 @@ def test_ship_auto_writes_the_trailer_the_pass_labels_automerge():
     assert "`Automerge: yes`" in text
     assert ship_intent.asks_automerge("Because.\n\nAutomerge: yes")
     assert "never add the line on your own judgement" in " ".join(text.split())
+
+
+def _section() -> str:
+    """The skill from `QUEUE_SECTION` on."""
+    return SKILL.read_text(encoding="utf-8").split(QUEUE_SECTION, 1)[1]
+
+
+def test_never_leaving_the_person_a_job_is_the_skills_last_section():
+    """The instruction the operator cares most about, and the last thing a session reads
+    before it stops. Last so an edit to the flow above it cannot bury it, and held here so
+    one cannot drop it: a session that loses this section goes back to ending on "you
+    need to", which is exactly what this test fails on."""
+    headings = re.findall(r"^## .*$", SKILL.read_text(encoding="utf-8"), re.M)
+    assert headings[-1] == QUEUE_SECTION
+
+
+def test_the_section_says_each_thing_a_session_has_to_be_told():
+    text = " ".join(_section().split())
+    for clause in (
+        "a session NEVER ends with",
+        "Anything that must happen later goes in a task file, in the same change",
+        "Anything that does not fit, a case nobody thought of, is a plain `agent` task",
+        "written for a session with no memory of this one",
+        "A session with no code change still commits that one file",
+        "Only what truly needs the human, a payment or a login, reaches them",
+        "through a task the agent attempts first",
+        "an edit never runs a finished one again",
+        "to run something again, add a new file",
+    ):
+        assert clause in text, clause
+
+
+def test_the_example_is_a_task_the_queue_accepts():
+    """An example the parser refuses would teach every session to write a malformed file."""
+    example = re.search(r"```toml\n(.*?)```", _section(), re.S)
+    assert example is not None
+    task = after_merge.parse(
+        "project", f"{after_merge.QUEUE_DIR}/name.toml", "a" * 40, example.group(1)
+    )
+    assert not task.malformed, task.malformed
+    assert (task.when, task.on) == (after_merge.GREEN, after_merge.ANY), (
+        "the section calls these the defaults"
+    )
+
+
+def test_the_section_names_the_elevated_verbs_the_queue_takes():
+    for verb in after_merge.ELEVATED_VERBS:
+        assert f"`{verb}`" in _section()
+    assert f"{after_merge.QUEUE_DIR}/<name>.toml" in _section()
 
 
 def test_the_scope_rule_keeps_subagents_from_shipping():

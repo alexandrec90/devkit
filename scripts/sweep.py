@@ -63,6 +63,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -299,6 +300,39 @@ def run_bounded(
         said = f"{err or ''}\ntimed out after {timeout:g}s; ended it and its children"
         return subprocess.CompletedProcess(argv, TIMED_OUT, out or "", said.strip())
     return subprocess.CompletedProcess(argv, process.returncode, out, err)
+
+
+def run_to_files(
+    argv: str | list[str], timeout: float, **kwargs
+) -> subprocess.CompletedProcess[str]:
+    """`run_bounded` for a command whose children may outlive it: the output goes to
+    temporary files and the wait is on the process, not on its pipes.
+
+    A pipe stays open while anything holds its write end, so a command that exits 0 and
+    leaves a server running looked like a command still running, until its timeout called
+    a success a failure. `kwargs` go to `Popen`; a process still running at `timeout` is
+    ended with its tree, returncode `TIMED_OUT`.
+    """
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            creationflags=NO_WINDOW,
+            start_new_session=sys.platform != "win32",
+            **kwargs,
+        )
+        try:
+            code = process.wait(timeout=timeout)
+            ended = ""
+        except subprocess.TimeoutExpired:
+            _end_tree(process)
+            code, ended = TIMED_OUT, f"\ntimed out after {timeout:g}s; ended it and its children"
+        out.seek(0)
+        err.seek(0)
+        said = [f.read().decode("utf-8", "replace").replace("\r\n", "\n") for f in (out, err)]
+    return subprocess.CompletedProcess(argv, code, said[0], (said[1] + ended).lstrip("\n"))
 
 
 def _end_tree(process: subprocess.Popen) -> None:

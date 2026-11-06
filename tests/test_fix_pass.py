@@ -93,6 +93,32 @@ def prs_still_open(monkeypatch):
     monkeypatch.setattr(fix_pass.fix_send, "closed_since", lambda failure, root: "")
 
 
+class NoOtherPC:
+    """`fix_claims.Turn` on a machine with nothing to compete with: every send is its own."""
+
+    held_for = ""
+
+    def __init__(self, *args) -> None:
+        self.given_back: list = []
+
+    def held(self, decision) -> str:
+        return self.held_for
+
+    def note(self, decision) -> str:
+        return ""
+
+    def failed(self, decision) -> None:
+        self.given_back.append(decision)
+
+
+@pytest.fixture(autouse=True)
+def no_other_pc(monkeypatch):
+    """No other PC holds a claim unless a test says one does: the real one pushes a ref in
+    whatever checkout a test names."""
+    monkeypatch.setattr(fix_pass.fix_send.fix_claims, "Turn", NoOtherPC)
+    return NoOtherPC
+
+
 def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path):
     """The pass shipped 0926-19's intent at 04:09 while that session was still fixing a
     group filed after it wrote the intent, and #422's while its sweep kept editing --
@@ -1288,6 +1314,50 @@ def test_send_all_records_only_what_opened_and_caps_the_rest(world, tmp_path):
         and [why for _, why in capped]
         == ["already dispatched at " + NOW.isoformat(timespec="seconds")] * 2
     )
+
+
+def test_a_red_another_pc_claimed_is_held_and_nothing_is_recorded(world, tmp_path, monkeypatch):
+    """Two PCs on `dispatch`: the second neither sends nor writes its ledger, so if the
+    first PC's fixer dies this one looks again once the claim's TTL has passed."""
+    monkeypatch.setattr(NoOtherPC, "held_for", "claimed by pc-b, which sent it")
+    ctx = _ctx(tmp_path)
+    go = [fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),))]
+    sent, capped, worst = fix_pass.fix_send.send_all(go, ctx, "claude")
+    assert sent == [] and worst == 0
+    assert [why for _, why in capped] == ["claimed by pc-b, which sent it"]
+    assert fix_ledger.read_ledger(ctx.ledger_path) == {}
+
+
+def test_a_send_with_no_claim_says_so_on_its_record_line(world, tmp_path, monkeypatch):
+    """A claim that failed opens the send rather than stopping it, so the line is the
+    trace that it went out unclaimed."""
+    monkeypatch.setattr(NoOtherPC, "note", lambda self, decision: " (claim failed open: x)")
+    go = [fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),))]
+    sent, _, _ = fix_pass.fix_send.send_all(go, _ctx(tmp_path), "claude")
+    assert sent == ["carameli #1 -- dispatch (claim failed open: x)"]
+
+
+def test_saying_keeps_what_was_printed_and_returns_the_code(capsys):
+    def noisy(word):
+        print(word)
+        return 3
+
+    assert fix_pass.fix_send.saying(noisy, "hello") == (3, "hello\n")
+    assert capsys.readouterr().out == "hello\n"
+
+
+def test_a_send_that_failed_gives_its_claim_back(world, tmp_path, monkeypatch):
+    turns: list[NoOtherPC] = []
+
+    def record(*args):
+        turns.append(NoOtherPC())
+        return turns[-1]
+
+    monkeypatch.setattr(fix_pass.fix_send.fix_claims, "Turn", record)
+    monkeypatch.setattr(fix_pass.fix_send, "dispatch", lambda *a: 1)
+    go = [fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),))]
+    fix_pass.fix_send.send_all(go, _ctx(tmp_path), "claude")
+    assert turns[0].given_back == go
 
 
 def test_a_session_the_machine_has_no_memory_for_is_held_for_the_next_pass(world, tmp_path):
