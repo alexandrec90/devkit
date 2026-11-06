@@ -496,6 +496,59 @@ def test_a_clean_checkout_on_its_default_branch_is_fast_forwarded(checkout):
     assert watchdog.self_update(checkout) == (True, "current")
 
 
+def _publish_green(checkout: Path, sha: str) -> None:
+    _git(checkout, "push", "--quiet", "origin", f"{sha}:refs/heads/green")
+
+
+def test_a_checkout_follows_green_and_not_the_tip(checkout):
+    """Merging no longer means tested, and the pass is what repairs a bad merge. Running
+    one would break the repair of itself."""
+    start = _git(checkout, "rev-parse", "HEAD")
+    _publish_green(checkout, start)
+    ok, what = watchdog.self_update(checkout)
+    assert (ok, what) == (True, "current")
+    assert (checkout / "a.txt").read_text(encoding="utf-8") == "1\n", "main is ahead, unjudged"
+
+
+def test_a_checkout_moves_when_green_does(checkout):
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    tip = _git(checkout, "rev-parse", "origin/main")
+    _publish_green(checkout, tip)
+    ok, what = watchdog.self_update(checkout)
+    assert ok and what.startswith("updated")
+    assert (checkout / "a.txt").read_text(encoding="utf-8") == "2\n"
+
+
+def test_no_green_yet_follows_the_default_branch(checkout):
+    assert watchdog.update_target(checkout, "main") == "origin/main"
+
+
+def test_a_failed_green_fetch_stays_on_the_last_green(checkout, monkeypatch):
+    """A moment's network trouble must not move the pass onto a commit nobody judged."""
+    start = _git(checkout, "rev-parse", "HEAD")
+    _publish_green(checkout, start)
+    watchdog.update_target(checkout, "main")
+    real = watchdog.git
+
+    def down(root, *args):
+        if args[0] == "fetch":
+            return subprocess.CompletedProcess(args, 1, "", "fatal: unable to access\n")
+        return real(root, *args)
+
+    monkeypatch.setattr(watchdog, "git", down)
+    assert watchdog.update_target(checkout, "main") == "origin/green"
+
+
+def test_a_green_a_day_behind_is_filed_while_the_checkout_stays_on_it(checkout):
+    start = _git(checkout, "rev-parse", "HEAD")
+    _publish_green(checkout, start)
+    target = watchdog.update_target(checkout, "main")
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    assert watchdog.stale_green(checkout, "main", target) == ""
+    said = watchdog.stale_green(checkout, "main", target, limit=-1)
+    assert "behind origin/main" in said
+
+
 def test_a_dirty_checkout_is_left_and_said(checkout):
     (checkout / "a.txt").write_text("local\n", encoding="utf-8")
     assert watchdog.self_update(checkout) == (
@@ -518,7 +571,7 @@ def test_a_fetch_that_fails_once_is_tried_again(checkout, monkeypatch):
     real, fetches = watchdog.git, []
 
     def flaky(root, *args):
-        if args[0] == "fetch":
+        if args[:3] == ("fetch", "--quiet", "origin") and args[-1] == "main":
             fetches.append(args)
             if len(fetches) == 1:
                 lock = "error: cannot lock ref 'refs/remotes/origin/main': is at 1a2b3c4d5e6f7a8b"

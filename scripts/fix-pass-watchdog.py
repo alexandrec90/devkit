@@ -166,6 +166,12 @@ FETCH_FAILED = "could not fetch"
 FETCH_STREAK = "fetch_failures"
 FETCH_FIRES = 6
 
+# The branch `dependabot-automerge.yml` keeps at the newest commit whose gate passed.
+GREEN = "green"
+# How far it may trail the default branch before that is filed. A day: a red `main` gets a
+# fixer within a pass and fix-or-revert within hours, so a day means the gate itself stopped.
+GREEN_STALE_SECONDS = 24 * 60 * 60
+
 
 def fetch(root: Path, base: str) -> str:
     """Fetch `origin/<base>`, once more after a pause; "" on success, else why not.
@@ -204,6 +210,48 @@ def worth_filing(state: dict, ok: bool, what: str) -> bool:
     return state[FETCH_STREAK] >= FETCH_FIRES
 
 
+def update_target(root: Path, base: str) -> str:
+    """The ref the checkout follows: `origin/green` once it exists, else `origin/<base>`.
+
+    Merging no longer means tested, and the pass is what repairs a bad merge: running one
+    would break the repair of itself. `green` is the newest commit whose gate passed, so a
+    red `main` leaves the pass on code that works and the fixers it sends cut from `main`.
+    A repository with no `green` yet is one whose gate has not passed since it was added.
+
+    Decided by the ref being known here, not by this fetch: a fetch that failed for a
+    moment must leave the checkout on the last `green`, never move it to the unjudged tip.
+
+    The refspec's source is spelled in full. `+green:...` exits 0 and writes no ref when
+    the commit is already here, which it always is: `green` trails what `main` fetched.
+    """
+    ref = f"refs/remotes/origin/{GREEN}"
+    git(root, "fetch", "--quiet", "origin", f"+refs/heads/{GREEN}:{ref}")
+    known = git(root, "rev-parse", "--verify", "--quiet", ref)
+    return f"origin/{GREEN}" if known.returncode == 0 else f"origin/{base}"
+
+
+def stale_green(root: Path, base: str, target: str, limit: float = GREEN_STALE_SECONDS) -> str:
+    """What to file when `green` trails `origin/<base>` by more than `limit`, else "".
+
+    Following `green` means a broken gate stops the machine updating, quietly. Nothing
+    should act on the tip while that lasts, but the job that says so is the point at
+    which the wait stops being the safe answer and becomes the failure.
+    """
+    if target == f"origin/{base}":
+        return ""
+    stamps = (
+        git(root, "log", "-1", "--format=%ct", target),
+        git(root, "log", "-1", "--format=%ct", f"origin/{base}"),
+    )
+    try:
+        behind = int(stamps[1].stdout.strip()) - int(stamps[0].stdout.strip())
+    except ValueError:
+        return ""
+    if behind <= limit:
+        return ""
+    return f"{target} is {behind // 3600}h behind origin/{base}: its gate has not passed since"
+
+
 def self_update(root: Path) -> tuple[bool, str]:
     """Fast-forward the checkout the pass runs from; `(ok, what happened)`.
 
@@ -221,9 +269,12 @@ def self_update(root: Path) -> tuple[bool, str]:
     if failed := fetch(root, base):
         return False, f"{FETCH_FAILED} origin/{base} -- {failed}"
     before = git(root, "rev-parse", "HEAD").stdout.strip()
-    if git(root, "merge", "--ff-only", "--quiet", f"origin/{base}").returncode != 0:
-        return False, f"{base} has diverged from origin/{base}"
+    target = update_target(root, base)
+    if git(root, "merge", "--ff-only", "--quiet", target).returncode != 0:
+        return False, f"{base} has diverged from {target}"
     after = git(root, "rev-parse", "HEAD").stdout.strip()
+    if stale := stale_green(root, base, target):
+        return False, stale
     return True, "current" if before == after else f"updated {before[:9]}..{after[:9]}"
 
 
