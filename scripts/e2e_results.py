@@ -35,6 +35,8 @@ used to be a skip by design, which is the state the tier exists to end: every pr
 has tests only this machine can run, and a skip reads as green. So a project whose
 `origin/<default>` carries no `scripts/e2e.py` is recorded red with the one signature
 `MISSING`, and the fix pass sends its fixer to write the tier (`fix_prompts.local_prompt`).
+One fixer per project however many share the line: neither `fix_plan.plan` nor
+`fix_cycle.classify` may read it as one vendored cause.
 
 Stdlib plus `fix_plan`. Tested in `tests/test_e2e_results.py`.
 """
