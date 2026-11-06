@@ -158,9 +158,9 @@ def hold_if_moved(
 
 
 # A background fixer measured ~450 MB (the session and its pty host) once it loads no
-# MCP server; the floor leaves the person at the machine room for their own work.
+# MCP server.
 SESSION_MB = 500
-MEMORY_FLOOR_MB = 2048
+MEMORY_FLOOR_MB = host_memory.FLOOR_MB
 HELD_FOR_MEMORY = "held for memory"
 # Why a session is not launched by a pass past its deadline (`fix-pass.SEND_RESERVE_SECONDS`
 # before the watchdog's stop). A launch provisions a tree and starts a session, 1-2.5

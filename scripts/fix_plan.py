@@ -74,6 +74,10 @@ BRANCH = "branch"
 # (`e2e_results.py`): the tests no hosted runner can run, run on this machine. It is a
 # red default branch in every way the plan cares about, read off a file, not a run.
 LOCAL = "local"
+# The `workflow` of a `LOCAL` from the medium tier (`tier-pass.py`), which runs the
+# project's own tests here rather than its end-to-end script. Spelled here because
+# `e2e_results` imports this module, and `local_name` reads it.
+MEDIUM_TIER = "Medium Tier"
 # The harness-defect ledger's open backlog (`harness_triage.py`), as one failure for the
 # devkit session: every entry on it is a devkit defect, whichever project filed it.
 LEDGER = "ledger"
@@ -159,8 +163,10 @@ EVIDENCE_DIR = "logs/gate"
 
 # pytest's short-summary line, `FAILED tests/x.py::test_y - AssertionError: ...`. The
 # id alone is the signature: the message carries a line number or a value that changes
-# between two runs of the same failure.
-FAILED_LINE = re.compile(r"^FAILED (\S+)")
+# between two runs of the same failure. A fixture or a collection failure prints as
+# `ERROR tests/x.py::test_y - ...`; held to a Python path, because `ERROR <word>` is also
+# what a logger prints, and the first word of a message is no test.
+FAILED_LINE = re.compile(r"^(?:FAILED|ERROR(?= \S+\.py)) (\S+)")
 # ruff (`path:1:2: E501 ...`) and mypy (`path:1: error: ...`) both start with the file
 # and a line; the file is the stable part.
 LINT_LINE = re.compile(r"^(\S+?\.\w+):\d+(?::\d+)?: (?:error|[A-Z]{1,4}\d{3,4})\b")
@@ -209,6 +215,13 @@ class Failure:
     tip: str = ""
     tip_running: bool = False
     rerun_file: str = ""
+    # LOCAL, medium tier: the last commit the tier judged green, the good end of the range
+    # its fixer bisects; "" when it has judged none. `green_at` is the BRANCH field below.
+    green_sha: str = ""
+    # LOCAL, medium tier: the commit a failure that came back was first seen on, the bad
+    # end of that range and what the ledger keys it under; `sha` stays the run the hold
+    # compares with `tip`. "" for a red seen once.
+    first_seen: str = ""
     # BRANCH only: when the gate last passed on the branch (`gate_evidence.last_green`),
     # ISO, among the runs read; "" when none of them did. Sessions sent at this problem
     # before then were at another failure that was fixed (`fix_budget.since`).
@@ -410,12 +423,17 @@ def name_of(failure: Failure) -> str:
     if failure.kind == BRANCH:
         return f"origin/{failure.base}"
     if failure.kind == LOCAL:
-        return f"origin/{failure.base} (local e2e)"
+        return f"origin/{failure.base} ({local_name(failure)})"
     if failure.kind == COMMIT:
         return failure.head
     if failure.kind in (LEDGER, DEPENDABOT):
         return failure.kind
     return f"#{failure.number}"
+
+
+def local_name(failure: Failure) -> str:
+    """Which scheduled local tier a `LOCAL` came from, as a record and a tab title name it."""
+    return "medium tier" if failure.workflow == MEDIUM_TIER else "local e2e"
 
 
 def is_dependabot(failure: Failure) -> bool:
@@ -592,7 +610,8 @@ def is_stale_local(failure: Failure) -> bool:
     stale local run is held until the scheduled job re-tests: the commits between may
     carry the fix -- a fixer's own merged PR always does -- and a session sent at the old
     red would be re-sent every `fix_ledger.RESEND_AFTER` until the next night. An unknown
-    tip is not a moved one, so a run whose base git cannot read is still dispatched.
+    tip is not a moved one, so a run whose base git cannot read is still dispatched. The
+    medium tier's red inherits this, and re-tests within minutes, not at night.
     """
     return failure.kind == LOCAL and failure.tip not in ("", failure.sha)
 

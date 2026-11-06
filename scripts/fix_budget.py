@@ -114,8 +114,8 @@ def budget(
         return Budget(False, f"waits on {url}: {state.lower() or 'its state is unreadable'}")
     if reason := fix_ledger.blocked_reason(decision, ledger, since):
         return _escalate(decision, "fixer-blocked", f"a fixer reported it blocked: {reason}")
-    if when := fix_ledger.already_sent(decision, ledger, now, since):
-        return Budget(False, f"already dispatched at {when}")
+    if why := _in_flight(decision, ledger, now, since):
+        return Budget(False, why)
     made = fix_ledger.attempts(decision, ledger, since)
     limit = fix_ledger.BLIND_ATTEMPTS if is_blind(decision) else fix_ledger.ATTEMPTS
     rebased = decision.action == fix_plan.RESOLVE and fix_ledger.moved_on(decision, ledger)
@@ -126,6 +126,17 @@ def budget(
     if over := over_daily_cap(decision, ledger, now):
         return Budget(False, over)
     return Budget(True)
+
+
+def _in_flight(
+    decision: fix_plan.Decision, ledger: dict[str, dict], now: _dt.datetime, since: str
+) -> str:
+    """Why a session already sent stands in for this one, or "" when none does."""
+    if when := fix_ledger.already_sent(decision, ledger, now, since):
+        return f"already dispatched at {when}"
+    if when := fix_ledger.open_medium_session(decision, ledger, now, since):
+        return f"a medium tier session went at {when}; one per project at a time"
+    return ""
 
 
 def since_for(decision: fix_plan.Decision, escalated: fix_findings.Escalation) -> str:

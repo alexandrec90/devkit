@@ -154,36 +154,23 @@ def wait_for_idle(
 # --- one project --------------------------------------------------------------------------
 
 
-def _said(done: object) -> str:
-    text = f"{getattr(done, 'stderr', '') or ''}\n{getattr(done, 'stdout', '') or ''}"
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return lines[-1] if lines else "no output"
-
-
-def _ok(done: object) -> bool:
-    return done is not None and getattr(done, "returncode", 1) == 0
-
-
-def _out(done: object) -> str:
-    return str(getattr(done, "stdout", "") or "").strip()
-
-
 def prepare(git: Git, base: str) -> tuple[str, str]:
     """`(sha, "")` with the checkout at origin/<base>'s tip, or `("", why)` when it is not
     this pass's to move."""
+    ok, out, said = e2e_results.ok, e2e_results.out, e2e_results.said
     fetched = git("fetch", "--quiet", "origin")
-    if not _ok(fetched):
-        return "", f"git fetch failed: {_said(fetched)}"
-    branch = _out(git("branch", "--show-current"))
+    if not ok(fetched):
+        return "", f"git fetch failed: {said(fetched)}"
+    branch = out(git("branch", "--show-current"))
     if branch != base:
         return "", f"checkout is on {branch or 'a detached HEAD'}, not {base}"
     dirty = git("status", "--porcelain", "--untracked-files=no")
-    if not _ok(dirty) or _out(dirty):
+    if not ok(dirty) or out(dirty):
         return "", "checkout has uncommitted changes to tracked files"
     merged = git("merge", "--ff-only", "--quiet", f"origin/{base}")
-    if not _ok(merged):
-        return "", f"cannot fast-forward to origin/{base}: {_said(merged)}"
-    return _out(git("rev-parse", "HEAD")), ""
+    if not ok(merged):
+        return "", f"cannot fast-forward to origin/{base}: {said(merged)}"
+    return out(git("rev-parse", "HEAD")), ""
 
 
 def run_contract(project_dir: Path, timeout: float, runner=sweep.run_bounded) -> object:
@@ -232,20 +219,10 @@ def run_project(
     done = run_contract(project_dir, timeout, seams.runner)
     output = f"{getattr(done, 'stdout', '') or ''}\n{getattr(done, 'stderr', '') or ''}"
     code = int(getattr(done, "returncode", 1))
-    where = e2e_results.result_dir(name, seams.root)
-    where.mkdir(parents=True, exist_ok=True)
-    (where / e2e_results.OUTPUT_FILE).write_text(output, encoding="utf-8")
-    green = code == 0
-    result = replace(
-        result,
-        status=e2e_results.PASSED if green else e2e_results.FAILED,
-        sha=sha,
-        exit_code=code,
-        finished=stamp(),
-        reason="" if green else ("timed out" if code == sweep.TIMED_OUT else ""),
-        signature=() if green else e2e_results.signature_of(output, code),
-    )
-    e2e_results.write(result, seams.root)
+    why = "timed out" if code == sweep.TIMED_OUT else ""
+    ended = replace(result, sha=sha, finished=stamp())
+    result = e2e_results.verdict(ended, code, output, reason=why)
+    e2e_results.record(result, output, seams.root)
     return result
 
 
@@ -262,20 +239,11 @@ def record_missing(
     git = seams.git_for(project_dir)
     git("fetch", "--quiet", "origin")
     base = tb.detect_default_branch(git, fallback="main")
-    if _ok(git("cat-file", "-e", f"origin/{base}:{e2e_results.CONTRACT}")):
+    if e2e_results.ok(git("cat-file", "-e", f"origin/{base}:{e2e_results.CONTRACT}")):
         return None
     stamp = seams.now().isoformat(timespec="seconds")
     tip = e2e_results.origin_tip(git, base)
-    result = e2e_results.Result(
-        project=name,
-        status=e2e_results.FAILED if tip else e2e_results.SKIPPED,
-        sha=tip,
-        base=base,
-        started=stamp,
-        finished=stamp,
-        reason=f"origin/{base} has no {e2e_results.CONTRACT}" if tip else f"no origin/{base}",
-        signature=(e2e_results.MISSING,) if tip else (),
-    )
+    result = e2e_results.missing_result(name, base, tip, stamp)
     e2e_results.write(result, seams.root)
     return result
 
@@ -332,14 +300,7 @@ def to_run_after_all(workspace: Path, lacking: Iterable[str], seams: Seams) -> l
     return late
 
 
-def line_for(result: e2e_results.Result) -> str:
-    if result.status == e2e_results.PASSED:
-        return f"{result.project}: passed at {result.sha[:9]}"
-    if result.status == e2e_results.SKIPPED:
-        return f"{result.project}: skipped -- {result.reason}"
-    shown = ", ".join(result.signature[:3])
-    more = f" (+{len(result.signature) - 3} more)" if len(result.signature) > 3 else ""
-    return f"{result.project}: FAILED at {result.sha[:9]} -- {shown}{more}"
+line_for = e2e_results.line_for
 
 
 def run_pass(
