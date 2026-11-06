@@ -36,6 +36,8 @@ VENDORED = ("scripts/hooks/tests/test_untested_symbols.py::t",)
 FIXERS_WORKING = fix_pass.fix_loop.fixers_working
 # Kept before `nothing_to_provision` stubs it, for the tests that drive it.
 PROVISION_FOR_SHIP = fix_pass.provision_for_ship
+# Kept before `prs_still_open` stubs it, for the tests that drive it.
+CLOSED_SINCE = fix_pass.fix_send.closed_since
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +84,13 @@ def nothing_to_provision(monkeypatch):
     """Every tree has its toolchain unless a test says otherwise: the real check would
     run `uv sync` in whatever path a test's intent names."""
     monkeypatch.setattr(fix_pass, "provision_for_ship", lambda tree: "")
+
+
+@pytest.fixture(autouse=True)
+def prs_still_open(monkeypatch):
+    """Every planned PR is still open when it is sent unless a test says otherwise: the
+    real check would run `gh pr view` in whatever checkout a test names."""
+    monkeypatch.setattr(fix_pass.fix_send, "closed_since", lambda failure, root: "")
 
 
 def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path):
@@ -1018,6 +1027,82 @@ def test_an_update_that_fails_because_the_pr_just_closed_is_not_a_failure(monkey
 
     monkeypatch.setattr(fix_pass.fix_send.sweep, "gh_for", gh_for)
     assert fix_pass.fix_send.update_branch(failure(number=390, behind=True), tmp_path) == 0
+
+
+def _view_says(monkeypatch, done: subprocess.CompletedProcess) -> list:
+    """`gh pr view` answers `done` from every checkout; the calls made, to count them."""
+    asked: list = []
+
+    def gh_for(project_dir):
+        def gh(*args):
+            asked.append((project_dir.name, args))
+            return done
+
+        return gh
+
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "gh_for", gh_for)
+    return asked
+
+
+@pytest.mark.parametrize(
+    "action", [fix_plan.RESOLVE, fix_plan.DISPATCH, fix_plan.UPDATE, fix_plan.RERUN]
+)
+def test_a_pr_closed_since_the_plan_is_neither_sent_nor_filed(monkeypatch, tmp_path, action):
+    """4b29b7ac: dependabot closed carameli #512 as superseded and deleted its branch
+    while the pass held a plan that read it conflicted, so the resolve found no branch
+    and filed a `resolve-failed` a sweep spent a session on. A tree still on that head
+    would have opened a fixer at a closed PR instead."""
+    monkeypatch.setattr(fix_pass.fix_send, "closed_since", CLOSED_SINCE)
+    asked = _view_says(monkeypatch, subprocess.CompletedProcess((), 0, '{"state": "CLOSED"}', ""))
+    monkeypatch.setattr(fix_pass.fix_send, "dispatch", lambda *a: pytest.fail("nothing to send"))
+    ledger = tmp_path / "l.json"
+    ctx = fix_pass.fix_loop.Context(
+        tmp_path, ["carameli"], tmp_path, ledger, tmp_path / "h", "dispatch", NOW
+    )
+    journal = fix_pass.Journal(tmp_path)
+    decision = fix_plan.Decision(action, "merge conflict", (failure(number=512),))
+    line, code = fix_pass.fix_send._send_one(decision, ctx, "claude", "", journal)
+    assert (line, code) == ("closed since the plan read it; nothing to send", fix_pass.EXIT_OK)
+    assert journal.findings == []
+    assert fix_ledger.read_ledger(ledger) == {}, "the ledger is written only for what opened"
+    assert asked == [("carameli", ("pr", "view", "512", "--json", "state"))]
+
+
+@pytest.mark.parametrize(
+    "done",
+    [
+        subprocess.CompletedProcess((), 0, '{"state": "OPEN"}', ""),
+        subprocess.CompletedProcess((), 1, "", "gh: not reachable"),
+        subprocess.CompletedProcess((), 0, "not json", ""),
+    ],
+    ids=["open", "gh-failed", "unreadable"],
+)
+def test_a_pr_still_open_or_unreadable_is_sent(monkeypatch, tmp_path, done):
+    """Only a state read as closed stops a send: GitHub being down is not a closed PR."""
+    monkeypatch.setattr(fix_pass.fix_send, "closed_since", CLOSED_SINCE)
+    _view_says(monkeypatch, done)
+    assert fix_pass.fix_send.closed_since(failure(), tmp_path) == ""
+
+
+def test_a_state_that_cannot_even_be_asked_for_does_not_raise(monkeypatch, tmp_path):
+    """The read sits in front of every PR send, so a `gh` that cannot start -- no binary,
+    no checkout to run in -- would otherwise take the rest of the pass's sends with it."""
+    monkeypatch.setattr(fix_pass.fix_send, "closed_since", CLOSED_SINCE)
+
+    def no_gh(*_args):
+        raise NotADirectoryError(267, "The directory name is invalid")
+
+    monkeypatch.setattr(fix_pass.fix_send.sweep, "gh_for", lambda _project_dir: no_gh)
+    assert fix_pass.fix_send.closed_since(failure(), tmp_path) == ""
+
+
+def test_only_a_numbered_pr_is_asked_whether_it_closed(monkeypatch, tmp_path):
+    """A branch, a commit and a pushed head with no PR have no state to read."""
+    monkeypatch.setattr(fix_pass.fix_send, "closed_since", CLOSED_SINCE)
+    asked = _view_says(monkeypatch, subprocess.CompletedProcess((), 0, '{"state": "CLOSED"}', ""))
+    for gone in (failure(kind=fix_plan.COMMIT), failure(number=0), failure(kind=fix_plan.BRANCH)):
+        assert fix_pass.fix_send.closed_since(gone, tmp_path) == ""
+    assert asked == []
 
 
 def test_a_failed_send_files_what_its_dispatcher_said_as_the_evidence(
