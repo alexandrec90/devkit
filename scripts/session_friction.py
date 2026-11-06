@@ -79,11 +79,21 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("patch-failed", re.compile(r'File "<stdin>", line \d+[\s\S]{0,600}?AssertionError')),
 )
 # Claude Code's own refusal of a foreground `sleep`, which names the right wait in the
-# same message. Absent from `blocked-call` for the isolation guard's reason, and it
-# retracts its call's `poll` too: a refused sleep waited for nothing, so the one refusal
-# was filed as two groups neither of which devkit could fix (9854b541, 363d8be7). It
-# refuses PowerShell's `Start-Sleep 40; Get-Content` in the same words (228353d8).
+# same message. Absent from `blocked-call` for the isolation guard's reason: the one
+# refusal was filed as two groups neither of which devkit could fix (9854b541, 363d8be7).
+# It refuses PowerShell's `Start-Sleep 40; Get-Content` in the same words (228353d8).
 SLEEP_GUARD = re.compile(r"<tool_use_error>Blocked: (?:sleep|Start-Sleep) \d+ followed by")
+# A result that opens this way came from something that stopped the call, so the command
+# never ran: a refused heredoc wrote nothing, a refused `--no-verify` skipped nothing, a
+# refused sleep waited for nothing. The command classes read a call's text before its
+# result exists, so `failed` takes them back; 2865249b and 004d53f9 recurred 7 and 4 times
+# with each fix narrowing what the text had to say, and the last two were refused calls.
+# Anchored: a command that ran and failed opens `Exit code N`, whatever its output quotes.
+NEVER_RAN = re.compile(
+    r"\A(?:<tool_use_error>Blocked:|[^\n]*\bRefusing to run it\b|"
+    r"Permission for this command was denied|"
+    r"The user doesn't want to proceed with this tool use)"
+)
 # The least a wait holds its turn for to be a `poll`: the `sleep\s+\d{2,}` pattern's own
 # floor. An until-loop ends when its condition holds, so its shape says nothing of its
 # cost: one waiting nine seconds for a database out of recovery was filed as the eighth
@@ -191,7 +201,7 @@ ASSERTION = re.compile(r"\bassert\b|AssertionError")
 # name may sit between, and nothing else: a `\nifty-lark\` in a Windows path is no escape.
 ESCAPED_NEWLINE = re.compile(r"\\n[ \t]*(?:[\w.]+(?:Error|Exception): [^\\\n]*)?$")
 
-# Commands that are friction whatever they return.
+# Commands that are friction whatever they return, once they ran (`NEVER_RAN`).
 NO_VERIFY = re.compile(r"\bgit\b[^\n]*--no-verify")
 COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("no-verify", NO_VERIFY),
@@ -254,6 +264,11 @@ SCRATCH_DIR = re.compile(
     r"(?:^|[\\/])(?:tmp\w*|temp)(?:[\\/]|$)|\$(?:env:)?\{?(?:TMP|TEMP|TMPDIR)\b", re.I
 )
 GIT_C = re.compile(r"\bgit\s(?:[^\n]*?\s)?-C\s+(\S+)")
+# What `scratch_only` follows a scratch repository through: a shell variable naming it and
+# a step down inside it (004d53f9). A value that is itself an expansion binds nothing.
+ASSIGNMENT = re.compile(r"\s*(?P<name>[A-Za-z_]\w*)=(?P<value>\"[^\"$`]*\"|'[^']*'|[^\s\"'$`]*)\s*")
+EXPANSION = re.compile(r"\$(?:(?P<bare>[A-Za-z_]\w*)|\{(?P<braced>[A-Za-z_]\w*)\})")
+ROOTED = re.compile(r"[\\/~$]|\w:")
 # What `taken_back` reads. A WIP commit is how a session carries a dirty tree over a rebase,
 # since the stash stack is shared: undone in the call that made it, it reached nothing a
 # hook guards (ded3ca52). `GIT_UNDO` is a `reset` to some steps behind `HEAD`.
@@ -611,17 +626,36 @@ def only_prints(statement: str) -> bool:
     return bool(words) and words[0] in PRINTERS and not WRITES_OUTPUT.search(statement)
 
 
+def entered(where: str, target: str) -> str:
+    """The directory a step to `target` from `where` lands in, as far as `SCRATCH_DIR` needs
+    it. A relative step down stays in a scratch tree; any other target stands for itself,
+    so `cd ../../ws` or an unbound `$REPO` reads as having left."""
+    if SCRATCH_DIR.search(where) and target and ".." not in target:
+        if not ROOTED.match(target):
+            return f"{where}/{target}"
+    return target
+
+
 def scratch_only(command: str) -> bool:
     """Every `--no-verify` git statement in `command` runs in a scratch repository: after
-    a `cd` into one, or with `git -C` naming one."""
+    a `cd` into one, or with `git -C` naming one, spelled through a variable the command
+    set or a step down from a scratch directory."""
     where, verdicts = "", []
+    names: dict[str, str] = {}
+
+    def expanded(word: str) -> str:
+        return EXPANSION.sub(lambda m: names.get(m["bare"] or m["braced"], m[0]), word)
+
     for part in STATEMENT.split(command):
         words = [word.strip("'\"") for word in part.split()]
-        if words and words[0] in ("cd", "pushd"):
-            where = words[1] if len(words) > 1 else ""
+        if bound := ASSIGNMENT.fullmatch(part):
+            names[bound["name"]] = bound["value"].strip("'\"")
+        elif words and words[0] in ("cd", "pushd"):
+            where = entered(where, expanded(words[1]) if len(words) > 1 else "")
         elif NO_VERIFY.search(part):
             target = GIT_C.search(part)
-            verdicts.append(bool(SCRATCH_DIR.search(target[1].strip("'\"") if target else where)))
+            at = entered(where, expanded(target[1].strip("'\""))) if target else where
+            verdicts.append(bool(SCRATCH_DIR.search(at)))
     return bool(verdicts) and all(verdicts)
 
 
@@ -1010,7 +1044,9 @@ class _Session:
     def _unclaim(self, event: Event) -> None:
         """Hand back the roots a whole run claimed when pytest says it ran nothing."""
         claimed = self.claimed.pop(event.call_id, set())
-        if self.checked is not None and RAN_NOTHING.search(event.text):
+        if self.checked is not None and (
+            RAN_NOTHING.search(event.text) or NEVER_RAN.match(event.text)
+        ):
             self.checked -= claimed
 
     def succeeded(self, event: Event) -> None:
@@ -1035,8 +1071,10 @@ class _Session:
         event = replace(event, command=command)
         self._brief_wait(event)
         self._unclaim(event)
+        if NEVER_RAN.match(event.text):
+            for cls, what in COMMAND_DETAIL.items():
+                self.retract(cls, what, event.call_id)
         if SLEEP_GUARD.search(event.text):
-            self.retract("poll", COMMAND_DETAIL["poll"], event.call_id)
             return
         if not READS_HARNESS_TEXT.search(command):
             cls, what = _result_class(event.text, command)
