@@ -531,6 +531,303 @@ def test_only_the_trailer_as_the_last_line_asks_for_automerge(tmp_path):
     assert ship_intent.labels_for(tmp_path, asked=True) == (ship_intent.sweep.AUTOMERGE_LABEL,)
 
 
+# --- the direct flow ----------------------------------------------------------------
+
+
+def direct(tmp_path, body="Because.") -> ship_intent.Intent:
+    return replace(intent(tmp_path, body=body), direct=True)
+
+
+def gh_with_open_body(body: str):
+    """A `gh_for` whose one open PR on the branch has `body`; anything else answers ok."""
+
+    def gh_for(_tree):
+        def gh(*args):
+            if args[:2] == ("pr", "list"):
+                row = [{"body": body}]
+                return subprocess.CompletedProcess(args, 0, ship_intent.json.dumps(row), "")
+            return subprocess.CompletedProcess(args, 0, "https://x/pull/7", "")
+
+        return gh
+
+    return gh_for
+
+
+def test_intents_read_the_flow_off_the_projects_checkout(tmp_path):
+    """Off the checkout rather than the tree: every pass and task agrees on one answer,
+    and a tree cut before the switch ships the way the project does now."""
+    checkout = tmp_path / "carameli"
+    ready = intent(tmp_path)
+    (checkout / ".devkit.toml").write_text('[delivery]\nflow = "direct"\n', encoding="utf-8")
+    listing = f"worktree {ready.tree.as_posix()}\nHEAD 2\nbranch refs/heads/agent/labels-0919\n\n"
+
+    def git_for(_project_dir):
+        def git(*args):
+            if args[:2] == ("worktree", "list"):
+                return subprocess.CompletedProcess(args, 0, listing, "")
+            if args[0] == "symbolic-ref":
+                return subprocess.CompletedProcess(args, 0, "refs/remotes/origin/main\n", "")
+            return subprocess.CompletedProcess(args, 1, "", "")
+
+        return git
+
+    [found] = ship_intent.find_intents(tmp_path, ["carameli"], git_for)
+    assert found.direct
+
+
+def gh_no_open_pr(_tree):
+    """A `gh_for` that says plainly this branch heads no open PR yet."""
+
+    def gh(*args):
+        out = "[]" if args[:2] == ("pr", "list") else "https://x/pull/7"
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    return gh
+
+
+def test_a_direct_intents_pr_is_labelled_merge_now(tmp_path, monkeypatch):
+    plans = capture_plans(monkeypatch)
+    out = ship_intent.ship_one(direct(tmp_path), "py", "main", Runner(), gh_no_open_pr, NOW)
+    assert out.stage == ship_intent.SHIPPED
+    assert plans[0].pr_labels == (ship_intent.sweep.MERGE_NOW_LABEL,)
+
+
+def test_merge_now_is_a_label_the_harness_can_create(tmp_path):
+    """`ensure_pr` creates a label before applying it, from this table."""
+    assert ship_intent.sweep.MERGE_NOW_LABEL == "merge-now"
+    args = ship_intent.sweep._label_args(ship_intent.sweep.MERGE_NOW_LABEL)
+    color, description = ship_intent.sweep.LABEL_SPECS["merge-now"]
+    assert args == (
+        "label",
+        "create",
+        "merge-now",
+        "--force",
+        "--color",
+        color,
+        "--description",
+        description,
+    )
+    assert description
+
+
+def test_a_held_direct_intent_gets_no_merge_label_at_all(tmp_path, monkeypatch):
+    plans = capture_plans(monkeypatch)
+    held = direct(tmp_path, body="Wants a look.\n\nHold: yes")
+    assert ship_intent.ship_one(held, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
+    assert plans[0].pr_labels == ()
+    assert plans[0].pr_body.endswith("Hold: yes"), "what keeps it held through a resolver"
+
+
+def test_a_held_intent_overrides_the_fixers_label_in_a_gated_project_too(tmp_path):
+    (tmp_path / ship_intent.fix_reports.ORIGIN_FILE).parent.mkdir()
+    (tmp_path / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
+    assert ship_intent.labels_for(tmp_path) == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert ship_intent.labels_for(tmp_path, held=True) == ()
+
+
+def test_a_hold_is_a_whole_line_anywhere_in_the_body(tmp_path):
+    """It is the one promise this flow makes to the person: a `Co-Authored-By` or a
+    `Closes #N` after it must not lose it."""
+    asks = ship_intent.asks_hold
+    assert asks("Because.\n\nHold: yes\n") and asks("Because.\n\n  hold:YES  ")
+    assert asks("Because.\n\nHold: yes\n\nCo-Authored-By: x <x@y>\nCloses #4")
+    assert ship_intent.pr_body(replace(intent(tmp_path), body="B\n\nHold: yes")) == "B\n\nHold: yes"
+
+
+def test_a_prose_mention_of_a_hold_is_not_one():
+    asks = ship_intent.asks_hold
+    assert not asks("Because.\n\nHold: no")
+    assert not asks("Because. Hold: yes")
+    assert not asks("The `Hold: yes` line keeps a PR back.")
+    assert not asks("")
+
+
+def test_automerge_keeps_its_last_line_rule():
+    assert not ship_intent.asks_automerge("Because.\n\nAutomerge: yes\n\nCloses #4")
+
+
+def test_a_resolvers_ship_keeps_a_merge_now_prs_label(tmp_path, monkeypatch):
+    """Its intent carries no trailer and the PR is not held, so the label is applied again:
+    `ensure_pr` only ever adds one, so it stays on the PR the drain will pick up."""
+    asked = []
+
+    def gh_for(_tree):
+        def gh(*args):
+            asked.append(args)
+            if args[:2] == ("pr", "list"):
+                return subprocess.CompletedProcess(args, 0, '[{"body": "Because."}]', "")
+            return subprocess.CompletedProcess(args, 0, "https://x/pull/7", "")
+
+        return gh
+
+    one = direct(tmp_path, body="Resolved the conflict.")
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_for, NOW).stage == "shipped"
+    assert ("pr", "edit", one.branch, "--add-label", "merge-now") in asked
+    assert not [a for a in asked if "--remove-label" in a]
+
+
+def test_a_resolvers_ship_leaves_a_held_pr_held(tmp_path, monkeypatch):
+    """A resolver writes its own intent, trailer-less, and may work in a fresh tree: only
+    the PR remembers the person said to wait."""
+    plans = capture_plans(monkeypatch)
+    one = direct(tmp_path, body="Resolved the conflict.")
+    gh_for = gh_with_open_body("Wants a look.\n\nHold: yes")
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_for, NOW).stage == "shipped"
+    assert plans[0].pr_labels == ()
+
+
+def test_an_intents_labels_ask_its_pr_only_in_the_direct_flow(tmp_path):
+    asked = []
+
+    def gh(*args):
+        asked.append(args)
+        return subprocess.CompletedProcess(args, 0, '[{"body": "x\\n\\nHold: yes"}]', "")
+
+    assert ship_intent.intent_labels(intent(tmp_path), gh) == () and asked == []
+    assert ship_intent.intent_labels(direct(tmp_path), gh) == ()
+    assert asked, "a resolver's own intent says nothing of the hold"
+
+
+@pytest.mark.parametrize(("code", "out"), [(1, ""), (0, "not json"), (0, "{}"), (0, "[3]")])
+def test_a_pr_gh_cannot_describe_reads_as_held(code, out):
+    """A label withheld waits for someone; one applied wrongly merges past the person."""
+
+    def gh(*args):
+        return subprocess.CompletedProcess(args, code, out, "")
+
+    assert ship_intent.held_pr("agent/x", gh) is True
+
+
+def test_a_gh_that_cannot_say_puts_no_merge_label_on(tmp_path, monkeypatch):
+    plans = capture_plans(monkeypatch)
+
+    def gh_for(_tree):
+        def gh(*args):
+            code = 1 if args[:2] == ("pr", "list") else 0
+            return subprocess.CompletedProcess(args, code, "", "HTTP 502" if code else "")
+
+        return gh
+
+    assert ship_intent.ship_one(direct(tmp_path), "py", "main", Runner(), gh_for, NOW).stage == (
+        ship_intent.SHIPPED
+    )
+    assert plans[0].pr_labels == ()
+
+
+def test_a_pr_github_says_is_not_held_is_not_held():
+    def gh(*args):
+        return subprocess.CompletedProcess(args, 0, '[{"body": "Because."}]', "")
+
+    assert ship_intent.held_pr("agent/x", gh) is False
+    assert (
+        ship_intent.held_pr("agent/x", lambda *a: subprocess.CompletedProcess(a, 0, "[]", ""))
+        is False
+    )
+
+
+def test_a_gated_ship_asks_github_nothing_new(tmp_path, monkeypatch):
+    """Inert for a gated project: `held_pr` is the direct flow's alone."""
+    capture_plans(monkeypatch)
+    asked = []
+
+    def gh_for(_tree):
+        def gh(*args):
+            asked.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        return gh
+
+    ship_intent.ship_one(intent(tmp_path), "py", "main", Runner(), gh_for, NOW)
+    assert not [a for a in asked if a[:2] == ("pr", "list") and "body" in a]
+
+
+def test_a_persons_direct_flow_pr_is_never_pass_owned(tmp_path, monkeypatch):
+    """The regression `pass_owned` was separated from `labels_for` for. A person's PR in
+    the direct flow carries `merge-now`, and pass ownership decides whether the pass may
+    close it; read off the labels, every such PR would read as the pass's own."""
+    one = direct(tmp_path)
+    assert ship_intent.labels_for(one.tree, direct=True) == (ship_intent.sweep.MERGE_NOW_LABEL,)
+    assert not ship_intent.pass_cut(one.tree)
+    assert ship_intent.pass_owned(one) is False
+    (one.tree / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
+    assert ship_intent.pass_owned(one) is True, "a tree the pass cut is still its own"
+
+
+def test_a_direct_flow_pr_that_lands_nothing_is_left_open(tmp_path):
+    """Through the real decision: `_superseded` hands a person's PR to the commit stage
+    rather than closing it, labelled or not."""
+    one, repo, git = _landed(tmp_path, "agent/mine")
+    one = replace(one, direct=True)
+    asked: list = []
+    gh = _gh_with_pr(git("rev-parse", "HEAD").stdout.strip(), asked)(repo)
+    porcelain = git("status", "--porcelain").stdout
+    settled = ship_intent._settled(one, porcelain, "main", ship_intent.run_quiet, "w", gh)
+    assert settled is None and ("pr", "close") not in [a[:2] for a in asked]
+
+
+def test_a_direct_commit_runs_no_fixers_and_skips_only_the_framework(tmp_path):
+    """No `ship.py --fix`, and no `--no-verify`, which would drop the branch policy too."""
+    run = Runner()
+    assert ship_intent.commit_intent(direct(tmp_path), "py", run) == ("", "")
+    argvs = [argv for argv, _cwd, _env in run.calls]
+    assert ["py", "scripts/ship.py", "--fix"] not in argvs
+    assert run.verbs() == ["git add", "git commit"]
+    assert "--no-verify" not in argvs[-1]
+    env = run.calls[-1][2]
+    assert env[ship_intent.git_policy.FRAMEWORK_SKIP_ENV_VAR] == "1"
+    assert ship_intent.git_policy.SKIP_ENV_VAR not in env, "the policy is what still runs"
+
+
+def test_a_gated_commit_keeps_the_framework(tmp_path):
+    run = Runner()
+    assert ship_intent.commit_intent(intent(tmp_path), "py", run) == ("", "")
+    assert run.calls[-1][0][:2] == ["git", "commit"] and run.calls[-1][2] is None
+
+
+def test_a_direct_commit_names_the_step_that_refused(tmp_path):
+    run = Runner({"git commit": (1, "", "policy said no")})
+    assert ship_intent.commit_intent(direct(tmp_path), "py", run) == ("commit", "policy said no")
+    run = Runner({"git add": (1, "", "index broken")})
+    assert ship_intent.commit_intent(direct(tmp_path), "py", run) == ("add", "index broken")
+
+
+def test_a_direct_push_skips_the_framework_and_a_gated_one_does_not(tmp_path, monkeypatch):
+    capture_plans(monkeypatch)
+    run = Runner()
+    ship_intent.ship_one(direct(tmp_path), "py", "main", run, gh_ok, NOW)
+    [push] = [env for argv, _cwd, env in run.calls if argv[:2] == ["git", "push"]]
+    assert push[ship_intent.git_policy.FRAMEWORK_SKIP_ENV_VAR] == "1"
+    assert push["SKIP"] == ship_intent.SKIP_PUSH_GATE
+    run = Runner()
+    ship_intent.ship_one(intent(tmp_path / "g"), "py", "main", run, gh_ok, NOW)
+    [push] = [env for argv, _cwd, env in run.calls if argv[:2] == ["git", "push"]]
+    assert ship_intent.git_policy.FRAMEWORK_SKIP_ENV_VAR not in push
+
+
+def test_a_direct_commit_is_still_carried_off_a_retired_name(tmp_path):
+    """Why the policy has to keep running in the direct flow."""
+    run = _RetiredBranch(retired={"agent/labels-0919"}, taken={"agent/labels-0919-2"})
+    carried, step, _output = ship_intent._commit_carrying(direct(tmp_path), "py", run)
+    assert step == "" and carried.branch == "agent/labels-0919-3" and carried.direct
+
+
+def test_a_stored_refusal_is_read_off_the_state_without_a_git_step(tmp_path):
+    one = direct(tmp_path)
+    assert ship_intent.stored_refusal(one, Runner()) is None
+    state = {"stage": ship_intent.REFUSED, "step": "commit", "output": "no", "intent": one.digest}
+    ship_intent.write_state(one.tree, {**state, "tree": ship_intent._digest(" M a.py\n")})
+    assert ship_intent.stored_refusal(one, Runner()).stage == ship_intent.REFUSED
+    moved = Runner(porcelain=" M a.py\n M b.py\n")
+    assert ship_intent.stored_refusal(one, moved) is None, "the tree moved: try again"
+
+
+def test_a_tree_git_cannot_read_has_no_stored_refusal(tmp_path):
+    def unreadable(argv, cwd):
+        return subprocess.CompletedProcess(argv, 128, "", "fatal: not a git repository")
+
+    assert ship_intent.stored_refusal(direct(tmp_path), unreadable) is None
+
+
 def test_the_commit_half_names_the_step_that_refused(tmp_path):
     one = intent(tmp_path)
     assert ship_intent.commit_intent(one, "py", Runner()) == ("", "")

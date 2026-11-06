@@ -14,8 +14,22 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ._core import Runner, _git, _stdout, console_python, emit
+from ._core import (
+    FRAMEWORK_SKIP_ENV_VAR,
+    _OFF_VALUES,
+    Runner,
+    _git,
+    _stdout,
+    console_python,
+    emit,
+)
 from .branch import parse_push_updates
+
+
+def framework_skipped(env: Mapping[str, str]) -> bool:
+    """True when `FRAMEWORK_SKIP_ENV_VAR` is set to anything that does not read as "off",
+    as `branch.policy_skipped` reads its own variable."""
+    return env.get(FRAMEWORK_SKIP_ENV_VAR, "").strip().lower() not in _OFF_VALUES
 
 
 def _venv_roots(root: Path, runner: Runner) -> tuple[Path, ...]:

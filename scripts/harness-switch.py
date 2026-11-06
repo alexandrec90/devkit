@@ -103,6 +103,7 @@ BRANCH_DELIVERY_JOBS = (
     "devkit-upgrade-projects",
     "devkit-release",
     "devkit-fix-pass",
+    "devkit-ship",
 )
 
 # What reads as "off" to a human must not switch the harness off, the same asymmetry
