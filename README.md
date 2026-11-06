@@ -1579,7 +1579,7 @@ locally; the `generated-project` job above is what exercises them.
 ### The local end-to-end tier: what no hosted runner can run
 
 Some tests need *this workstation*: the live workspace file, VS Code itself, a project's
-Docker stack, a browser session, a credential. CI skips them, a session never runs the
+Docker stack, a browser session, a credential. CI deselects them, a session never runs the
 whole suite, and a box is not the static checkout -- so until this tier they ran only
 when a person happened to run the suite on `main`. Now `devkit-local-e2e`
 (`scripts/install-e2e-schedule.py`) runs them every night once the PC has been idle for

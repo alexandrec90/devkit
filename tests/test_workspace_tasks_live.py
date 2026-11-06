@@ -26,8 +26,8 @@ substitutes into a chain. That needs the editor itself, and is the next tier.
 
 `${workspaceFolder:devkit}` resolves to *this* tree, every other folder to its checkout
 beside the live workspace file: a fixer in a box tests the scripts it changed against
-the machine it is on. Marked `local` through `needs_live_workspace`, so CI skips it and
-`scripts/e2e.py` runs it nightly.
+the machine it is on. Marked `local` through `needs_live_workspace`, so CI deselects it
+and `scripts/e2e.py` runs it nightly.
 """
 
 from __future__ import annotations
