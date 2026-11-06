@@ -321,6 +321,53 @@ def test_the_sleep_guards_powershell_refusal_is_not_a_blocked_call():
     assert classes([_tool("PowerShell", "1", command=command), result(refusal, "1")]) == []
 
 
+# Both of these came back from Claude Code's isolation guard, unrun, in one subagent.
+PATCH_SCRIPT = (
+    "cat > /dev/null <<'EOF'\nEOF\n.venv/Scripts/python.exe - <<'PY'\n"
+    "p = Path('scripts/after-merge-pass.py')\n"
+    "p.write_text(p.read_text().replace('a\\\\nb', 'c'))\nPY"
+)
+NO_VERIFY_PUSH = "git push --quiet --no-verify origin HEAD:refs/heads/x"
+GUARD_REFUSAL = (
+    "This agent is isolated in the worktree C:\\ws\\.claude\\worktrees\\a, but this command "
+    "feeds python text naming git in a plain command, which cannot be shown to stay inside "
+    "the worktree. Refusing to run it, as a worktree-isolated agent's git operations must "
+    "target its own worktree."
+)
+
+
+@pytest.mark.parametrize(
+    ("command", "filed"),
+    [(PATCH_SCRIPT, "heredoc-write"), (NO_VERIFY_PUSH, "no-verify")],
+)
+def test_a_command_refused_before_it_ran_did_none_of_what_it_says(command, filed):
+    """2865249b and 004d53f9: the 7th heredoc-write and 4th no-verify recurrence were both
+    calls the guard refused, so no file was written and nothing was pushed. The two groups
+    were retired detector by detector, each fix reading the command's text, and neither
+    could see what the result said: the command never ran."""
+    assert classes([call(command, "1"), result(GUARD_REFUSAL, "1")]) == []
+    # A refusal retracts only its own call: the same command that ran first stands.
+    ran = [call(command, "1"), result("", "1", error=False)]
+    assert classes([*ran, call(command, "2"), result(GUARD_REFUSAL, "2")]) == [filed]
+    # Filed still when it ran and failed, the refusal's words in its output included.
+    for output in ("Exit code 1\nboom", f"Exit code 1\n{GUARD_REFUSAL}"):
+        assert classes([call(command, "1"), result(output, "1")]) == [filed], output
+
+
+@pytest.mark.parametrize(
+    ("refusal", "filed"),
+    [
+        (GUARD_REFUSAL, []),
+        ("Permission for this command was denied by a built-in Claude Code safety check", []),
+        ("<tool_use_error>Blocked: rm -rf / is not allowed</tool_use_error>", ["blocked-call"]),
+        (REJECTED, ["user-rejected"]),
+    ],
+)
+def test_every_refusal_retracts_the_command_and_keeps_its_own_class(refusal, filed):
+    """The refusal's own class stands: only what the command would have done is taken back."""
+    assert classes([call(NO_VERIFY_PUSH, "1"), result(refusal, "1")]) == filed
+
+
 def test_no_verify_in_a_scratch_repository_is_a_fixture_not_a_bypass():
     """7ce3ea59: a release repro committed its fixture with `--no-verify` in a clone
     under the job's `tmp/`. Nothing there is gated, so nothing was skipped."""
@@ -339,6 +386,40 @@ def test_no_verify_in_a_scratch_repository_is_a_fixture_not_a_bypass():
         "cd scripts && git commit --no-verify -m x",
         "cd templates && git commit --no-verify -m x",
         "cd /tmp/x && git status; cd /ws/devkit && git push --no-verify",
+    ):
+        assert classes([call(command, "1")]) == ["no-verify"], command
+
+
+def test_a_scratch_repository_named_by_a_variable_or_a_step_inside_it_is_still_scratch():
+    """004d53f9: a probe of `--force-with-lease` set `S=` to its scratchpad, `cd "$S"`, then
+    `cd a` into the clone it made there. Each step left `where` reading as no scratch path,
+    so the fixture's pushes read as a bypass of the tree the session was in."""
+    probe = (
+        'S="C:/Users/a/AppData/Local/Temp/claude/9eed/scratchpad/gitprobe"; mkdir -p "$S"; '
+        'cd "$S"; git init -q --bare remote.git; git init -q a; cd a; '
+        "git remote add origin ../remote.git; git commit -q --allow-empty -m first; "
+        "git push -q origin HEAD:refs/heads/main; "
+        "git push --quiet --no-verify --force-with-lease=refs/devkit/claim/x: origin x; "
+        "echo rc=$?"
+    )
+    assert sf.scratch_only(probe)
+    assert classes([call(probe, "1")]) == []
+    assert sf.scratch_only("S=/tmp/x; git -C $S commit --no-verify -m x")
+    assert sf.scratch_only("cd /tmp/x; git -C a/b commit --no-verify -m x")
+    assert sf.scratch_only("cd ${S:-x}; cd /tmp/x; git push --no-verify")
+    scratch = "C:/Users/a/AppData/Local/Temp/x"
+    assert sf.entered(scratch, "a") == f"{scratch}/a"
+    # Out of the scratch tree, by whatever spelling, is the tree the session was in.
+    assert sf.entered(scratch, "/ws/devkit") == "/ws/devkit"
+    assert sf.entered(scratch, "../../ws") == "../../ws"
+    assert sf.entered("/ws/devkit", "a") == "a"
+    for command in (
+        "cd /tmp/x; cd ../../ws/devkit; git push --no-verify",
+        "cd /tmp/x; cd $REPO; git push --no-verify",
+        "cd /tmp/x; cd C:/ws/devkit; git push --no-verify",
+        'S=/ws/devkit; cd /tmp/x; cd "$S"; git push --no-verify',
+        "S=/tmp/x; S=/ws/devkit; cd $S; git push --no-verify",
+        "cd $S; git push --no-verify",
     ):
         assert classes([call(command, "1")]) == ["no-verify"], command
 
@@ -1206,6 +1287,8 @@ def test_a_whole_run_interrupted_at_collection_checked_nothing():
     ], "a whole run that ran the suite has checked the change"
     nothing = [conftest, call(first, "1"), result("no tests ran in 0.01s", "1"), rerun]
     assert classes(nothing) == [], "a run that collected nothing checked nothing"
+    refused = [conftest, call(first, "1"), result(GUARD_REFUSAL, "1"), rerun]
+    assert classes(refused) == [], "a run refused before it started checked nothing"
     passed = [conftest, call(first, "1"), result("95 passed in 3.28s", "1", error=False), rerun]
     assert classes(passed) == ["full-suite"]
 
