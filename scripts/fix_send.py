@@ -90,7 +90,16 @@ def code_moved(root: Path) -> str:
 
 
 def origin_tip(git: sweep.Git) -> str:
-    """`origin/<default>`'s commit, fetched first; "" when the fetch fails."""
+    """The commit this checkout is meant to be at, fetched first; "" when the fetch fails.
+
+    `origin/green` where it exists, the ref `fix-pass-watchdog.update_target` follows.
+    Read off `origin/<default>` the pass would be held forever whenever `main` is ahead
+    of its last passing commit, which in the direct flow is most of the time.
+    """
+    git("fetch", "--quiet", "origin", "+refs/heads/green:refs/remotes/origin/green")
+    known = git("rev-parse", "--verify", "--quiet", "refs/remotes/origin/green")
+    if known.returncode == 0:
+        return known.stdout.strip()
     head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip()
     base = head.removeprefix("origin/") or "main"
     if git("fetch", "--quiet", "origin", base).returncode != 0:

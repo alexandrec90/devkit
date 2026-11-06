@@ -43,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -166,6 +167,12 @@ FETCH_FAILED = "could not fetch"
 FETCH_STREAK = "fetch_failures"
 FETCH_FIRES = 6
 
+# The branch `dependabot-automerge.yml` keeps at the newest commit whose gate passed.
+GREEN = "green"
+# How far it may trail the default branch before that is filed. A day: a red `main` gets a
+# fixer within a pass and fix-or-revert within hours, so a day means the gate itself stopped.
+GREEN_STALE_SECONDS = 24 * 60 * 60
+
 
 def fetch(root: Path, base: str) -> str:
     """Fetch `origin/<base>`, once more after a pause; "" on success, else why not.
@@ -204,6 +211,56 @@ def worth_filing(state: dict, ok: bool, what: str) -> bool:
     return state[FETCH_STREAK] >= FETCH_FIRES
 
 
+def update_target(root: Path, base: str) -> str:
+    """The ref the checkout follows: `origin/green` once it exists, else `origin/<base>`.
+
+    Merging no longer means tested, and the pass is what repairs a bad merge: running one
+    would break the repair of itself. `green` is the newest commit whose gate passed, so a
+    red `main` leaves the pass on code that works and the fixers it sends cut from `main`.
+    A repository with no `green` yet is one whose gate has not passed since it was added.
+
+    Decided by the ref being known here, not by this fetch: a fetch that failed for a
+    moment must leave the checkout on the last `green`, never move it to the unjudged tip.
+
+    The refspec's source is spelled in full. `+green:...` exits 0 and writes no ref when
+    the commit is already here, which it always is: `green` trails what `main` fetched.
+    """
+    ref = f"refs/remotes/origin/{GREEN}"
+    git(root, "fetch", "--quiet", "origin", f"+refs/heads/{GREEN}:{ref}")
+    known = git(root, "rev-parse", "--verify", "--quiet", ref)
+    return f"origin/{GREEN}" if known.returncode == 0 else f"origin/{base}"
+
+
+def stale_green(
+    root: Path,
+    base: str,
+    limit: float = GREEN_STALE_SECONDS,
+    clock: Callable[[], float] = time.time,
+) -> str:
+    """What to file when a commit has waited more than `limit` to reach `green`, else "".
+
+    Following `green` means a broken gate stops the machine updating, quietly. Nothing
+    should act on the tip while that lasts, but past this the wait stops being the safe
+    answer and becomes the failure.
+
+    Measured from the oldest commit `green` has not reached, against the clock. The gap
+    between the two commits would call a quiet weekend followed by one merge days stale
+    while that merge's gate was still running. Filed apart from `self_update`, whose False
+    would also stop the rerun: the checkout is up to date with everything judged good.
+    """
+    ref = f"refs/remotes/origin/{GREEN}"
+    if git(root, "rev-parse", "--verify", "--quiet", ref).returncode != 0:
+        return ""
+    waiting = git(root, "log", "--reverse", "--format=%ct", f"{ref}..origin/{base}").stdout.split()
+    try:
+        oldest = int(waiting[0]) if waiting else 0
+    except ValueError:
+        return ""
+    if not oldest or clock() - oldest <= limit:
+        return ""
+    return f"origin/{base} has commits {GREEN} has not reached in a day: its gate is not passing"
+
+
 def self_update(root: Path) -> tuple[bool, str]:
     """Fast-forward the checkout the pass runs from; `(ok, what happened)`.
 
@@ -221,8 +278,9 @@ def self_update(root: Path) -> tuple[bool, str]:
     if failed := fetch(root, base):
         return False, f"{FETCH_FAILED} origin/{base} -- {failed}"
     before = git(root, "rev-parse", "HEAD").stdout.strip()
-    if git(root, "merge", "--ff-only", "--quiet", f"origin/{base}").returncode != 0:
-        return False, f"{base} has diverged from origin/{base}"
+    target = update_target(root, base)
+    if git(root, "merge", "--ff-only", "--quiet", target).returncode != 0:
+        return False, f"{base} has diverged from {target}"
     after = git(root, "rev-parse", "HEAD").stdout.strip()
     return True, "current" if before == after else f"updated {before[:9]}..{after[:9]}"
 
@@ -542,6 +600,9 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
             file_once(
                 state, signature("pass-stale", what, head), "pass-stale", what, str(REPO_ROOT), now
             )
+        if stale := stale_green(REPO_ROOT, default_branch(REPO_ROOT)):
+            sig = signature("green-stale", stale, head)
+            file_once(state, sig, "green-stale", stale, str(REPO_ROOT), now)
     code, output = run_current(argv, mode, notes, began)
     print(output, end="")  # pythonw.exe runs this job with sys.stdout None
     kind, detail = judge(code, output)
