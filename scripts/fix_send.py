@@ -241,11 +241,28 @@ def push_clean_merge(failure: fix_plan.Failure, root: Path) -> int:
 def _state(gh, number: int | str) -> str:
     """The PR's state (`OPEN`, `CLOSED`, `MERGED`), or "" when it cannot be read. A URL
     for `number` reads a PR in any repository, from wherever `gh` runs."""
-    done = gh("pr", "view", str(number), "--json", "state")
     try:
+        done = gh("pr", "view", str(number), "--json", "state")
         return str(json.loads(done.stdout or "{}").get("state", "")) if done.returncode == 0 else ""
-    except (ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError):  # no `gh`, or no checkout for it to run in
         return ""
+
+
+def closed_since(failure: fix_plan.Failure, root: Path) -> str:
+    """The record line for a PR that closed or merged after the plan read it, or "".
+
+    Sends run minutes after the read that planned them, each behind a tree and a session
+    before it. Dependabot closed carameli #512 and deleted its branch in that gap, so the
+    resolve found no branch and filed a `resolve-failed` (4b29b7ac); had a tree still held
+    that head, a fixer would have opened at a closed PR. Only a state read as closed stops
+    a send: "" is `gh` not answering, and the send's own failure says more than that does.
+    """
+    if failure.kind != fix_plan.PR or not failure.number:
+        return ""
+    state = _state(sweep.gh_for(root / failure.project), failure.number)
+    if state in ("", "OPEN"):
+        return ""
+    return f"{state.lower()} since the plan read it; nothing to send"
 
 
 def dispatch(
@@ -419,16 +436,19 @@ def _send_one(
 ) -> tuple[str, int]:
     """Dispatch one decision the budget let through; `(record line, exit code)`.
 
-    The ledger is written only for a dispatch that opened; one that did not is filed.
+    The ledger is written only for a dispatch that opened; one that did not is filed. A
+    PR that closed since the plan is neither: nothing went wrong and nothing is owed.
     """
     if not ctx.writes:
         would = {fix_plan.UPDATE: "update the branch", fix_plan.RERUN: "re-run the workflow"}
         return f"would {would.get(decision.action, f'send ({decision.action})')}", EXIT_OK
+    first = decision.failures[0]
+    if gone := closed_since(first, ctx.root):
+        return gone, EXIT_OK
     how = agent_models.Launch(launch.agent, launch.model, effort) if effort else launch
     problem = fix_ledger.problem_key(decision)
     code, said = _saying(dispatch, decision, ctx.root, how, problem)
     if code != EXIT_OK:
-        first = decision.failures[0]
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         detail, kind = f"{names}: {decision.note[:160]}", f"{decision.action}-failed"
         if fix_reports.untrusted(said):
