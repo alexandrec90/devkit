@@ -1797,6 +1797,14 @@ def test_a_fresh_branch_session_is_told_by_the_shape_of_its_first_failure(tmp_pa
     )
     assert prompt == fix_prs.fix_prompts.local_prompt(local, "agent/fix-e2e")
     assert title == "carameli local e2e"
+    medium = failure(
+        kind=fix_plan.LOCAL, number=0, head="", url="", workflow=fix_plan.MEDIUM_TIER, sha="b31b"
+    )
+    prompt, title = fix_prs.fresh_prompt(
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (medium,)), tmp_path, "agent/fix-tier"
+    )
+    assert prompt == fix_prs.fix_prompts.local_prompt(medium, "agent/fix-tier")
+    assert title == "carameli medium tier"
     nightly = failure(kind=fix_plan.NIGHTLY, number=3, head="", workflow="Nightly")
     prompt, title = fix_prs.fresh_prompt(
         fix_plan.Decision(fix_plan.DISPATCH, "n", (nightly,)), tmp_path, "b"

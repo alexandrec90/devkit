@@ -1883,6 +1883,7 @@
 								"reap-schedule",
 								"reconcile-task",
 								"release-schedule",
+								"tier-schedule",
 								"tray",
 								"upgrade-schedule",
 								"workspace-status",

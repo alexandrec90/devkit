@@ -104,6 +104,56 @@ def test_an_escalated_problem_waits_while_open_and_starts_over_once_resolved():
     assert go(fix_budget.budget(third, ledger, NOW, fix_findings.Escalation(False, resolved)))
 
 
+def _medium(*signature: str, project: str = "carameli") -> fix_plan.Decision:
+    return decision(
+        fix_plan.DISPATCH,
+        failure(
+            kind=fix_plan.LOCAL,
+            project=project,
+            number=0,
+            head="",
+            workflow=fix_plan.MEDIUM_TIER,
+            signature=signature,
+        ),
+    )
+
+
+def test_one_medium_tier_session_per_project_at_a_time():
+    """The key digests the signature, so `{x}` then `{x, flaky}` is a new problem, and a
+    second session would go at once while the first still works."""
+    ledger = ledger_after(_medium("tests/a.py::x"))
+    wider = _medium("tests/a.py::x", "tests/b.py::flaky")
+    verdict = fix_budget.budget(wider, ledger, NOW)
+    assert not verdict.go
+    assert verdict.finding is None
+    assert "medium tier session" in verdict.why
+
+
+def test_another_project_s_medium_session_holds_nobody():
+    ledger = ledger_after(_medium("tests/a.py::x"))
+    assert go(fix_budget.budget(_medium("tests/a.py::y", project="homelab"), ledger, NOW))
+
+
+def test_a_medium_session_that_died_or_went_quiet_is_not_open():
+    first = _medium("tests/a.py::x")
+    wider = _medium("tests/a.py::x", "tests/b.py::flaky")
+    ledger = ledger_after(first)
+    ledger[fix_ledger.decision_key(first)]["dead"] = "never started"
+    assert go(fix_budget.budget(wider, ledger, NOW))
+    later = NOW + fix_ledger.RESEND_AFTER
+    assert go(fix_budget.budget(wider, ledger_after(first), later))
+
+
+def test_a_local_e2e_session_is_not_a_medium_tier_one():
+    e2e = decision(
+        fix_plan.DISPATCH,
+        failure(
+            kind=fix_plan.LOCAL, number=0, head="", workflow="Local E2E", signature=("t::e2e",)
+        ),
+    )
+    assert go(fix_budget.budget(_medium("tests/a.py::x"), ledger_after(e2e), NOW))
+
+
 def test_a_changed_failure_is_progress_and_goes():
     first = decision(
         fix_plan.DISPATCH, failure(sha="a1", signature=("tests/a.py::t", "tests/b.py::t"))
