@@ -653,6 +653,7 @@ def toolchain(**over):
         "extensions": list,
         "codex": list,
         "terminal": list,
+        "launchers": list,
     }
     return ws.toolchain_lines(**{**args, **over})
 
@@ -697,7 +698,25 @@ def test_the_injected_reporters_default_to_the_real_ones():
         ws.vscode_extensions.report_lines()
         + ws.codex_context.report_lines()
         + ws.wt_profile.status_lines()
+        + ws.launcher_lines()
     )
+
+
+def test_a_dead_launcher_in_any_checkout_is_named_with_the_checkout_and_its_fix(
+    tmp_path, monkeypatch
+):
+    """513c55e5: `.venv/Scripts/mypy` dead for 26 days, and nothing said so until a session
+    tried it. No gate runs a launcher, so a check somebody has to run would never fire."""
+    workspace = tmp_path / "ws.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(ws.sweep, "parse_workspace", lambda _text: ["fine", "broken"])
+    gaps = {"broken": ws.toolchain.Gap("8 console scripts dead", "uv sync --reinstall")}
+    monkeypatch.setattr(ws.toolchain, "launcher_gap", lambda root: gaps.get(root.name))
+    assert ws.launcher_lines(workspace) == [
+        "broken: 8 console scripts dead (fix: uv sync --reinstall)"
+    ]
+    assert ws.launcher_lines(tmp_path / "gone.code-workspace") == [], "no workspace to read"
+    assert toolchain(launchers=lambda: ["broken: x"]) == ["broken: x"]
 
 
 def test_a_codex_that_cannot_read_the_rules_joins_the_other_prerequisites():

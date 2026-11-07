@@ -28,6 +28,8 @@ from support import (
     load_script,
 )
 
+import project_settings
+
 SETTINGS = REPO_ROOT / ".claude" / "settings.json"
 TEMPLATE_SETTINGS = TEMPLATES / "core" / "dot-claude" / "settings.json.tmpl"
 
@@ -75,6 +77,11 @@ def test_claude_worktrees_borrow_the_checkouts_venv():
     ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     assert ".venv" in ignored or "/.venv" in ignored, (
         ".gitignore ignores .venv only as a directory, so the symlinked one is untracked"
+    )
+    # 513c55e5: nothing pulls into devkit itself, so what a pull adds is written here.
+    assert project_settings.with_borrowed_env(_settings()) == (_settings(), []), (
+        "a `uv run` in a tree would sync the checkout's .venv through the link, and write "
+        "the tree's path into its console scripts"
     )
 
 
