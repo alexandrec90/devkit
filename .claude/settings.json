@@ -5,7 +5,8 @@
     "PY_COLORS": "0",
     "TTY_COMPATIBLE": "0",
     "TTY_INTERACTIVE": "0",
-    "MSYS2_ARG_CONV_EXCL": "origin/;upstream/;refs/"
+    "MSYS2_ARG_CONV_EXCL": "origin/;upstream/;refs/",
+    "UV_NO_SYNC": "1"
   },
   "worktree": {
     "symlinkDirectories": [".venv"]

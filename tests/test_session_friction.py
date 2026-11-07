@@ -503,6 +503,43 @@ def test_a_backgrounded_wait_is_one_call_and_its_notice_not_a_poll():
     assert classes([call(loop, "1")]) == ["poll"], "in the foreground it holds the turn"
 
 
+# 2d4d52ac: what Claude Code answers a foreground call it takes out of the foreground, and
+# the one wait a subagent then has, since a subagent that ends its turn has returned.
+MOVED = (
+    "Command was moved to the background (ID: bl2dpflqw) after running for 180s. Output is "
+    "being written to: C:\\T\\tasks\\bl2dpflqw.output. You will be notified when it completes."
+)
+WAIT_ON_MOVED = (
+    'F="C:/T/tasks/bl2dpflqw.output"; until grep -qE "[0-9]+ passed" "$F"; do sleep 2; done; '
+    'tail -8 "$F"'
+)
+
+
+def subagent(rows: list[dict]) -> list[str]:
+    """`classes` of `rows` as a subagent's transcript records them, through `st.events`,
+    which is what reads a record's own fields."""
+    marked = tuple((n, {**row, "isSidechain": True}) for n, row in enumerate(rows, 1))
+    return sorted(cls for cls, _, _ in sf.detect(st.events(Path("agent-x.jsonl"), marked)))
+
+
+def test_a_subagent_waiting_on_the_call_claude_code_moved_is_not_polling():
+    """It did as the rule says and ran the job in the foreground; Claude Code moved it at
+    180 s whatever its `timeout`, and the notice it promises cannot reach a subagent that
+    has returned. One foreground loop on the file it was told to read is the only wait left."""
+    moved = [call("python -m pytest tests/test_x.py", "1"), result(MOVED, "1", error=False)]
+    rows = [*moved, call(WAIT_ON_MOVED, "2"), result("3 passed", "2", error=False)]
+    assert subagent(rows) == []
+    assert classes(rows) == ["poll"], "a top-level session gets the notice, so it can stop"
+
+
+def test_a_subagents_loop_on_anything_else_is_still_a_poll():
+    """Only the call Claude Code moved: its other waits are the habit."""
+    rows = [call("python -m pytest tests/test_x.py", "1"), result(MOVED, "1", error=False)]
+    other = "until grep -q done logs/other.log; do sleep 2; done"
+    assert subagent([*rows, call(other, "2")]) == ["poll"]
+    assert subagent([call(WAIT_ON_MOVED, "2")]) == ["poll"], "nothing was moved"
+
+
 def test_a_pause_between_distinct_runs_is_not_a_poll():
     """52b90be8, the poll group's eleventh recurrence: a session restarted a database once
     per setting, measured its peak memory and paused 20 s before the next -- three
@@ -557,6 +594,9 @@ def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
     flat = " ".join(section.split())
     assert "A subagent gets no notice before it returns" in flat
     assert "in the foreground instead" in flat
+    # 2d4d52ac, the twelfth: Claude Code moves that foreground call out at 180 s, and the
+    # one wait left is the one `MOVED_TO_BACKGROUND` excuses.
+    assert "one `until` loop on the file named when Claude Code moves that call out" in flat
 
 
 def test_a_module_the_tree_itself_holds_is_a_code_defect_not_the_environment(tmp_path):
@@ -2134,6 +2174,68 @@ def test_a_scratch_program_on_the_machines_python_never_asked_the_trees_environm
     assert judged("python -m pytest tests/test_host.py") == ["environment"], "not throwaway"
     own = '.venv/Scripts/python.exe -c "import psutil; psutil.cpu_count()"'
     assert judged(own) == ["environment"], "its own interpreter"
+
+
+# 78d19a1f and 5ba01dec: one devkit review measuring how photolab behaves on a fresh tree.
+CLONE = r"C:\Users\x\AppData\Local\Temp\claude\9e\scratchpad\review\photolab-clone"
+CLONE_RUN = (
+    f"$c='{CLONE}'; Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue; "
+    "Push-Location -LiteralPath $c; "
+    "& 'C:\\ws\\photolab\\.venv\\Scripts\\python.exe' -m pytest tests -x -q --tb=line"
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        CLONE_RUN,
+        f'cd "{CLONE}" && .venv/Scripts/python.exe -m pytest tests',
+        'c="/tmp/clone"; cd "$c" && pytest tests',
+        'Set-Location -Path "$env:TEMP\\clone"; python -m pytest',
+    ],
+)
+def test_a_whole_run_in_a_scratch_clone_is_a_measurement_of_the_clone(command):
+    """No gate runs that clone, and no change is in it to target, so there is nothing
+    narrower it could have been asked for; `scratch_only` says the same of a `--no-verify`
+    there."""
+    assert sf.scratch_suite(command)
+    assert "full-suite" not in classes([call(command, "1")])
+
+
+def test_where_a_command_ends_up_is_its_last_step_read_through_what_it_bound():
+    assert sf.in_scratch("$c = 'C:\\Temp\\x'; Set-Location $c")
+    assert sf.in_scratch('d="/tmp/x"; pushd "${d}"')
+    assert not sf.in_scratch("cd /tmp/x && cd /c/ws/photolab")
+    assert not sf.in_scratch("$c = 'C:\\ws\\photolab'; Set-Location $c"), "bound, not scratch"
+    assert not sf.in_scratch("cd $unbound")
+    assert not sf.in_scratch("echo /tmp/x"), "it never stepped there"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python -m pytest tests",
+        'cd "C:\\ws\\photolab" && python -m pytest tests',
+        "cd /tmp/clone && cd /c/ws/photolab && python -m pytest tests",
+        "python -m pytest tests; cd /tmp/clone && pytest tests",
+        "$c='C:\\ws\\photolab'; Push-Location -LiteralPath $c; python -m pytest tests",
+        "cd /tmp/clone && python scripts/run_push_gate.py",
+    ],
+)
+def test_a_whole_run_anywhere_else_is_still_filed(command):
+    assert not sf.scratch_suite(command)
+    assert "full-suite" in classes([call(command, "1")])
+
+
+def test_a_scratch_clones_run_under_another_checkouts_venv_owes_the_tree_nothing(tmp_path):
+    """The module photolab's static `.venv` lacked is no environment any tree of this
+    session was owed: `uv sync` in the clone settled it two calls later."""
+    tree = _git_tree(tmp_path / "devkit", {"x.py": "\n"})
+    said = "Exit code 4\ntests\\conftest.py:19: in <module>\nE   ModuleNotFoundError: No module named 'httpx'\n"
+    rows = [call(CLONE_RUN, "1"), result(said, "1")]
+    events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+    assert "environment" in classes(rows), "the premise"
+    assert [row[0] for row in sf.judged(events, str(tree), tmp_path)] == []
 
 
 def _bash_spelling(path: Path) -> str:

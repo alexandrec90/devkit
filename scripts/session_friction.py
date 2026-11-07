@@ -111,6 +111,11 @@ SETTLE = re.compile(
     re.M,
 )
 SETTLE_MAX = 30  # seconds: longer than a run takes to attach is a wait, not a settle
+# Claude Code taking a foreground call out of the foreground, which it does at 180 s
+# whatever the call's `timeout` said. A top-level session is told when it ends and can
+# stop; a subagent that stops has returned, so the rule has it run the job in the
+# foreground, and this leaves it one loop on the file it was told to read (2d4d52ac).
+MOVED_TO_BACKGROUND = re.compile(r"\ACommand was moved to the background \(ID: (\w+)\)")
 # A pause between the *different* runs of one experiment re-reads nothing: `for S in
 # "set a" "set b"; do restart; run "$S"; sleep 20; done` paces three measurements, each
 # its own work, where a poll asks one question again. A session comparing a database's
@@ -938,6 +943,7 @@ class _Session:
     rejected: tuple[str, str] | None = None
     started: dict[str, str] = field(default_factory=dict)  # call id -> when it was made
     settled: bool = False  # it spent the one `SETTLE` a session is excused
+    moved: set[str] = field(default_factory=set)  # task ids `MOVED_TO_BACKGROUND` named
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -993,19 +999,25 @@ class _Session:
         """What the call's command is friction as, less what this session was excused."""
         checked = frozenset(self.checked) if self.checked is not None else None
         for cls, what in _command_classes(event.command, checked, self.targeted_runner):
-            if cls == "full-suite" and self.suite_asked:
+            if cls == "full-suite" and (self.suite_asked or scratch_suite(event.command)):
                 continue
-            # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes, and
-            # a backgrounded one is a single call and its completion notice -- the shape
-            # the engineering rule asks a long wait to take, not a loop of turns.
-            if cls == "poll" and (event.tool in WAIT_TOOLS or event.background):
-                continue
-            if cls == "poll" and paced(event.command):
-                continue
-            if cls == "poll" and not self.settled and settles(event.command):
-                self.settled = True
+            if cls == "poll" and self._excused_wait(event):
                 continue
             self.note(cls, what, event)
+
+    def _excused_wait(self, event: Event) -> bool:
+        """A poll-shaped call that holds no turn for nothing. A `Monitor` until-loop is the
+        wait Claude Code's `SLEEP_GUARD` prescribes, and a backgrounded one is a single
+        call and its completion notice -- the shape the engineering rule asks a long wait
+        to take, not a loop of turns."""
+        if event.tool in WAIT_TOOLS or event.background or paced(event.command):
+            return True
+        if event.sidechain and any(task in event.command for task in self.moved):
+            return True
+        if not self.settled and settles(event.command):
+            self.settled = True
+            return True
+        return False
 
     def say(self, event: Event) -> None:
         self.last_said = event
@@ -1053,6 +1065,7 @@ class _Session:
         """A call that exited 0 still failed if it was a test run or a git call reporting
         a missing environment: `| tail` hides pytest's exit code."""
         command = self.calls.get(event.call_id, "")
+        self.moved.update(MOVED_TO_BACKGROUND.findall(event.text))
         self._brief_wait(event)
         self._unclaim(event)
         # Once: the same dirty lock in every later `git status` is no new change.
@@ -1225,15 +1238,43 @@ def outside_the_tree(found: list, cwd: str) -> list:
 PYTHON_SCRIPT = re.compile(r"\S*python\S*\s+(?:-\S+\s+)*[\"']?(?P<script>[^\s\"';&|]+\.py)\b")
 # The directory a call changes into, and a path that does not lean on it.
 CD_INTO = re.compile(
-    r"(?:^|[;&|]\s*)(?:cd|pushd|Set-Location)\s+[\"']?(?P<dir>[^\"';&|\n]+)", re.I | re.M
+    r"(?:^|[;&|]\s*)(?:cd|pushd|Set-Location|Push-Location)\s+(?:-(?:Literal)?Path\s+)?"
+    r"[\"']?(?P<dir>[^\"';&|\n]+)",
+    re.I | re.M,
 )
 ABSOLUTE_PATH = re.compile(r"^(?:[A-Za-z]:)?[\\/]|^[~$]")
+# A quoted path bound to a variable, in either shell: `c="/tmp/x"`, `$c = 'C:\Temp\x'`.
+QUOTED_BINDING = re.compile(
+    r"(?:^|[;&|]\s*)\$?(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<q>[\"'])(?P<value>[^\"'\n]*)(?P=q)",
+    re.M,
+)
+
+
+def in_scratch(command: str) -> bool:
+    """The last directory `command` changes into is a scratch one, by its name or through
+    a variable it bound."""
+    names = {found["name"]: found["value"] for found in QUOTED_BINDING.finditer(command)}
+    steps = [found["dir"].strip() for found in CD_INTO.finditer(command)]
+    return bool(steps) and bool(
+        SCRATCH_DIR.search(
+            EXPANSION.sub(lambda m: names.get(m["bare"] or m["braced"], m[0]), steps[-1])
+        )
+    )
+
+
+def scratch_suite(command: str) -> bool:
+    """Every test run in `command` runs in a scratch directory: a clone a session measures
+    a project with, which no gate runs and which holds no change to target. A devkit
+    review timing photolab's suite on a fresh tree was filed as the habit (78d19a1f)."""
+    runs = list(TEST_RUN.finditer(command_position(command)))
+    return bool(runs) and all(in_scratch(command[: run.start()]) for run in runs)
 
 
 def ad_hoc_program(command: str) -> bool:
     """`command` runs a program the session wrote for itself: inline (`python -c`, any
-    flags first), or a script in a scratch directory, by its path or beside a `cd` there."""
-    if PYTHON_C.search(command):
+    flags first), a script in a scratch directory, by its path or beside a `cd` there, or
+    the suite of a scratch clone (`scratch_suite`, 5ba01dec)."""
+    if PYTHON_C.search(command) or scratch_suite(command):
         return True
     beside = any(SCRATCH_DIR.search(found["dir"]) for found in CD_INTO.finditer(command))
     return any(
