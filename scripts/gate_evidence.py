@@ -447,7 +447,9 @@ def evidence_slot(failure: fix_plan.Failure) -> str:
     project under a directory named for the project would overwrite each other.
     """
     where = failure.number or tb.slugify(failure.head or failure.base or "?")
-    return f"{failure.project}-{failure.kind}-{where}"
+    # The two local tiers share a kind and a base, and a project can be red in both.
+    kind = "medium-tier" if failure.workflow == fix_plan.MEDIUM_TIER else failure.kind
+    return f"{failure.project}-{kind}-{where}"
 
 
 def pr_failure(project: str, pr: dict) -> fix_plan.Failure:

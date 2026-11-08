@@ -937,6 +937,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | --- | --- | --- | --- |
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
 | `devkit-local-e2e` | `scripts/install-e2e-schedule.py` | nightly 01:00, each project once the PC is idle | `logs/scheduled-local-e2e.log`, results under `logs/e2e/` |
+| `devkit-medium-tier` | `scripts/install-tier-schedule.py` | every 15 min, whatever the person is doing, behind `devkit.fixPass` being `dispatch` | `logs/scheduled-medium-tier.log`, results under `logs/medium-tier/` |
 | `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00 | `logs/scheduled-devkit-release.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
@@ -1657,6 +1658,37 @@ A project without the tier gets one from its fixer, sent the night the pass reco
 missing; to write it yourself, add its `scripts/e2e.py`. A pytest marker of its own,
 run the way devkit's is, is the usual shape. Then `python scripts/e2e-pass.py run --no-wait
 <project>` from devkit shows what the night will see.
+
+### The medium tier: the suite, on Windows, through the day
+
+The PR gate is Linux, so once a merge no longer runs pre-commit on someone's machine,
+nothing else checks a change on Windows. `devkit-medium-tier`
+(`scripts/install-tier-schedule.py`) runs every project's own suite every 15 minutes,
+whoever is at the keyboard. It blocks nothing, so it covers every project, whatever its
+delivery flow. `scripts/CLAUDE.md` has the table of all four tiers.
+
+**It tests only on a PC whose `devkit.fixPass` is `dispatch`.** A result stays on the PC
+that made it, so a red anywhere else would reach no fixer. Every PC registers the job; on
+any other PC a fire says why in one line of its log and exits 0, and no failure is filed.
+
+| Piece | What it does |
+| --- | --- |
+| `scripts/run-tests.py` in a project | **The contract**, run with `--all` where the script has that flag, since bare it picks the tests for what changed, and at origin's tip that is none. Every project owes it: a project whose tip has no script and no override is recorded red (`e2e_results.MEDIUM.missing`), and its fixer is sent to write one. |
+| `[delivery] medium_tier` in `.devkit.toml` | **The override**: a command to run instead, read at the commit under test. `python` in it means the tree's own `.venv`. It runs without a shell. |
+| `scripts/tier_command.py` | **Where the tier does not run.** A tree never gets a project's real `.env`, so a project with `[db] enabled = true`, or whose runner drives the Docker stack, is recorded as not applicable, never as red, unless it sets `medium_tier`. |
+| `scripts/tier-pass.py run` | For each project origin has moved past the last commit this tier judged, longest-waiting first and one at a time: cuts a tree at the tip, provisions it, runs the tests, destroys the tree, and writes `logs/medium-tier/<project>/result.json` and `output.log` in devkit. A red at a tip that has not moved gets one more run an hour later. Exits 0 on a red result. `run <project>` by hand runs that project whatever the schedule would decide. |
+| `scripts/tier_state.py` | What a project with no verdict is waiting for, in `state.json` beside its result. A run that could not start is retried on a backoff doubling from an hour to a day and filed once, only after a day, and never when it is the project's own broken lock. A run that would not fit in free memory is counted in the pass's record, and a day of those is said there and in `status`; no session can fix that, so it is not a finding. |
+| `scripts/disposable_tree.py` | The tree: detached at one commit under the checkout's `.claude/worktrees/`, so a path dependency resolves as it does for a session, and swept if a crash left it, from disk as well as from git's list. The static checkout is never touched. |
+| `scripts/e2e_results.py` | `MEDIUM` reads the same way as the night's tier: a red is a `fix_plan.LOCAL` failure from `fix_red.collect_red`, and its fixer is told to bisect from the last green commit, since a run spans every merge since then. A result older than the tip is held for the next fire, and one fixer goes per project at a time. |
+| `scripts/tier-pass.py status` | Each project's last result, and anything it is waiting for. |
+
+A run is bounded by `--timeout-minutes` and the pass by `--pass-minutes`. A pass in progress
+holds the machine, and a fire that lands during it is dropped, which loses nothing. Where
+several PCs dispatch, each runs the job; once the `job_claims` module is there, a run is claimed as
+`tier-<project>-<sha12>` so one PC takes it, and the result, and so the fixer, is that PC's.
+
+`python scripts/tier-pass.py run <project>` from devkit runs it by hand, against the tip on
+origin, whether or not the tree you are in has that commit.
 
 ### The repo contract
 

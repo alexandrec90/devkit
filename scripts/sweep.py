@@ -414,6 +414,8 @@ class State:
     is_git: bool = True
     host: str = "other"
     default_branch: str = ""
+    # The ref a sync fast-forwards to when it is not `origin/<default_branch>`: see `follows`.
+    follows: str = ""
     branch: str = ""
     dirty: int = 0
     # The changed paths behind `dirty`, for the generated PR body. Empty is a
@@ -1220,7 +1222,7 @@ def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
     # Unconditional: `behind` was measured against the *old* HEAD, so after a
     # checkout it says nothing about where `home` sits. `--ff-only` makes an
     # already-current branch a no-op and a diverged one an error, never a merge.
-    steps.append(("merge", "--ff-only", f"origin/{state.default_branch}"))
+    steps.append(("merge", "--ff-only", state.follows or f"origin/{state.default_branch}"))
     steps += _reap_steps(state, verdict, home)
 
     # Only linked worktrees need the record: a primary can always fall back to the
@@ -1530,6 +1532,20 @@ def _dirty_files(git: Git, porcelain: str) -> tuple[str, ...]:
     return dirty_files
 
 
+def follows(path: Path, git: Git) -> str:
+    """`origin/green` for devkit's own checkout once that ref exists, else "".
+
+    That checkout is the code the pass runs, and `fix-pass-watchdog.update_target` holds it
+    on the newest commit whose gate passed, so a bad merge cannot break the pass that
+    repairs it. This job syncs every checkout, so taking this one to the tip would undo
+    that every fifteen minutes. A project's checkout is only what a person reads.
+    """
+    if not (path / "scripts" / "devkit_manifest.py").is_file():
+        return ""
+    known = git("rev-parse", "--verify", "--quiet", "refs/remotes/origin/green")
+    return "origin/green" if known.returncode == 0 else ""
+
+
 def inspect(
     name: str,
     path: Path,
@@ -1631,9 +1647,9 @@ def inspect(
     return State(
         name=name,
         path=str(path),
-        is_git=True,
         host=remote_host(remote_url),
         default_branch=default_branch,
+        follows=follows(path, git),
         branch=branch,
         dirty=len(dirty_files),
         dirty_files=dirty_files,

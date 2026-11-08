@@ -353,7 +353,7 @@ def fresh_prompt(decision: fix_plan.Decision, root: Path, branch: str) -> tuple[
     if first.kind == fix_plan.BRANCH:
         return fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
     if first.kind == fix_plan.LOCAL:
-        return fix_prompts.local_prompt(first, branch), f"{project} local e2e"
+        return fix_prompts.local_prompt(first, branch), f"{project} {fix_plan.local_name(first)}"
     if first.kind == fix_plan.DEPENDABOT:
         return fix_prompts.dependabot_prompt(first, branch), f"{project} dependabot"
     return fix_prompts.nightly_prompt(first, branch), f"{project} {first.workflow}"

@@ -60,6 +60,53 @@ def test_a_nightly_read_at_its_bases_tip_is_keyed_there():
     )
 
 
+def test_a_medium_red_stays_under_one_key_as_the_tip_moves():
+    """Every merge after the first sighting would otherwise be a new key, and a second
+    session sent while the first still works."""
+    fields = {
+        "kind": fix_plan.LOCAL,
+        "number": 0,
+        "workflow": fix_plan.MEDIUM_TIER,
+        "sha": "run",
+        "first_seen": "first",
+    }
+    one, two = (fix_ledger.failure_key(failure(**fields, tip=tip)) for tip in ("t1", "t2"))
+    assert one == two
+    assert one.startswith(f"local:carameli:{fix_ledger.MEDIUM_TARGET}:first:")
+
+
+def _medium_decision(*signature: str) -> fix_plan.Decision:
+    red = failure(
+        kind=fix_plan.LOCAL,
+        number=0,
+        workflow=fix_plan.MEDIUM_TIER,
+        sha="s",
+        signature=signature,
+    )
+    return fix_plan.Decision(fix_plan.DISPATCH, "n", (red,))
+
+
+def test_a_project_s_open_medium_session_is_found_whatever_its_signature():
+    now = _dt.datetime(2026, 11, 6, 12, 0, tzinfo=_dt.UTC)
+    first = _medium_decision("t::x")
+    ledger = {fix_ledger.decision_key(first): {"when": now.isoformat(), "sent": 1}}
+    wider = _medium_decision("t::x", "t::flaky")
+    assert fix_ledger.open_medium_session(wider, ledger, now) == now.isoformat()
+    later = now + fix_ledger.RESEND_AFTER
+    assert fix_ledger.open_medium_session(wider, ledger, later) == ""
+    blocked = {key: {**entry, "blocked": "no"} for key, entry in ledger.items()}
+    assert fix_ledger.open_medium_session(wider, blocked, now) == ""
+    pr = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    assert fix_ledger.open_medium_session(pr, ledger, now) == ""
+
+
+def test_a_local_e2e_red_keeps_its_key_shape():
+    key = fix_ledger.failure_key(
+        failure(kind=fix_plan.LOCAL, number=0, workflow="Local E2E", sha="s", tip="t")
+    )
+    assert key.startswith("local:carameli:0:t:")
+
+
 def test_a_refused_commit_is_keyed_by_its_branch_so_each_tree_is_its_own_problem(tmp_path):
     """787d0750: every refused commit was target `0`, so social-scraper's
     happy-drifting-sprout, refused by detect-secrets, was filed fixers-exhausted with no

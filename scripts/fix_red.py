@@ -65,8 +65,10 @@ def collect_red(
     failures = refused + gate_evidence.collect(workspace, found)
     failures += [failure for _, failure in branches.values() if failure]
     # After the branches: their read fetched origin, which the local runs' tips are read
-    # against. The tests no hosted runner can run, red on this machine (`e2e_results`).
+    # against. The tests no hosted runner can run, red on this machine (`e2e_results`),
+    # and the project's own tests, red on this machine through the day (`tier-pass.py`).
     failures += e2e_results.collect(workspace, projects, sweep.git_for)
+    failures += e2e_results.collect(workspace, projects, sweep.git_for, tier=e2e_results.MEDIUM)
     green, _ = branches.get(fix_cycle.DEVKIT, (None, None))
     unread = [name for name, (verdict, _) in branches.items() if verdict is None]
     return failures, green, unread

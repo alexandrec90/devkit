@@ -800,6 +800,16 @@ def test_stale_tree_names_what_a_linked_worktree_lacks_of_origins_scripts(static
     assert fix_pass.fix_send.stale_tree(tmp_path / "missing") == "", "a git failure is not stale"
 
 
+def test_origin_tip_is_green_where_green_exists(static):
+    """The checkout follows `green`. Read off `main`, the pass would see its own code as
+    moved on every pass `main` is ahead of its last green commit, and hold every send."""
+    author, checkout = static
+    head = _git(author, "rev-parse", "HEAD")
+    _git(author, "push", "--quiet", "origin", f"{head}:refs/heads/green")
+    _push(author, "scripts/route.py")
+    assert fix_pass.fix_send.origin_tip(fix_pass.sweep.git_for(checkout)) == head
+
+
 def test_origin_tip_and_scripts_range_read_origin_after_a_fetch(static, tmp_path):
     author, checkout = static
     git = fix_pass.fix_send.sweep.git_for(checkout)
@@ -917,6 +927,22 @@ def test_collect_red_gathers_prs_and_default_branches_and_the_backlog_is_read_ap
     assert [f.kind for f in failures] == [fix_plan.PR, fix_plan.BRANCH]
     assert green is False and unread == []
     assert fix_pass.fix_red.backlog_failure(world["workspace"]) == backlog
+
+
+def test_collect_red_reads_both_local_tiers(world, monkeypatch):
+    """A medium tier red reaches the pass by the road a local end-to-end red takes."""
+    results = fix_pass.fix_red.e2e_results
+    world["failures"], world["branches"] = [], {}
+    asked = []
+
+    def collect(_workspace, _projects, _git_for, root=None, tier=results.E2E):
+        asked.append(tier)
+        return [failure(kind=fix_plan.LOCAL, workflow=tier.workflow)]
+
+    monkeypatch.setattr(results, "collect", collect)
+    failures, _, _ = fix_pass.fix_red.collect_red(world["workspace"], ["carameli"], [])
+    assert asked == [results.E2E, results.MEDIUM]
+    assert [f.workflow for f in failures] == ["Local E2E", fix_plan.MEDIUM_TIER]
 
 
 def test_an_unreadable_devkit_main_is_re_gated_and_holds_nothing_meanwhile(world, monkeypatch):

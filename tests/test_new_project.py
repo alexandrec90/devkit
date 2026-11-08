@@ -2197,7 +2197,8 @@ def test_generated_automerge_carries_no_project_specific_value(tmp_path):
     assert b"trunk" not in theirs, "the project's default branch leaked into a vendored file"
     # `branches:` absent entirely, rather than present and set to something neutral —
     # any value here is a name that differs per repo.
-    assert _workflow_triggers(yaml.safe_load(theirs.decode("utf-8")))["pull_request"] is None
+    trigger = _workflow_triggers(yaml.safe_load(theirs.decode("utf-8")))["pull_request"]
+    assert "branches" not in trigger
 
 
 def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
@@ -2212,10 +2213,11 @@ def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
     path = root / ".github" / "workflows" / "dependabot-automerge.yml"
     parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert parsed["permissions"] == {
-        # `actions: read` is the retry sweep's: it asks the runs API whether `PR Gate`
-        # succeeded on a PR's current head SHA, which the event-driven job is handed by
-        # its trigger and a scheduled pass has to go and find.
-        "actions": "read",
+        # `actions: write` is for dispatching `PR Gate` on what a merge landed, since a
+        # merge with this token raises no `push`. Its read half is the retry sweep's: it
+        # asks the runs API whether `PR Gate` succeeded on a PR's current head SHA, which
+        # the event-driven job is handed by its trigger and a scheduled pass must go find.
+        "actions": "write",
         # `checks: read` is the sweep's other half, for the evidence the runs API does
         # not hold -- whether anything *else* wired onto the PR is unfinished or red.
         # Exact-dict on purpose: a generated project that is handed a scope short is a
@@ -2490,18 +2492,70 @@ def _nothing_to_compare(constant: str, tag: str | None, repo: Path = REPO_ROOT) 
 
     A tag outside HEAD's history was cut after this branch was, and its bump arrives
     with main: a fixer's targeted run went red on v0.11.37, minutes old (2026-10-01).
+
+    The third is the release commit itself, once merged. Its gate runs before the tag can
+    exist, so every release left its commit red for good, and nothing that reads the
+    default branch's verdict could tell that from a real failure. A release PR's gate
+    runs on GitHub's merge commit instead, whose subject is not this one, so it stays
+    red and `gate_verdict` keeps judging it.
     """
     if tag is None:
         return "no tags to compare against"
     if not _in_history(tag, repo):
         return f"{tag} is not in this branch's history: merging main brings its bump"
+    bumped, released = _version(constant), _version(tag)
+    ahead = bumped is not None and released is not None and bumped > released
+    if ahead and _is_release_commit(constant, repo):
+        return f"HEAD is the release commit for {constant}, whose tag comes after it"
     gate = load_script("scripts/precommit/run_push_gate.py")
     if not os.environ.get(gate.RELEASE_PREPARE_ENV):
         return ""
-    bumped, released = _version(constant), _version(tag)
-    if bumped is not None and released is not None and bumped > released:
+    if ahead:
         return f"release prepare in flight: {constant} is not tagged yet"
     return ""
+
+
+def _is_release_commit(constant: str, repo: Path) -> bool:
+    """HEAD is the squashed release PR for `constant`: `Release v1.2.3 (#742)`."""
+    done = subprocess.run(
+        ["git", "log", "-1", "--format=%s"],
+        cwd=repo if repo.is_dir() else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode != 0:
+        return False
+    return (
+        re.fullmatch(rf"Release {re.escape(constant)}( \(#\d+\))?", done.stdout.strip()) is not None
+    )
+
+
+def _repo_with_head(path: Path, subject: str) -> Path:
+    identity = ("-c", "user.name=t", "-c", "user.email=t@example.invalid")
+    empty = ("commit", "--allow-empty", "--quiet", "--no-verify", "-m", subject)
+    for args in (("init", "--quiet"), (*identity, *empty), ("tag", "v0.1.0")):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+    return path
+
+
+def test_the_merged_release_commit_is_not_red_for_a_tag_it_comes_before(tmp_path):
+    """Its gate runs before the tag can exist, so every release left its commit red, and
+    nothing reading the default branch could tell that from a real failure."""
+    repo = _repo_with_head(tmp_path, "Release v0.1.1 (#742)")
+    assert "release commit" in _nothing_to_compare("v0.1.1", "v0.1.0", repo)
+
+
+def test_a_release_pr_stays_red_on_its_merge_commit(tmp_path):
+    """`gate_verdict` judges that red, and needs it to exist."""
+    repo = _repo_with_head(tmp_path, "Merge abc into def")
+    assert _nothing_to_compare("v0.1.1", "v0.1.0", repo) == ""
+
+
+def test_a_stale_constant_on_a_release_commit_is_still_caught(tmp_path):
+    """The subject excuses a constant ahead of the tag, never one behind it."""
+    repo = _repo_with_head(tmp_path, "Release v0.0.9 (#742)")
+    assert _nothing_to_compare("v0.0.9", "v0.1.0", repo) == ""
 
 
 def test_latest_devkit_tag_is_none_outside_a_git_repo(tmp_path):

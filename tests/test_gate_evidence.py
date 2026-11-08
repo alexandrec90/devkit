@@ -934,6 +934,16 @@ def test_one_slot_per_failure_named_for_what_it_is():
     ) == ("devkit-branch-main")
 
 
+def test_a_project_red_in_both_local_tiers_keeps_both_runs_output():
+    """One upstream session can hold both, and they share a kind and a base."""
+    e2e = fix_plan.Failure(fix_plan.LOCAL, "devkit", 0, "", "", base="main", workflow="Local E2E")
+    medium = fix_plan.Failure(
+        fix_plan.LOCAL, "devkit", 0, "", "", base="main", workflow=fix_plan.MEDIUM_TIER
+    )
+    assert ev.evidence_slot(e2e) == "devkit-local-main"
+    assert ev.evidence_slot(medium) == "devkit-medium-tier-main"
+
+
 def test_the_newest_completed_run_at_the_tip_is_the_branchs_verdict(monkeypatch, tmp_path):
     """An unfinished run for some other commit above it says nothing; the completed one
     at the tip is the verdict."""
