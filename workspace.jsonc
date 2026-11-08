@@ -1374,6 +1374,36 @@
 				},
 				"problemMatcher": []
 			},
+			// --- scoped: photolab -------------------------------------------------
+			// A literal checkout, not a picker: the album binds fixed ports, so a second
+			// checkout could only collide with the first.
+			{
+				"label": "Photolab: Open Album",
+				"detail": "Start Postgres in Docker and the API and Vite on this machine, then open the album on localhost (FRONTEND_HOST_PORT in .env, 5180 by default). Needs .env with PHOTO_LIBRARY_HOST_DIR. Runs until you close the terminal. AI images and subscription annotation use the codex and claude commands on this machine.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"photolab",
+					"album"
+				],
+				"icon": {
+					"id": "device-camera",
+					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
 			// --- scoped: the checkouts that have a database -----------------------
 			{
 				// The last task to leave a .vscode/tasks.json anywhere, and the only one

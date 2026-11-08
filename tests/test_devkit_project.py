@@ -501,6 +501,9 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # Born scoped, by capability: only ibkr_trader ships the web UI.
         # `scripts/ui-task.py` is the contract.
         "trader-ui",
+        # Born scoped, by capability: only photolab ships the album.
+        # `scripts/album.py` is the contract.
+        "album",
     }
 
 
@@ -706,6 +709,39 @@ def test_the_trader_ui_names_its_missing_script(tmp_path):
     """A checkout without the UI branch merged is a conformance failure by name."""
     with pytest.raises(ProjectError, match=r"scripts/ui-task\.py"):
         plan_command(ACTIONS["trader-ui"], tmp_path, [])
+
+
+def test_the_album_is_photolab_scoped_and_runs_the_script_bare(tmp_path):
+    """`album.py` reads its ports from the checkout's .env, so the dispatch adds nothing
+    between the interpreter and the script, and only photolab owes the script."""
+    action = ACTIONS["album"]
+    assert action.script == "scripts/album.py"
+    assert action.label == "Photolab: Open Album"
+    assert action.args == ()
+    assert action.projects == devkit_project.PHOTOLAB == ("photolab",)
+    assert action.owner == devkit_project.PROJECT
+    assert "album" in expected_actions("photolab")
+    assert "album" not in expected_actions("devkit")
+
+    checkout = tmp_path / "photolab"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "album.py").write_text("", encoding="utf-8")
+    argv = plan_command(action, checkout, [])
+    assert argv[-2:] == ["python", "scripts/album.py"]
+
+
+def test_the_album_task_names_its_checkout_rather_than_asking(canonical):
+    """The album binds fixed ports, so a second checkout could only collide with the first.
+    A literal `--project` asks nothing; the literal-scope test holds it to the action."""
+    task = next(t for t in canonical["tasks"] if t["label"] == "Photolab: Open Album")
+    args = [str(a) for a in task["args"]]
+    assert args[args.index("--project") + 1 :] == ["photolab", "album"]
+
+
+def test_the_album_names_its_missing_script(tmp_path):
+    """A checkout without `album.py` is a conformance failure by name."""
+    with pytest.raises(ProjectError, match=r"scripts/album\.py"):
+        plan_command(ACTIONS["album"], tmp_path, [])
 
 
 def test_the_host_preview_pair_is_one_script_told_apart_by_a_flag():
