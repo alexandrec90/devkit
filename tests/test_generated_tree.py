@@ -24,6 +24,7 @@ SHAPES = [
     pytest.param({}, id="bare"),
     pytest.param({f: True for f in new_project.STACK_FEATURES}, id="everything"),
     pytest.param({f: True for f in new_project.DESKTOP_FEATURES}, id="desktop"),
+    pytest.param({f: True for f in new_project.ELECTRON_FEATURES}, id="electron"),
 ]
 
 

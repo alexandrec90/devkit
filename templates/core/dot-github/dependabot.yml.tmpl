@@ -112,6 +112,22 @@ updates:
           - "patch"
 
 {{/desktop}}
+{{#electron}}
+  # The Electron app's packages. A major of `electron` itself is a browser engine upgrade,
+  # so it lands as its own PR, where the gate drives the packaged app against it.
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    assignees:
+      - {{ github_owner }}
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+{{/electron}}
   # The actions the workflows pin. Majors land as individual PRs and the auto-merge
   # classifier holds them for review.
   - package-ecosystem: github-actions

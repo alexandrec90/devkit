@@ -190,7 +190,58 @@ jobs:
           path: |
             logs/desktop-lint.log
             logs/desktop-test.log
+      - name: Upload what the app drew
+        # On a pass too: the screenshot is how a UI change gets looked at.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-ui
+          if-no-files-found: ignore
+          path: logs/ui/
 {{/desktop}}
+{{#electron}}
+
+  electron:
+    name: Electron build and UI tests
+    # Windows, because that is what `release.yml` ships, and a hosted Windows runner has
+    # the desktop session Electron needs with nothing to set up. `test:e2e:packaged`
+    # drives the packed app rather than the source: a file `electron-builder.yml` leaves
+    # out passes every other check here and fails only on a user's machine.
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        id: typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        id: unit-tests
+        # After a red typecheck too, so one gate cycle names every failure.
+        if: success() || steps.typecheck.outcome == 'failure'
+        run: npm run test:run
+      - name: Drive the packaged app
+        if: success() || steps.typecheck.outcome == 'failure' || steps.unit-tests.outcome == 'failure'
+        run: npm run test:e2e:packaged
+      - name: Upload what the app drew
+        # On a pass too: the screenshot is how a UI change gets looked at.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: electron-ui
+          if-no-files-found: ignore
+          path: |
+            logs/ui/
+            logs/e2e-results.json
+            logs/e2e-artifacts/
+{{/electron}}
 
   devkit-drift:
     name: Vendored harness drift

@@ -178,7 +178,7 @@ jobs:
       - name: Generate a project of each shape and run its checks
         run: |
           set -euo pipefail
-          for preset in bare service service-redis data fullstack; do
+          for preset in bare service service-redis data fullstack desktop desktop-static desktop-web; do
             name="probe_$(echo "$preset" | tr '-' '_')"
             echo "::group::$preset"
             rm -rf /tmp/gen && mkdir -p /tmp/gen
