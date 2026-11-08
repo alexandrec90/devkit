@@ -701,6 +701,16 @@ def test_stale_tree_names_what_a_linked_worktree_lacks_of_origins_scripts(static
     assert fix_pass.fix_send.stale_tree(tmp_path / "missing") == "", "a git failure is not stale"
 
 
+def test_origin_tip_is_green_where_green_exists(static):
+    """The checkout follows `green`. Read off `main`, the pass would see its own code as
+    moved on every pass `main` is ahead of its last green commit, and hold every send."""
+    author, checkout = static
+    head = _git(author, "rev-parse", "HEAD")
+    _git(author, "push", "--quiet", "origin", f"{head}:refs/heads/green")
+    _push(author, "scripts/route.py")
+    assert fix_pass.fix_send.origin_tip(fix_pass.sweep.git_for(checkout)) == head
+
+
 def test_origin_tip_and_scripts_range_read_origin_after_a_fetch(static, tmp_path):
     author, checkout = static
     git = fix_pass.fix_send.sweep.git_for(checkout)

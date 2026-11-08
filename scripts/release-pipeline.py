@@ -501,11 +501,10 @@ def tag_missing(devkit: Path, version: str) -> str:
 def regate_default_branch(devkit: Path, branch: str = "") -> str:
     """Re-run the gate on the default branch now the tag exists; what to say about it.
 
-    The merge's own gate ran before the tag was pushed, so `EXPECTED_RED_TEST` failed
-    there by construction and left the default branch red on GitHub until the next push
-    (v0.11.31). The pass reads that red as green once the commit is tagged; this makes
-    the gate say so too. Not waited on, and a dispatch that fails is said, not fatal:
-    the release is cut either way.
+    The merge's own gate ran before the tag was pushed, and `EXPECTED_RED_TEST` excuses
+    that only by recognising the commit's subject. A run with the tag in place compares
+    the constant for real, and that is the verdict worth leaving on the branch. Not waited
+    on, and a dispatch that fails is said, not fatal: the release is cut either way.
     """
     branch = branch or task_branch.detect_default_branch(sweep.git_for(devkit), fallback="main")
     done = _run(["gh", "workflow", "run", gate_evidence.GATE_WORKFLOW, "--ref", branch], cwd=devkit)
