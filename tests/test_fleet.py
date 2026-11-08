@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 from support import REPO_ROOT, load_script
@@ -24,13 +25,23 @@ FAR = "desktop-far"
 THIRD = "desktop-third"
 
 
-def collector(project: str = "cheap", **fields) -> config.Collector:
+def collector(project: str = "cheap", **fields: Any) -> Any:
     fields.setdefault("service", "app")
     fields.setdefault("handoff", ("uv", "run", "handoff"))
     return fleet.config.Collector(project, **fields)
 
 
-def machine(host: str, free: float, runs: Sequence[str] = (), **fields) -> fleet.Machine:
+def recorder(sent: list[Sequence[str]]) -> Callable[[Sequence[str]], int]:
+    """A mover that runs nothing and keeps what it was asked to run."""
+
+    def mover(argv: Sequence[str]) -> int:
+        sent.append(argv)
+        return 0
+
+    return mover
+
+
+def machine(host: str, free: float, runs: Sequence[str] = (), **fields: Any) -> Any:
     fields.setdefault("ready", frozenset({"cheap", "heavy"}))
     return fleet.Machine(
         host, available_gb=free, assignment=dict.fromkeys(runs, fleet.config.RUN), **fields
@@ -352,7 +363,7 @@ def test_move_runs_collectors_move_on_the_owner(here: Path):
     sent: list[Sequence[str]] = []
     machines = [machine(HERE, 8), machine(FAR, 8, ["cheap"])]
 
-    assert fleet.move("cheap", HERE, machines, here, lambda argv: sent.append(argv) or 0) == 0
+    assert fleet.move("cheap", HERE, machines, here, recorder(sent)) == 0
 
     assert sent[0][-5:] == [
         "vs-code/devkit/scripts/collectors.py",
@@ -368,7 +379,7 @@ def test_move_accepts_a_host_as_a_person_types_it(here: Path):
     machines = [machine(HERE, 8, ["cheap"]), machine(FAR, 8)]
     typed = "DESKTOP-FAR.tail1234.ts.net"
 
-    assert fleet.move("cheap", typed, machines, here, lambda argv: sent.append(argv) or 0) == 0
+    assert fleet.move("cheap", typed, machines, here, recorder(sent)) == 0
 
     assert sent[0][-1] == FAR
 
@@ -379,7 +390,7 @@ def test_move_refuses_a_machine_that_already_runs_it(
     sent: list[Sequence[str]] = []
     machines = [machine(HERE, 8, ["cheap"])]
 
-    assert fleet.move("cheap", HERE, machines, here, lambda argv: sent.append(argv) or 0) == 1
+    assert fleet.move("cheap", HERE, machines, here, recorder(sent)) == 1
 
     assert sent == []
     assert "already runs" in capsys.readouterr().err
@@ -389,7 +400,7 @@ def test_move_runs_nothing_when_the_destination_cannot_take_it(here: Path):
     sent: list[Sequence[str]] = []
     machines = [machine(HERE, 8, ["cheap"]), fleet.Machine(FAR, error="offline")]
 
-    assert fleet.move("cheap", FAR, machines, here, lambda argv: sent.append(argv) or 0) == 1
+    assert fleet.move("cheap", FAR, machines, here, recorder(sent)) == 1
 
     assert sent == []
 
@@ -401,7 +412,7 @@ def test_rebalance_says_what_it_would_do_and_does_nothing_without_apply(
     machines = [machine(HERE, 1, ["cheap"]), machine(FAR, 10)]
     collectors = [collector(rebalance=True, memory_gb=1.0)]
 
-    assert fleet.rebalance(machines, collectors, False, here, lambda a: sent.append(a) or 0) == 0
+    assert fleet.rebalance(machines, collectors, False, here, recorder(sent)) == 0
 
     assert sent == []
     assert f"cheap from {HERE} to {FAR}" in capsys.readouterr().out
@@ -412,7 +423,7 @@ def test_rebalance_applies_one_move(here: Path):
     machines = [machine(HERE, 1, ["cheap"]), machine(FAR, 10)]
     collectors = [collector(rebalance=True)]
 
-    assert fleet.rebalance(machines, collectors, True, here, lambda a: sent.append(a) or 0) == 0
+    assert fleet.rebalance(machines, collectors, True, here, recorder(sent)) == 0
 
     assert len(sent) == 1
 
@@ -487,7 +498,7 @@ def test_spawn_reports_a_missing_program():
 
 
 def test_inherit_returns_the_exit_code(monkeypatch: pytest.MonkeyPatch):
-    done = subprocess.CompletedProcess([], 7)
+    done: subprocess.CompletedProcess[str] = subprocess.CompletedProcess([], 7)
     monkeypatch.setattr(fleet.subprocess, "run", lambda argv, check: done)
     assert fleet.inherit(["x"]) == 7
 
