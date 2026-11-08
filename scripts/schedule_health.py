@@ -118,6 +118,11 @@ OVERLAPPING = frozenset({SCHED_REFUSED_ALREADY_RUNNING, SCHED_REFUSED_ALREADY_RU
 
 NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) | OVERLAPPING
 
+# A job that fires every two minutes outlives one fire whenever a ship takes its time, and
+# the fire it skips loses nothing: the running one, or the next, ships what is there.
+# Saying "its runs are overlapping" would file a finding over the schedule working.
+OVERLAP_EXPECTED = frozenset({"devkit-ship"})
+
 # How many intervals a job may miss before it is worth a line. One is noise: a laptop
 # asleep at 04:00 misses a daily run and catches it the next night, which is the system
 # working. Two consecutive misses is a job that has stopped.
@@ -149,10 +154,30 @@ ARTIFACTS: dict[str, str] = {
     "devkit-workspace-status": "logs/scheduled-workspace-status.log",
     "devkit-installers": "logs/installers.log",
     "devkit-fix-pass": "logs/fix-pass.log",
+    "devkit-ship": "logs/ship-pass.log",
     "devkit-collectors": "logs/collectors.log",
     "devkit-local-e2e": "logs/scheduled-local-e2e.log",
     "devkit-medium-tier": "logs/scheduled-medium-tier.log",
+    # Absolute, the one job here that may not write in a checkout (`elevated_worker.py`).
+    "devkit-elevated": "C:/ProgramData/devkit/elevated/worker.log",
 }
+
+
+# A job that keeps the step its run is in *now*, beside a per-run artifact it writes only
+# once the run ends (`reconcile_journal.RUNNING`). When that artifact is an earlier run's,
+# this is the one file that says where the run in question was: 1f44005c's sweep had
+# "an earlier run's account" and nothing else to read about the 00:30 pass.
+IN_FLIGHT: dict[str, str] = {
+    "devkit-worktree-reconcile": "logs/reconcile.running.json",
+}
+
+
+def in_flight_hint(name: str, root: Path, in_flight: dict[str, str] | None = None) -> str:
+    """`"; see <marker> ..."` when `name` keeps an in-flight marker and one is on disk."""
+    path = (IN_FLIGHT if in_flight is None else in_flight).get(name, "")
+    if not path or not (root / path).is_file():
+        return ""
+    return f"; see {path} for the step a pass still running, or one that died, was last in"
 
 
 def failure_artifact(
@@ -274,7 +299,7 @@ def artifact_hint(
         return (
             f" -- {path} was last written {written:%Y-%m-%d %H:%M}, before this run: an "
             f"earlier run's account, so this one had not finished or died before writing"
-        )
+        ) + in_flight_hint(name, base)
     if since is not None and written > since:
         return (
             f" -- {path} is empty and was rewritten {written:%Y-%m-%d %H:%M}, after this "
@@ -531,7 +556,7 @@ def job_problem(
         if job.next_run is None or job.next_run < moment:
             return f"{job.name}: registered but has never run"
         return None
-    if job.last_result in OVERLAPPING:
+    if job.last_result in OVERLAPPING and job.name not in OVERLAP_EXPECTED:
         # Not a failure, but not silence either: a job whose pass outlives its own
         # interval is running essentially continuously, and that background cost is
         # invisible everywhere else.

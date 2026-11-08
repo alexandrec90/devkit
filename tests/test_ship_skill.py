@@ -39,10 +39,21 @@ def test_ship_auto_writes_the_trailer_the_pass_labels_automerge():
     quietly waits for the review the person said to skip."""
     text = SKILL.read_text(encoding="utf-8")
     assert "$ARGUMENTS" in text
-    assert _frontmatter()["argument-hint"] == "'[auto]'"
+    assert "auto" in _frontmatter()["argument-hint"]
     assert "`Automerge: yes`" in text
     assert ship_intent.asks_automerge("Because.\n\nAutomerge: yes")
     assert "never add the line on your own judgement" in " ".join(text.split())
+
+
+def test_ship_hold_writes_the_trailer_that_keeps_the_merge_label_off():
+    """The direct flow merges what nobody held, so a drift here is a PR that merges past
+    the person who said to wait."""
+    text = " ".join(SKILL.read_text(encoding="utf-8").split())
+    assert "hold" in _frontmatter()["argument-hint"]
+    assert "`Hold: yes`" in text
+    assert ship_intent.asks_hold("Because.\n\nHold: yes")
+    assert "The same rule: never add the line on your own judgement" in text
+    assert "standing alone on a line of its own" in text
 
 
 def test_the_scope_rule_keeps_subagents_from_shipping():

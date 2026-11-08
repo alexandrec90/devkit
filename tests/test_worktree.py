@@ -4250,6 +4250,8 @@ def test_reap_vacated_waits_out_a_stopped_docker_engine_rather_than_strand_the_s
 
 def test_reap_decided_settles_the_plan_and_fails_a_plan_it_cannot_make(tmp_path, monkeypatch):
     plan = worktree.ReapPlan(box="demo--x-0806")
+    steps: list[str] = []
+    monkeypatch.setattr(worktree.reconcile_journal, "step", steps.append)
     monkeypatch.setattr(worktree, "plan_reap", lambda box, ws, **k: plan)
     settled = worktree.reap_decided(
         "demo--x-0806",
@@ -4260,6 +4262,7 @@ def test_reap_decided_settles_the_plan_and_fails_a_plan_it_cannot_make(tmp_path,
         fetch=False,
     )
     assert settled == (worktree.WAIT, True, ["demo--x-0806"])
+    assert steps == ["reap demo--x-0806"], "the journal names the box a pass is reaping"
 
     def refuse(box, ws, **k):
         raise worktree.WorktreeError("no such box")
@@ -4706,10 +4709,13 @@ def test_inspect_boxes_reads_none_past_the_deadline(monkeypatch):
         worktree, "inspect_box", lambda *a, **k: pytest.fail("read a box past the deadline")
     )
     deferred: list[str] = []
+    steps: list[str] = []
+    monkeypatch.setattr(worktree.reconcile_journal, "step", steps.append)
     boxes = {"b--two-0806": box("b--two-0806"), "a--one-0806": box("a--one-0806")}
     with sweep.until(worktree.time.monotonic() - 1):
         rows, landed = worktree.inspect_boxes(boxes, Path("ws"), False, deferred)
     assert (rows, landed) == ([], set())
+    assert steps == [], "a box left for the next pass is not a step this one reached"
     assert deferred == ["a--one-0806", "b--two-0806"], "in the order a pass reads them"
 
 
@@ -4952,6 +4958,38 @@ def test_a_dry_run_leaves_the_scheduled_passs_log_untouched(tmp_path):
     )
 
     assert log.read_text(encoding="utf-8") == before
+    assert not (workspace.parent / worktree.reconcile_journal.HISTORY).exists()
+
+
+def test_the_reconcile_cli_records_when_its_pass_started_and_its_steps(tmp_path, monkeypatch):
+    """1f44005c: the log stamped only its end, and only the latest pass, so how long the
+    overlapping 00:30 pass ran, and in which step, could not be read anywhere."""
+    workspace = tmp_path / "ws" / "probe.code-workspace"
+    workspace.parent.mkdir()
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+
+    def reconcile(*_a, **_k):
+        worktree.reconcile_journal.step("inspect demo--x-0806")
+        return 0, {"boxes": [], "checkouts": {}, "deferred": []}
+
+    monkeypatch.setattr(worktree, "reconcile", reconcile)
+    argv = ["reconcile", "--yes", "--no-fetch", "--workspace", str(workspace)]
+    assert worktree.main(argv) == 0
+    root = workspace.parent
+    body = (root / worktree.RECONCILE_LOG).read_text(encoding="utf-8")
+    assert "started=" in body and "took=" in body and "inspect demo--x-0806@" in body
+    assert worktree.main(argv) == 0
+    rows = (root / worktree.reconcile_journal.HISTORY).read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 2, "every pass is kept, not only the latest"
+    assert not (root / worktree.reconcile_journal.RUNNING).exists()
+
+
+def test_a_reconcile_pass_names_each_box_and_the_sync_as_it_reaches_them(workspace, monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(worktree.reconcile_journal, "step", seen.append)
+    monkeypatch.setattr(worktree, "sync_checkouts", lambda *a, **k: (0, {}))
+    worktree.reconcile(workspace, apply=True)
+    assert seen[-1] == "sync checkouts"
 
 
 # --- the scheduled pass opens no windows ------------------------------------

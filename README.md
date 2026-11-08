@@ -462,7 +462,7 @@ python scripts/harness-switch.py --off --job devkit-tray  # one scheduled job, f
 | --- | --- | --- |
 | `hooks` | every switchable hook script — none is wired today, so this changes nothing until one is | `DEVKIT_HOOKS_OFF=1` in the user settings and the user environment |
 | `instructions` | every `CLAUDE.md` and `.claude/rules/*.md`, at every tier | moved to `logs/harness-switch/`, tracked ones marked `skip-worktree` |
-| `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release`, `devkit-fix-pass` | `schtasks /Change /DISABLE` |
+| `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release`, `devkit-fix-pass`, `devkit-ship` | `schtasks /Change /DISABLE` |
 
 Nothing is deleted: files are held and restored byte for byte, jobs are disabled rather
 than unregistered, and `--on` is the inverse of `--off`. A job stood down by name or by
@@ -579,7 +579,7 @@ thing it knows that nothing else can recover is *why* the change was made.
 
 `scripts/fix-pass.py` is what does the rest, every half hour once `devkit.fixPass` in the
 workspace file is switched on (`scripts/install-fix-pass-task.py` registers it, wired and
-off), or by hand through the *Agent: Fix What Is Red* task, which passes `dispatch`
+off, and `off` means this PC sends no fixers: the ship task below still ships), or by hand through the *Agent: Fix What Is Red* task, which passes `dispatch`
 explicitly and asks only which agent. One pass, in order:
 
 The rule behind the order: anything a script can do, no session does. A fixer is sent at
@@ -588,7 +588,7 @@ way every session ends — with an intent. Merging the base in, committing, push
 opening the PR, reading the gate, updating a branch, merging an adoption: one command
 each, run here.
 
-1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
+1. **Ship every gated intent.** Run the tree's commit-stage fixers, commit with the message,
    push with the push gate skipped, open the PR -- labelled `automerge` when the pass cut
    the tree for a fixer or the person shipped with `/ship auto` (the intent ends
    `Automerge: yes`), so those merge once green while any other person's PR waits for
@@ -596,7 +596,8 @@ each, run here.
    the outcome in `logs/ship-state.json` beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
    touched; a refused commit is a failure like any other, with the pre-commit output as
-   its evidence.
+   its evidence. A direct-flow intent (below) is the ship task's: the pass only turns a
+   refusal stored there into that same failure.
 2. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
    Before the red is read, so a release whose adoptions just went green stops holding
    the projects on this pass.
@@ -636,7 +637,9 @@ each, run here.
    (`scripts/fix_issues.py`) when the reporter's own close did not happen. Each database
    checkout's dev database is upgraded to its head (`scripts/fix_migrate.py`, through an
    upgrade script each database project ships, whose contract that module states), but only on the default branch, with a clean
-   tree and HEAD already on origin, so nothing unmerged is ever applied.
+   tree and HEAD already on origin, so nothing unmerged is ever applied. In the direct
+   flow alone, a default branch that stayed red has its commits reverted
+   (`scripts/fix_revert.py`, below).
 
 `--mode plan` writes the whole plan to `logs/fix-pass.log` and does nothing, which is
 what the scheduled job does while the switch says `plan`. What each dispatch looks like
@@ -718,6 +721,54 @@ python scripts/fix-prs.py --picks "devkit:88 roguelike:16"    # by hand: these P
 non-interactive but streams into the terminal that started it and leaves nothing to
 reattach to. Every PR is re-read live before anything is spawned, so one that went green,
 was closed or was merged since the scan is reported and skipped.
+
+### The direct flow: nothing between a finished session and `main`
+
+A project opts in with `flow = "direct"` under `[delivery]` in its `.devkit.toml`
+(`scripts/delivery.py` reads it; absent, or anything else, is `gated`, and everything in
+this section is inert). Every check then runs after the merge and repairs what it finds.
+
+`scripts/ship-pass.py` (`devkit-ship`, every two minutes, on every PC) is what ships: it
+commits with no `ship.py --fix` and no pre-commit framework, pushes, and opens the PR
+labelled `merge-now`, which means merge now with no gate consulted, where `automerge`
+means once the gate passes. `/ship hold` puts `Hold: yes` on a line of its own in the
+intent and the PR gets no merge label: it waits for you, and a resolver sent at it leaves
+it waiting. Any doubt reads as held: if `gh` cannot say, no `merge-now` goes on. The task
+holds where the fix pass holds, sends no one, and never runs beside a dispatching pass's
+ship step: both take `ship_step.SHIP_LOCK_NAME`.
+
+**`devkit.fixPass: off` means "this PC sends no fixers", not "nothing runs."** On such a
+PC the ship task ships gated intents too, through the gated path, so a machine that is
+not allowed to send fixers still gets its sessions' work out. `plan` is a dry run and
+ships nothing gated. To stop shipping, use `harness-switch.py --off --group jobs`.
+
+The commit keeps the global branch policy, which `--no-verify` would not: the hook
+reads `DEVKIT_SKIP_PRE_COMMIT_FRAMEWORK` and skips the framework alone, at the commit and
+the push. It is read by the installed policy (`~/.devkit/git-hooks`), so it takes effect
+from the first release that carries it, and a project should not opt in before then.
+
+The fix pass changes in three ways for such a project (`scripts/fix_plan.py`). A red
+default branch does not hold a conflict's resolver, since nothing waits on it being
+green. One red on nothing but formatting or the Codex mirror sends no fixer for
+`fix_plan.TIDY_GRACE`, since the post-merge tidy rewrites both; past that it is a failure
+like any other, because tidy cannot land everything (`.github/workflows` is restored
+before it stages). And one that stays red for two hours from when a pass first saw it
+(`scripts/red_seen.py`, under `logs/red-seen/`) is reverted (`scripts/fix_revert.py`):
+every PR commit after `origin/green` up to the oldest whose failing jobs overlap the
+tip's, newest first, each on `agent/revert-<sha7>` with
+`.devkit-queue/reland-<sha7>.toml` beside it, so the reverted work is queued to land again
+with the failure fixed. Tidy's own commit (its exact subject and author), a release and a
+revert are never named; a tidy commit that touched the same files goes in the same revert,
+since it rewrote those lines. One revert per sha, ever, and a re-land (`Reland-of: <sha>`)
+that goes red is reverted without another re-land and filed. A revert that conflicts is
+aborted and filed, a range longer than `fix_revert.MOST_REVERTS` is filed rather than
+reverted, and a red that implicates no commit -- no runner, a bill, a release's own red, a
+run that did not conclude `failure` -- reverts nothing.
+
+```bash
+python scripts/ship-pass.py                  # one fire, by hand
+python scripts/install-ship-schedule.py --yes  # registered from the static checkout; installers.py keeps it current
+```
 
 ### Running someone else's branch before it merges
 
@@ -861,9 +912,13 @@ fires only where `gh` **answered** that the branch has no PR — an offline or
 unauthenticated `gh` exits with the same code, so absence of an answer keeps waiting
 forever, and a box holding uncommitted work is held at any age like every other.
 
-The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
+The run is windowless, so its record is `logs/reconcile.log`, overwritten per
 pass and written on success too — a log that appears only on failure cannot be told
-apart from a task that has stopped running. That log's timestamp is also what
+apart from a task that has stopped running. Its header says when the pass started, how
+long it took and when it reached each step. Beside it, `logs/reconcile.history.jsonl`
+keeps the same for the last two days of passes, and `logs/reconcile.running.json` names
+the step a pass is in now (`scripts/reconcile_journal.py`). A pass that dies leaves that
+file behind, and the next pass records it in the history as `unfinished`. That log's timestamp is also what
 `workspace-status.py` reads on its own daily pass: a scheduled task that has been disabled
 looks exactly like one that is working, so the status line says when a pass last
 finished rather than leaving you to notice the drift it causes.
@@ -898,7 +953,9 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-installers` | `scripts/install-installers-schedule.py` | daily 08:45, and at logon | `logs/installers.log` |
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
 | `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, behind `devkit.fixPass` | `logs/fix-pass.log` |
+| `devkit-ship` | `scripts/install-ship-schedule.py` | every 2 min, on every PC; a fire with nothing to ship exits within seconds | `logs/ship-pass.log` |
 | `devkit-collectors` | `scripts/install-collectors.py` | every 15 min, and at logon; acts only where `run-here`/`stop-here` assigned | `logs/collectors.log` |
+| `devkit-elevated` | `scripts/install-elevated-worker.py` | every 5 min, elevated; installed once per PC by an administrator, never by a job | `C:\ProgramData\devkit\elevated\worker.log` |
 
 #### The one installer you run by hand
 
@@ -910,8 +967,9 @@ asks every `scripts/install-*.py` the one question they all answer — `--check`
 current, 1 needs (re)installing, 2 left alone — and in `maintain` mode runs `--yes` on
 each that answered 1: a job never installed, a checkout that moved, an installer that
 gained a flag, a task disabled by nobody. `devkit-installers` runs it daily and two
-minutes after every logon, so registering *that* job is the only install a machine ever
-needs done by hand:
+minutes after every logon, so registering *that* job is the only install a machine
+needs done by hand, bar the [elevated worker](#the-elevated-worker-one-admin-action-per-pc),
+which this pass holds out because no unelevated job can install it:
 
 ```bash
 python scripts/install-installers-schedule.py --yes   # once per machine
@@ -963,8 +1021,8 @@ on — found by name, answers `--check` and `--yes`, names its group, checks thr
 `devkit_schtasks.run_check`, consults the ledger, and has a row in the table above — so a
 new installer joins the pass by existing, and one that cannot be driven fails the suite.
 
-The last of those is the workspace's own health report, and it is a scheduled job for a
-reason worth knowing before you move it: `workspace-status.py` was written as a
+`devkit-workspace-status` is the workspace's own health report, and it is a scheduled job
+for a reason worth knowing before you move it: `workspace-status.py` was written as a
 SessionStart line, every document here called it one, and **nothing ever ran it** — so a
 missing `uv`, an unset git identity, a stranded checkout and an uninstalled picker
 extension were all reported to nobody until the extension surfaced as `command
@@ -984,6 +1042,62 @@ in (`GROUP`), which is what the switch's list is held to.
 — and names the file above when one exits non-zero, so the reported line is a
 pointer rather than a bare exit code. `tests/test_scheduled_jobs.py` holds the contract:
 a job registered by hand, or one that leaves nothing behind, fails the suite.
+
+#### The elevated worker: one admin action per PC
+
+Every job above runs unelevated, and one recovery cannot: the DACL on `WSLService` grants
+an unelevated token neither start nor stop, and a service stuck in `STOP_PENDING` hangs
+every `wsl` call until an administrator ends it. A dispatcher running tasks as admin would
+run merged, unreviewed code as admin, so there is no dispatcher. Each PC gets
+`devkit-elevated`, a worker with one verb that takes no arguments:
+
+```bash
+python scripts/elevated_request.py restart-wsl-service   # from any unelevated process
+```
+
+Or `elevated_request.request(verb)` from Python. Either way the only thing crossing to the
+elevated side is the name of an empty file in `C:\ProgramData\devkit\requests\`: the worker
+never opens one, and anything else it finds there is deleted and logged.
+
+A request is not an instruction. The worker first asks whether WSL is actually unhealthy,
+with the checks `docker-maint.py recover-wsl` uses, each bounded and needing no elevation,
+and a healthy service is left alone and logged. A stuck one gets what `recover-wsl`'s
+elevated half does: its process ended, a wait for it to settle, and `wsl --update`, so
+Windows Update has no install left to retry and hang on. That ends every distro, Docker's
+included, and `collectors.py` brings Docker Desktop back, unelevated. It runs at most once
+in six hours (`RESTART_EVERY`, kept in the admin-only folder). A run that fails or is
+refused reaches the pass through `elevated_request.results`, and is filed for a fixer.
+
+**Installing takes an administrator, once per PC, and cannot be automated.** That is why
+`installers.py` holds this one out of its pass. From an elevated terminal:
+
+```bash
+python scripts/install-elevated-worker.py                 # the plan, changing nothing
+python -I -S scripts/install-elevated-worker.py --yes     # install or upgrade; elevated only
+python scripts/install-elevated-worker.py --check         # is it current; needs no elevation
+```
+
+The task runs a copy of the worker and a private copy of the interpreter (about 36 MB,
+stdlib only) in `C:\ProgramData\devkit\elevated\`, which only administrators can write, so
+a merged change cannot rewrite what runs as admin. **The install itself cannot have that
+property:** it reads the checkout and the Python it copies from places the user can write,
+so it assumes a clean machine at that moment.
+
+So the harness never prompts for it. A merged change to the worker does not reach a PC
+until someone chooses to re-run `--yes`, a working installed worker keeps working, and only
+`--check` reports that its copy is behind. An unreviewed merge plus a prompted admin paste
+would be the dispatcher this design refused. The one person's step is for a real request
+waiting on a PC with no worker: `request` says so and leaves a dated note, the fix pass
+names the machine and the exact command, and the step goes once a worker appears or a
+day passes with nobody asking again.
+
+The installed task is read-only to the user, so `harness-switch.py --off --job
+devkit-elevated` is refused unelevated, as is `--uninstall --yes`. `installers.py uninstall`
+does not reach it either: take it off a decommissioned PC with `--uninstall --yes` from
+an elevated terminal.
+
+Windows-only. Everywhere else the worker and the installer say so and exit 0, `request`
+says so and writes nothing, and no step is ever filed.
 
 #### Ingestion collectors, and which machine runs them
 

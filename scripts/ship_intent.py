@@ -12,8 +12,17 @@ through the tree's own `ship.py --fix`, commit with the message, push with the p
 skipped -- CI judges, and the pass reads its artifact -- open the PR, labelled
 `automerge` only when the fix pass cut the tree or the intent ends `Automerge: yes`
 (`labels_for`): a fixer's PR merges once green, as does one a person shipped with
-`/ship auto`, and any other waits for them. The outcome is recorded in `logs/ship-state.json`
-beside the intent. A refused commit is
+`/ship auto`, and any other waits for them.
+
+**A project in the direct flow** (`delivery.py`, `Intent.direct`) ships here too, from the
+ship task (`scripts/ship-pass.py`), by a shorter road: no fixers and no pre-commit
+framework, at the commit or the push, because every check now runs after the merge
+(`_commit_direct`). The branch policy still runs: it is what refuses a retired name, and
+`_commit_carrying` depends on that refusal. Its PR is labelled `merge-now` unless the
+intent carries `Hold: yes` on a line of its own (`asks_hold`), and a held PR stays held
+through a resolver's ship (`held_pr`), which is also what any doubt about it reads as.
+
+The outcome is recorded in `logs/ship-state.json` beside the intent. A refused commit is
 recorded too, with the pre-commit output as evidence, so the pass can tell it from a
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do,
@@ -59,8 +68,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+import delivery
 import fix_plan
 import fix_reports
+import git_policy
 import sweep
 import task_branch as tb
 import worktree_tiers
@@ -121,6 +132,9 @@ class Intent:
     # A hand-named branch in an agent's worktree (`hand_named`), which `ship_one` renames
     # into the `agent/` namespace before it commits.
     adopt: bool = False
+    # The project is in the direct flow (`delivery.is_direct`), read off its checkout by
+    # `find_intents` so a tree cut before the switch ships the way the project does now.
+    direct: bool = False
 
     @property
     def digest(self) -> str:
@@ -408,7 +422,8 @@ def find_intents(
             shippable, why = True, ""
         adopt = not shippable and hand_named(tree, branch, base)
         blocked = "" if shippable or adopt else why
-        found.append(Intent(project, tree, branch, subject, body, blocked, base, adopt))
+        direct = delivery.is_direct(root / project)
+        found.append(Intent(project, tree, branch, subject, body, blocked, base, adopt, direct))
     return found
 
 
@@ -549,9 +564,20 @@ def open_pr_at_head(tree: Path, branch: str, runner: Runner, gh) -> str:
     return ""
 
 
+def pass_cut(tree: Path) -> bool:
+    """Whether the fix pass cut `tree` for a fixer (`fix_reports.ORIGIN_FILE`), or a fixer
+    cut it and marked it the same way. A fixer committing to a person's PR works in that
+    person's tree, which carries no mark."""
+    return (tree / fix_reports.ORIGIN_FILE).is_file()
+
+
 def pass_owned(intent: Intent) -> bool:
-    """A PR whose fate the pass decides: from a tree it cut (`labels_for`), or Dependabot's."""
-    return bool(labels_for(intent.tree)) or intent.branch.startswith(fix_plan.DEPENDABOT_BRANCH)
+    """A PR whose fate the pass decides: from a tree it cut (`pass_cut`), or Dependabot's.
+
+    Never read off the labels. A label now says how a PR merges, and a person's PR in the
+    direct flow carries `merge-now`; read as ownership, that would let the pass close it.
+    """
+    return pass_cut(intent.tree) or intent.branch.startswith(fix_plan.DEPENDABOT_BRANCH)
 
 
 def _empty(intent: Intent, when: str, why: str) -> Outcome:
@@ -564,6 +590,9 @@ def _empty(intent: Intent, when: str, why: str) -> Outcome:
 # The trailer `/ship auto` ends an intent with: the person's own say-so that this PR
 # needs no review of theirs. The last line of the body, as a git trailer sits.
 AUTOMERGE_TRAILER = re.compile(r"automerge:\s*yes", re.I)
+# The line `/ship hold` adds to an intent: the person's say-so that this PR waits for them.
+# It matters in the direct flow, where every other PR merges unasked.
+HOLD_TRAILER = re.compile(r"hold:\s*yes", re.I)
 
 
 def asks_automerge(body: str) -> bool:
@@ -577,20 +606,62 @@ def asks_automerge(body: str) -> bool:
     return bool(lines) and AUTOMERGE_TRAILER.fullmatch(lines[-1].strip()) is not None
 
 
-def labels_for(tree: Path, asked: bool = False) -> tuple[str, ...]:
-    """`automerge` for work the fix pass started or a person `asked` to merge unreviewed
+def asks_hold(body: str) -> bool:
+    """Whether any line of the body is `HOLD_TRAILER`, standing alone.
+
+    Any line, not the last, because a hold is the one promise this flow makes to the
+    person: `Closes #N` or a `Co-Authored-By` after it must not lose it. Only a whole line,
+    so a sentence mentioning it is not one. It stays in the PR body too, which is what
+    keeps the PR held (`held_pr`)."""
+    return any(HOLD_TRAILER.fullmatch(line.strip()) for line in str(body).splitlines())
+
+
+def labels_for(
+    tree: Path, asked: bool = False, direct: bool = False, held: bool = False
+) -> tuple[str, ...]:
+    """What the PR is labelled, which says how it merges and nothing about who owns it
+    (`pass_owned`): nothing when `held`, `merge-now` in the `direct` flow; otherwise
+    `automerge` for work the fix pass started or a person `asked` to merge unreviewed
     (`asks_automerge`), nothing for any other.
 
     `automerge` is an authorization the vendored `dependabot-automerge.yml` honours on
-    any PR once its gate passes, so it goes only where the pass itself is the author: a
-    tree it cut for a fixer (`fix_reports.ORIGIN_FILE`), or one a fixer cut and marked
-    the same way. A fixer committing to a person's PR works in that person's tree, which
-    carries no mark, so their PR still waits for them -- and `ensure_pr` labelling a
-    reused PR too is why the mark is the tree's origin, not the dispatch stamp.
+    any PR once its gate passes, so it goes only where the pass itself is the author:
+    `pass_cut`. A person's PR still waits for them -- and `ensure_pr` labelling a reused
+    PR too is why the mark is the tree's origin, not the dispatch stamp.
     """
-    if asked or (tree / fix_reports.ORIGIN_FILE).is_file():
+    if held:
+        return ()
+    if direct:
+        return (sweep.MERGE_NOW_LABEL,)
+    if asked or pass_cut(tree):
         return (sweep.AUTOMERGE_LABEL,)
     return ()
+
+
+def held_pr(branch: str, gh) -> bool:
+    """Whether the open PR `branch` heads was shipped `Hold: yes`; True when `gh` cannot say.
+
+    Asked of the PR because a resolver sent at a held PR writes an intent of its own,
+    with no trailer, often in a fresh tree, and read off that intent its ship would label
+    the PR `merge-now` and merge what the person said to keep. It fails closed: a merge
+    label withheld waits for someone, and one applied wrongly cannot be taken back.
+    """
+    listed = gh("pr", "list", "--head", branch, "--state", "open", "--json", "body")
+    if getattr(listed, "returncode", 1) != 0:
+        return True
+    try:
+        rows = json.loads(listed.stdout or "[]")
+    except ValueError:
+        return True
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        return True
+    return any(asks_hold(row.get("body") or "") for row in rows)
+
+
+def intent_labels(intent: Intent, gh) -> tuple[str, ...]:
+    """`labels_for` this intent: what its body asks, and in the direct flow, its open PR."""
+    held = asks_hold(intent.body) or (intent.direct and held_pr(intent.branch, gh))
+    return labels_for(intent.tree, asks_automerge(intent.body), intent.direct, held)
 
 
 def still_refused(intent: Intent, state: dict, porcelain: str) -> Outcome | None:
@@ -609,6 +680,19 @@ def still_refused(intent: Intent, state: dict, porcelain: str) -> Outcome | None
         return None  # the carry to a free branch answers it now; try again
     detail = f"{state.get('step', 'commit')}: {str(state.get('output', '')).strip()[-400:]}"
     return Outcome(intent, REFUSED, detail)
+
+
+def stored_refusal(intent: Intent, runner: Runner = run_quiet) -> Outcome | None:
+    """`still_refused`, asked of the tree itself; None when git cannot read it.
+
+    What the fix pass reads of an intent the ship task owns, turning the refusal into a
+    failure without touching the tree, and what stops the ship task trying a refused
+    intent again every two minutes.
+    """
+    status = runner(["git", "status", "--porcelain"], cwd=intent.tree)
+    if status.returncode != 0:
+        return None
+    return still_refused(intent, read_state(intent.tree), status.stdout or "")
 
 
 def _digest(porcelain: str) -> str:
@@ -656,19 +740,45 @@ def _wait(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def run_git(argv: list[str], tree: Path, runner: Runner) -> subprocess.CompletedProcess[str]:
+def run_git(
+    argv: list[str], tree: Path, runner: Runner, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """`runner(argv)`, tried again after each of `LOCK_WAITS` while git says a lock is held.
 
     A lock still held after the last wait is left to refuse: a stale one needs a person or
     a fixer to decide it is stale, and fifteen seconds is well past any git call's hold.
     """
-    done = runner(argv, cwd=tree)
+    options = {} if env is None else {"env": env}
+    done = runner(argv, cwd=tree, **options)
     for seconds in LOCK_WAITS:
         if done.returncode == 0 or not LOCK_HELD.search((done.stdout or "") + (done.stderr or "")):
             break
         _wait(seconds)
-        done = runner(argv, cwd=tree)
+        done = runner(argv, cwd=tree, **options)
     return done
+
+
+def _without_framework() -> dict[str, str]:
+    """The environment of a direct-flow commit or push: the git hook still runs, with its
+    branch policy, and skips the project's pre-commit framework alone."""
+    return {**os.environ, git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
+
+
+def _commit_direct(intent: Intent, runner: Runner) -> tuple[str, str]:
+    """Add and commit, for `commit_intent`, with no fixers and no framework.
+
+    The hook is not bypassed: `--no-verify` would take the branch policy with the
+    framework, and with it the refusal `_commit_carrying` moves a commit off a retired
+    name by. Formatting, the secrets baseline and the Codex mirror run after the merge.
+    """
+    added = run_git(["git", "add", "-A"], intent.tree, runner)
+    if added.returncode != 0:
+        return "add", (added.stdout or "") + (added.stderr or "")
+    commit = ["git", "commit", "-F", str(INTENT_FILE)]
+    committed = run_git(commit, intent.tree, runner, _without_framework())
+    if committed.returncode != 0:
+        return "commit", (committed.stdout or "") + (committed.stderr or "")
+    return "", ""
 
 
 def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str]:
@@ -680,7 +790,10 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
     -- so over an unstaged tree both of `ship.py --fix`'s passes failed on "baseline is
     unstaged", a refusal no code change could answer (carameli #395). Staging between
     runs is what a person committing by hand does; the commit takes all of it anyway.
+    In the direct flow this is only `_commit_direct`.
     """
+    if intent.direct:
+        return _commit_direct(intent, runner)
     output = ""
     for _attempt in (1, 2):
         added = run_git(["git", "add", "-A"], intent.tree, runner)
@@ -998,7 +1111,7 @@ def _push(intent: Intent, runner: Runner, when: str) -> Outcome | None:
         record = {"stage": REFUSED, "step": "merge", "output": conflict, "when": when}
         write_state(tree, {**record, "intent": intent.digest, "tree": _digest(after)})
         return Outcome(intent, REFUSED, f"merge: {conflict.strip()[-400:]}")
-    env = dict(os.environ)
+    env = _without_framework() if intent.direct else dict(os.environ)
     env["SKIP"] = SKIP_PUSH_GATE
 
     def push() -> str:
@@ -1067,7 +1180,7 @@ def ship_one(
         pr_body=pr_body(intent),
         pr_head=intent.branch,
         pr_base=base,
-        pr_labels=labels_for(tree, asks_automerge(intent.body)),
+        pr_labels=intent_labels(intent, gh_for(tree)),
     )
     url = ""
 

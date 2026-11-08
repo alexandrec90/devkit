@@ -122,6 +122,7 @@ CREATE_VISIBILITY = "--public"
 CARAMELI = ("carameli",)
 IBKR = ("ibkr_trader",)
 SOCIAL_SCRAPER = ("social-scraper",)
+PHOTOLAB = ("photolab",)
 
 # The source checkout, as a scope. One action is genuinely devkit-only rather than
 # merely implemented here: the live-CLI hook smokes live in `tests/`, which is the tree
@@ -411,6 +412,12 @@ ACTIONS: dict[str, Action] = {
     # scrape reuses. The platform rides in from the task as a trailing argument, so a
     # Reddit row is a task-file edit rather than a second action.
     "scraper-login": Action("scripts/login.py", "Scraper: Log In", projects=SOCIAL_SCRAPER),
+    # --- scoped to photolab ---
+    #
+    # The trader UI's shape: in the foreground until its terminal closes. On the host rather
+    # than in Docker because the `codex` and `claude` commands and their logins are out
+    # here. Fixed ports, which is why the task names the checkout.
+    "album": Action("scripts/album.py", "Photolab: Open Album", projects=PHOTOLAB),
     # --- scoped to the checkouts that have a database ---
     #
     # The last task to leave a `.vscode/tasks.json`, and the only one that was in the

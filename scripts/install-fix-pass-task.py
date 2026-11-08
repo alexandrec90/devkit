@@ -188,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f'Would run: "{python}" {arguments}\n\n'
             f"  every     {args.minutes} minutes\n"
-            f"  switch    devkit.fixPass in the workspace file (off, plan, dispatch); off does nothing\n"
+            f"  switch    devkit.fixPass in the workspace file (off, plan, dispatch); off sends no fixers, and devkit-ship still ships\n"
             f"  on battery runs anyway, and catches up a fire it slept through\n\n"
             f"Dry run -- re-run with --yes."
         )

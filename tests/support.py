@@ -31,6 +31,21 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = REPO_ROOT / "templates"
 
+# The one job exempt from "scheduled jobs run unelevated", by installer, with the reason.
+# `tests/test_installer_contract.py` and `tests/test_scheduled_jobs.py` read this and
+# nothing else: a second name here is a second elevated job, which is a design change.
+ELEVATED_EXEMPTION: dict[str, str] = {
+    "install-elevated-worker.py": (
+        "Ending a stuck WSLService is refused to every unelevated token (its DACL grants no "
+        "start or stop), and that recovery otherwise waits on a person. A central admin "
+        "dispatcher was refused because it would run merged code as admin. So this one job "
+        "has one verb, run from a copy in an admin-only folder, under an interpreter copied "
+        "there too, and takes no input but a file name. An administrator registers it once "
+        "per PC, so nothing unelevated maintains it; it runs nothing from a checkout, so it "
+        "cannot be wrapped by log-wrap.py or write logs/."
+    ),
+}
+
 # The harness kill switch, cleared for this whole process. `scripts/hooks/tests/` does the
 # same thing in its `conftest.py` and for the same reason: the variable lives in a
 # `settings.json` `env` block, so it is present in the environment of every agent session

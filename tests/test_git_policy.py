@@ -428,6 +428,71 @@ def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatc
     )
 
 
+def _commit_responses(tmp_path):
+    """A commit the policy lets through in a project with a framework and a project hook."""
+    responses = git_responses()
+    responses.update(merged_response("claude/fresh", []))
+    responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("git", "rev-parse", "--show-toplevel")] = completed(["git"], stdout=f"{tmp_path}\n")
+    responses[("git", "config", "--get", "devkit.branchPolicy.projectHooksPath")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("project-hook-test",)] = completed(["project-hook-test"])
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    project_hook = tmp_path / ".githooks" / "pre-commit"
+    project_hook.parent.mkdir()
+    project_hook.write_text("# project hook\n", encoding="utf-8")
+    return responses
+
+
+def test_the_framework_skip_waives_the_framework_and_nothing_else(tmp_path, monkeypatch):
+    """The direct flow's commit: no formatter, and the rest of the hook as it was."""
+    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
+    monkeypatch.setattr(
+        git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
+    )
+    runner = FakeRunner(_commit_responses(tmp_path))
+    env = {git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
+    # `_pre_commit_command` answering None is a refusal unless the framework is not reached.
+    assert git_policy.run_hook("pre-commit", [], runner=runner, env=env) == 0
+    assert ("git", "branch", "--show-current") in runner.calls
+    assert ("project-hook-test",) in runner.calls
+
+
+def test_the_framework_skip_keeps_the_retired_branch_refusal(tmp_path, capsys):
+    """`ship_intent._commit_carrying` moves a commit off a retired name only because this
+    refusal reaches it. `--no-verify` would lose it along with the framework."""
+    responses = _commit_responses(tmp_path)
+    responses.update(merged_response("claude/fresh", [{"url": "https://github.com/acme/w/pull/1"}]))
+    env = {git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
+    assert git_policy.run_hook("pre-commit", [], runner=FakeRunner(responses), env=env) == 1
+    assert "is permanently retired because its PR merged" in capsys.readouterr().err
+
+
+def test_the_framework_skip_covers_the_push_stage_too(tmp_path, monkeypatch):
+    """`pre-commit` refusing a push, or absent from a tree nobody provisioned, stands
+    between a direct-flow session and its PR as much as at the commit."""
+    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
+    responses = _push_responses(tmp_path)
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    raw = "refs/heads/claude/fresh aaa refs/heads/claude/fresh 0000\n"
+    env = {git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
+    code = git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=FakeRunner(responses))
+    assert code == 1, "unset, the missing framework still refuses"
+    runner = FakeRunner(responses)
+    assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner, env=env) == 0
+
+
+def test_the_framework_skip_reads_off_values_as_off(tmp_path):
+    for value in ("", "0", "false", "no", "off", " Off "):
+        assert not git_policy.framework_skipped({git_policy.FRAMEWORK_SKIP_ENV_VAR: value}), value
+    for value in ("1", "true", "yes"):
+        assert git_policy.framework_skipped({git_policy.FRAMEWORK_SKIP_ENV_VAR: value}), value
+    assert not git_policy.framework_skipped({})
+
+
 def _push_responses(tmp_path):
     responses = git_responses()
     responses.update(merged_response("claude/fresh", []))

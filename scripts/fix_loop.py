@@ -77,6 +77,8 @@ class Context:
     # When the machine last started (`fix_reports.booted_at`); None judges a session by
     # its silence alone.
     booted: _dt.datetime | None = None
+    # The projects in the direct flow (`delivery.direct_projects`), read once per pass.
+    direct: frozenset[str] = frozenset()
 
     @property
     def writes(self) -> bool:
