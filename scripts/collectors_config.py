@@ -30,6 +30,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
@@ -141,18 +142,22 @@ def _argv(raw: object) -> tuple[str, ...] | None:
     return tuple(raw)
 
 
-def _placement(project: str, raw: dict) -> tuple[float, bool, str]:
-    """`memoryGb` and `rebalance`, and the reason either was refused."""
+def _movement(project: str, raw: dict) -> tuple[dict[str, Any], str]:
+    """What either kind declares about moving between machines -- `handoff`, `memoryGb`,
+    `rebalance` -- as `Collector` fields, or the reason one was refused."""
+    handoff = _argv(raw.get("handoff", []))
+    if handoff is None:
+        return {}, f"{project}: `handoff` must be a list of strings (argv, not a shell line)"
     memory = raw.get("memoryGb", 0)
     # `bool` is an `int`, as for `minutes`.
     if isinstance(memory, bool) or not isinstance(memory, int | float) or memory < 0:
-        return 0.0, False, f"{project}: `memoryGb` must be a number of gigabytes, 0 or more"
+        return {}, f"{project}: `memoryGb` must be a number of gigabytes, 0 or more"
     rebalance = raw.get("rebalance", False)
     if not isinstance(rebalance, bool):
-        return 0.0, False, f"{project}: `rebalance` must be true or false"
-    if rebalance and not raw.get("handoff"):
-        return 0.0, False, f"{project}: `rebalance` needs a `handoff` to carry its data"
-    return float(memory), rebalance, ""
+        return {}, f"{project}: `rebalance` must be true or false"
+    if rebalance and not handoff:
+        return {}, f"{project}: `rebalance` needs a `handoff` to carry its data"
+    return {"handoff": handoff, "memory_gb": float(memory), "rebalance": rebalance}, ""
 
 
 def _scheduled_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
@@ -169,25 +174,14 @@ def _scheduled_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     needs = _argv(raw.get("needs", []))
     if needs is None:
         return None, f"{project}: `needs` must be a list of compose service names"
-    handoff = _argv(raw.get("handoff", []))
-    if handoff is None:
-        return None, f"{project}: `handoff` must be a list of strings (argv, not a shell line)"
     if project.startswith(DEVKIT_PREFIX):
         # The task is named after the collector, and `devkit-` is devkit's own jobs'
         # namespace: `schedule_health` and the fix pass would report it as a devkit job.
         return None, f"{project}: a collector's name may not start with `{DEVKIT_PREFIX}`"
-    memory_gb, rebalance, why = _placement(project, raw)
+    movement, why = _movement(project, raw)
     if why:
         return None, why
-    return Collector(
-        project,
-        command=command,
-        minutes=minutes,
-        needs=needs,
-        handoff=handoff,
-        memory_gb=memory_gb,
-        rebalance=rebalance,
-    ), ""
+    return Collector(project, command=command, minutes=minutes, needs=needs, **movement), ""
 
 
 def _entry(project: str, raw: object) -> tuple[Collector | None, str]:
@@ -217,21 +211,11 @@ def _container_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     builds_from = _argv(raw.get("buildsFrom", []))
     if builds_from is None or any("/" in name or "\\" in name for name in builds_from):
         return None, f"{project}: `buildsFrom` must be a list of sibling checkout names"
-    handoff = _argv(raw.get("handoff", []))
-    if handoff is None:
-        return None, f"{project}: `handoff` must be a list of strings (argv, not a shell line)"
-    memory_gb, rebalance, why = _placement(project, raw)
+    movement, why = _movement(project, raw)
     if why:
         return None, why
     return Collector(
-        project,
-        service,
-        tuple(health),
-        settle=settle,
-        builds_from=builds_from,
-        handoff=handoff,
-        memory_gb=memory_gb,
-        rebalance=rebalance,
+        project, service, tuple(health), settle=settle, builds_from=builds_from, **movement
     ), ""
 
 

@@ -264,27 +264,41 @@ def plan(
         return None, [f"no machine is below {floor:g} GB"]
     notes: list[str] = []
     for source in short:
-        movable = [c for c in collectors if c.rebalance and c.handoff and c.project in source.runs]
-        if not movable:
-            notes.append(f"{source.host} is short, but runs nothing `rebalance` may move")
-            continue
-        for collector in sorted(movable, key=lambda c: -footprint(c, source)):
-            cost = footprint(collector, source)
-            room = [
-                m
-                for m in up
-                if m.host != source.host
-                and collector.project in m.ready
-                and m.available_gb - cost >= floor + margin
-            ]
-            if room:
-                best = max(room, key=lambda m: m.available_gb)
-                return Move(collector.project, source.host, best.host, cost), notes
-            notes.append(
-                f"{collector.project} ({cost:.1f} GB) has nowhere to go from {source.host}: "
-                f"no machine with its checkout would keep {floor + margin:g} GB"
-            )
+        chosen = relieve(source, up, collectors, floor + margin, notes)
+        if chosen:
+            return chosen, notes
     return None, notes
+
+
+def relieve(
+    source: Machine,
+    up: Sequence[Machine],
+    collectors: Sequence[config.Collector],
+    keep: float,
+    notes: list[str],
+) -> Move | None:
+    """The largest collector `rebalance` may take off `source` to a machine that keeps
+    `keep` GB afterwards, the most room first; each one that cannot go is added to `notes`."""
+    movable = [c for c in collectors if c.rebalance and c.handoff and c.project in source.runs]
+    if not movable:
+        notes.append(f"{source.host} is short, but runs nothing `rebalance` may move")
+    for collector in sorted(movable, key=lambda c: -footprint(c, source)):
+        cost = footprint(collector, source)
+        room = [
+            m
+            for m in up
+            if m.host != source.host
+            and collector.project in m.ready
+            and m.available_gb - cost >= keep
+        ]
+        if room:
+            best = max(room, key=lambda m: m.available_gb)
+            return Move(collector.project, source.host, best.host, cost)
+        notes.append(
+            f"{collector.project} ({cost:.1f} GB) has nowhere to go from {source.host}: "
+            f"no machine with its checkout would keep {keep:g} GB"
+        )
+    return None
 
 
 def move_argv(project: str, source: str, dest: str, here: str, root: Path) -> list[str]:

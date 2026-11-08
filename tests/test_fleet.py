@@ -269,6 +269,14 @@ def test_plan_takes_the_largest_collector_it_may_move():
     assert move.project == "heavy"
 
 
+def test_relieve_notes_each_collector_that_has_nowhere_to_go():
+    notes: list[str] = []
+    source = machine(HERE, 1, ["cheap", "heavy"])
+    collectors = [collector("cheap", rebalance=True), collector("heavy", rebalance=True)]
+    assert fleet.relieve(source, [source, machine(FAR, 3)], collectors, 4.0, notes) is None
+    assert len(notes) == 2
+
+
 def test_plan_never_picks_a_collector_that_did_not_opt_in():
     machines = [machine(HERE, 1, ["cheap"]), machine(FAR, 10)]
     move, notes = fleet.plan(machines, [collector(rebalance=False)])
