@@ -45,7 +45,9 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import fix_switch
 import harness_events
 import worktree_tiers
 
@@ -63,7 +65,6 @@ MIN_RERUN = _dt.timedelta(minutes=5)
 # seconds this run of the pass has before it is stopped, which it launches no session past.
 WINDOW_ENV = "DEVKIT_FIX_PASS_SECONDS"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-MODE = re.compile(r'"devkit\.fixPass"\s*:\s*"(\w+)"')
 RESCUE_PREFIX = "agent/fix-pass-rescue"
 INTENT = Path("logs") / "ship-intent.md"
 # `fix_reports.ORIGIN_FILE`, spelled here because this file imports nothing the pass
@@ -128,11 +129,7 @@ def mode_of(argv: list[str], workspace: Path) -> str:
     """`--mode` when the caller passed one, else the workspace file's switch, else off."""
     if "--mode" in argv and argv.index("--mode") + 1 < len(argv):
         return argv[argv.index("--mode") + 1]
-    try:
-        found = MODE.search(workspace.read_text(encoding="utf-8"))
-    except OSError:
-        return "off"
-    return found.group(1) if found else "off"
+    return fix_switch.workspace_mode(workspace)
 
 
 def workspace_of(argv: list[str]) -> Path | None:

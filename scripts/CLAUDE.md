@@ -221,6 +221,26 @@ as a `fix_plan.LOCAL` failure. Keep the job's non-zero exit for the pass itself 
 `e2e_results.py` carries the rest, including why a run older than the tip is held
 rather than sent.
 
+## The test tiers
+
+CI is Linux, so a check that must also hold on Windows needs a job on a PC. Each tier
+runs after the last, and none stands between a change and `main`.
+
+| Tier | Runs | Where | When | Job |
+| --- | --- | --- | --- | --- |
+| fast | the `PR Gate` workflow | CI | every commit | `.github/workflows/pr-gate.yml` |
+| medium | each project's `scripts/run-tests.py`, whole suite | a PC whose `devkit.fixPass` is `dispatch`, one project at a time | every 15 minutes, whatever the person is doing; never takes focus | `devkit-medium-tier` |
+| heavy | each project's `scripts/e2e.py`, may take focus | the PC `devkit.localE2e` assigns | nightly, once the PC is idle | `devkit-local-e2e` |
+| full | the `Nightly` workflow | CI | nightly | `.github/workflows/nightly.yml` |
+
+The medium tier is `e2e_results.MEDIUM`: the same result file in its own folder, and the
+same `fix_plan.LOCAL` red, so a change to either tier's result reaches both. What differs
+is `tier-pass.py`'s to say. It tests only the tip, in a tree nobody works in
+(`disposable_tree.py`), so a red can span many merges: its fixer bisects from
+`Result.last_green`. A tree has no `.env` and no stack, so a project that needs either is
+not applicable, never red (`tier_command.not_applicable`), and what stops a run judging
+at all is a backoff and a count, not a ledger row (`tier_state.py`).
+
 ## The events ledger: append-only, and that is why resolution is an event
 
 `harness_events.py` is the write half and `harness_triage.py` the read half.

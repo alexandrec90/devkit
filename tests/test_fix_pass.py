@@ -820,6 +820,22 @@ def test_collect_red_gathers_prs_and_default_branches_and_the_backlog_is_read_ap
     assert fix_pass.fix_red.backlog_failure(world["workspace"]) == backlog
 
 
+def test_collect_red_reads_both_local_tiers(world, monkeypatch):
+    """A medium tier red reaches the pass by the road a local end-to-end red takes."""
+    results = fix_pass.fix_red.e2e_results
+    world["failures"], world["branches"] = [], {}
+    asked = []
+
+    def collect(_workspace, _projects, _git_for, root=None, tier=results.E2E):
+        asked.append(tier)
+        return [failure(kind=fix_plan.LOCAL, workflow=tier.workflow)]
+
+    monkeypatch.setattr(results, "collect", collect)
+    failures, _, _ = fix_pass.fix_red.collect_red(world["workspace"], ["carameli"], [])
+    assert asked == [results.E2E, results.MEDIUM]
+    assert [f.workflow for f in failures] == ["Local E2E", fix_plan.MEDIUM_TIER]
+
+
 def test_an_unreadable_devkit_main_is_re_gated_and_holds_nothing_meanwhile(world, monkeypatch):
     """What left six PRs stale: every merge to devkit main was the auto-merge workflow's,
     whose push raises no event, so no gate ever ran at the tip. The harness read RED on
