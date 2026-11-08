@@ -93,6 +93,23 @@ def prs_still_open(monkeypatch):
     monkeypatch.setattr(fix_pass.fix_send, "closed_since", lambda failure, root: "")
 
 
+@pytest.fixture(autouse=True)
+def no_elevated_worker_owed(monkeypatch):
+    """This PC's worker is current unless a test says otherwise: the real check asks the
+    real scheduler, and on a Windows machine without it files a row every test here counts."""
+    monkeypatch.setattr(fix_pass.fix_elevated, "check", lambda ctx, journal: [])
+
+
+def test_an_owner_step_that_raises_costs_the_other_nothing(monkeypatch, tmp_path):
+    def raises(ctx, journal):
+        raise OSError("schtasks is gone")
+
+    monkeypatch.setattr(fix_pass.fix_visibility, "check", raises)
+    monkeypatch.setattr(fix_pass.fix_elevated, "check", lambda ctx, journal: ["filed"])
+    journal = fix_pass.pass_journal(tmp_path, time.monotonic() + 60)
+    assert fix_pass.owners_steps(object(), journal) == ["filed"]
+
+
 def test_an_intent_whose_fixer_is_still_busy_waits_for_it(monkeypatch, tmp_path):
     """The pass shipped 0926-19's intent at 04:09 while that session was still fixing a
     group filed after it wrote the intent, and #422's while its sweep kept editing --

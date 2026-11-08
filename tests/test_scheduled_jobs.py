@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT, load_script
+from support import ELEVATED_EXEMPTION, REPO_ROOT, load_script
 
 schedule_health = load_script("scripts/schedule_health.py")
 
@@ -94,6 +94,11 @@ def test_a_job_names_the_artifact_it_leaves(name, module):
         f"`log-wrap.py --always` (see install-docker-prune.py) or point ARTIFACT at the "
         f"log its runner already writes."
     )
+    if name in ELEVATED_EXEMPTION:
+        # It writes nowhere but its admin-only folder, so `logs/` is the one place it
+        # cannot be; still a file a reader can open.
+        assert artifact.startswith("C:/ProgramData/devkit/"), f"{name}: {artifact}"
+        return
     assert artifact.startswith("logs/"), f"{name}: {artifact} is not under logs/"
 
 
@@ -354,6 +359,8 @@ UNATTENDED: dict[str, str] = {
     "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
     "scripts/collector_tasks.py": "the schtasks that pass makes, and each scheduled collector's fire",
     "scripts/collector_handoff.py": "the project's handoff command that pass asks and imports through",
+    "scripts/elevated_worker.py": "devkit-elevated runs the installed copy every 5 minutes",
+    "scripts/elevated_request.py": "the schtasks query the fix pass asks after the worker with",
     # reached from `workspace-status.py --notify`, which is the one script that imports
     # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.
     "scripts/notify.py": "the Windows PowerShell the status pass raises its toast through",
@@ -1165,6 +1172,13 @@ def test_every_branch_delivery_job_has_an_installer_here():
     switch = load_script("scripts/harness-switch.py")
     covered = {module.TASK_NAME for _name, module in branch_delivery_installers()}
     assert covered == set(switch.BRANCH_DELIVERY_JOBS)
+
+
+def test_the_elevated_worker_writes_the_file_its_installer_advertises():
+    """Under `HOME`, the folder the worker may write in; slashed, as `ARTIFACTS` is."""
+    installer = load_script("scripts/install-elevated-worker.py")
+    runner = load_script("scripts/elevated_worker.py")
+    assert installer.ARTIFACT == "/".join([*runner.HOME.split("\\"), runner.LOG_NAME])
 
 
 def test_the_collectors_pass_writes_the_file_its_installer_advertises():

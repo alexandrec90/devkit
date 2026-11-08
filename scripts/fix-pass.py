@@ -20,8 +20,9 @@ which survives this file crashing). Two rules hold it together:
 4. **Collect everything red** (`fix_red.py`), the harness-defect backlog included, and
    what Dependabot cannot do (`fix_dependabot.py`: failing update jobs, alerts no PR
    answers -- under its own daily cap), plan it (`fix_plan.py`) and classify it
-   (`fix_cycle.py`). A gate refused over the account's billing, and a private repo that
-   runs Actions (`fix_visibility.py`), are each filed as its owner's step.
+   (`fix_cycle.py`). A gate refused over the account's billing, a private repo that
+   runs Actions (`fix_visibility.py`), and a request waiting on a PC with no elevated
+   worker (`fix_elevated.py`), are each filed as its owner's step.
 5. **Harness first**: while anything harness-shaped is red, one devkit session gets
    all of it and project fixers are held, out loud. Only one at a time.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
@@ -65,6 +66,7 @@ import devkit_project
 import fix_cycle
 import fix_dependabot
 import fix_drift
+import fix_elevated
 import fix_issues
 import fix_ledger
 import fix_loop
@@ -583,6 +585,14 @@ def _switched_off() -> int:
     return EXIT_OK
 
 
+def owners_steps(ctx: fix_loop.Context, journal: Journal) -> list[str]:
+    """What this pass files for an owner alone. Two steps, so one raising costs the other
+    nothing."""
+    step = journal.step
+    visibility = step("visibility", fix_visibility.check, ctx, journal, default=[])
+    return visibility + step("elevated", fix_elevated.check, ctx, journal, default=[])
+
+
 def run(
     workspace: Path,
     mode: str,
@@ -619,7 +629,7 @@ def run(
         workspace, ctx, journal, failures, green, backlog
     )
     closed.verified += step("billing", fix_red.billing, ctx, journal, skipped, default=[])
-    closed.verified += step("visibility", fix_visibility.check, ctx, journal, default=[])
+    closed.verified += owners_steps(ctx, journal)
 
     # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current,
     # and the next fire routes a click's.
