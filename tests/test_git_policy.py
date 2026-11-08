@@ -99,6 +99,57 @@ def test_pre_commit_rejects_default_branch_and_detached_head_without_network():
     decision = git_policy.evaluate_pre_commit(detached)
     assert not decision.ok
     assert any("detached HEAD" in error for error in decision.errors)
+    assert not any("symbolic-ref" in error for error in decision.errors)
+
+
+def test_a_detached_head_mid_merge_is_told_how_to_branch_without_losing_the_merge():
+    """86eaa68b: a supervisor's merge in a `--detach` tree was refused, `git switch -c`
+    then refused mid-merge, and `git checkout -b` would have dropped MERGE_HEAD."""
+    responses = git_responses(branch="")
+    responses[("git", "rev-parse", "-q", "--verify", "MERGE_HEAD")] = completed(
+        ["git"], stdout="abc123\n"
+    )
+    decision = git_policy.evaluate_pre_commit(FakeRunner(responses))
+    assert not decision.ok
+    (error,) = decision.errors
+    assert error == git_policy.branch.detached_head_error(FakeRunner(responses))
+    assert git_policy.branch.detached_head_error(FakeRunner()) == git_policy.branch.DETACHED_HEAD
+    assert "mid-merge" in error
+    assert "git branch <new-name> HEAD && git symbolic-ref HEAD refs/heads/<new-name>" in error
+
+
+def test_the_mid_merge_remedy_keeps_the_merge_in_a_real_repo(tmp_path):
+    """The spelling the refusal names, run for real: on a branch, still merging."""
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "core.hooksPath=", *args],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def commit(body):
+        (tmp_path / "f").write_text(body)
+        git("add", "f")
+        git("commit", "-qm", body)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    commit("a")
+    git("switch", "-qc", "side")
+    commit("b")
+    git("switch", "-q", "main")
+    commit("c")
+    git("switch", "-q", "--detach")
+    git("merge", "side")
+    assert (tmp_path / ".git" / "MERGE_HEAD").exists()
+    git("branch", "carried", "HEAD")
+    git("symbolic-ref", "HEAD", "refs/heads/carried")
+    assert git("branch", "--show-current").stdout.strip() == "carried"
+    assert (tmp_path / ".git" / "MERGE_HEAD").exists()
 
 
 def test_pre_commit_allows_the_default_branch_when_there_is_no_remote():

@@ -60,6 +60,10 @@ jobs:
           # catch, invisible on a runner that cannot see a tag at all.
           fetch-depth: 0
       - uses: ./.github/actions/setup-python-env
+        # Every check after the first runs once this has, whatever the check before it
+        # said: a red lint here once hid both test tiers, so main's log named 2 of its 4
+        # reds and the other two surfaced a gate cycle later (ledger f872ef7c).
+        id: env
         with:
           # Explicit, the same way every generated gate passes it: the action is
           # copied verbatim rather than rendered, so its own default cannot know a
@@ -81,8 +85,10 @@ jobs:
         # cannot catch it: `scripts/**` ignores E501 by design.
         run: uv run ruff format --check .
       - name: Lint
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         run: uv run ruff check .
       - name: Lint + typecheck via the wrapper devkit ships
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         # Runs devkit's own `scripts/lint-all.py` — the entrypoint the pre-push gate
         # and every generated PR gate invoke. Its unique contribution over the two
         # steps above is mypy; running it here also means the wrapper itself is
@@ -99,14 +105,15 @@ jobs:
           path: logs/lint-errors.log
       - name: Hook-script tests (vendored tier)
         id: hooks-tests
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         # A junit file, because this step fails before `run-tests.py` writes
         # `logs/test-failures.log`: without it a red vendored suite uploads nothing the
         # fix pass can read, and its failing ids come out of `gh run view --log-failed`.
         run: uv run python -m pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml
       - name: devkit tests (generator, ports, renderer)
-        # Also after a red vendored tier, never after a red lint: skipped, this tier's
-        # failures reached the fix pass one gate cycle late (ledger f07541c7).
-        if: success() || steps.hooks-tests.outcome == 'failure'
+        # Also after a red vendored tier or a red lint: skipped, this tier's failures
+        # reached the fix pass one gate cycle late (ledgers f07541c7, f872ef7c).
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         # Via the wrapper, for the same dogfooding reason as the lint step: this is
         # what `run-tests.py` is for, and a broken wrapper should fail devkit's own CI
         # rather than surface first in a generated project.

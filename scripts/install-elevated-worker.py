@@ -166,8 +166,9 @@ USERS = "S-1-5-32-545"
 # `ROOT` from its first instant: owned by Administrators, protected, so nothing of
 # `C:\ProgramData`'s `Users:(CI)(WD,AD,WEA,WA)` or `CREATOR OWNER` is inherited.
 ROOT_DESCRIPTOR = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
-# `CreateDirectoryW`'s errors.
+# `CreateDirectoryW`'s errors, and the one `make_protected` answers off Windows.
 ERROR_ALREADY_EXISTS = 183
+ERROR_NOT_SUPPORTED = 50
 # The principal: whoever is logged on, at the highest level their token holds. The shape
 # of Windows' own `SilentCleanup`. A group rather than a user, so nothing depends on which
 # account the elevated terminal belonged to.
@@ -269,7 +270,10 @@ def make_protected(path: str, sddl: str) -> int:
     """Create `path` with `sddl` as its descriptor, in one call; 0, or the Win32 error.
 
     There is no moment at which the folder exists with any other access, which is the
-    whole of the point, and an existing folder is an error rather than something reused."""
+    whole of the point, and an existing folder is an error rather than something reused.
+    Elsewhere there is no such call, which is ERROR_NOT_SUPPORTED."""
+    if sys.platform != "win32":  # also what tells mypy `WinDLL` exists below
+        return ERROR_NOT_SUPPORTED
 
     class SecurityAttributes(ctypes.Structure):
         _fields_ = [

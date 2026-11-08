@@ -226,6 +226,8 @@ def descriptor(path: str) -> str:
 
     Through the API rather than `Get-Acl` in a child: a Windows PowerShell started from
     PowerShell 7 inherits a `PSModulePath` it cannot load its own security module from."""
+    if sys.platform != "win32":  # also what tells mypy `windll` exists below
+        return ""
     file_object, owner_and_dacl, sddl_revision = 1, 0x1 | 0x4, 1
     held = ctypes.c_void_p()
     text = ctypes.c_wchar_p()
