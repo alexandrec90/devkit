@@ -851,3 +851,39 @@ def test_a_job_log_line_is_read_past_its_prefix_and_colour():
 def test_a_vitest_entry_names_its_file():
     assert fix_plan.entry_path("src/a.test.ts > suite > case") == "src/a.test.ts"
     assert fix_plan.entry_path("tests/test_a.py::test_b") == "tests/test_a.py"
+
+
+def test_a_fixture_failure_is_signed_by_its_test():
+    """pytest prints a fixture failure as `ERROR`, so a run with no other failure named
+    nothing and every project's read the same."""
+    log = (
+        "ERROR tests/test_a.py::test_x - RuntimeError: DATABASE_URL is not set\n"
+        "ERROR tests/test_b.py - ImportError: no module\n"
+        "FAILED tests/test_c.py::test_y - assert 1 == 2\n"
+    )
+    assert fix_plan.signature_from_logs([log]) == (
+        "tests/test_a.py::test_x",
+        "tests/test_b.py",
+        "tests/test_c.py::test_y",
+    )
+
+
+def test_a_log_line_that_merely_says_error_is_no_test():
+    log = "ERROR: could not connect\nERROR Connection refused\nERROR 500 at /api\n"
+    assert fix_plan.signature_from_logs([log]) == ()
+
+
+def test_a_medium_tier_red_is_named_for_its_tier_and_gets_a_fixer():
+    medium = _local(workflow=fix_plan.MEDIUM_TIER)
+    assert fix_plan.name_of(medium) == "origin/main (medium tier)"
+    assert fix_plan.local_name(_local()) == "local e2e"
+    [decision] = fix_plan.plan([medium], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.DISPATCH
+    assert decision.note.startswith("Medium Tier failing on origin/main on this machine: ")
+
+
+def test_a_medium_tier_red_the_tip_has_moved_past_is_held_like_a_local_one():
+    stale = _local(workflow=fix_plan.MEDIUM_TIER, tip="ffffffffffff")
+    [decision] = fix_plan.plan([stale], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.HOLD
+    assert "the next scheduled local run re-tests the tip" in decision.note
