@@ -76,6 +76,9 @@
 		},
 		{
 			"path": "agent-terminal"
+		},
+		{
+			"path": "d2-trader"
 		}
 	],
 	"extensions": {
@@ -1794,7 +1797,8 @@
 								"skinamp",
 								"photolab",
 								"homelab",
-								"agent-terminal"
+								"agent-terminal",
+								"d2-trader"
 							]
 						}
 					]
@@ -1838,7 +1842,8 @@
 								"skinamp",
 								"photolab",
 								"homelab",
-								"agent-terminal"
+								"agent-terminal",
+								"d2-trader"
 							]
 						}
 					]
@@ -1979,7 +1984,8 @@
 					"skinamp",
 					"photolab",
 					"homelab",
-					"agent-terminal"
+					"agent-terminal",
+					"d2-trader"
 				],
 				"default": "carameli"
 			},
@@ -2678,7 +2684,8 @@
 					"skinamp",
 					"photolab",
 					"homelab",
-					"agent-terminal"
+					"agent-terminal",
+					"d2-trader"
 				],
 				"default": "carameli"
 			},
