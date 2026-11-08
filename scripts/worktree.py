@@ -5298,6 +5298,51 @@ def sync_checkouts(
     return (1 if summary["failed"] else 0), summary
 
 
+def inspect_boxes(
+    boxes: dict[str, Box], root: Path, fetch: bool, deferred: list[str]
+) -> tuple[list[tuple[Box, str, str, PullRequest, int]], set[str]]:
+    """`reconcile`'s reading of each box: its row for `reconcile_plan`, and the names
+    whose work has landed. A box reached past a caller's `sweep.until` deadline is not
+    read, only named in `deferred`, for the next pass."""
+    rows: list[tuple[Box, str, str, PullRequest, int]] = []
+    landed: set[str] = set()
+    for name, box in sorted(boxes.items()):
+        if sweep.past_until():
+            deferred.append(name)
+            continue
+        state, verdict, reason = inspect_box(box, root, fetch=fetch)
+        # A preview's PR is the one for the branch it is SHOWING. Looking it up by
+        # `box.branch` would ask GitHub about the throwaway `preview/...` ref, get
+        # nothing back, and leave the preview standing after the work it shows merged.
+        subject = box.tracks or box.branch
+        pr = (
+            pr_for(sweep.gh_for(box_path(root, name)), subject)
+            if fetch and subject and state.host == "github"
+            else PullRequest()
+        )
+        # Asked only for the verdicts it can settle, and only of a clean box, so a pass
+        # over sixteen boxes adds two git calls for the rare one rather than thirty-two
+        # for the ordinary ones. Same gate as `plan_reap`'s, so `reap` and this pass
+        # cannot describe one box differently.
+        if work_landed(sweep.git_for(box_path(root, name)), state, verdict, pr):
+            landed.add(name)
+        rows.append((box, verdict, reason, pr, state.dirty))
+    return rows, landed
+
+
+def sync_in_time(
+    workspace: Path, checkouts: bool, apply: bool, fetch: bool, deferred: list[str]
+) -> tuple[int, dict]:
+    """`sync_checkouts` for `reconcile`, unless `checkouts` is off -- or a caller's
+    `sweep.until` deadline has passed, which names the sync in `deferred` instead."""
+    if not checkouts:
+        return 0, {}
+    if sweep.past_until():
+        deferred.append("the checkout sync")
+        return 0, {}
+    return sync_checkouts(workspace, apply=apply, fetch=fetch)
+
+
 def agent_sessions() -> list[dict]:
     """Every Claude Code session on this machine, with its working directory."""
     return bg_sessions.listed(sweep.run_windowless)
@@ -5465,27 +5510,14 @@ def reconcile(
     free = free_gb(boxes_root(root) if boxes_root(root).is_dir() else root)
     pressure = under_pressure(free, min_free_gb)
 
-    rows: list[tuple[Box, str, str, PullRequest, int]] = []
-    landed: set[str] = set()
-    for name, box in sorted(boxes.items()):
-        state, verdict, reason = inspect_box(box, root, fetch=fetch)
-        # A preview's PR is the one for the branch it is SHOWING. Looking it up by
-        # `box.branch` would ask GitHub about the throwaway `preview/...` ref, get
-        # nothing back, and leave the preview standing after the work it shows merged.
-        subject = box.tracks or box.branch
-        pr = (
-            pr_for(sweep.gh_for(box_path(root, name)), subject)
-            if fetch and subject and state.host == "github"
-            else PullRequest()
-        )
-        # Asked only for the verdicts it can settle, and only of a clean box, so a pass
-        # over sixteen boxes adds two git calls for the rare one rather than thirty-two
-        # for the ordinary ones. Same gate as `plan_reap`'s, so `reap` and this pass
-        # cannot describe one box differently.
-        if work_landed(sweep.git_for(box_path(root, name)), state, verdict, pr):
-            landed.add(name)
-        rows.append((box, verdict, reason, pr, state.dirty))
-
+    # Inside a caller's `sweep.until` -- the scheduled pass's `--budget` -- no unit of
+    # work is begun past the deadline: a box not inspected or not reaped, or the checkout
+    # sync, is the next pass's, and named in the report. Every call already begun ends by
+    # the deadline too, so the pass is over before its next fire is due. 2026-11-07 the
+    # 00:30 pass was still going at 00:45, each of its calls bounded and the pass as a
+    # whole not (3fa66640, after three fixes bounding the calls).
+    deferred: list[str] = []
+    rows, landed = inspect_boxes(boxes, root, fetch, deferred)
     outcomes: list[dict] = []
     worst = 0
     # Each asked once, and only by a pass that reaps (the engine: only one reaping a stack).
@@ -5508,6 +5540,9 @@ def reconcile(
         notes: list[str] = []
         action = decision.action
         pr = decision.pr
+        if action in (MERGE, REAP) and sweep.past_until():
+            deferred.append(decision.box)
+            continue
 
         if action == MERGE and apply:
             ok, message = merge_pr(sweep.gh_for(box_path(root, decision.box)), pr.number)
@@ -5533,10 +5568,8 @@ def reconcile(
 
     # Last, and after the reaps: a reap deletes its box's branch in the source
     # checkout, so the sync reads a checkout this pass has finished with.
-    synced: dict = {}
-    if checkouts:
-        code, synced = sync_checkouts(workspace, apply=apply, fetch=fetch)
-        worst = max(worst, code)
+    code, synced = sync_in_time(workspace, checkouts, apply, fetch, deferred)
+    worst = max(worst, code)
 
     report = {
         "applied": apply,
@@ -5546,6 +5579,7 @@ def reconcile(
         "automerge": automerge,
         "boxes": outcomes,
         "checkouts": synced,
+        "deferred": deferred,
     }
     return worst, report
 
@@ -5800,21 +5834,25 @@ def _run_reconcile(args: argparse.Namespace) -> int:
     the scheduler said exit 1 and the only evidence on disk said success. The
     traceback is written as the pass's report, and the exception still propagates, so
     the exit code and `main`'s own handling are what they were.
+
+    `--budget` bounds the whole pass (`sweep.until`); see `reconcile`'s `deferred`.
     """
     root = artifact_root(args.workspace.parent)
+    deadline = time.monotonic() + args.budget if args.budget else None
     try:
-        code, report = reconcile(
-            args.workspace,
-            apply=not args.dry_run,
-            automerge=args.automerge,
-            merge_label=args.merge_label,
-            min_free_gb=args.min_free_gb,
-            max_age_days=args.max_age_days,
-            unclaimed_age_days=args.unclaimed_age_days,
-            fetch=args.fetch,
-            keep_stack=args.keep_stack,
-            checkouts=args.checkouts,
-        )
+        with sweep.until(deadline):
+            code, report = reconcile(
+                args.workspace,
+                apply=not args.dry_run,
+                automerge=args.automerge,
+                merge_label=args.merge_label,
+                min_free_gb=args.min_free_gb,
+                max_age_days=args.max_age_days,
+                unclaimed_age_days=args.unclaimed_age_days,
+                fetch=args.fetch,
+                keep_stack=args.keep_stack,
+                checkouts=args.checkouts,
+            )
     except Exception:
         write_reconcile_log(traceback.format_exc().rstrip(), 1, root, args.dry_run)
         raise
@@ -5847,7 +5885,7 @@ def render_reconcile(report: dict) -> str:
     outcomes = report.get("boxes") or []
     checkouts = report.get("checkouts") or {}
     if not outcomes and not checkouts.get("rows"):
-        return "No ephemeral boxes and no checkouts to sync. Nothing to reconcile."
+        return render_empty(report)
 
     by_action: dict[str, list[dict]] = {}
     for row in outcomes:
@@ -5884,9 +5922,28 @@ def render_reconcile(report: dict) -> str:
             lines.append(f"    {row['box']} -- {row['reason']}{url}")
             lines.extend(f"        {note}" for note in row.get("notes") or [])
     lines.extend(render_checkout_sync(checkouts, applied=bool(applied)))
+    lines.extend(render_deferred(report, lead="\n  "))
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
     return "\n".join(lines)
+
+
+NOTHING_TO_RECONCILE = "No ephemeral boxes and no checkouts to sync. Nothing to reconcile."
+
+
+def render_empty(report: dict) -> str:
+    """The report of a pass with no box and no checkout rows: nothing to do, or -- past
+    its deadline before it began any -- what it left to the next pass."""
+    return "\n".join(render_deferred(report)) or NOTHING_TO_RECONCILE
+
+
+def render_deferred(report: dict, lead: str = "") -> list[str]:
+    """The line naming what a pass past its deadline left to the next one, after `lead`;
+    none when it left nothing (`reconcile`'s `deferred`)."""
+    deferred = report.get("deferred") or []
+    if not deferred:
+        return []
+    return [f"{lead}left to the next pass, this one's time having run out: {', '.join(deferred)}"]
 
 
 def render_checkout_sync(summary: dict, *, applied: bool) -> list[str]:
@@ -6040,6 +6097,35 @@ def render_reap(plan: ReapPlan, applied: bool, notes: list[str]) -> str:
 
 
 # --- entrypoint -------------------------------------------------------------
+
+
+def add_reconcile_scope_args(fix: argparse.ArgumentParser) -> None:
+    """`reconcile`'s reach: whether the static checkouts are synced too, and how long
+    the pass may take (`--budget`, which `_run_reconcile` holds it to)."""
+    # Paired with its negation for the same reason `--no-merge` is: the scheduled
+    # command names every knob it passes, so `schtasks /query` shows what is on.
+    static = fix.add_mutually_exclusive_group()
+    static.add_argument(
+        "--checkouts",
+        dest="checkouts",
+        action="store_true",
+        default=True,
+        help="also run sweep.py --sync over the static checkouts (the default)",
+    )
+    static.add_argument(
+        "--no-checkouts",
+        dest="checkouts",
+        action="store_false",
+        help="boxes only; static checkouts stay wherever they are parked",
+    )
+    fix.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="end the pass by then: no git, gh or compose call runs past it, and what is "
+        "not started is left to the next pass (the scheduled task passes its interval's)",
+    )
 
 
 def add_common_args(parser: argparse.ArgumentParser, dry_run: bool = True) -> None:
@@ -6329,22 +6415,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     fix.add_argument("--keep-stack", action="store_true", help="leave Docker stacks running")
-    # Paired with its negation for the same reason `--no-merge` is: the scheduled
-    # command names every knob it passes, so `schtasks /query` shows what is on.
-    static = fix.add_mutually_exclusive_group()
-    static.add_argument(
-        "--checkouts",
-        dest="checkouts",
-        action="store_true",
-        default=True,
-        help="also run sweep.py --sync over the static checkouts (the default)",
-    )
-    static.add_argument(
-        "--no-checkouts",
-        dest="checkouts",
-        action="store_false",
-        help="boxes only; static checkouts stay wherever they are parked",
-    )
+    add_reconcile_scope_args(fix)
     add_common_args(fix)
 
     look = sub.add_parser(
