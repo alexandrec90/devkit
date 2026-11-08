@@ -306,7 +306,8 @@ def test_a_fire_starts_what_it_needs_then_runs_the_command_in_the_checkout(tmp_p
         tasks.NEEDS_TIMEOUT,
     )
     assert spawn.calls[1][0] == [r"C:\bin\uv.exe", "run", "social-scraper", "scrape"]
-    assert spawn.calls[1][2] == tasks.FIRE_TIMEOUT
+    budget = tasks.fire_budget(SCRAPER)
+    assert budget - 1 <= spawn.calls[1][2] <= budget, "bounded to before the next fire"
     assert "reddit: 40 posts" in lines
 
 
@@ -469,6 +470,11 @@ def instant(monkeypatch):
     return clock
 
 
+def started_db(lines):
+    """Whether the fire's log says its db came up, with how long that took."""
+    return any(line.startswith("started: db in ") and line.endswith("s") for line in lines)
+
+
 # The probe after a failed start and every probe of `await_engine`, none answering.
 PROBE_TIMED_OUT = (tasks.TIMED_OUT, "timed out after 30s")
 SILENT_THROUGH_WAIT = [PROBE_TIMED_OUT, *[SILENT] * (tasks.ENGINE_WAIT // tasks.ENGINE_POLL)]
@@ -495,7 +501,7 @@ def test_a_fire_landing_in_an_engine_restart_waits_and_then_runs(tmp_path, insta
     resolutions. The engine answering a minute later is a late fire, not a lost one."""
     spawn = FakeSpawn(SILENT, SILENT, SILENT, SILENT, ENGINE_UP, (0, ""), (0, "reddit: 40"))
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
-    assert code == 0 and "reddit: 40" in lines and "started: db" in lines
+    assert code == 0 and "reddit: 40" in lines and started_db(lines)
     assert instant.slept == [tasks.ENGINE_POLL] * 3
     up = ["docker", "compose", "up", "-d", "--wait", "db"]
     assert [call[0] for call in spawn.calls].count(up) == 2, "tried again once it answered"
@@ -568,7 +574,7 @@ def test_an_engine_that_comes_back_after_an_update_runs_the_command(tmp_path, mo
     monkeypatch.setattr(tasks.os, "name", "nt")
     spawn = FakeSpawn(SILENT, SILENT, ENGINE_UP, (0, ""), (0, "reddit: 40"), listing=(0, UPDATER))
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
-    assert code == 0 and "reddit: 40" in lines and "started: db" in lines
+    assert code == 0 and "reddit: 40" in lines and started_db(lines)
 
 
 def test_a_silent_engine_with_no_update_running_still_fails(tmp_path, monkeypatch, instant):
@@ -619,7 +625,7 @@ def test_a_start_that_timed_out_on_an_engine_being_revived_waits_and_then_runs(t
     engine answered. A timed-out start on a silent engine waits for it like a fast one."""
     spawn = FakeSpawn(TIMED_OUT, PROBE_TIMED_OUT, SILENT, ENGINE_UP, (0, ""), (0, "reddit: 40"))
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
-    assert code == 0 and "reddit: 40" in lines and "started: db" in lines
+    assert code == 0 and "reddit: 40" in lines and started_db(lines)
     up = ["docker", "compose", "up", "-d", "--wait", "db"]
     assert [call[0] for call in spawn.calls].count(up) == 2, "tried again once it answered"
 
@@ -638,7 +644,99 @@ def test_the_command_is_bounded_by_what_the_start_left_of_the_fire(tmp_path, ins
     tasks.fire(SCRAPER, checkout(tmp_path), spawn)
     spent = instant.now - 1  # all but the command's own second
     assert spent > tasks.NEEDS_TIMEOUT, "the start did run out its timeout"
-    assert spawn.calls[-1][2] == tasks.FIRE_TIMEOUT - int(spent)
+    assert spawn.calls[-1][2] == tasks.fire_budget(SCRAPER) - int(spent)
+
+
+class Lasting(FakeSpawn):
+    """A `FakeSpawn` whose every call takes its whole timeout on `clock` when it times
+    out, and a second otherwise; and `costs` seconds more for an `up` that succeeds."""
+
+    def __init__(self, clock, *answers, costs=0, **kwargs):
+        super().__init__(*answers, **kwargs)
+        self.clock = clock
+        self.costs = costs
+
+    def __call__(self, argv, cwd, timeout, env=None):
+        answer = super().__call__(argv, cwd, timeout, env)
+        timed_out = answer[0] == tasks.TIMED_OUT
+        self.clock.now += timeout if timed_out else 1
+        if not timed_out and list(argv)[:3] == ["docker", "compose", "up"]:
+            self.clock.now += self.costs
+        return answer
+
+
+UP = ["docker", "compose", "up", "-d", "--wait", "db"]
+
+
+@pytest.mark.parametrize(
+    ("minutes", "budget"),
+    [
+        (30, 30 * 60 - tasks.END_MARGIN),
+        (0, tasks.FIRE_TIMEOUT),
+        (120, tasks.FIRE_TIMEOUT),
+        (1, tasks.LEAST_COMMAND),
+    ],
+)
+def test_a_fire_is_budgeted_to_end_before_its_next_fire(minutes, budget):
+    collector = config.Collector("x", command=("x",), minutes=minutes)
+    assert tasks.fire_budget(collector) == budget
+
+
+def test_a_start_that_spent_the_cycle_fails_instead_of_running_into_the_next_fire(
+    tmp_path, instant
+):
+    """b8e9fd6c: 2026-11-07 the 00:00 social-scraper fire's start ran to about 00:48 under
+    `FIRE_TIMEOUT`'s 55 minutes, so the 00:30 fire was skipped behind it, and the scrape's
+    own watchdog ended it the moment it began. The command is not started at all once
+    the start has left less than `LEAST_COMMAND` of the cycle, and the run says why."""
+    spawn = Lasting(instant, (0, ""), (0, "reddit: 40"), costs=tasks.fire_budget(SCRAPER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == tasks.TIMED_OUT
+    assert [call[0] for call in spawn.calls] == [UP], "the command never ran"
+    assert started_db(lines)
+    assert lines[-1] == "error: the fire's time ran out before the command could start"
+    assert log_wrap.failure_cause("\n".join(lines)) == lines[-1]
+
+
+def test_too_late_names_the_numbers_above_an_error_line_naming_only_the_kind():
+    """The cause `log-wrap.py` files stays stable across recurrences: no counts in it."""
+    *said, cause = tasks.too_late(SCRAPER, 1700)
+    assert said == [
+        f"1700s of this fire's {tasks.fire_budget(SCRAPER)}s were spent before the command "
+        "could start, so it was not run: the next fire runs on time instead of being skipped "
+        "behind it"
+    ]
+    assert cause == "error: the fire's time ran out before the command could start"
+    assert not any(ch.isdigit() for ch in cause)
+
+
+def test_a_fire_whose_every_call_hangs_still_ends_before_the_next_fire(tmp_path, instant):
+    """However the start goes -- a hung `up`, a silent engine waited for, a second `up`
+    -- the fire is over inside its cadence, so the scheduler never skips a fire behind
+    it. The diagnostics after a failed start get the margin."""
+    spawn = Lasting(instant, TIMED_OUT, *[PROBE_TIMED_OUT] * 200)
+    code, _lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == tasks.TIMED_OUT
+    assert instant.now <= SCRAPER.minutes * 60 - tasks.END_MARGIN + 2 * tasks.PROBE
+    assert instant.now < SCRAPER.minutes * 60
+
+
+def test_a_call_with_nothing_left_before_the_deadline_is_not_made(instant):
+    spawn = FakeSpawn((0, "made"))
+    bounded = tasks.within(spawn, until=100)
+    instant.now = 40
+    assert bounded(["docker"], Path("x"), 600) == (0, "made")
+    assert spawn.calls[-1][2] == 60, "cut to what is left"
+    instant.now = 100
+    assert bounded(["docker"], Path("x"), 600) == (tasks.TIMED_OUT, tasks.SPENT)
+    assert len(spawn.calls) == 1, "and not made once nothing is"
+
+
+def test_the_wait_for_the_engine_stops_at_the_deadline(instant):
+    spawn = FakeSpawn(*[SILENT] * 100)
+    answer = tasks.await_engine(Path("x"), spawn, until=2 * tasks.ENGINE_POLL)
+    assert answer == SILENT
+    assert sum(instant.slept) == 2 * tasks.ENGINE_POLL < tasks.ENGINE_WAIT
 
 
 def test_an_update_is_not_asked_about_while_the_engine_answers(tmp_path, monkeypatch):
@@ -928,7 +1026,7 @@ def test_a_need_that_timed_out_on_an_answering_engine_is_started_once_more(tmp_p
     start that stalls twice running is the one worth filing."""
     spawn = FakeSpawn(TIMED_OUT, (0, "28.4.0\n"), (0, "started"), (0, "ok"))
     code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
-    assert code == 0 and "started: db" in lines
+    assert code == 0 and started_db(lines)
     assert spawn.calls[2][0] == spawn.calls[0][0] and spawn.calls[3][0] != spawn.calls[0][0]
 
 

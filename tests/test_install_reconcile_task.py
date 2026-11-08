@@ -70,6 +70,33 @@ def test_the_workspace_is_named_not_inferred():
     assert str(WORKSPACE) in command()
 
 
+@pytest.mark.parametrize(
+    ("minutes", "budget"),
+    [
+        (15, 15 * 60 - installer.BUDGET_MARGIN_S),
+        (60, 60 * 60 - installer.BUDGET_MARGIN_S),
+        (4, 120),
+    ],
+)
+def test_a_pass_is_budgeted_to_end_before_its_next_fire(minutes, budget):
+    """3fa66640: the 00:30 pass of 2026-11-07 was still going at 00:45, so the scheduler
+    skipped that fire: each call the pass made was bounded, the pass was not."""
+    assert installer.pass_budget(minutes) == budget
+
+
+def test_with_budget_appends_the_intervals_budget():
+    assert "--budget" not in command()
+    expected = f"--budget {installer.pass_budget(15)}"
+    assert installer.with_budget(command(), 15) == f"{command()} {expected}"
+
+
+def test_the_scheduled_pass_is_registered_with_its_intervals_budget(monkeypatch, capsys):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    assert installer.main([]) == 0, "the dry run prints what --yes registers"
+    expected = installer.pass_budget(installer.DEFAULT_INTERVAL_MINUTES)
+    assert f"--budget {expected}" in capsys.readouterr().out
+
+
 def test_paths_are_quoted_for_a_profile_name_with_spaces():
     quoted = installer.reconcile_arguments(Path(r"C:\Program Files\ws\worktree.py"), WORKSPACE)
     assert '"C:\\Program Files\\ws\\worktree.py"' in quoted
@@ -173,8 +200,11 @@ def _the_document_main_would_register() -> str:
     """Built the way `main` builds it: this interpreter, this checkout, the defaults."""
     python = installer.windowless(sys.executable)
     workspace = sweep.default_workspace(REPO_ROOT).resolve()
-    arguments = installer.reconcile_arguments(installer.worktree_script(), workspace)
-    return installer.task_document(python, arguments, installer.DEFAULT_INTERVAL_MINUTES)
+    minutes = installer.DEFAULT_INTERVAL_MINUTES
+    arguments = installer.with_budget(
+        installer.reconcile_arguments(installer.worktree_script(), workspace), minutes
+    )
+    return installer.task_document(python, arguments, minutes)
 
 
 def test_check_is_green_when_the_scheduler_holds_the_document_yes_would_register(

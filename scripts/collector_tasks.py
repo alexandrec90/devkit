@@ -58,6 +58,18 @@ NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # the wrapper -- which records why -- rather than killed by the scheduler, which does not.
 TIME_LIMIT = "PT1H"
 FIRE_TIMEOUT = 55 * 60
+# A collector on a cadence (`minutes`) has its fire end this long before the next fire is
+# due, `FIRE_TIMEOUT` or not (`fire_budget`): a task still running when the scheduler
+# fires again skips that fire (`IgnoreNew`). The margin covers `spawn`'s reap of a killed
+# tree, the diagnostics a failed start runs, and the log the fire writes after.
+# 2026-11-07 the 00:00 social-scraper fire's start ran until about 00:48 inside a
+# 55-minute bound, skipping the 00:30 fire, and the scrape's own watchdog -- 95% of the
+# cycle from the fire -- fired the moment the scrape began (b8e9fd6c, after seven fixes to
+# the scrape): nothing in the fire itself knew the cadence.
+END_MARGIN = 2 * 60
+# The least of a cycle a command is started with once its `needs` are up; a start that
+# leaves less is failed instead, naming how long the start took.
+LEAST_COMMAND = 60
 NEEDS_TIMEOUT = 600
 SCHTASKS_TIMEOUT = 60
 # The re-ask after a `compose up` failed (`needs_failed`): an engine that answers at
@@ -577,10 +589,53 @@ def keep_docker_on_path() -> None:
         os.environ["PATH"] = with_docker_bin(os.environ.get("PATH", ""))
 
 
-def await_engine(checkout: Path, run: Spawner) -> tuple[int, str]:
+def fire_budget(collector: config.Collector) -> int:
+    """The seconds one fire of `collector` may take: `FIRE_TIMEOUT`, and for one on a
+    cadence no more than its `minutes` less `END_MARGIN`, so it has ended before the
+    next fire is due -- but never less than `LEAST_COMMAND`."""
+    if collector.minutes <= 0:
+        return FIRE_TIMEOUT
+    return max(LEAST_COMMAND, min(FIRE_TIMEOUT, collector.minutes * 60 - END_MARGIN))
+
+
+def too_late(collector: config.Collector, spent: int) -> list[str]:
+    """The lines ending a fire that had less than `LEAST_COMMAND` left for its command,
+    `spent` seconds into it: the error line names only the kind, which `log-wrap.py`
+    files as the cause, and the numbers stay above it."""
+    budget = fire_budget(collector)
+    return [
+        f"{spent}s of this fire's {budget}s were spent before the command could start, "
+        "so it was not run: the next fire runs on time instead of being skipped behind it",
+        "error: the fire's time ran out before the command could start",
+    ]
+
+
+SPENT = "not run: this fire's time before the next one is spent"
+
+
+def within(run: Spawner, until: float) -> Spawner:
+    """`run` with every call's timeout cut to what is left before `until` (a
+    `_time.monotonic` moment), and a call with nothing left not made: `TIMED_OUT`, saying
+    so (`SPENT`)."""
+
+    def bounded(
+        argv: Sequence[str], cwd: Path, timeout: int, env: Mapping[str, str] | None = None
+    ) -> tuple[int, str]:
+        left = int(until - _time.monotonic())
+        if left <= 0:
+            return TIMED_OUT, SPENT
+        return run(argv, cwd, min(timeout, left), env)
+
+    return bounded
+
+
+def await_engine(checkout: Path, run: Spawner, until: float | None = None) -> tuple[int, str]:
     """`probe`, asked every `ENGINE_POLL` seconds until it answers or `ENGINE_WAIT` has
-    passed; its last answer."""
+    passed -- or `until` (a `_time.monotonic` moment), when that is sooner; its last
+    answer."""
     deadline = _time.monotonic() + ENGINE_WAIT
+    if until is not None:
+        deadline = min(deadline, until)
     answer = (1, "")
     while (left := deadline - _time.monotonic()) > 0:
         _time.sleep(min(ENGINE_POLL, left))
@@ -601,8 +656,11 @@ class NeedsStart(NamedTuple):
     updating: bool = False
 
 
-def start_needs(needs: Sequence[str], checkout: Path, run: Spawner) -> NeedsStart:
-    """`compose up --wait` of `needs`.
+def start_needs(
+    needs: Sequence[str], checkout: Path, run: Spawner, until: float | None = None
+) -> NeedsStart:
+    """`compose up --wait` of `needs`, over by `until` (a `_time.monotonic` moment) when
+    one is given: every call and the wait for the engine are cut to it (`within`).
 
     A failed start is asked whether the engine answers. A silent one is waited for
     (`await_engine`) and the start tried once more once it answers: a fire landing in a
@@ -616,6 +674,8 @@ def start_needs(needs: Sequence[str], checkout: Path, run: Spawner) -> NeedsStar
     before the wait, since it can be gone by the end of it: 7c00ca1a's finished two
     minutes before the wait did, so asking only afterwards read it as no update at all.
     """
+    if until is not None:
+        run = within(run, until)
     up = ["docker", "compose", "up", "-d", "--wait", *needs]
     code, out = run(up, checkout, NEEDS_TIMEOUT)
     if code == 0:
@@ -627,7 +687,7 @@ def start_needs(needs: Sequence[str], checkout: Path, run: Spawner) -> NeedsStar
         code, out = run(up, checkout, NEEDS_TIMEOUT)
         return NeedsStart(code, out, None if code == 0 else engine)
     updating = desktop_updating(checkout, run)
-    engine = await_engine(checkout, run)
+    engine = await_engine(checkout, run, until)
     if engine[0] != 0:
         return NeedsStart(code, out, engine, updating)
     code, out = run(up, checkout, NEEDS_TIMEOUT)
@@ -728,8 +788,12 @@ def fire(
 
     The command is told when the scheduler fired (`FIRED_AT`) -- `fired`, now when None
     -- which is taken before the `needs` come up, since they are part of the cycle. The
-    command's bound is what is left of `FIRE_TIMEOUT` once they are up, so a start that
-    waited out an engine restart still ends inside the task's `TIME_LIMIT`. A silent
+    whole fire, counted from its own start, is bounded by `fire_budget`: the start of the
+    `needs` is cut to it (`start_needs`' `until`), the command's bound is what is left of
+    it once they are up, and a start that leaves less than `LEAST_COMMAND` fails the run
+    rather than starting a command into the next fire -- so a start that waited out an
+    engine restart still ends inside the task's `TIME_LIMIT` and before the next fire is
+    due. The `started:` line says how long the start took. A silent
     engine's log carries Docker Desktop's reason (`stop_reason`) from `desktop_logs`,
     where one is given, and one whose WSL service is stuck (`wsl_said`) is failed on that.
 
@@ -742,11 +806,12 @@ def fire(
     """
     stamp = fired_env(fired or _dt.datetime.now(_dt.UTC))
     began = _time.monotonic()
+    until = began + fire_budget(collector)
     lines = [f"command: {' '.join(collector.command)}", f"cwd: {checkout}"]
     if not (checkout / ".git").exists():
         return 2, [*lines, f"no checkout at {checkout} -- nothing to run"]
     if collector.needs:
-        code, out, engine, updating = start_needs(collector.needs, checkout, run)
+        code, out, engine, updating = start_needs(collector.needs, checkout, run, until)
         if code != 0:
             engine = engine or probe(checkout, run)
             if engine[0] != 0 and (updating or desktop_updating(checkout, run)):
@@ -762,8 +827,9 @@ def fire(
             stuck = wsl_said(engine, checkout, run)
             cause = f"error: {WSL_STUCK}" if stuck else cause
             return code, [*lines, *failed, *said, *stuck, cause]
-        lines.append(f"started: {', '.join(collector.needs)}")
-    left = FIRE_TIMEOUT - int(_time.monotonic() - began)
+        lines.append(f"started: {', '.join(collector.needs)} in {int(_time.monotonic() - began)}s")
+    if (left := int(until - _time.monotonic())) < LEAST_COMMAND:
+        return TIMED_OUT, [*lines, *too_late(collector, int(_time.monotonic() - began))]
     since = _dt.datetime.now(_dt.UTC).timestamp()
     code, out = run(resolve(collector.command), checkout, left, stamp)
     output = out.splitlines()
