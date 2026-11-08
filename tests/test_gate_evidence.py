@@ -1010,6 +1010,13 @@ def test_a_red_default_branch_is_a_failure_with_its_run_downloaded(monkeypatch, 
     assert failure.green_at == "", "no run read passed"
 
 
+def test_a_red_default_branch_keeps_the_hooks_its_logs_name(monkeypatch, tmp_path):
+    """What lets the direct flow tell formatting from the rest of the pre-commit step."""
+    branch_world(monkeypatch, "failure", f"{SUMMARY}\n- hook id: ruff-format\n", "")
+    _, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert failure.hooks == (("", "ruff-format"),)
+
+
 def test_a_red_default_branch_says_when_its_gate_last_passed(monkeypatch, tmp_path):
     """430656bd: carameli master passed on 10-19 between the 10-06 lint failure and the
     10-22 one, and the pass could not tell them apart."""
@@ -1204,6 +1211,18 @@ def test_the_default_branch_runs_are_the_listed_dicts_newest_first_or_nothing():
     assert ev.default_branch_runs(table({("run", "list"): runs}), "main") == [runs[0], runs[2]]
     assert ev.default_branch_runs(table({}), "main") == []
     assert ev.default_branch_runs(table({("run", "list"): {"not": "a list"}}), "main") == []
+
+
+def test_the_default_branch_runs_read_as_many_as_asked():
+    asked = []
+
+    def gh(*args):
+        asked.append(args)
+        return subprocess.CompletedProcess(args, 0, "[]", "")
+
+    ev.default_branch_runs(gh, "main")
+    ev.default_branch_runs(gh, "main", limit=7)
+    assert [a[a.index("--limit") + 1] for a in asked] == [str(ev.RUN_LIMIT), "7"]
 
 
 def test_the_runs_behind_failing_checks_are_read_off_the_rollup():

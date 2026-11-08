@@ -173,6 +173,7 @@ def test_the_jobs_group_names_only_the_branch_delivery_jobs():
         "devkit-upgrade-projects",
         "devkit-release",
         "devkit-fix-pass",
+        "devkit-ship",
     }
 
 
@@ -319,7 +320,11 @@ def test_standing_one_delivery_job_back_up_leaves_the_rest_of_the_group_down(tmp
         runner=lambda argv, **_: _ok(argv),
         jobs=("devkit-upgrade-projects", "devkit-release"),
     )
-    assert harness_state.Ledger.load().jobs == ("devkit-fix-pass", "devkit-worktree-reconcile")
+    assert harness_state.Ledger.load().jobs == (
+        "devkit-fix-pass",
+        "devkit-ship",
+        "devkit-worktree-reconcile",
+    )
 
 
 def _run_ok(argv, **_kwargs):

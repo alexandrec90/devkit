@@ -118,6 +118,11 @@ OVERLAPPING = frozenset({SCHED_REFUSED_ALREADY_RUNNING, SCHED_REFUSED_ALREADY_RU
 
 NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) | OVERLAPPING
 
+# A job that fires every two minutes outlives one fire whenever a ship takes its time, and
+# the fire it skips loses nothing: the running one, or the next, ships what is there.
+# Saying "its runs are overlapping" would file a finding over the schedule working.
+OVERLAP_EXPECTED = frozenset({"devkit-ship"})
+
 # How many intervals a job may miss before it is worth a line. One is noise: a laptop
 # asleep at 04:00 misses a daily run and catches it the next night, which is the system
 # working. Two consecutive misses is a job that has stopped.
@@ -149,6 +154,7 @@ ARTIFACTS: dict[str, str] = {
     "devkit-workspace-status": "logs/scheduled-workspace-status.log",
     "devkit-installers": "logs/installers.log",
     "devkit-fix-pass": "logs/fix-pass.log",
+    "devkit-ship": "logs/ship-pass.log",
     "devkit-collectors": "logs/collectors.log",
     "devkit-local-e2e": "logs/scheduled-local-e2e.log",
     "devkit-medium-tier": "logs/scheduled-medium-tier.log",
@@ -550,7 +556,7 @@ def job_problem(
         if job.next_run is None or job.next_run < moment:
             return f"{job.name}: registered but has never run"
         return None
-    if job.last_result in OVERLAPPING:
+    if job.last_result in OVERLAPPING and job.name not in OVERLAP_EXPECTED:
         # Not a failure, but not silence either: a job whose pass outlives its own
         # interval is running essentially continuously, and that background cost is
         # invisible everywhere else.

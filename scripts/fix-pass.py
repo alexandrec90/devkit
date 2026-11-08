@@ -12,7 +12,10 @@ which survives this file crashing). Two rules hold it together:
   what the pass cannot turn green becomes a finding on the harness-defect ledger
   (`fix_findings.py`), which the devkit session this same pass sends takes over.
 
-1. **Ship every intent** (`ship_intent.py`); a refused commit is a failure like any other.
+1. **Ship every gated intent** (`ship_step.py`); a refused commit is a failure like any
+   other. An intent of a project in the direct flow (`delivery.py`) is the ship task's
+   (`ship-pass.py`, every two minutes), so nothing races; only the refusal it stored is
+   read here, and turned into that same failure.
 2. **Merge green adoptions**, then start any release `main` owes (`fix_release.py`).
 3. **Read back** (`fix_loop.py`): blocked reports, friction files, dead sessions,
    transcripts, resolutions that did not hold, waits that have gone stale -- filed now,
@@ -32,7 +35,8 @@ which survives this file crashing). Two rules hold it together:
 8. **Upkeep** (`tend`): a default branch's uncommitted lockfile carried or restored
    (`fix_drift.py`), any other drift reported and left; tracker issues whose workflow is
    green at the tip closed (`fix_issues.py`); each dev database upgraded to its merged
-   head (`fix_migrate.py`).
+   head (`fix_migrate.py`); and, in the direct flow alone, the commits that turned a
+   default branch red reverted once it has stayed red too long (`fix_revert.py`).
 
 The pass keeps inside the watchdog's stop (`send_deadline`): past its deadline the ship
 under way is ended and held, no further step starts and no session is launched, and the
@@ -40,8 +44,10 @@ record says what was left. Each step prints a line as it starts.
 
 Every pass appends a line to `logs/fix-pass.history.jsonl`, which `fix_stall` reads.
 `"devkit.fixPass"` in the workspace file is `off` (the default), `plan` (write it all,
-do nothing) or `dispatch`. Scheduled runs use `claude-bg`. The record is
-`logs/fix-pass.log`, overwritten per pass.
+do nothing) or `dispatch`. **`off` means this PC sends no fixers, not that nothing runs:**
+the ship task still ships this machine's intents, gated ones included. `plan` is the dry
+run, and ships nothing gated. `harness-switch.py` is the stop. Scheduled runs use
+`claude-bg`. The record is `logs/fix-pass.log`, overwritten per pass.
 
 `tests/test_fix_pass.py` drives the wiring with every subprocess replaced.
 """
@@ -62,6 +68,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
 import agent_tabs
 import broken_pr_menu as menu
+import delivery
 import devkit_project
 import fix_cycle
 import fix_dependabot
@@ -74,15 +81,16 @@ import fix_migrate
 import fix_plan
 import fix_release
 import fix_red
+import fix_revert
 import fix_send
 import fix_visibility
 import gate_evidence
 import git_trust
 import installers
 import ship_intent
+import ship_step
 import sweep
 import worktree
-from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -92,9 +100,6 @@ fix_prs = fix_send.fix_prs
 send_all = fix_send.send_all
 dispatch = fix_send.dispatch
 update_branch = fix_send.update_branch
-# The interpreter resolver the push gate uses: the tree's venv, or the checkout's when
-# the tree has none, so `ship.py --fix` runs with the project's own pre-commit.
-push_gate = load_by_path("run_push_gate", REPO_ROOT / "scripts" / "precommit" / "run_push_gate.py")
 
 Finding = fix_loop.Finding
 Journal = fix_loop.fix_findings.Journal
@@ -121,6 +126,9 @@ RUN_LOCK_WAIT = 300.0
 # Past the watchdog's 25-minute stop (`fix-pass-watchdog.TIMEOUT`): a pass it killed
 # leaves the lock behind, and the next half-hourly fire breaks it.
 RUN_LOCK_STALE = 26 * 60.0
+# How long the ship step waits on the ship task's lock (`ship_step.SHIP_LOCK_NAME`): a fire
+# stops starting ships at 100 seconds. Still held past this, the next pass ships.
+SHIP_LOCK_WAIT = 150.0
 
 # The ship step's share of the watchdog's 25 minutes: no intent starts shipping once the
 # step has run this long, and the next pass ships it. Each ship is a commit stage, a push
@@ -227,100 +235,6 @@ def append_history(account: fix_cycle.Account, now: _dt.datetime, root: Path | N
 # --- the steps ----------------------------------------------------------------------------
 
 
-def provision_for_ship(tree: Path) -> str:
-    """Install the tree's toolchain when neither it nor its checkout has the project's own
-    pre-commit: a line for the record, "" when nothing needed doing.
-
-    `ship.py --fix` refuses without one ("provision first"), and that refusal went to a
-    devkit session: sports_betting's worktree-harmonic-humming-kay, cut with no `.venv`
-    from a checkout with none, was refused on every pass of the 2026-10-02 supervision.
-    Provisioning is one command, and anything a script can do, no session does. A
-    pre-commit on PATH is not the project's: the fixers it runs are the wrong versions.
-    """
-    own = ship_intent.ship.pre_commit_command(
-        tree, sweep.source_checkout(tree), which=lambda _name: None, find_spec=lambda _name: None
-    )
-    if own is not None:
-        return ""
-    steps = worktree.plan_provision(tree, quiet=True)
-    if not steps:
-        return ""
-    ok, notes = worktree.run_provision(tree, steps)
-    if not ok:
-        return "FAILED to provision: " + "; ".join(n for n in notes if n.startswith("FAILED"))
-    return "provisioned its toolchain: " + ", ".join(step.label for step in steps)
-
-
-def not_shipping(
-    intent: ship_intent.Intent,
-    busy: frozenset[str],
-    now: _dt.datetime,
-    mode: str,
-    journal: Journal | None = None,
-) -> str:
-    """The record line for an intent this pass does not ship, or "" for one it does:
-    held (`fix_loop.why_held`), unshippable (filed), or any intent of a dry run."""
-    where = f"{intent.project} {intent.branch}"
-    if held := fix_loop.why_held(busy, intent.tree, now):
-        return f"{where} -- held: {held}"
-    if intent.blocked:
-        fix_loop.fix_findings.file(
-            journal,
-            "intent-unshippable",
-            intent.project,
-            f"{where}: {intent.blocked}",
-            str(intent.tree),
-        )
-        return f"{where} -- NOT shipped: {intent.blocked}"
-    if mode != fix_cycle.DISPATCH:
-        spent = ship_intent.is_spent(intent)
-        return f"{where} -- {'would set aside, already shipped' if spent else 'would ship'}: {intent.subject}"
-    return ""
-
-
-def shipped_line(outcome: ship_intent.Outcome, where: str) -> str:
-    """One line: a refusal's detail is hook output, and its newlines broke the record
-    into rows no reader of it could attribute. A refusal says why on the line
-    `refusal_reason` picks -- its tail is the hook's boilerplate -- and the rest is
-    evidence; for anything else the tail says why."""
-    detail = outcome.detail
-    if outcome.stage == ship_intent.REFUSED:
-        state = ship_intent.read_state(outcome.intent.tree)
-        if output := str(state.get("output", "")):
-            detail = f"{state.get('step', 'commit')}: {ship_intent.refusal_reason(output)}"
-    return f"{where} -- {outcome.stage}: {' '.join(detail.split())[-240:]}"
-
-
-def carried_where(intent: ship_intent.Intent, outcome: ship_intent.Outcome, root: Path) -> str:
-    """The record's name for a ship carried off a retired branch, re-pointing the
-    resolutions that named it.
-
-    The record names what went out, or it reads as a merged branch shipping again. The
-    session's resolutions named the retired name too, whose PR predates them, so they
-    follow the fix to its new one. A hand-named branch never headed a PR, so every
-    resolution naming it does.
-    """
-    if intent.adopt:
-        since = ship_intent.EVER
-    else:
-        since = ship_intent.retired_at(intent.tree, intent.branch)
-    moved = fix_loop.triage.repoint(
-        intent.branch, outcome.intent.branch, since, root / fix_cycle.DEVKIT
-    )
-    return (
-        f"{intent.project} {outcome.intent.branch} (carried off {intent.branch}; "
-        f"{len(moved)} resolution(s) re-pointed)"
-    )
-
-
-def deadline_of(journal: Journal | None) -> float | None:
-    """The `time.monotonic()` the journal's deadline falls at (`Journal.left`), or None
-    for a journal with none: what `ship_intent.bounded` ends a ship by."""
-    if journal is None or journal.left is None:
-        return None
-    return time.monotonic() + journal.left()
-
-
 def ship_intents(
     root: Path,
     projects: list[str],
@@ -331,67 +245,29 @@ def ship_intents(
 ) -> tuple[list[str], list[fix_plan.Failure], bool]:
     """Step 1. `(lines for the record, refused commits as failures, any ship failed)`.
 
-    A push or a PR that failed is retried next pass and filed now (GitHub's own failure
-    only once it lasts: `ship_intent.DEFERRED`); the third element turns the task red
-    over a branch that did not go out. One no PR can be opened from is filed for the
-    devkit session to move. One whose fixer is still busy in its tree waits, and so does
-    one a live session has edited past (`fix_loop.why_held`), and so does every one left
-    once the step has spent `budget` seconds: the steps after it are what send anyone
-    anywhere. The budget bounds when a ship may start; the journal's deadline
-    (`Journal.left`) bounds the one under way, which is ended there and held for the
-    next pass.
+    A gated intent ships here (`ship_step.ship_each`). A direct-flow one is the ship
+    task's, so this only reads it back; a refusal stored there still becomes a failure
+    here, which is how a fixer goes (`ship_step.left_to_ship_task`). A dispatching pass
+    does all of it under the ship task's own lock, so the two exclude each other, and a
+    fire that outlasts `SHIP_LOCK_WAIT` costs this step, which the next pass makes good.
     """
-    lines: list[str] = []
-    refused: list[fix_plan.Failure] = []
-    failed = False
-    started = clock()
-    busy = fix_loop.fixers_working() if mode == fix_cycle.DISPATCH else frozenset()
-    now = _dt.datetime.now(_dt.UTC)
-    for intent in ship_intent.find_intents(root, projects):
-        where = f"{intent.project} {intent.branch}"
-        if line := not_shipping(intent, busy, now, mode, journal):
-            lines.append(line)
-            continue
-        if (shipping := clock() - started) >= budget:
-            lines.append(
-                f"{where} -- held: this pass spent {int(shipping // 60)} min shipping; "
-                f"the next pass ships it"
-            )
-            continue
-        # Flushed as it starts: the record is written only at the end, so a pass stopped
-        # mid-ship otherwise leaves the watchdog no line saying where it was.
-        print(f"fix-pass: shipping {where}", flush=True)
-        base = intent.base or "main"
-        if provisioned := provision_for_ship(intent.tree):
-            lines.append(f"{where} -- {provisioned}")
-        # Read after provisioning, so the commit stage runs with the `.venv` just made.
-        python = push_gate.interpreter(intent.tree)
-        try:
-            with ship_intent.bounded(deadline_of(journal)):
-                outcome = ship_intent.ship_one(intent, python, base)
-        except ship_intent.OutOfTime as stopped:
-            # Ended, not refused: nothing about the change said no, so no fixer is sent.
-            cleared = stopped.ended and ship_intent.clear_index_lock(intent.tree)
-            lines.append(
-                f"{where} -- held: {stopped}{' (its index.lock removed)' if cleared else ''}"
-                f"; the next pass ships it"
-            )
-            continue
-        if outcome.intent.branch != intent.branch:
-            where = carried_where(intent, outcome, root)
-        lines.append(shipped_line(outcome, where))
-        if outcome.stage == ship_intent.REFUSED:
-            refused.append(ship_intent.refusal_failure(outcome, base))
-        if outcome.stage == ship_intent.FAILED:
-            failed = True
-            fix_loop.fix_findings.file(
-                journal,
-                "ship-failed",
-                intent.project,
-                f"{where}: {outcome.detail[:200]}",
-                str(intent.tree),
-            )
-    return lines, refused, failed
+
+    def step() -> tuple[list[str], list[fix_plan.Failure], bool]:
+        intents = ship_intent.find_intents(root, projects)
+        gated = [intent for intent in intents if not intent.direct]
+        direct = [intent for intent in intents if intent.direct]
+        lines, refused, failed = ship_step.ship_each(gated, root, mode, journal, budget, clock)
+        left, stored = ship_step.left_to_ship_task(direct, mode, journal)
+        return lines + left, refused + stored, failed
+
+    if mode != fix_cycle.DISPATCH:
+        return step()
+    name, stale = ship_step.SHIP_LOCK_NAME, ship_step.SHIP_LOCK_STALE
+    with worktree.named_lock(root, name, SHIP_LOCK_WAIT, stale) as held:
+        lock = worktree.boxes_root(root) / name
+        if not held and lock.is_dir():
+            return [f"nothing shipped: the ship task holds {lock}; the next pass ships"], [], False
+        return step()
 
 
 def refresh_installers(workspace: Path, journal: Journal | None = None) -> int:
@@ -435,21 +311,24 @@ def _ship_and_merge(
 
 def _collect(
     workspace: Path,
-    projects: list[str],
+    ctx: fix_loop.Context,
     refused: list[fix_plan.Failure],
-    now: _dt.datetime,
     journal: Journal,
 ) -> tuple[list[fix_plan.Failure], bool | str | None, list[str], list[str]]:
     """Step 4's reading, each source isolated: `(failures, devkit's default-branch
     verdict, the default branches with none, what Dependabot fails on that no session
-    can change)`. A Dependabot read that raised costs its own failures, not the gate's."""
+    can change)`. A Dependabot read that raised costs its own failures, not the gate's.
+    A red only tidy owes is marked once its grace is up, for the plan and the revert step."""
     failures, green, unread = journal.step(
-        "collect", fix_red.collect_red, workspace, projects, refused, default=([], None, [])
+        "collect", fix_red.collect_red, workspace, ctx.projects, refused, default=([], None, [])
     )
     found, notes = journal.step(
-        "dependabot", fix_dependabot.collect, workspace, projects, now, default=([], [])
+        "dependabot", fix_dependabot.collect, workspace, ctx.projects, ctx.now, default=([], [])
     )
-    return failures + found, green, unread, notes
+    marked = journal.step(
+        "tidy-grace", fix_revert.mark_tidy_lapsed, ctx, failures, default=failures
+    )
+    return marked + found, green, unread, notes
 
 
 def _file_failures(lines: list[str], kind: str, journal: Journal) -> None:
@@ -460,14 +339,15 @@ def _file_failures(lines: list[str], kind: str, journal: Journal) -> None:
 
 
 def tend(
-    workspace: Path, ctx: fix_loop.Context, journal: Journal
-) -> tuple[list[str], list[str], list[str]]:
-    """The checkouts' own upkeep, after the send: `(drift, issue, migrate lines)`.
+    workspace: Path, ctx: fix_loop.Context, journal: Journal, failures: list[fix_plan.Failure]
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """The checkouts' own upkeep, after the send: `(drift, issue, migrate, revert lines)`.
 
     Uncommitted drift on a default branch (`fix_drift.tend`), the tracker issues a green
-    tip has answered (`fix_issues.sweep_green`), and each dev database brought to its
-    merged head (`fix_migrate.tend`). Each step isolated, and a line any of them says
-    `FAILED` on is filed against its checkout, as a failed merge is.
+    tip has answered (`fix_issues.sweep_green`), each dev database brought to its merged
+    head (`fix_migrate.tend`), and a direct-flow branch that stayed red reverted
+    (`fix_revert.tend`). Each step isolated, and a line any of them says `FAILED` on is
+    filed against its checkout, as a failed merge is.
     """
     drift = journal.step("drift", fix_drift.tend, workspace, ctx.projects, ctx.mode, default=[])
     issues = journal.step(
@@ -476,10 +356,12 @@ def tend(
     migrated = journal.step(
         "migrate", fix_migrate.tend, workspace, ctx.projects, ctx.mode, default=[]
     )
+    reverted = journal.step("revert", fix_revert.tend, ctx, failures, journal, default=[])
     _file_failures(drift, "drift-failed", journal)
     _file_failures(issues, "issue-close-failed", journal)
     _file_failures(migrated, "migrate-failed", journal)
-    return drift, issues, migrated
+    _file_failures(reverted, "revert-failed", journal)
+    return drift, issues, migrated, reverted
 
 
 def decide(
@@ -488,6 +370,7 @@ def decide(
     newest: str,
     adopting: list[str],
     prefixes: tuple[str, ...],
+    direct: frozenset[str] = frozenset(),
 ) -> tuple[
     fix_cycle.Harness,
     list[fix_plan.Decision],
@@ -495,7 +378,7 @@ def decide(
     list[fix_plan.Decision],
 ]:
     """Steps 4-6's decisions: `(harness, go, held, skipped)`, pure over what was read."""
-    decisions = fix_plan.plan(failures, newest, prefixes)
+    decisions = fix_plan.plan(failures, newest, prefixes, direct)
     classes = fix_cycle.classify_all(failures, prefixes)
     harness = fix_cycle.harness_state(classes, green, adopting)
     go, held = fix_cycle.phase(decisions, classes, harness, prefixes)
@@ -516,7 +399,10 @@ def context(workspace: Path, mode: str, now: _dt.datetime) -> fix_loop.Context:
     devkit_dir = root / fix_cycle.DEVKIT
     booted = fix_loop.fix_reports.booted_at(now)
     history = REPO_ROOT / HISTORY
-    return fix_loop.Context(root, projects, devkit_dir, ledger_path, history, mode, now, booted)
+    direct = delivery.direct_projects(root, projects)
+    return fix_loop.Context(
+        root, projects, devkit_dir, ledger_path, history, mode, now, booted, direct
+    )
 
 
 def pass_journal(devkit_dir: Path, deadline: float) -> Journal:
@@ -563,7 +449,9 @@ def release_and_plan(
     )
     prefixes = fix_release.adoption_prefixes()
     fallback = fix_cycle.only_the_harness(backlog)
-    planned = step("plan", decide, failures, green, newest, adopting, prefixes, default=fallback)
+    planned = step(
+        "plan", decide, failures, green, newest, adopting, prefixes, ctx.direct, default=fallback
+    )
     if "plan" in journal.late:
         # Not the step's fault: the record said it "raised", with nothing filed to match.
         return release, fix_cycle.only_the_harness(backlog, fix_cycle.PLAN_LATE)
@@ -614,7 +502,7 @@ def run(
 
     shipped, refused, ship_failed, merged = _ship_and_merge(root, projects, mode, journal)
     closed = step("read-back", fix_loop.close, ctx, journal, default=fix_loop.Closed())
-    failures, green, unread, unsent = _collect(workspace, projects, refused, now, journal)
+    failures, green, unread, unsent = _collect(workspace, ctx, refused, journal)
     regated, rerun = step("regate", fix_red.regate_unread, root, unread, mode, default=([], set()))
     _file_failures(regated, "regate-failed", journal)
     _file_failures(merged, "merge-failed", journal)
@@ -642,9 +530,8 @@ def run(
     )
     if mode == fix_cycle.DISPATCH:
         step("installers", refresh_installers, workspace, journal, default=2)
-    drift, issues, migrated = tend(workspace, ctx, journal)
+    drift, issues, migrated, reverted = tend(workspace, ctx, journal, failures)
     filed += fix_loop.record(ctx, journal)
-    failed_steps = ship_failed or bool(journal.crashed)
     account = fix_cycle.Account(
         mode,
         harness,
@@ -666,13 +553,14 @@ def run(
         drift=tuple(drift),
         issues=tuple(issues),
         migrated=tuple(migrated),
+        reverted=tuple(reverted),
         late=late_lines(journal),
         working=tuple(closed.at_work),
         person=tuple(step("person", fix_loop.person_steps, ctx, default=[], always=True)),
         owed=step("owed", fix_loop.owed, ctx, default=0, always=True),
     )
     publish(account, now)
-    return exit_code(moved, worst, failed_steps)
+    return exit_code(moved, worst, ship_failed or bool(journal.crashed))
 
 
 def exit_code(

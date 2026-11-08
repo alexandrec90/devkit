@@ -452,6 +452,8 @@ class Account:
     drift: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
     migrated: tuple[str, ...] = ()
+    # The commits reverted off a direct-flow branch that stayed red (`fix_revert`).
+    reverted: tuple[str, ...] = ()
     # What a pass past its send deadline left to the next one (`fix-pass.LATE`).
     late: tuple[str, ...] = ()
     # The tray's half (`tray_state.fix_pass_states`): the fixer trees with a session at
@@ -494,6 +496,7 @@ def render(account: Account) -> str:
         ("drift", account.drift),
         ("issue", account.issues),
         ("migrate", account.migrated),
+        ("revert", account.reverted),
         ("late", account.late),
         ("working", account.working),
         ("you", account.person),

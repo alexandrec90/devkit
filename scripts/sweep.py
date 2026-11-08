@@ -485,13 +485,18 @@ class Result:
 # authorization rather than a request.
 AUTOMERGE_LABEL = "automerge"
 AUTOFIX_LABEL = "autofix"
+# A project in the direct flow (`delivery.py`): merge with no gate consulted, where
+# `automerge` means once the gate passes. The drain job is what acts on it.
+MERGE_NOW_LABEL = "merge-now"
 
 # Colour and description per label `ensure_pr` may need to create. The `automerge`
 # spelling matches `dependabot-automerge.yml`'s `gh label create` exactly -- both
-# use `--force`, so two spellings would flip the label back and forth per run.
+# use `--force`, so two spellings would flip the label back and forth per run. Anything
+# else that creates `merge-now` has to spell it exactly as this does, for the same reason.
 LABEL_SPECS: dict[str, tuple[str, str]] = {
     AUTOMERGE_LABEL: ("0e8a16", "PR the harness may merge once the gate passes"),
     AUTOFIX_LABEL: ("1d76db", "Mechanical changes produced by a repository task"),
+    MERGE_NOW_LABEL: ("d93f0b", "PR the harness merges now, with no gate consulted"),
 }
 
 
