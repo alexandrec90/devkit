@@ -245,6 +245,27 @@ def test_a_full_artifact_older_than_the_run_is_named_as_an_earlier_runs(tmp_path
     assert health.run_artifact(name, root=tmp_path, since=ran) == ""
 
 
+def test_an_earlier_runs_account_points_at_the_marker_of_the_run_in_flight(tmp_path):
+    """1f44005c: "an earlier run's account" was all the 00:30 pass's sweep had, while
+    the pass itself kept the step it was in on disk all along."""
+    name = "devkit-worktree-reconcile"
+    written(tmp_path, name, body="# exit=0\n", age=NOW - dt.timedelta(minutes=30))
+    marker = tmp_path / health.IN_FLIGHT[name]
+    marker.write_text('{"step": "sync checkouts"}', encoding="utf-8")
+    since = NOW - dt.timedelta(minutes=2)
+    hint = health.artifact_hint(name, root=tmp_path, since=since)
+    assert "before this run" in hint and f"see {health.IN_FLIGHT[name]}" in hint
+    marker.unlink()
+    assert "see" not in health.artifact_hint(name, root=tmp_path, since=since)
+
+
+def test_the_in_flight_marker_is_the_one_the_journal_writes(tmp_path):
+    journal = load_script("scripts/reconcile_journal.py")
+    assert health.IN_FLIGHT["devkit-worktree-reconcile"] == journal.RUNNING
+    assert health.in_flight_hint("devkit-docker-prune", tmp_path) == ""
+    assert health.in_flight_hint("x", tmp_path, in_flight={"x": "logs/none.json"}) == ""
+
+
 def test_a_run_artifact_is_only_a_present_full_file_no_older_than_the_run(tmp_path):
     name = "devkit-worktree-reconcile"
     ran = NOW - dt.timedelta(hours=1)

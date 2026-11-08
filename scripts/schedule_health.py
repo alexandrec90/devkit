@@ -155,6 +155,23 @@ ARTIFACTS: dict[str, str] = {
 }
 
 
+# A job that keeps the step its run is in *now*, beside a per-run artifact it writes only
+# once the run ends (`reconcile_journal.RUNNING`). When that artifact is an earlier run's,
+# this is the one file that says where the run in question was: 1f44005c's sweep had
+# "an earlier run's account" and nothing else to read about the 00:30 pass.
+IN_FLIGHT: dict[str, str] = {
+    "devkit-worktree-reconcile": "logs/reconcile.running.json",
+}
+
+
+def in_flight_hint(name: str, root: Path, in_flight: dict[str, str] | None = None) -> str:
+    """`"; see <marker> ..."` when `name` keeps an in-flight marker and one is on disk."""
+    path = (IN_FLIGHT if in_flight is None else in_flight).get(name, "")
+    if not path or not (root / path).is_file():
+        return ""
+    return f"; see {path} for the step a pass still running, or one that died, was last in"
+
+
 def failure_artifact(
     name: str,
     artifacts: dict[str, str] | None = None,
@@ -274,7 +291,7 @@ def artifact_hint(
         return (
             f" -- {path} was last written {written:%Y-%m-%d %H:%M}, before this run: an "
             f"earlier run's account, so this one had not finished or died before writing"
-        )
+        ) + in_flight_hint(name, base)
     if since is not None and written > since:
         return (
             f" -- {path} is empty and was rewritten {written:%Y-%m-%d %H:%M}, after this "

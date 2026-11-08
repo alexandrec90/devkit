@@ -102,6 +102,7 @@ import git_policy
 # seam the hooks use, so a box provisions the way its project says to rather than the way
 # this file guesses.
 import harness_config
+import reconcile_journal
 import sweep
 import task_branch as tb
 import worktree_env
@@ -5310,6 +5311,7 @@ def inspect_boxes(
         if sweep.past_until():
             deferred.append(name)
             continue
+        reconcile_journal.step(f"inspect {name}")
         state, verdict, reason = inspect_box(box, root, fetch=fetch)
         # A preview's PR is the one for the branch it is SHOWING. Looking it up by
         # `box.branch` would ask GitHub about the throwaway `preview/...` ref, get
@@ -5340,6 +5342,7 @@ def sync_in_time(
     if sweep.past_until():
         deferred.append("the checkout sync")
         return 0, {}
+    reconcile_journal.step("sync checkouts")
     return sync_checkouts(workspace, apply=apply, fetch=fetch)
 
 
@@ -5360,6 +5363,7 @@ def reap_decided(
     """Plan the reap `reconcile` decided on for `box` and `settle` it: `(action, ok,
     notes)`. A plan that cannot be made is a failed reap, never a skipped one -- unless
     another reaper destroyed the box meanwhile (`unless_reaped_elsewhere`)."""
+    reconcile_journal.step(f"reap {box}")
     try:
         doomed = plan_reap(box, workspace, keep_stack=keep_stack, fetch=fetch, pr=pr)
     except WorktreeError as exc:
@@ -5776,7 +5780,11 @@ def artifact_root(root: Path, repo_root: Path | None = None) -> Path:
 
 
 def write_reconcile_log(
-    rendered: str, code: int, root: Path = REPO_ROOT, dry_run: bool = False
+    rendered: str,
+    code: int,
+    root: Path = REPO_ROOT,
+    dry_run: bool = False,
+    journal: reconcile_journal.Journal | None = None,
 ) -> Path | None:
     """Persist a reconcile pass to `logs/reconcile.log`. Returns the path, or None.
 
@@ -5808,14 +5816,25 @@ def write_reconcile_log(
     A failing pass is written a second time, to `RECONCILE_FAILED_LOG`, which only the
     next failure replaces: the per-run log belongs to whichever pass ran last.
 
+    `journal` is the pass's timing (`reconcile_journal`): the header then says when the
+    pass started and how long each step took, and the pass is filed in the history that
+    outlives this log.
+
     Best-effort — a reconcile pass that did its work must not report failure because a
     log file could not be written.
     """
     if dry_run:
         return None
     path = root / RECONCILE_LOG
-    stamp = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
-    body = f"# devkit worktree reconcile\n# {stamp}  exit={code}\n\n{rendered}\n"
+    ended = _dt.datetime.now(_dt.UTC)
+    head = (
+        journal.header(code, ended)
+        if journal
+        else f"# {ended.isoformat(timespec='seconds')}  exit={code}"
+    )
+    if journal:
+        reconcile_journal.finish(journal, code, ended)
+    body = f"# devkit worktree reconcile\n{head}\n\n{rendered}\n"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8", newline="\n")
@@ -5835,12 +5854,15 @@ def _run_reconcile(args: argparse.Namespace) -> int:
     traceback is written as the pass's report, and the exception still propagates, so
     the exit code and `main`'s own handling are what they were.
 
-    `--budget` bounds the whole pass (`sweep.until`); see `reconcile`'s `deferred`.
+    `--budget` bounds the whole pass (`sweep.until`); see `reconcile`'s `deferred`. The
+    pass is journaled (`reconcile_journal`) so its start, duration and steps outlive the
+    next pass's log; a dry run journals nothing, as it logs nothing.
     """
     root = artifact_root(args.workspace.parent)
     deadline = time.monotonic() + args.budget if args.budget else None
+    journal: reconcile_journal.Journal | None = None
     try:
-        with sweep.until(deadline):
+        with sweep.until(deadline), reconcile_journal.journaled(root, not args.dry_run) as journal:
             code, report = reconcile(
                 args.workspace,
                 apply=not args.dry_run,
@@ -5854,11 +5876,11 @@ def _run_reconcile(args: argparse.Namespace) -> int:
                 checkouts=args.checkouts,
             )
     except Exception:
-        write_reconcile_log(traceback.format_exc().rstrip(), 1, root, args.dry_run)
+        write_reconcile_log(traceback.format_exc().rstrip(), 1, root, args.dry_run, journal)
         raise
     rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
     print(rendered)
-    write_reconcile_log(rendered, code, root, args.dry_run)
+    write_reconcile_log(rendered, code, root, args.dry_run, journal)
     return code
 
 
