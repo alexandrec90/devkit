@@ -861,9 +861,13 @@ fires only where `gh` **answered** that the branch has no PR — an offline or
 unauthenticated `gh` exits with the same code, so absence of an answer keeps waiting
 forever, and a box holding uncommitted work is held at any age like every other.
 
-The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
+The run is windowless, so its record is `logs/reconcile.log`, overwritten per
 pass and written on success too — a log that appears only on failure cannot be told
-apart from a task that has stopped running. That log's timestamp is also what
+apart from a task that has stopped running. Its header says when the pass started, how
+long it took and when it reached each step. Beside it, `logs/reconcile.history.jsonl`
+keeps the same for the last two days of passes, and `logs/reconcile.running.json` names
+the step a pass is in now (`scripts/reconcile_journal.py`). A pass that dies leaves that
+file behind, and the next pass records it in the history as `unfinished`. That log's timestamp is also what
 `workspace-status.py` reads on its own daily pass: a scheduled task that has been disabled
 looks exactly like one that is working, so the status line says when a pass last
 finished rather than leaving you to notice the drift it causes.
