@@ -46,6 +46,7 @@ import bg_sessions
 import devkit_project
 import fix_findings
 import fix_reports
+import fix_send
 import fix_stall
 import harness_triage as triage
 import session_friction
@@ -163,6 +164,22 @@ def check_ran(record: str, mode: str) -> list[str]:
     ):
         return []
     return [f"the pass did not run in {mode} mode here: {first}"]
+
+
+def stale_dispatch(mode: str, root: Path) -> str:
+    """Why a dispatch from `root` would run as a plan, or "".
+
+    `fix_send.dispatch_mode` turns a dispatch from a linked tree that lacks origin's
+    `scripts/` changes into a plan, and says so only on stderr, which the watchdog keeps.
+    Supervision 2026-11-08: origin's default branch moved seven `scripts/` commits after
+    the rehearsal, and three iterations ran as plans whose record said only `mode=plan`.
+    """
+    if mode != "dispatch" or not (lag := fix_send.stale_tree(root)):
+        return ""
+    return (
+        f"this tree lacks origin's scripts/ changes {lag}, so the pass would run every "
+        "dispatch as a plan -- merge the default branch into this tree, then run again"
+    )
 
 
 def _tracked(line: str) -> bool:
@@ -465,9 +482,16 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return EXIT_REFUSED
+    if why := stale_dispatch(args.mode, REPO_ROOT):
+        print(f"fix-pass-supervise: {why}", file=sys.stderr)
+        return EXIT_REFUSED
     iterations: list[Iteration] = []
     since: _dt.datetime | None = None
     for number in range(1, args.iterations + 1):
+        if iterations and (why := stale_dispatch(args.mode, REPO_ROOT)):
+            # Origin moved during the run: every iteration from here would be a plan.
+            iterations[-1].violations.append(f"stopped before iteration {number}: {why}")
+            break
         iteration = iterate(args.workspace.resolve(), number, args.mode, utc_now, since)
         since = utc_now()
         iterations.append(iteration)
