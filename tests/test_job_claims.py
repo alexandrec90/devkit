@@ -152,7 +152,9 @@ def test_a_claim_passes_a_failing_pre_push_hook_that_would_stop_a_branch(pcs, tm
     a, _, _remote = pcs
     hooks = tmp_path / "hooks"
     hooks.mkdir()
-    (hooks / "pre-push").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (hooks / "pre-push").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8", newline="\n")
+    # Git on Linux ignores a hook without its executable bit, and the control then passes.
+    (hooks / "pre-push").chmod(0o755)
     a("config", "core.hooksPath", hooks.as_posix())
     commit = jc.make_commit(a, "x", NOW)
     assert a("push", "origin", f"{commit}:refs/heads/branch").returncode != 0, "the control"
@@ -261,6 +263,7 @@ def test_a_done_push_the_server_rejected_is_not_done(pcs):
     hook = remote / "hooks" / "update"
     hook.parent.mkdir(exist_ok=True)
     hook.write_text("#!/bin/sh\necho fatal >&2\nexit 1\n", encoding="utf-8", newline="\n")
+    hook.chmod(0o755)  # git on Linux ignores a hook without its executable bit
     run_git(remote, "config", "core.hooksPath", "hooks")
     assert not jc.mark_done(a, jc.done_ref("abc"), "done p/x by pc-a: passed", NOW)
     assert not on_remote(remote, jc.done_ref("abc"))

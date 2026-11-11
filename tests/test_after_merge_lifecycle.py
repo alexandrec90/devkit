@@ -431,6 +431,7 @@ def reject_done(world) -> None:
         encoding="utf-8",
         newline="\n",
     )
+    script.chmod(0o755)  # git on Linux ignores a hook without its executable bit
     git(world.remote(), "config", "core.hooksPath", "hooks")
 
 
