@@ -64,6 +64,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -218,8 +219,11 @@ KILL_GRACE = 10
 
 
 # The `time.monotonic()` past which no `run_bounded` call runs on, whatever its own
-# timeout: a caller's own stop, set with `until`. None outside one.
+# timeout: a caller's own stop, set with `until`. None outside one. Always the earliest
+# of `_deadlines`, the open `until` blocks' own, which `_deadlines_lock` guards.
 _until: float | None = None
+_deadlines: list[float] = []
+_deadlines_lock = threading.Lock()
 
 
 @contextmanager
@@ -232,15 +236,25 @@ def until(deadline: float | None) -> Iterator[None]:
     fix pass's `verify` read took eleven minutes and its `collect` read was still running
     twelve minutes later, each `gh` call inside its own 600 s, and the watchdog stopped
     the pass with no record written (2e2e7804).
+
+    The bound is the process's, so a pool's workers inside a block are held to it. Each
+    block adds and removes only its own deadline: restoring what it saw on entry left a
+    racing thread's deadline set for good once two blocks ended out of order, and every
+    later test on that worker inherited it (2026-11-11).
     """
+    if deadline is None:
+        yield
+        return
     global _until
-    before = _until
-    if deadline is not None and (before is None or deadline < before):
-        _until = deadline
+    with _deadlines_lock:
+        _deadlines.append(deadline)
+        _until = min(_deadlines)
     try:
         yield
     finally:
-        _until = before
+        with _deadlines_lock:
+            _deadlines.remove(deadline)
+            _until = min(_deadlines, default=None)
 
 
 def past_until() -> bool:

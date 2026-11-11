@@ -18,14 +18,33 @@ docker compose up -d
 {{#alembic}}
 alembic upgrade head
 {{/alembic}}
-{{^desktop}}
+{{^shipped}}
 pytest
-{{/desktop}}
+{{/shipped}}
 {{#desktop}}
 dotnet run --project {{ desktop_project }}   # the app, from source
 python scripts/desktop.py test               # its tests (and lint: format + build)
 {{/desktop}}
+{{#electron}}
+cd frontend && npm ci    # installs the app and its toolchain
+npm run dev              # the app, from source, reloading as you edit
+npm run test:run         # unit tests
+npm run test:e2e         # drives the real app; the screenshot lands in logs/ui/
+{{/electron}}
 ```
+{{#electron}}
+
+## Releasing
+
+Push a tag: `git tag v0.1.0 && git push origin v0.1.0`. `.github/workflows/release.yml`
+builds the app, packs it with [electron-builder](https://www.electron.build) and publishes
+the installer as the GitHub release for that tag. That release is the download link to
+share. Installed copies check the same releases on launch and offer a restart once the
+newer version has downloaded.
+
+Until the `CSC_LINK` and `CSC_KEY_PASSWORD` repository secrets hold a code-signing
+certificate, the installer is unsigned and Windows SmartScreen warns on download.
+{{/electron}}
 {{#desktop}}
 
 ## Releasing

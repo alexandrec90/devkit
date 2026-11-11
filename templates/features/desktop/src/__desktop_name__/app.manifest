@@ -5,10 +5,12 @@
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
         <!--
-          asInvoker on purpose. Most theming -- per-user registry keys, the wallpaper,
-          accent colour, app settings files -- needs no administrator, and an app that
+          asInvoker on purpose. Most theming (per-user registry keys, the wallpaper,
+          accent colour, app settings files) needs no administrator, and an app that
           demands it shows a UAC prompt on every launch and on every update restart.
           Ask for elevation per operation instead: `Elevation.RunElevated`.
+          XML forbids a double hyphen in a comment, and Windows then refuses to start
+          the executable, so keep one out of this file.
         -->
         <requestedExecutionLevel level="asInvoker" uiAccess="false" />
       </requestedPrivileges>

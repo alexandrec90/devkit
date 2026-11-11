@@ -1,0 +1,22 @@
+# What `electron-builder` packs. `appId` is the identity of every installed copy: an
+# install only accepts updates carrying the id it was installed with, so it never changes
+# after the first release.
+appId: {{ electron_app_id }}
+productName: {{ display_name }}
+directories:
+  output: release
+files:
+  - out/**
+win:
+  target: nsis
+  # Asked for when the app needs it, never at launch or on update; see CLAUDE.md.
+  requestedExecutionLevel: asInvoker
+nsis:
+  oneClick: true
+  perMachine: false
+# The feed `electron-updater` reads: this repo's GitHub Releases.
+publish:
+  provider: github
+  owner: {{ github_owner }}
+  repo: {{ name }}
+  releaseType: release

@@ -19,9 +19,17 @@
 | App lint | `dotnet format`, and a build with warnings as errors |
 | Scripts and harness | Python {{ python_version }} |
 {{/desktop}}
-{{^desktop}}
+{{#electron}}
+| Language | TypeScript on Electron — `frontend/.nvmrc` pins Node |
+| UI | React (TSX) + Vite, through electron-vite (`{{ app_dir }}`) |
+| Installer and self-update | electron-builder and electron-updater, published to this repo's GitHub Releases |
+| App tests | vitest (`*.test.ts` beside the code), Playwright driving the real app (`frontend/e2e/`) |
+| App lint | `tsc` in strict mode |
+| Scripts and harness | Python {{ python_version }} |
+{{/electron}}
+{{^shipped}}
 | Language | Python {{ python_version }} |
-{{/desktop}}
+{{/shipped}}
 {{#postgres}}
 | Database | PostgreSQL |
 {{/postgres}}
@@ -40,11 +48,42 @@
 {{#frontend}}
 | Front-end | React (TSX) + Vite |
 {{/frontend}}
-{{^desktop}}
+{{^shipped}}
 | Tests | pytest |
 | Lint | ruff |
-{{/desktop}}
+{{/shipped}}
 
+{{#electron}}
+## The desktop app
+
+A Windows app shipped to other people's machines as an installer. Everything below is
+what the code alone does not say.
+
+- **Look at what you changed.** `npm run test:e2e` drives the real app with Playwright and
+  writes `logs/ui/main-window.png`. Read that image after a UI change; a passing test
+  says the page loaded, not that it looks right. Its failures are in
+  `logs/e2e-results.json`. Each new screen gets a test in `frontend/e2e/`.
+- **The page gets nothing from Node.** `sandbox`, `contextIsolation` and
+  `nodeIntegration: false` in `src/main/index.ts` stay as they are, and `e2e/app.spec.ts`
+  holds them. What the page needs from the machine is a narrow function on the bridge in
+  `src/preload/index.ts`, handled in `src/main/`. Never expose `ipcRenderer` or a generic
+  invoke, and never relax the Content-Security-Policy in `src/renderer/index.html`
+  without saying why beside it.
+- **Keep logic out of components and out of main.** Plain modules carry the vitest tests;
+  `src/shared/` is what both sides of the bridge may import.
+- **The installer ships only what `files` in `frontend/electron-builder.yml` lists.** A
+  file the app reads at runtime and that list leaves out works from source and fails
+  installed, which is why the PR gate drives the packaged app
+  (`npm run test:e2e:packaged`), not the source.
+- **Updates come from this repo's GitHub Releases.** `src/main/updates.ts` is the only
+  place the app talks to `electron-updater`: check on launch, download quietly, restart
+  only when the user asks.
+- **A tag is a release.** Push `v<major>.<minor>.<patch>`; `.github/workflows/release.yml`
+  stamps that version into `package.json`, packs the installer and publishes it.
+- **`appId` in `frontend/electron-builder.yml` never changes after the first release.**
+  An installed copy only accepts updates carrying the id it was installed with.
+
+{{/electron}}
 {{#desktop}}
 ## The desktop app
 
@@ -59,8 +98,12 @@ what the code alone does not say.
 - **The compiler is the type checker.** `Directory.Build.props` makes warnings errors,
   so `python scripts/desktop.py lint` (format, then build) fails on a nullable
   dereference. Fix the code; do not suppress the warning without the reason beside it.
+- **Look at what you changed.** `MainWindowTests` fails on a broken `{Binding}`, which
+  otherwise compiles and draws nothing, and writes `logs/ui/main-window.png`. Read that
+  image after a UI change; a passing test says the window drew, not that it looks right.
+  Each new window gets a test like it.
 - **Keep logic out of the windows.** Code-behind wires events to plain classes, and the
-  plain classes carry the tests — a WPF window cannot be constructed in a test host.
+  plain classes carry the tests.
 - **Theming changes belong in storyboards**, as `MainWindow.xaml`'s fade-in shows,
   not in timers that set properties by hand.
 {{#updater}}
@@ -107,16 +150,21 @@ checkout's ports and credentials.
 
 ## Tooling
 
-{{^desktop}}
+{{^shipped}}
 > Everything in this section needs the local Docker Desktop daemon. If it isn't
 > running, make the code change and defer container/stack verification until it is
 > (or to CI). Run `docker ps` first — an `npipe`/daemon error means Desktop is stopped.
-{{/desktop}}
+{{/shipped}}
 {{#desktop}}
 > The app's checks need Windows and the .NET SDK `global.json` names. Without either,
 > `scripts/lint-all.py` and `scripts/run-tests.py` skip the desktop tier with a note
 > and the PR gate's Windows job is the only place it runs.
 {{/desktop}}
+{{#electron}}
+> The app's checks need `npm ci` in `frontend/`. `scripts/lint-all.py` and
+> `scripts/run-tests.py` run its typecheck and vitest; the Playwright suite runs from
+> `npm run test:e2e` and the PR gate's Windows job.
+{{/electron}}
 
 ### Scripts and the vendored harness
 
@@ -151,12 +199,12 @@ terminal output — it scrolls away and buries the signal. Keep the terminal to 
 status line plus the artifact path; put everything needed to diagnose in the file.
 Write the artifact on failure too, not just success, and overwrite per run.
 
-{{^desktop}}
+{{^shipped}}
 ### Docker subprocess calls
 
 - **`docker compose exec` must use `-T`** — without it a pseudo-TTY is allocated and
   the subprocess handle can outlive the command, leaving the caller hung.
-{{/desktop}}
+{{/shipped}}
 
 ## Testing
 

@@ -20,9 +20,9 @@ dependencies = [
   "duckdb>=1.1",
   "boto3>=1.35",
 {{/archive}}
-{{^desktop}}
+{{^shipped}}
   "pydantic-settings>=2.4",
-{{/desktop}}
+{{/shipped}}
 ]
 
 [project.optional-dependencies]
@@ -40,20 +40,25 @@ dev = [
   "pre-commit>=4.6",
 ]
 
+{{#shipped}}
 {{#desktop}}
 # The app is C# (`{{ desktop_solution }}`); Python here is only the harness and the
+{{/desktop}}
+{{#electron}}
+# The app is TypeScript (`frontend/`); Python here is only the harness and the
+{{/electron}}
 # project scripts, so there is no package to build -- uv installs the dev extra alone.
 [tool.uv]
 package = false
-{{/desktop}}
-{{^desktop}}
+{{/shipped}}
+{{^shipped}}
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["{{ src_root }}"]
-{{/desktop}}
+{{/shipped}}
 
 [tool.pytest.ini_options]
 # `testpaths` is what keeps `scripts/hooks/tests/` out of the application suite —

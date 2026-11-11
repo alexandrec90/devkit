@@ -14,6 +14,7 @@ from pathlib import Path
 
 LOCK_COMMAND = ["uv", "lock"]
 SYNC_COMMAND = ["uv", "sync", "--all-extras", "--all-groups"]
+NPM_LOCK_COMMAND = ["npm", "install", "--package-lock-only", "--ignore-scripts"]
 
 
 def _uv_step(command: list[str], root: Path, dry_run: bool, *, skip: str, fail: str) -> bool:
@@ -49,6 +50,30 @@ def lock_dependencies(root: Path, dry_run: bool) -> None:
     )
     if _uv_step(LOCK_COMMAND, root, dry_run, skip=skip, fail="continuing without a lockfile"):
         print("  write   uv.lock")
+
+
+def lock_node_dependencies(app: Path, dry_run: bool) -> None:
+    """Generate `package-lock.json` in `app`, which `npm ci` in the PR gate requires.
+
+    `--package-lock-only` resolves without installing and `--ignore-scripts` runs nothing,
+    so this costs no Electron download. Best-effort like `lock_dependencies`, but it says
+    what is owed: with no lockfile, the first PR's `npm ci` fails.
+    """
+    if dry_run:
+        print(f"  run     {' '.join(NPM_LOCK_COMMAND)}    (in {app.name}/)")
+        return
+    npm = shutil.which("npm")
+    if npm is None:
+        print("  warn    npm is not installed; the PR gate's `npm ci` needs a lockfile")
+        print(f"          run `npm install --package-lock-only` in {app.name}/")
+        return
+    done = subprocess.run([npm, *NPM_LOCK_COMMAND[1:]], cwd=app, capture_output=True, text=True)
+    if done.returncode != 0:
+        print(f"  warn    npm could not lock {app.name}/; the PR gate's `npm ci` needs a lockfile")
+        for line in (done.stderr or done.stdout).strip().splitlines()[-3:]:
+            print(f"          {line}")
+        return
+    print(f"  write   {app.name}/package-lock.json")
 
 
 def provision_environment(root: Path, dry_run: bool) -> None:

@@ -53,7 +53,12 @@ import devkit_project
 import task_branch as tb
 import worktree_tiers
 from devkit_render import TemplateError, render
-from project_env import lock_dependencies, missing_commit_tooling, provision_environment
+from project_env import (
+    lock_dependencies,
+    lock_node_dependencies,
+    missing_commit_tooling,
+    provision_environment,
+)
 
 DEVKIT_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = DEVKIT_ROOT / "templates"
@@ -77,7 +82,12 @@ STACK_FEATURES = ("docker", "app_service", "postgres", "redis", "alembic", "fron
 # stack: an executable on a stranger's PC cannot depend on a compose stack, and skinamp
 # was generated as a `service` -- Postgres and all -- because no shape here fit it.
 DESKTOP_FEATURES = ("desktop", "updater")
-FEATURES = STACK_FEATURES + DESKTOP_FEATURES
+# The other way to ship an installer: a TypeScript app on Electron, for a project whose
+# work is its UI rather than the Windows API. Playwright drives the real app, so an agent
+# can see what it drew, which WPF offers no equivalent of. Excludes the C# shape and the
+# stack alike.
+ELECTRON_FEATURES = ("electron",)
+FEATURES = STACK_FEATURES + DESKTOP_FEATURES + ELECTRON_FEATURES
 
 # Named feature bundles. These exist for the VS Code task: a task picker passes one
 # string, and VS Code cannot build a variable-length argument list from it. They are
@@ -93,12 +103,14 @@ PRESETS: dict[str, tuple[str, ...]] = {
     "fullstack": ("docker", "app_service", "postgres", "alembic", "redis", "frontend"),
     "desktop": ("desktop", "updater"),
     "desktop-static": ("desktop",),
+    "desktop-web": ("electron",),
 }
 
-# Core templates a feature replaces. A desktop project's tests are C#, so the Python
-# smoke test -- which imports a package the desktop shape does not have -- stays behind.
+# Core templates a feature replaces. A shipped app's tests are in its own language, so the
+# Python smoke test -- which imports a package those shapes do not have -- stays behind.
 REPLACED_BY: dict[str, tuple[str, ...]] = {
     "desktop": ("tests/test_smoke.py.tmpl",),
+    "electron": ("tests/test_smoke.py.tmpl",),
 }
 
 # A template path segment spelled `__<name>__` takes that context value, so a C# project
@@ -291,6 +303,16 @@ def pascal_case(name: str) -> str:
     return f"App{joined}" if joined[:1].isdigit() else joined
 
 
+def electron_app_id(owner: str, package: str) -> str:
+    """`io.github.<owner>.<name>`, in the reverse-domain form `electron-builder` asks for.
+
+    Underscores are out because an app id is a bundle identifier on every platform but
+    Windows, and this id cannot be corrected later: an install only accepts updates
+    carrying it.
+    """
+    return f"io.github.{owner.lower()}.{package.replace('_', '-')}"
+
+
 def resolve_features(args: argparse.Namespace) -> None:
     """Turn on what the chosen features imply, and refuse a shape that cannot work.
 
@@ -304,7 +326,12 @@ def resolve_features(args: argparse.Namespace) -> None:
     if args.app_service or args.postgres or args.redis or args.frontend:
         args.docker = True
     stack = [f for f in STACK_FEATURES if getattr(args, f)]
-    if args.desktop and stack:
+    if args.desktop and args.electron:
+        raise GeneratorError(
+            "pick one desktop stack: `desktop` is C#/WPF and `electron` is TypeScript, and "
+            "each owns the app's source tree, its installer and its release workflow."
+        )
+    if (args.desktop or args.electron) and stack:
         raise GeneratorError(
             f"the desktop shape cannot carry {', '.join(stack)}: it ships an executable to "
             f"other people's machines, which has no compose stack to talk to. Keep its "
@@ -394,6 +421,9 @@ def build_context(
     if features["desktop"]:
         # The app is the C# project; there is no Python package to point the harness at.
         app_dir = f"src/{desktop_name}/"
+    elif features["electron"]:
+        # Likewise the Electron app, which is also what the `[frontend]` tier points at.
+        app_dir = "frontend/src/"
     else:
         app_dir = f"src/{package}/" if args.src_layout else f"{package}/"
 
@@ -415,6 +445,10 @@ def build_context(
         "desktop_name": desktop_name,
         "desktop_solution": f"{desktop_name}.slnx",
         "desktop_project": f"src/{desktop_name}/{desktop_name}.csproj",
+        # An app shipped to other people's machines in its own language, so the project
+        # has no Python package, no compose stack and no pytest suite of its own.
+        "shipped": features["desktop"] or features["electron"],
+        "electron_app_id": electron_app_id(args.github_owner, package),
         "tests_dir": "tests/",
         # The layout this generator actually produces is flat -- `tests/test_smoke.py`,
         # no unit/integration split -- so this must be `tests`, not `tests/unit`.
@@ -550,11 +584,11 @@ def _render_or_die(source: Path, context: dict[str, object]) -> str:
 def write_package(plan: Plan, dry_run: bool) -> None:
     """The importable package stub the smoke test and the Dockerfile CMD expect.
 
-    A desktop project gets none: its app is the C# project the templates render, and a
+    A shipped app gets none: its app is the source tree the templates render, and a
     Python package beside it would be a second "app" for an agent to edit.
     """
     app_dir = plan.root / str(plan.context["app_dir"])
-    init = None if plan.context["desktop"] else app_dir / "__init__.py"
+    init = None if plan.context["shipped"] else app_dir / "__init__.py"
     body = f'"""{plan.context["display_name"]}."""\n\n__version__ = "0.1.0"\n'
     unit_tests = plan.root / str(plan.context["unit_tests"])
     if dry_run:
@@ -667,26 +701,28 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
                 shutil.copy2(source / "scripts" / name, plan.root / "scripts" / name)
             else:
                 print(f"  write   scripts/{name}    (bootstrap copy)")
-        run(
-            [
-                sys.executable,
-                "scripts/sync-devkit.py",
-                "--pull",
-                "--src",
-                str(source),
-                # Generating is not adopting a release, so `--pull`'s release guards do
-                # not apply here. They exist to stop an *existing* consumer vendoring
-                # from an unreleased revision it can never pin. This project has no pins
-                # yet: the generator renders both from `latest_devkit_tag() or
-                # FALLBACK_DEVKIT_REF`, which is the tagged ref, not this checkout's HEAD.
-                # Refusing here would mean devkit could not generate a project at all
-                # while it had uncommitted work — which is most of the time.
-                "--allow-dirty",
-                "--allow-untagged",
-            ],
-            plan.root,
-            dry_run,
-        )
+        pull = [
+            sys.executable,
+            "scripts/sync-devkit.py",
+            "--pull",
+            "--src",
+            str(source),
+            # Generating is not adopting a release, so `--pull`'s release guards do
+            # not apply here. They exist to stop an *existing* consumer vendoring
+            # from an unreleased revision it can never pin. This project has no pins
+            # yet: the generator renders both from `latest_devkit_tag() or
+            # FALLBACK_DEVKIT_REF`, which is the tagged ref, not this checkout's HEAD.
+            # Refusing here would mean devkit could not generate a project at all
+            # while it had uncommitted work — which is most of the time.
+            "--allow-dirty",
+            "--allow-untagged",
+        ]
+        run(pull, plan.root, dry_run)
+        # The gated tier is read through the consumer's `harness_config.py`, which the
+        # pull above is what delivers, so that pull answered "off" for every gate. These
+        # are the shapes that render a gate on; `scripts/CLAUDE.md` has the rest.
+        if plan.context["shipped"]:
+            run(pull, plan.root, dry_run)
     # Codex reads project instructions from CLAUDE.md through its configured fallback,
     # but repository skills and hooks still use Codex-specific paths. Runs after the
     # pull because the compatibility script arrives with the vendored harness.
@@ -1079,12 +1115,13 @@ def trust_hint(plan: Plan) -> None:
 
 
 def desktop_hint(plan: Plan) -> None:
-    """The two things a desktop project cannot do for itself before its first release."""
-    if not plan.context["desktop"]:
+    """The two things a shipped app cannot do for itself before its first release."""
+    if not plan.context["shipped"]:
         return
+    signing = "a VPK_SIGN_PARAMS repo secret" if plan.context["desktop"] else "the CSC_LINK secret"
     print("\nNext: ship it — a tag is a release:")
     print("  git tag v0.1.0 && git push origin v0.1.0   (release.yml publishes the installer)")
-    print("  add a VPK_SIGN_PARAMS repo secret once you have a code-signing certificate;")
+    print(f"  add {signing} once you have a code-signing certificate;")
     print("  until then SmartScreen warns on every download")
 
 
@@ -1093,6 +1130,20 @@ def next_steps(plan: Plan) -> None:
     register_slot_hint(plan)
     trust_hint(plan)
     desktop_hint(plan)
+
+
+FEATURE_FLAGS = (
+    ("docker", "docker-compose stack + Dockerfile + .dockerignore"),
+    ("app-service", "an `app` service in the compose stack (implies --with-docker)"),
+    ("postgres", "a Postgres service, DATABASE_URL, and the harness DB test tier"),
+    ("redis", "a Redis service and REDIS_URL"),
+    ("alembic", "alembic.ini and the migration tasks (implies --with-postgres)"),
+    ("frontend", "a Vite frontend service and its npm tasks"),
+    ("archive", "the data-lake archive seam and its rule file"),
+    ("desktop", "a C#/WPF app shipped as an installer (excludes every stack feature)"),
+    ("updater", "Velopack self-update from GitHub Releases (implies --with-desktop)"),
+    ("electron", "a TypeScript Electron app and installer (excludes desktop and the stack)"),
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1125,17 +1176,7 @@ def main(argv: list[str] | None = None) -> int:
         help="a named feature bundle; individual --with-* flags are added on top",
     )
 
-    for feature, help_text in [
-        ("docker", "docker-compose stack + Dockerfile + .dockerignore"),
-        ("app-service", "an `app` service in the compose stack (implies --with-docker)"),
-        ("postgres", "a Postgres service, DATABASE_URL, and the harness DB test tier"),
-        ("redis", "a Redis service and REDIS_URL"),
-        ("alembic", "alembic.ini and the migration tasks (implies --with-postgres)"),
-        ("frontend", "a Vite frontend service and its npm tasks"),
-        ("archive", "the data-lake archive seam and its rule file"),
-        ("desktop", "a C#/WPF app shipped as an installer (excludes every stack feature)"),
-        ("updater", "Velopack self-update from GitHub Releases (implies --with-desktop)"),
-    ]:
+    for feature, help_text in FEATURE_FLAGS:
         parser.add_argument(
             f"--with-{feature}",
             dest=feature.replace("-", "_"),
@@ -1210,6 +1251,8 @@ def main(argv: list[str] | None = None) -> int:
         write_package(the_plan, args.dry_run)
         vendor_harness(the_plan, args.dry_run)
         lock_dependencies(the_plan.root, args.dry_run)
+        if the_plan.context["electron"]:
+            lock_node_dependencies(the_plan.root / "frontend", args.dry_run)
         provision_environment(the_plan.root, args.dry_run)
         git_init(the_plan, args.dry_run)
         register_in_workspace(the_plan, args.dry_run)

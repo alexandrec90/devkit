@@ -2477,6 +2477,10 @@
 						"value": "desktop-static"
 					},
 					{
+						"label": "desktop-web — a TypeScript Electron app: installer + auto-update, for apps whose work is their UI",
+						"value": "desktop-web"
+					},
+					{
 						"label": "bare — no Docker, no database; just the harness and CI",
 						"value": "bare"
 					}
