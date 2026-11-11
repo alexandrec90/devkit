@@ -230,6 +230,16 @@ def test_a_machine_another_is_assigned_to_serves_nothing_and_says_who_does():
     assert elsewhere == ["devkit: served by desktop-a, not here (desktop-b)"]
 
 
+def test_parse_hosts_is_the_one_reading_every_hosts_knob_shares():
+    """`devkit.localE2e` assigns its nightly run with this same parser, and says what
+    it does with a project in its own verb."""
+    assert rc_config.parse_hosts("Desktop-A") == (("*", "desktop-a"),)
+    assert rc_config.parse_hosts({"carameli": "pc-b"}) == (("carameli", "pc-b"),)
+    config = rc_config.Config(hosts=rc_config.parse_hosts("desktop-a"))
+    _, elsewhere = rc_config.assigned_here(config, ["devkit"], "desktop-b", verb="tested")
+    assert elsewhere == ["devkit: tested by desktop-a, not here (desktop-b)"]
+
+
 def test_a_project_named_in_hosts_overrides_the_default_machine():
     config = rc_config.parse_config(
         workspace_text({"projects": "all", "hosts": {"*": "desktop-a", "carameli": "desktop-b"}})

@@ -26,8 +26,20 @@ same move `sweep.py --sync` makes, which never rewrites anything. A checkout tha
 in that state is skipped with the reason written to its result: a person is working in
 it, and it is theirs.
 
-**A project opts in by shipping `scripts/e2e.py`** (`e2e_results.CONTRACT`). One without
-it has no end-to-end tier and is listed as such, never run.
+**Every project owes `scripts/e2e.py`** (`e2e_results.CONTRACT`). One whose
+`origin/<default>` has none is recorded red as a missing tier (`record_missing`), which
+sends its fixer to write one. It is asked of origin, not of the checkout: a checkout a
+person is working in may lag, and the tier a fixer just merged must stop the red the
+next night, whatever branch the static checkout is on. No idle wait comes first, since
+nothing runs.
+
+**One machine tests each project** (`SETTING`'s `hosts`). The workspace file is the same
+on every PC and every PC registers the job, so with several of them each would test
+every project, write its own result and send its own fixer at the same red. `hosts`
+names the machine, in `devkit.remoteControl`'s shape (`rc_config.parse_hosts`): one
+name for every project, or `{"*": "pc-a", "carameli": "pc-b"}` to spread them. Moving
+the job is editing that value; each PC reads it at fire time, so nothing is re-registered.
+Absent, every machine tests its own checkouts, which is right while there is one.
 
 Exits 0 whenever every project reached a verdict, red included; non-zero only when the
 pass itself broke, which `log-wrap.py` files on the ledger as a harness defect.
@@ -40,16 +52,19 @@ from __future__ import annotations
 import argparse
 import ctypes
 import datetime as _dt
+import json
 import os
 import sys
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import devkit_jsonc
 import devkit_project
 import e2e_results
+import rc_config
 import sweep
 import task_branch as tb
 
@@ -59,6 +74,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # can tell the scheduled run from a person's (and, say, refuse to skip what it would
 # skip by hand).
 ENV_FLAG = "DEVKIT_E2E"
+
+# The workspace setting that assigns each project's nightly run to one machine.
+SETTING = "devkit.localE2e"
 
 DEFAULT_IDLE_MINUTES = 10
 DEFAULT_UNTIL = "06:30"
@@ -136,36 +154,23 @@ def wait_for_idle(
 # --- one project --------------------------------------------------------------------------
 
 
-def _said(done: object) -> str:
-    text = f"{getattr(done, 'stderr', '') or ''}\n{getattr(done, 'stdout', '') or ''}"
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return lines[-1] if lines else "no output"
-
-
-def _ok(done: object) -> bool:
-    return done is not None and getattr(done, "returncode", 1) == 0
-
-
-def _out(done: object) -> str:
-    return str(getattr(done, "stdout", "") or "").strip()
-
-
 def prepare(git: Git, base: str) -> tuple[str, str]:
     """`(sha, "")` with the checkout at origin/<base>'s tip, or `("", why)` when it is not
     this pass's to move."""
+    ok, out, said = e2e_results.ok, e2e_results.out, e2e_results.said
     fetched = git("fetch", "--quiet", "origin")
-    if not _ok(fetched):
-        return "", f"git fetch failed: {_said(fetched)}"
-    branch = _out(git("branch", "--show-current"))
+    if not ok(fetched):
+        return "", f"git fetch failed: {said(fetched)}"
+    branch = out(git("branch", "--show-current"))
     if branch != base:
         return "", f"checkout is on {branch or 'a detached HEAD'}, not {base}"
     dirty = git("status", "--porcelain", "--untracked-files=no")
-    if not _ok(dirty) or _out(dirty):
+    if not ok(dirty) or out(dirty):
         return "", "checkout has uncommitted changes to tracked files"
     merged = git("merge", "--ff-only", "--quiet", f"origin/{base}")
-    if not _ok(merged):
-        return "", f"cannot fast-forward to origin/{base}: {_said(merged)}"
-    return _out(git("rev-parse", "HEAD")), ""
+    if not ok(merged):
+        return "", f"cannot fast-forward to origin/{base}: {said(merged)}"
+    return out(git("rev-parse", "HEAD")), ""
 
 
 def run_contract(project_dir: Path, timeout: float, runner=sweep.run_bounded) -> object:
@@ -187,6 +192,8 @@ class Seams:
     sleep: Sleep = time.sleep
     git_for: Callable[[Path], Git] = sweep.git_for
     runner: Callable[..., object] = sweep.run_bounded
+    # This machine, spelled as `hosts` is matched against.
+    host: str = field(default_factory=rc_config.harness_events.host_name)
 
 
 def run_project(
@@ -212,19 +219,31 @@ def run_project(
     done = run_contract(project_dir, timeout, seams.runner)
     output = f"{getattr(done, 'stdout', '') or ''}\n{getattr(done, 'stderr', '') or ''}"
     code = int(getattr(done, "returncode", 1))
-    where = e2e_results.result_dir(name, seams.root)
-    where.mkdir(parents=True, exist_ok=True)
-    (where / e2e_results.OUTPUT_FILE).write_text(output, encoding="utf-8")
-    green = code == 0
-    result = replace(
-        result,
-        status=e2e_results.PASSED if green else e2e_results.FAILED,
-        sha=sha,
-        exit_code=code,
-        finished=stamp(),
-        reason="" if green else ("timed out" if code == sweep.TIMED_OUT else ""),
-        signature=() if green else e2e_results.signature_of(output, code),
-    )
+    why = "timed out" if code == sweep.TIMED_OUT else ""
+    ended = replace(result, sha=sha, finished=stamp())
+    result = e2e_results.verdict(ended, code, output, reason=why)
+    e2e_results.record(result, output, seams.root)
+    return result
+
+
+def record_missing(
+    name: str, project_dir: Path, seams: Seams | None = None
+) -> e2e_results.Result | None:
+    """A project with no tier on origin's tip, recorded; None when origin has one.
+
+    Red when there is a tip to pin it to, so the fix pass sends this project's fixer to
+    write the tier. With no `origin/<default>` there is nothing a fixer could branch
+    from, so that is recorded as a skip naming why.
+    """
+    seams = seams or Seams()
+    git = seams.git_for(project_dir)
+    git("fetch", "--quiet", "origin")
+    base = tb.detect_default_branch(git, fallback="main")
+    if e2e_results.ok(git("cat-file", "-e", f"origin/{base}:{e2e_results.CONTRACT}")):
+        return None
+    stamp = seams.now().isoformat(timespec="seconds")
+    tip = e2e_results.origin_tip(git, base)
+    result = e2e_results.missing_result(name, base, tip, stamp)
     e2e_results.write(result, seams.root)
     return result
 
@@ -234,6 +253,28 @@ def run_project(
 
 def registered(workspace: Path) -> list[str]:
     return devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+
+
+def assignment(text: str) -> rc_config.Config:
+    """`SETTING`'s `hosts` off a workspace file; no hosts for anything absent or broken,
+    which reads as "every machine tests its own"."""
+    try:
+        payload = devkit_jsonc.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return rc_config.Config()
+    settings = payload.get("settings") if isinstance(payload, dict) else None
+    raw = settings.get(SETTING) if isinstance(settings, dict) else None
+    hosts = raw.get("hosts") if isinstance(raw, dict) else None
+    return rc_config.Config(hosts=rc_config.parse_hosts(hosts))
+
+
+def tested_here(workspace: Path, names: list[str], host: str) -> list[str]:
+    """The names `SETTING` assigns this machine, saying where each other one is tested."""
+    config = assignment(workspace.read_text(encoding="utf-8"))
+    here, elsewhere = rc_config.assigned_here(config, names, host, verb="tested")
+    for line in elsewhere:
+        print(line, flush=True)
+    return here
 
 
 def opted_in(workspace: Path, names: Iterable[str]) -> tuple[list[str], list[str]]:
@@ -246,14 +287,20 @@ def opted_in(workspace: Path, names: Iterable[str]) -> tuple[list[str], list[str
     return having, lacking
 
 
-def line_for(result: e2e_results.Result) -> str:
-    if result.status == e2e_results.PASSED:
-        return f"{result.project}: passed at {result.sha[:9]}"
-    if result.status == e2e_results.SKIPPED:
-        return f"{result.project}: skipped -- {result.reason}"
-    shown = ", ".join(result.signature[:3])
-    more = f" (+{len(result.signature) - 3} more)" if len(result.signature) > 3 else ""
-    return f"{result.project}: FAILED at {result.sha[:9]} -- {shown}{more}"
+def to_run_after_all(workspace: Path, lacking: Iterable[str], seams: Seams) -> list[str]:
+    """Record each checkout lacking the script whose origin lacks it too; return the
+    others, whose fast-forward will bring the script in, to be run with the rest."""
+    late: list[str] = []
+    for name in lacking:
+        missing = record_missing(name, workspace.parent / name, seams)
+        if missing is None:
+            late.append(name)
+        else:
+            print(line_for(missing), flush=True)
+    return late
+
+
+line_for = e2e_results.line_for
 
 
 def run_pass(
@@ -269,9 +316,8 @@ def run_pass(
     if unknown:
         print(f"e2e-pass: not registered in the workspace: {', '.join(unknown)}", file=sys.stderr)
         return 2
-    having, lacking = opted_in(workspace, only or known)
-    for name in lacking:
-        print(f"{name}: no {e2e_results.CONTRACT}, so no end-to-end tier")
+    having, lacking = opted_in(workspace, tested_here(workspace, only or known, seams.host))
+    having += to_run_after_all(workspace, lacking, seams)
     deadline = deadline_at(args.until, seams.now())
     need = args.idle_minutes * 60.0
     for name in having:

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import e2e_results
 import fix_cycle
 import fix_ledger
 import fix_plan
@@ -237,6 +238,63 @@ def test_a_gate_refused_over_billing_is_not_the_harness_even_when_shared():
     assert billed in shared
     assert {fix_cycle.classify(f, shared) for f in red} == {fix_cycle.PROJECT}
     assert fix_cycle.harness_state(fix_cycle.classify_all(red), True, []).clean
+
+
+def _missing_tier(project: str) -> fix_plan.Failure:
+    return failure(
+        kind=fix_plan.LOCAL,
+        project=project,
+        number=0,
+        head="",
+        workflow=e2e_results.WORKFLOW,
+        signature=(e2e_results.MISSING,),
+    )
+
+
+def test_a_missing_tier_is_each_projects_own_even_when_every_project_shares_it():
+    """2026-11-06: eleven projects without `scripts/e2e.py` shared the one `MISSING` line,
+    so they read as one cause and were folded into a devkit session. A signature that
+    says a project's own file is absent names no cause to share, and no devkit change
+    writes any project's tests."""
+    red = [_missing_tier(p) for p in ("carameli", "roguelike", "skinamp")]
+    shared = fix_cycle.shared_signatures(red)
+    assert (e2e_results.MISSING,) in shared
+    assert {fix_cycle.classify(f, shared) for f in red} == {fix_cycle.PROJECT}
+    assert fix_cycle.harness_state(fix_cycle.classify_all(red), True, []).clean
+
+
+def test_a_missing_tier_goes_to_a_fixer_in_each_project_through_the_whole_cycle():
+    """`fix_plan.plan` had always made these one dispatch each, and its test passed while
+    `phase` folded them back together: what goes out is what this pins."""
+    names = ("carameli", "roguelike", "skinamp")
+    red = [_missing_tier(p) for p in names]
+    classes = fix_cycle.classify_all(red)
+    go, held = fix_cycle.phase(
+        fix_plan.plan(red, "v0-11-83", PREFIXES),
+        classes,
+        fix_cycle.harness_state(classes, True, []),
+    )
+    assert [(d.action, [f.project for f in d.failures]) for d in go] == [
+        (fix_plan.DISPATCH, [name]) for name in names
+    ]
+    assert held == []
+
+
+def test_a_missing_tier_waits_behind_a_red_harness_like_any_project_fixer():
+    """Being the project's own is what makes it holdable: the one devkit session goes
+    alone, and a harness failure beside these does not drag them into it."""
+    vendored = failure(
+        project="devkit", kind=fix_plan.BRANCH, number=0, head="", signature=VENDORED
+    )
+    red = [vendored, _missing_tier("carameli"), _missing_tier("roguelike")]
+    classes = fix_cycle.classify_all(red)
+    go, held = fix_cycle.phase(
+        fix_plan.plan(red, "v0-11-83", PREFIXES),
+        classes,
+        fix_cycle.harness_state(classes, True, []),
+    )
+    assert [f.project for d in go for f in d.failures] == ["devkit"]
+    assert [d.failures[0].project for d, _ in held] == ["carameli", "roguelike"]
 
 
 def test_classify_all_is_keyed_like_the_ledger():

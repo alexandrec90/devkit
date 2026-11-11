@@ -44,7 +44,8 @@ what the hook runs and CI does not, are both held to a written reason by
 - **`templates/` is a one-shot copy.** `--pull` never looks at a template again, so every
   fix made here after a project was generated stays here. The one exception is a copy the
   project never edited: `template_refresh.py`, run in every adoption box, replaces one
-  byte-identical to an earlier version of a template it lists. A project's own edits
+  byte-identical to an earlier version of a template it lists, a rendered line it names
+  (`RENDERED_LINES`) aside. A project's own edits
   keep it out of reach, so when a file stops having a per-project value, move it into
   `MANIFEST` rather than leaving it rendered.
 - **A file that only one tier can use goes in `GATED_MANIFEST`, not in `templates/`.**
@@ -68,8 +69,10 @@ what the hook runs and CI does not, are both held to a written reason by
   gate where no `$DEVKIT_DIR` exists — `sync_devkit.codex_hooks_stale` is that check.
   Regenerating on `--pull` is not enough alone: a project only pulls when asked to.
   The `.agents/skills/` mirror is the same shape: `--pull` re-mirrors it
-  (`remirror_codex_skills`), so does `ship.py --fix` before every commit the pass makes
-  (`mirror_codex_skills`), and the vendored `test_sync_codex_context.py` is its check.
+  (`remirror_codex_skills`), so does `ship.py --fix` before every gated commit the pass
+  makes (`mirror_codex_skills`), and the vendored `test_sync_codex_context.py` is its check.
+  A direct-flow commit runs no `ship.py --fix`, so there it stays stale until `ship.py
+  --tidy` runs after the merge.
 
 ## `templates/` is content, not source
 
@@ -184,6 +187,38 @@ log. Four things a change must keep:
   user; `devkit_schtasks.secured` names the user, and
   `tests/test_installer_contract.py` fails a document that would need elevation.
 
+**One job is the exception to that rule and to "scheduled jobs run unelevated", and there
+can only be one.** `devkit-elevated` (`install-elevated-worker.py`) is
+`support.ELEVATED_EXEMPTION`, reason beside it: ending a stuck `WSLService` is refused to
+every unelevated token, and a dispatcher running tasks as admin would run merged code as
+admin. A second elevated job is a design change, not a second entry; the contract test
+holds `HighestAvailable` to that one file. What a change there must keep, because each
+looks like the house pattern and is a privilege escalation here:
+
+- **The residual risk, which cannot be closed.** The installer and the interpreter it
+  copies are read from places the user can write, the checkout and on a typical PC an
+  `AppData` Python, so the install assumes a clean machine at that moment. What runs
+  afterwards is a copy in `C:\ProgramData\devkit\elevated\`, so a merged change cannot
+  reach it. Upgrading is an administrator re-running `--yes` by choice.
+- **The harness never prompts for it.** An unreviewed merge plus a prompted admin paste
+  is the dispatcher this design refused. `--check` reports a missing or outdated worker;
+  `fix_elevated.py` files a person's step only for a real request waiting on a PC with no
+  worker, never for an upgrade, and a working installed worker keeps working. It stays
+  out of `installers.py` (`HELD_OUT`), which runs unelevated.
+- **Not `register`, `secured` or `logged`.** `register` hands an elevated `schtasks` a file
+  in the user's temp folder; `secured` grants the user full access to the task, which lets
+  them rewrite its action; `logged` would run `log-wrap.py` from the checkout as admin.
+  Its document is written into the locked folder and carries a read-only descriptor, read
+  back after registering and by `elevated_request.state` every pass. It is
+  `OFF_THE_LEDGER`, its artifact is the one outside `logs/`, and a failed or refused run
+  reaches the pass through `elevated_request.results`.
+- **`ROOT` is never `mkdir` then ACL.** `make_protected` creates it with its descriptor
+  in one call, and `tree_problems` reads back the owner and ACL of everything beneath
+  before anything there runs, on a reinstall too, refusing rather than reusing.
+- **The name of an empty file is the whole interface** (`elevated_worker.py`): no content
+  read, no argument, nothing from the environment, which here is the user's. It is
+  Windows-only, and elsewhere each part says so and exits 0.
+
 Every installer declares `TASK_NAME` and `ARTIFACT`, because `pythonw.exe` sends stdout
 nowhere and a job leaves exactly what it writes itself;
 [`tests/test_scheduled_jobs.py`](../tests/test_scheduled_jobs.py) fails one that skips
@@ -191,12 +226,12 @@ either. **And every job's arguments go through `devkit_schtasks.logged`**, which
 them under `log-wrap.py --always` -- a runner that writes its own artifact included,
 because that artifact is overwritten by the next run and the wrapper's ledger event is
 not. Its label must not slug to the runner's own artifact. The exemptions -- the
-resident tray, and the fix pass, whose runner files its own -- are `OFF_THE_LEDGER` in
-`tests/test_installer_contract.py`, each with its reason.
+resident tray, the fix pass, whose runner files its own, and the elevated worker -- are
+`OFF_THE_LEDGER` in `tests/test_installer_contract.py`, each with its reason.
 
 **An installer is driven, not remembered.** `scripts/installers.py` runs every
-`scripts/install-*.py`'s `--check` on a schedule and `--yes` on each that needs it, so
-an installer is only as good as its answer to `--check`: exit 0 current, 1 needs
+`scripts/install-*.py`'s `--check` on a schedule, bar `HELD_OUT`, and `--yes` on each that
+needs it, so an installer is only as good as its answer to `--check`: exit 0 current, 1 needs
 (re)installing, 2 left alone. Answer it through `devkit_schtasks.run_check`, handing it
 the same document `--yes` registers, never a private parse of `schtasks` output — six
 installers each carried one, all six compared only the script path, and none could see
@@ -219,6 +254,26 @@ as `logs/e2e/<project>/result.json`, and `e2e_results.collect` hands it to the f
 as a `fix_plan.LOCAL` failure. Keep the job's non-zero exit for the pass itself breaking.
 `e2e_results.py` carries the rest, including why a run older than the tip is held
 rather than sent.
+
+## The test tiers
+
+CI is Linux, so a check that must also hold on Windows needs a job on a PC. Each tier
+runs after the last, and none stands between a change and `main`.
+
+| Tier | Runs | Where | When | Job |
+| --- | --- | --- | --- | --- |
+| fast | the `PR Gate` workflow | CI | every commit | `.github/workflows/pr-gate.yml` |
+| medium | each project's `scripts/run-tests.py`, whole suite | a PC whose `devkit.fixPass` is `dispatch`, one project at a time | every 15 minutes, whatever the person is doing; never takes focus | `devkit-medium-tier` |
+| heavy | each project's `scripts/e2e.py`, may take focus | the PC `devkit.localE2e` assigns | nightly, once the PC is idle | `devkit-local-e2e` |
+| full | the `Nightly` workflow | CI | nightly | `.github/workflows/nightly.yml` |
+
+The medium tier is `e2e_results.MEDIUM`: the same result file in its own folder, and the
+same `fix_plan.LOCAL` red, so a change to either tier's result reaches both. What differs
+is `tier-pass.py`'s to say. It tests only the tip, in a tree nobody works in
+(`disposable_tree.py`), so a red can span many merges: its fixer bisects from
+`Result.last_green`. A tree has no `.env` and no stack, so a project that needs either is
+not applicable, never red (`tier_command.not_applicable`), and what stops a run judging
+at all is a backoff and a count, not a ledger row (`tier_state.py`).
 
 ## The events ledger: append-only, and that is why resolution is an event
 

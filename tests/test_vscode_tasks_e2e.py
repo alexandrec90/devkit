@@ -179,6 +179,23 @@ def judge(results: list[dict], receipts: Path) -> list[str]:
     return problems
 
 
+NEVER_STARTED = " [accept]: never started"
+
+
+def never_started(problems: list[str]) -> list[str]:
+    """The labels `judge` says an accepted run never started, in its order."""
+    return [line.split(NEVER_STARTED)[0] for line in problems if NEVER_STARTED in line]
+
+
+def second_look(problems: list[str], again: list[dict], found: list[str]) -> list[str]:
+    """`problems` with each never-started line a fresh window re-ran replaced by what that
+    window `found`. 50917bb2: a task with no input at all "never started after 120s (76
+    picks answered)" in a full run, and the same label passed in 134 s alone. Which of
+    the editor and the task broke is what a fresh window answers."""
+    redone = tuple(f"{result['label']}{NEVER_STARTED}" for result in again)
+    return [line for line in problems if not line.startswith(redone)] + found
+
+
 # --- the pure half, which CI runs ---------------------------------------------------------
 
 
@@ -262,6 +279,26 @@ def test_the_judge_names_each_broken_contract(tmp_path):
     ]
 
 
+def test_a_second_look_clears_a_wedged_window_and_keeps_a_broken_task():
+    first = [
+        "wedged [accept]: never started after 120s (76 picks answered)",
+        "broken [accept]: never started after 120s (9 picks answered)",
+        "stale [escape]: started fully resolved after Escape",
+        "unseen [accept]: never started after 120s (1 picks answered)",
+    ]
+    assert never_started(first) == ["wedged", "broken", "unseen"]
+    again = [
+        {"label": "wedged", "mode": "accept", "started": True},
+        {"label": "broken", "mode": "accept", "started": False},
+    ]
+    found = ["broken [accept]: never started after 120s (98 picks answered)"]
+    assert second_look(first, again, found) == [
+        "stale [escape]: started fully resolved after Escape",
+        "unseen [accept]: never started after 120s (1 picks answered)",
+        "broken [accept]: never started after 120s (98 picks answered)",
+    ], "a label the second window was not given stays red"
+
+
 def test_the_receipt_appends_what_it_was_handed(tmp_path):
     assert receipt.main([str(tmp_path), "A: B", "--", "python", "x.py", "v"]) == 0
     assert receipt.main([str(tmp_path), "A: B", "--", "python", "x.py", "w"]) == 0
@@ -282,34 +319,46 @@ def test_every_task_resolves_its_inputs_and_honours_escape_in_real_vscode(tmp_pa
     wanted = devkit_jsonc.loads(CANONICAL.read_text(encoding="utf-8"))["extensions"]
     absent = sorted(set(wanted["recommendations"]) - set(extensions))
     assert not absent, f"the picker extensions are not installed here: {absent}"
-    receipts = tmp_path / "receipts"
-    receipts.mkdir()
     extensions_dir = tmp_path / "extensions"
     for source in extensions.values():
         shutil.copytree(source, extensions_dir / source.name)
-    user = tmp_path / "user-data" / "User"
+    results, problems = click(code, extensions_dir, tmp_path / "run", os.environ.get(ONLY_ENV, ""))
+    if suspects := never_started(problems):
+        wanted = ",".join(suspects)
+        again, found = click(code, extensions_dir, tmp_path / "second-look", wanted)
+        problems = second_look(problems, again, found)
+    assert results, "the plan drove no task"
+    assert not problems, "\n".join(problems)
+
+
+def click(code: Path, extensions_dir: Path, where: Path, only: str) -> tuple[list[dict], list[str]]:
+    """One window on a profile of its own in `where`: `(its results, what `judge` found)`."""
+    receipts = where / "receipts"
+    receipts.mkdir(parents=True)
+    user = where / "user-data" / "User"
     user.mkdir(parents=True)
     (user / "settings.json").write_text(json.dumps(SETTINGS), encoding="utf-8")
     rendered = render(CANONICAL.read_text(encoding="utf-8"), receipts)
-    workspace = tmp_path / "e2e.code-workspace"
+    workspace = where / "e2e.code-workspace"
     workspace.write_text(json.dumps(rendered, indent=2), encoding="utf-8")
-    out = tmp_path / "report.json"
+    out = where / "report.json"
+    tasks = plan_for(rendered["tasks"]["tasks"], only)
     plan = {
         "out": str(out),
-        "tasks": plan_for(rendered["tasks"]["tasks"], os.environ.get(ONLY_ENV, "")),
+        "tasks": tasks,
         "step_ms": STEP_MS,
         "settle_ms": SETTLE_MS,
         "task_timeout_ms": TASK_TIMEOUT_MS,
         "escape_timeout_ms": ESCAPE_TIMEOUT_MS,
     }
-    (tmp_path / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    (where / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "ELECTRON_RUN_AS_NODE"}
-    env["DEVKIT_VSCODE_E2E_PLAN"] = str(tmp_path / "plan.json")
+    env["DEVKIT_VSCODE_E2E_PLAN"] = str(where / "plan.json")
     done = subprocess.run(
         [
             str(code),
             str(workspace),
-            f"--user-data-dir={tmp_path / 'user-data'}",
+            f"--user-data-dir={where / 'user-data'}",
             f"--extensions-dir={extensions_dir}",
             f"--extensionDevelopmentPath={DRIVER}",
             f"--extensionTestsPath={DRIVER / 'run.js'}",
@@ -330,6 +379,5 @@ def test_every_task_resolves_its_inputs_and_honours_escape_in_real_vscode(tmp_pa
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["missingCommands"] == [], "VS Code no longer has the commands the driver sends"
     assert done.returncode == 0, f"VS Code exited {done.returncode}: {done.stderr[-800:]}"
-    assert len(report["results"]) == len(plan["tasks"]), "the driver stopped part-way"
-    problems = judge(report["results"], receipts)
-    assert not problems, "\n".join(problems)
+    assert len(report["results"]) == len(tasks), "the driver stopped part-way"
+    return report["results"], judge(report["results"], receipts)

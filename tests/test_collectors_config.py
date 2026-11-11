@@ -25,6 +25,32 @@ def workspace(settings: dict) -> str:
 # --- the workspace setting -------------------------------------------------------
 
 
+@pytest.mark.parametrize("kind", [{"service": "app"}, {"command": ["x"], "minutes": 5}])
+def test_either_kind_may_declare_its_placement(kind):
+    entry = {**kind, "handoff": ["x"], "memoryGb": 1.5, "rebalance": True}
+    collectors, errors = config.parse_setting(workspace({config.SETTING: {"p": entry}}))
+    assert errors == []
+    assert (collectors[0].memory_gb, collectors[0].rebalance) == (1.5, True)
+
+
+@pytest.mark.parametrize(
+    ("placement", "refused"),
+    [
+        ({"memoryGb": True}, "memoryGb"),
+        ({"memoryGb": -1}, "memoryGb"),
+        ({"memoryGb": "2"}, "memoryGb"),
+        ({"rebalance": "yes", "handoff": ["x"]}, "`rebalance` must be"),
+        ({"rebalance": True}, "needs a `handoff`"),
+    ],
+)
+@pytest.mark.parametrize("kind", [{"service": "app"}, {"command": ["x"], "minutes": 5}])
+def test_a_malformed_placement_is_refused(kind, placement, refused):
+    entry = {**kind, **placement}
+    collectors, errors = config.parse_setting(workspace({config.SETTING: {"p": entry}}))
+    assert collectors == []
+    assert refused in errors[0]
+
+
 def test_a_declared_collector_is_read_with_its_health_command():
     text = workspace(
         {config.SETTING: {"ibkr_trader": {"service": "app", "health": ["ibkr-trader", "health"]}}}

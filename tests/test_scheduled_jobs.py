@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT, load_script
+from support import ELEVATED_EXEMPTION, REPO_ROOT, load_script
 
 schedule_health = load_script("scripts/schedule_health.py")
 
@@ -94,6 +94,11 @@ def test_a_job_names_the_artifact_it_leaves(name, module):
         f"`log-wrap.py --always` (see install-docker-prune.py) or point ARTIFACT at the "
         f"log its runner already writes."
     )
+    if name in ELEVATED_EXEMPTION:
+        # It writes nowhere but its admin-only folder, so `logs/` is the one place it
+        # cannot be; still a file a reader can open.
+        assert artifact.startswith("C:/ProgramData/devkit/"), f"{name}: {artifact}"
+        return
     assert artifact.startswith("logs/"), f"{name}: {artifact} is not under logs/"
 
 
@@ -340,6 +345,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/installers.py": "devkit-installers runs it daily and at logon; it spawns every installer",
     "scripts/fix-pass-watchdog.py": "devkit-fix-pass runs it every half hour; it spawns the pass",
     "scripts/fix-pass.py": "the watchdog spawns it every half hour, behind the workspace switch",
+    "scripts/ship-pass.py": "devkit-ship runs it every 2 minutes; it spawns through ship_intent",
     "scripts/ship_intent.py": "the fixers, commit and push the pass makes per intent, and the runner it hands fix-prs.py",
     "scripts/fix-prs.py": "the worktree cut and the session the pass opens; spawns only through the runner it is handed",
     "scripts/gate_evidence.py": "the gh the pass reads every gate through",
@@ -349,9 +355,13 @@ UNATTENDED: dict[str, str] = {
     "scripts/log-wrap.py": "the wrapper every job but the tray is launched through",
     "scripts/e2e-pass.py": "devkit-local-e2e runs it nightly; it spawns each project's e2e.py",
     "scripts/e2e.py": "the pass spawns devkit's own; it spawns pytest over the local tier",
+    "scripts/tier-pass.py": "devkit-medium-tier runs it every 15 minutes; it spawns each suite",
+    "scripts/disposable_tree.py": "the git worktree add and remove that pass makes per run",
     "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
     "scripts/collector_tasks.py": "the schtasks that pass makes, and each scheduled collector's fire",
     "scripts/collector_handoff.py": "the project's handoff command that pass asks and imports through",
+    "scripts/elevated_worker.py": "devkit-elevated runs the installed copy every 5 minutes",
+    "scripts/elevated_request.py": "the schtasks query the fix pass asks after the worker with",
     # reached from `workspace-status.py --notify`, which is the one script that imports
     # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.
     "scripts/notify.py": "the Windows PowerShell the status pass raises its toast through",
@@ -385,11 +395,14 @@ DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/tray_state.py": "scripts/schedule_health.py",
     "scripts/fix-pass.py": "scripts/ship_intent.py",
     "scripts/fix-prs.py": "scripts/ship_intent.py",
+    "scripts/ship-pass.py": "scripts/ship_intent.py",
     "scripts/gate_evidence.py": "scripts/sweep.py",
     "scripts/broken_pr_menu.py": "scripts/sweep.py",
     "scripts/session_trees.py": "scripts/sweep.py",
     "scripts/e2e-pass.py": "scripts/sweep.py",
     "scripts/e2e.py": "scripts/sweep.py",
+    "scripts/tier-pass.py": "scripts/sweep.py",
+    "scripts/disposable_tree.py": "scripts/sweep.py",
 }
 
 SPAWN_ATTRS = frozenset({"run", "Popen", "call", "check_call", "check_output"})
@@ -1161,6 +1174,13 @@ def test_every_branch_delivery_job_has_an_installer_here():
     switch = load_script("scripts/harness-switch.py")
     covered = {module.TASK_NAME for _name, module in branch_delivery_installers()}
     assert covered == set(switch.BRANCH_DELIVERY_JOBS)
+
+
+def test_the_elevated_worker_writes_the_file_its_installer_advertises():
+    """Under `HOME`, the folder the worker may write in; slashed, as `ARTIFACTS` is."""
+    installer = load_script("scripts/install-elevated-worker.py")
+    runner = load_script("scripts/elevated_worker.py")
+    assert installer.ARTIFACT == "/".join([*runner.HOME.split("\\"), runner.LOG_NAME])
 
 
 def test_the_collectors_pass_writes_the_file_its_installer_advertises():

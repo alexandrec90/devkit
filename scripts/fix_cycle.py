@@ -45,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
+import e2e_results
 import fix_ledger
 import fix_plan
 
@@ -165,8 +166,11 @@ def _harness_shaped(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> 
     Nor is a gate GitHub refused to start over billing (`fix_plan.is_billing_refused`):
     every consumer shares it, and as harness it held every project fixer behind a red no
     session could clear -- the plan skips it as a person's step.
+    Nor is a project with no local end-to-end tier (`e2e_results.is_missing`): the one
+    line says a file each project owns is absent, which is eleven gaps and not one cause,
+    and a devkit session can write no project's tests. Its fixer goes to that project.
     """
-    if fix_plan.is_billing_refused(failure.signature):
+    if fix_plan.is_billing_refused(failure.signature) or e2e_results.is_missing(failure.signature):
         return False
     return failure.kind != fix_plan.DEPENDABOT and (
         failure.project == DEVKIT
@@ -448,6 +452,8 @@ class Account:
     drift: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
     migrated: tuple[str, ...] = ()
+    # The commits reverted off a direct-flow branch that stayed red (`fix_revert`).
+    reverted: tuple[str, ...] = ()
     # What a pass past its send deadline left to the next one (`fix-pass.LATE`).
     late: tuple[str, ...] = ()
     # The tray's half (`tray_state.fix_pass_states`): the fixer trees with a session at
@@ -490,6 +496,7 @@ def render(account: Account) -> str:
         ("drift", account.drift),
         ("issue", account.issues),
         ("migrate", account.migrated),
+        ("revert", account.reverted),
         ("late", account.late),
         ("working", account.working),
         ("you", account.person),

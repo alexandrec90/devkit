@@ -67,11 +67,13 @@ REASON_LIMIT = 400
 # A launch's diagnosis is a status page, not a line: `claude daemon status` is ~800 chars.
 DIAGNOSIS_LIMIT = 2000
 
-# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words, and
-# of its PowerShell tool's protected-path check (9a2a5478: an `rm` inside `docker exec`).
+# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words, of
+# its PowerShell tool's protected-path check (9a2a5478: an `rm` inside `docker exec`), and
+# of its built-in `rm` check (b945aedf: a target built from variables).
 CLAUDE_CODE_GUARD = re.compile(
     r"too complex to verify|stays? inside the worktree|cannot be shown not to be git|"
-    r"isolated in the worktree|worktree isolation guard|protected from removal",
+    r"isolated in the worktree|worktree isolation guard|protected from removal|"
+    r"Dangerous rm operation",
     re.I,
 )
 
@@ -238,6 +240,32 @@ UNTRUSTED_SAID = "Workspace not trusted"
 def untrusted(said: str) -> bool:
     """Whether a launcher's words are its refusal of an untrusted checkout."""
     return UNTRUSTED_SAID in said
+
+
+# Where Claude Code keeps the answer to its trust prompt, per directory.
+CLAUDE_CONFIG = Path.home() / ".claude.json"
+
+
+def trusted(checkout: Path, config: Path | None = None) -> bool:
+    """Whether Claude Code holds a yes to its trust prompt for `checkout` or a parent.
+
+    A parent's yes covers what is under it, and an entry's own `False` is only what any
+    first visit writes, so only a yes says anything. A file that cannot say is not a yes:
+    the hold this feeds (`fix_send._untrusted`) lasts while a refusal is open, and the
+    person's documented step of resolving that group still ends it."""
+    try:
+        text = (config or CLAUDE_CONFIG).read_text(encoding="utf-8")
+        projects = json.loads(text).get("projects")
+    except (OSError, ValueError, AttributeError):
+        return False
+    if not isinstance(projects, dict):
+        return False
+    accepted = {
+        Path(key)
+        for key, entry in projects.items()
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+    }
+    return checkout in accepted or not accepted.isdisjoint(checkout.parents)
 
 
 def launch_untrusted(tree: Path) -> bool:

@@ -60,7 +60,7 @@ markers = [
   "claude_live: paid opt-in smoke tests that launch an authenticated Claude Code CLI session",
   "codex_live: paid opt-in smoke tests that launch an authenticated Codex CLI session",
   "paid: tests that may consume paid live infrastructure and are excluded by default",
-  "local: needs this workstation, not a runner; run nightly by scripts/e2e.py, skipped where it cannot run",
+  "local: needs this workstation, not a runner; deselected by addopts, run nightly by scripts/e2e.py",
 ]
 
 [tool.mypy]
@@ -72,8 +72,9 @@ python_version = "3.12"
 # resolves it by happening to check that directory too. `lint-all.py --changed` passes
 # only the changed files, so the same import became "Cannot find implementation or
 # library stub" -- a gate that failed on exactly the files that had been edited, which
-# is every time it matters.
-mypy_path = ["scripts", "scripts/hooks", "scripts/precommit"]
+# is every time it matters. `tests/vscode_e2e` likewise, for the `receipt` module
+# `tests/test_vscode_tasks_e2e.py` imports the same way.
+mypy_path = ["scripts", "scripts/hooks", "scripts/precommit", "tests/vscode_e2e"]
 warn_unused_ignores = true
 warn_redundant_casts = true
 # The one note mypy prints for every untyped function it skipped, on a clean run too:

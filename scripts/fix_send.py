@@ -90,7 +90,16 @@ def code_moved(root: Path) -> str:
 
 
 def origin_tip(git: sweep.Git) -> str:
-    """`origin/<default>`'s commit, fetched first; "" when the fetch fails."""
+    """The commit this checkout is meant to be at, fetched first; "" when the fetch fails.
+
+    `origin/green` where it exists, the ref `fix-pass-watchdog.update_target` follows.
+    Read off `origin/<default>` the pass would be held forever whenever `main` is ahead
+    of its last passing commit, which in the direct flow is most of the time.
+    """
+    git("fetch", "--quiet", "origin", "+refs/heads/green:refs/remotes/origin/green")
+    known = git("rev-parse", "--verify", "--quiet", "refs/remotes/origin/green")
+    if known.returncode == 0:
+        return known.stdout.strip()
     head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip()
     base = head.removeprefix("origin/") or "main"
     if git("fetch", "--quiet", "origin", base).returncode != 0:
@@ -158,9 +167,9 @@ def hold_if_moved(
 
 
 # A background fixer measured ~450 MB (the session and its pty host) once it loads no
-# MCP server; the floor leaves the person at the machine room for their own work.
+# MCP server.
 SESSION_MB = 500
-MEMORY_FLOOR_MB = 2048
+MEMORY_FLOOR_MB = host_memory.FLOOR_MB
 HELD_FOR_MEMORY = "held for memory"
 # Why a session is not launched by a pass past its deadline (`fix-pass.SEND_RESERVE_SECONDS`
 # before the watchdog's stop). A launch provisions a tree and starts a session, 1-2.5
@@ -241,11 +250,28 @@ def push_clean_merge(failure: fix_plan.Failure, root: Path) -> int:
 def _state(gh, number: int | str) -> str:
     """The PR's state (`OPEN`, `CLOSED`, `MERGED`), or "" when it cannot be read. A URL
     for `number` reads a PR in any repository, from wherever `gh` runs."""
-    done = gh("pr", "view", str(number), "--json", "state")
     try:
+        done = gh("pr", "view", str(number), "--json", "state")
         return str(json.loads(done.stdout or "{}").get("state", "")) if done.returncode == 0 else ""
-    except (ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError):  # no `gh`, or no checkout for it to run in
         return ""
+
+
+def closed_since(failure: fix_plan.Failure, root: Path) -> str:
+    """The record line for a PR that closed or merged after the plan read it, or "".
+
+    Sends run minutes after the read that planned them, each behind a tree and a session
+    before it. Dependabot closed carameli #512 and deleted its branch in that gap, so the
+    resolve found no branch and filed a `resolve-failed` (4b29b7ac); had a tree still held
+    that head, a fixer would have opened at a closed PR. Only a state read as closed stops
+    a send: "" is `gh` not answering, and the send's own failure says more than that does.
+    """
+    if failure.kind != fix_plan.PR or not failure.number:
+        return ""
+    state = _state(sweep.gh_for(root / failure.project), failure.number)
+    if state in ("", "OPEN"):
+        return ""
+    return f"{state.lower()} since the plan read it; nothing to send"
 
 
 def dispatch(
@@ -295,7 +321,7 @@ def send_all(
     room = host_memory.available_mb()
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
-        if why := _occupied(decision, closed):
+        if why := _held(decision, ctx, closed, items or []):
             capped.append((decision, why))
             continue
         problem = fix_ledger.problem_key(decision)
@@ -341,6 +367,13 @@ def _no_time(decision: fix_plan.Decision, left: Callable[[], float] | None) -> s
     return f"{HELD_FOR_TIME}: this pass is past its send deadline; the next pass sends it"
 
 
+def _held(
+    decision: fix_plan.Decision, ctx: fix_loop.Context, closed: fix_loop.Closed, history: list
+) -> str:
+    """Why this decision goes nowhere this pass whatever its budget says, or ""."""
+    return _occupied(decision, closed) or _untrusted(decision, ctx, history)
+
+
 def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
     """Why a session is already where this one would go, or "": the one devkit session
     at the harness, or any live session in the branch's own tree.
@@ -361,6 +394,24 @@ def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
         else None
     )
     return f"a session is working in {tree}" if tree else ""
+
+
+def _untrusted(decision: fix_plan.Decision, ctx: fix_loop.Context, history: list) -> str:
+    """Why this session would only be refused, or "": its checkout has a launch refusal
+    open and is not trusted yet. The reason names a person's step, so it is no stale wait
+    (`fix_stall.tracked`).
+
+    Each re-send cut a fresh tree and was refused the same way, and a failure with no PR
+    has no tree to find again: 94 under photolab in three days (0edfe2b4). The devkit
+    session opens its tree in devkit, whatever projects its failures name.
+    """
+    if decision.action in (*fix_plan.NO_SESSION, fix_plan.UPSTREAM):
+        return ""
+    project = decision.failures[0].project
+    checkout = ctx.root / project
+    if project not in fix_loop.awaiting_trust(history) or fix_reports.trusted(checkout):
+        return ""
+    return f"held: {fix_loop.untrusted_detail(checkout)}"
 
 
 def named_by(decision: fix_plan.Decision, fixes: tuple[tuple[int, str], ...]) -> str:
@@ -394,16 +445,19 @@ def _send_one(
 ) -> tuple[str, int]:
     """Dispatch one decision the budget let through; `(record line, exit code)`.
 
-    The ledger is written only for a dispatch that opened; one that did not is filed.
+    The ledger is written only for a dispatch that opened; one that did not is filed. A
+    PR that closed since the plan is neither: nothing went wrong and nothing is owed.
     """
     if not ctx.writes:
         would = {fix_plan.UPDATE: "update the branch", fix_plan.RERUN: "re-run the workflow"}
         return f"would {would.get(decision.action, f'send ({decision.action})')}", EXIT_OK
+    first = decision.failures[0]
+    if gone := closed_since(first, ctx.root):
+        return gone, EXIT_OK
     how = agent_models.Launch(launch.agent, launch.model, effort) if effort else launch
     problem = fix_ledger.problem_key(decision)
     code, said = _saying(dispatch, decision, ctx.root, how, problem)
     if code != EXIT_OK:
-        first = decision.failures[0]
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         detail, kind = f"{names}: {decision.note[:160]}", f"{decision.action}-failed"
         if fix_reports.untrusted(said):

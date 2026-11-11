@@ -63,6 +63,20 @@ def test_claude_codes_isolation_guard_is_not_filed_on_devkits_ledger():
         assert classes([call("git -C .. status", "1"), result(refusal, "1")]) == []
 
 
+def test_claude_codes_rm_check_is_not_filed_on_devkits_ledger():
+    """b945aedf: the same reason as the guard above. Its wording says "requires explicit
+    approval", a near miss for `blocked-call`'s "requires approval"; if it ever reads as
+    that, every refusal reopens a group devkit cannot fix."""
+    refusal = (
+        "Permission for this command was denied by a built-in Claude Code safety check, not "
+        "by the user. What was flagged: Dangerous rm operation detected in `rm -f $A/$f/x`. "
+        "The target '$A/$f/x' is a shell variable expansion: when $A or $f is unset or empty "
+        "it becomes `/`, `/*` or a top-level path. This requires explicit approval and "
+        "cannot be auto-allowed by permission rules."
+    )
+    assert classes([call("rm -f $A/$f/x", "1"), result(refusal, "1")]) == []
+
+
 REJECTED = (
     "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if "
     "it was a file edit, the new_string was NOT written to the file)."
@@ -307,6 +321,53 @@ def test_the_sleep_guards_powershell_refusal_is_not_a_blocked_call():
     assert classes([_tool("PowerShell", "1", command=command), result(refusal, "1")]) == []
 
 
+# Both of these came back from Claude Code's isolation guard, unrun, in one subagent.
+PATCH_SCRIPT = (
+    "cat > /dev/null <<'EOF'\nEOF\n.venv/Scripts/python.exe - <<'PY'\n"
+    "p = Path('scripts/after-merge-pass.py')\n"
+    "p.write_text(p.read_text().replace('a\\\\nb', 'c'))\nPY"
+)
+NO_VERIFY_PUSH = "git push --quiet --no-verify origin HEAD:refs/heads/x"
+GUARD_REFUSAL = (
+    "This agent is isolated in the worktree C:\\ws\\.claude\\worktrees\\a, but this command "
+    "feeds python text naming git in a plain command, which cannot be shown to stay inside "
+    "the worktree. Refusing to run it, as a worktree-isolated agent's git operations must "
+    "target its own worktree."
+)
+
+
+@pytest.mark.parametrize(
+    ("command", "filed"),
+    [(PATCH_SCRIPT, "heredoc-write"), (NO_VERIFY_PUSH, "no-verify")],
+)
+def test_a_command_refused_before_it_ran_did_none_of_what_it_says(command, filed):
+    """2865249b and 004d53f9: the 7th heredoc-write and 4th no-verify recurrence were both
+    calls the guard refused, so no file was written and nothing was pushed. The two groups
+    were retired detector by detector, each fix reading the command's text, and neither
+    could see what the result said: the command never ran."""
+    assert classes([call(command, "1"), result(GUARD_REFUSAL, "1")]) == []
+    # A refusal retracts only its own call: the same command that ran first stands.
+    ran = [call(command, "1"), result("", "1", error=False)]
+    assert classes([*ran, call(command, "2"), result(GUARD_REFUSAL, "2")]) == [filed]
+    # Filed still when it ran and failed, the refusal's words in its output included.
+    for output in ("Exit code 1\nboom", f"Exit code 1\n{GUARD_REFUSAL}"):
+        assert classes([call(command, "1"), result(output, "1")]) == [filed], output
+
+
+@pytest.mark.parametrize(
+    ("refusal", "filed"),
+    [
+        (GUARD_REFUSAL, []),
+        ("Permission for this command was denied by a built-in Claude Code safety check", []),
+        ("<tool_use_error>Blocked: rm -rf / is not allowed</tool_use_error>", ["blocked-call"]),
+        (REJECTED, ["user-rejected"]),
+    ],
+)
+def test_every_refusal_retracts_the_command_and_keeps_its_own_class(refusal, filed):
+    """The refusal's own class stands: only what the command would have done is taken back."""
+    assert classes([call(NO_VERIFY_PUSH, "1"), result(refusal, "1")]) == filed
+
+
 def test_no_verify_in_a_scratch_repository_is_a_fixture_not_a_bypass():
     """7ce3ea59: a release repro committed its fixture with `--no-verify` in a clone
     under the job's `tmp/`. Nothing there is gated, so nothing was skipped."""
@@ -327,6 +388,67 @@ def test_no_verify_in_a_scratch_repository_is_a_fixture_not_a_bypass():
         "cd /tmp/x && git status; cd /ws/devkit && git push --no-verify",
     ):
         assert classes([call(command, "1")]) == ["no-verify"], command
+
+
+def test_a_scratch_repository_named_by_a_variable_or_a_step_inside_it_is_still_scratch():
+    """004d53f9: a probe of `--force-with-lease` set `S=` to its scratchpad, `cd "$S"`, then
+    `cd a` into the clone it made there. Each step left `where` reading as no scratch path,
+    so the fixture's pushes read as a bypass of the tree the session was in."""
+    probe = (
+        'S="C:/Users/a/AppData/Local/Temp/claude/9eed/scratchpad/gitprobe"; mkdir -p "$S"; '
+        'cd "$S"; git init -q --bare remote.git; git init -q a; cd a; '
+        "git remote add origin ../remote.git; git commit -q --allow-empty -m first; "
+        "git push -q origin HEAD:refs/heads/main; "
+        "git push --quiet --no-verify --force-with-lease=refs/devkit/claim/x: origin x; "
+        "echo rc=$?"
+    )
+    assert sf.scratch_only(probe)
+    assert classes([call(probe, "1")]) == []
+    assert sf.scratch_only("S=/tmp/x; git -C $S commit --no-verify -m x")
+    assert sf.scratch_only("cd /tmp/x; git -C a/b commit --no-verify -m x")
+    assert sf.scratch_only("cd ${S:-x}; cd /tmp/x; git push --no-verify")
+    scratch = "C:/Users/a/AppData/Local/Temp/x"
+    assert sf.entered(scratch, "a") == f"{scratch}/a"
+    # Out of the scratch tree, by whatever spelling, is the tree the session was in.
+    assert sf.entered(scratch, "/ws/devkit") == "/ws/devkit"
+    assert sf.entered(scratch, "../../ws") == "../../ws"
+    assert sf.entered("/ws/devkit", "a") == "a"
+    for command in (
+        "cd /tmp/x; cd ../../ws/devkit; git push --no-verify",
+        "cd /tmp/x; cd $REPO; git push --no-verify",
+        "cd /tmp/x; cd C:/ws/devkit; git push --no-verify",
+        'S=/ws/devkit; cd /tmp/x; cd "$S"; git push --no-verify',
+        "S=/tmp/x; S=/ws/devkit; cd $S; git push --no-verify",
+        "cd $S; git push --no-verify",
+    ):
+        assert classes([call(command, "1")]) == ["no-verify"], command
+
+
+def test_a_no_verify_commit_the_same_call_takes_back_is_not_a_bypass():
+    """ded3ca52: a session carried a dirty tree over a rebase in a WIP commit -- the exact
+    call -- since the stash stack is shared. The commit never outlived its call, so no
+    hook guarded anything it skipped."""
+    carried = (
+        'git add -A; git commit -q -m "WIP e2e missing tier" --no-verify; '
+        "git rebase origin/main 2>&1 | Select-Object -Last 3; git log --oneline -3; "
+        "git reset --soft HEAD~1; git reset -q; git status --short"
+    )
+    assert classes([call(carried, "1")]) == []
+    for undo in ("git reset HEAD^", "git reset -q --soft HEAD~", "git reset --mixed @~1"):
+        assert sf.taken_back(f"git commit --no-verify -m wip && {undo}"), undo
+    assert sf.taken_back(
+        "git commit --no-verify -m a; git commit --no-verify -m b; git reset HEAD~2"
+    )
+    for command in (
+        "git commit --no-verify -m x",
+        "git reset HEAD~1; git commit --no-verify -m x",
+        "git commit --no-verify -m wip; git push; git reset --soft HEAD~1",
+        "git commit --no-verify -m wip; git commit -m real; git reset --soft HEAD~1",
+        "git push --no-verify; git reset --soft HEAD~1",
+        "git merge --no-verify topic; git reset --soft HEAD~1",
+    ):
+        assert classes([call(command, "1")]) == ["no-verify"], command
+    assert not sf.taken_back("git status"), "no --no-verify, nothing to excuse"
 
 
 def test_the_prescribed_wait_and_a_sleep_in_source_text_are_not_polls():
@@ -379,6 +501,43 @@ def test_a_backgrounded_wait_is_one_call_and_its_notice_not_a_poll():
     backgrounded = {"type": "assistant", "message": {"content": [block]}}
     assert classes([backgrounded]) == []
     assert classes([call(loop, "1")]) == ["poll"], "in the foreground it holds the turn"
+
+
+# 2d4d52ac: what Claude Code answers a foreground call it takes out of the foreground, and
+# the one wait a subagent then has, since a subagent that ends its turn has returned.
+MOVED = (
+    "Command was moved to the background (ID: bl2dpflqw) after running for 180s. Output is "
+    "being written to: C:\\T\\tasks\\bl2dpflqw.output. You will be notified when it completes."
+)
+WAIT_ON_MOVED = (
+    'F="C:/T/tasks/bl2dpflqw.output"; until grep -qE "[0-9]+ passed" "$F"; do sleep 2; done; '
+    'tail -8 "$F"'
+)
+
+
+def subagent(rows: list[dict]) -> list[str]:
+    """`classes` of `rows` as a subagent's transcript records them, through `st.events`,
+    which is what reads a record's own fields."""
+    marked = tuple((n, {**row, "isSidechain": True}) for n, row in enumerate(rows, 1))
+    return sorted(cls for cls, _, _ in sf.detect(st.events(Path("agent-x.jsonl"), marked)))
+
+
+def test_a_subagent_waiting_on_the_call_claude_code_moved_is_not_polling():
+    """It did as the rule says and ran the job in the foreground; Claude Code moved it at
+    180 s whatever its `timeout`, and the notice it promises cannot reach a subagent that
+    has returned. One foreground loop on the file it was told to read is the only wait left."""
+    moved = [call("python -m pytest tests/test_x.py", "1"), result(MOVED, "1", error=False)]
+    rows = [*moved, call(WAIT_ON_MOVED, "2"), result("3 passed", "2", error=False)]
+    assert subagent(rows) == []
+    assert classes(rows) == ["poll"], "a top-level session gets the notice, so it can stop"
+
+
+def test_a_subagents_loop_on_anything_else_is_still_a_poll():
+    """Only the call Claude Code moved: its other waits are the habit."""
+    rows = [call("python -m pytest tests/test_x.py", "1"), result(MOVED, "1", error=False)]
+    other = "until grep -q done logs/other.log; do sleep 2; done"
+    assert subagent([*rows, call(other, "2")]) == ["poll"]
+    assert subagent([call(WAIT_ON_MOVED, "2")]) == ["poll"], "nothing was moved"
 
 
 def test_a_pause_between_distinct_runs_is_not_a_poll():
@@ -435,6 +594,9 @@ def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
     flat = " ".join(section.split())
     assert "A subagent gets no notice before it returns" in flat
     assert "in the foreground instead" in flat
+    # 2d4d52ac, the twelfth: Claude Code moves that foreground call out at 180 s, and the
+    # one wait left is the one `MOVED_TO_BACKGROUND` excuses.
+    assert "one `until` loop on the file named when Claude Code moves that call out" in flat
 
 
 def test_a_module_the_tree_itself_holds_is_a_code_defect_not_the_environment(tmp_path):
@@ -526,6 +688,28 @@ def test_reading_the_harness_own_logs_back_is_not_the_friction_they_quote():
     ):
         rows = [call(command, "1"), result("session is isolated in the worktree ...", "1")]
         assert classes(rows) == [], command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git log --oneline -5 -- x.py; grep -n "psutil" /c/ws/devkit/logs/fix-pass.log | cut -c1-200',
+        "git status; tail -n 30 logs/fix-pass.watchdog.log",
+        "git log -1; python scripts/harness_triage.py 2>&1 | head -40",
+        "git status; cat ../../logs/findings/friction-b20a1de608.txt",
+        "git status; type logs\\findings\\friction-b20a1de608.txt",
+    ],
+)
+def test_the_passs_own_record_read_back_is_not_the_environment(command):
+    """8860784d: a rescue session's `git log` sat beside a grep of `logs/fix-pass.log`, whose
+    "filed" line quotes another project's traceback. It exited 0, the `git` put its output
+    in front of the environment check, and that line was filed as devkit missing psutil --
+    a module devkit does not import. The same goes for what the triage script prints."""
+    quoted = (
+        "359:filed    productivity-tracker environment: ModuleNotFoundError: "
+        "No module named 'psutil' Traceback (most recent call last): File"
+    )
+    assert classes([call(command, "1"), result(quoted, "1", error=False)]) == []
 
 
 def test_an_environment_failure_is_seen_through_a_pipe_that_hid_its_exit_code():
@@ -1143,6 +1327,8 @@ def test_a_whole_run_interrupted_at_collection_checked_nothing():
     ], "a whole run that ran the suite has checked the change"
     nothing = [conftest, call(first, "1"), result("no tests ran in 0.01s", "1"), rerun]
     assert classes(nothing) == [], "a run that collected nothing checked nothing"
+    refused = [conftest, call(first, "1"), result(GUARD_REFUSAL, "1"), rerun]
+    assert classes(refused) == [], "a run refused before it started checked nothing"
     passed = [conftest, call(first, "1"), result("95 passed in 3.28s", "1", error=False), rerun]
     assert classes(passed) == ["full-suite"]
 
@@ -1294,6 +1480,61 @@ def test_a_whole_suite_under_a_scope_rule_older_than_its_spelling_is_the_pull_ow
     assert sf.asks_for_targeted_runs(str(REPO_ROOT), tmp_path, "devkit"), (
         "devkit's own rule carries the spelling the detector reads"
     )
+
+
+def fresh_project(root: Path, *committed: str) -> Path:
+    """A generated project's tree: the scope rule, and `committed` as its only history."""
+    (root / ".claude" / "rules").mkdir(parents=True)
+    (root / sf.SCOPE_RULE).write_text(SCOPE_RULE_TEXT, encoding="utf-8")
+    (root / "tests").mkdir()
+    for name in committed:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text("def test_x():\n    pass\n", encoding="utf-8")
+    for command in (
+        ["init", "-q"],
+        ["config", "core.hooksPath", str(root / ".nohooks")],
+        ["add", "-A"],
+        ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "x"],
+    ):
+        subprocess.run(["git", *command], cwd=root, check=True, capture_output=True)
+    return root
+
+
+def test_a_whole_run_of_a_suite_the_session_is_writing_is_the_targeted_run(tmp_path):
+    """435e2137: an agent-terminal session building a project from its generated commit
+    ran `pytest tests` over the 16 test files it had written, the one `test_smoke.py` it
+    was generated with beside them. With no suite older than the work, naming every file
+    would have run the same tests: nothing was wasted, and nothing could have narrowed it."""
+    run = ".venv\\Scripts\\python.exe -m pytest tests -q --no-header 2>&1 | Select-Object -Last 2"
+    chunk = st.Chunk(((1, user("build me a terminal")), (2, call(run, "1"))), 0)
+
+    def kinds(cwd: Path) -> list[str]:
+        return [
+            f.kind for f in sf.session_findings(tmp_path / "s.jsonl", chunk, str(cwd), tmp_path)
+        ]
+
+    fresh = fresh_project(
+        tmp_path / "fresh", "tests/test_smoke.py", f"{sf.VENDORED_TESTS}test_vendored.py"
+    )
+    (fresh / "tests" / "test_app.py").write_text("def test_y():\n    pass\n", encoding="utf-8")
+    assert kinds(fresh) == []
+    grown = fresh_project(tmp_path / "grown", "tests/test_smoke.py", "tests/e2e/test_app.py")
+    assert kinds(grown) == ["full-suite"], "two committed test files are a suite to narrow"
+
+
+def test_a_suite_only_git_can_vouch_for_is_never_called_new(tmp_path):
+    """No repository, a tree gone or git failing says nothing about the suite's age, so
+    the finding stands -- and a hard failure must not cost the harvest."""
+    assert not sf.suite_is_this_change(str(tmp_path / "gone"))
+    (tmp_path / "plain").mkdir()
+    assert not sf.suite_is_this_change(str(tmp_path / "plain"))
+
+    def broken(*_args, **_kwargs):
+        raise OSError("no git")
+
+    assert not sf.suite_is_this_change(str(tmp_path), runner=broken)
+    empty = subprocess.CompletedProcess([], 0, "\n", "")
+    assert sf.suite_is_this_change(str(tmp_path), runner=lambda *a, **k: empty)
 
 
 def test_a_heredoc_write_is_friction_only_where_the_rule_bans_it(tmp_path):
@@ -1896,6 +2137,105 @@ def test_a_scratch_program_reaching_for_a_package_its_tree_never_imports_is_not_
     [row] = sf.detect(events)
     assert sf.reached_past_the_tree(row, [roguelike])
     assert not sf.reached_past_the_tree(("poll", row[1], row[2]), [roguelike]), "its class only"
+
+
+def test_a_scratch_program_on_the_machines_python_never_asked_the_trees_environment(tmp_path):
+    """27c0d85a: a productivity-tracker session ran a scratchpad script under the bare
+    `python` -- the exact call -- in a `claude --worktree` tree, which builds its `.venv` on
+    its first test run. The tree imports psutil, so the import excuse did not hold; but
+    the machine's interpreter lacking it says nothing of any environment the tree is owed."""
+    ran = (
+        "$p = Get-Command python | Select-Object -First 1 -ExpandProperty Source; $p; "
+        'python -c "import psutil; print(psutil.__version__)"; '
+        f'python "{SCRATCH}\\sess.py"'
+    )
+    said = (
+        "Exit code 1\nC:\\Users\\a\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe\n"
+        'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\n'
+        "    import psutil; print(psutil.__version__)\n"
+        "ModuleNotFoundError: No module named 'psutil'\n"
+    )
+    files = {"src/host.py": "import psutil\n", "pyproject.toml": "[build-system]\n"}
+    tree = _git_tree(tmp_path / "productivity-tracker", files)
+    borrowing = _git_tree(
+        tmp_path / "borrows", {"host.py": "import psutil\n", "pyproject.toml": ""}
+    )
+    assert sf.builds_its_own_venv(str(tree)) and not sf.builds_its_own_venv(str(borrowing))
+    assert not sf.builds_its_own_venv(""), "no tree to read"
+
+    def judged(command: str) -> list[str]:
+        rows = [call(command, "1"), result(said, "1")]
+        events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+        return [row[0] for row in sf.judged(events, str(tree), tmp_path)]
+
+    assert classes([call(ran, "1"), result(said, "1")]) == ["environment"], "the premise"
+    assert judged(ran) == []
+    assert judged(f'python "{SCRATCH}\\sess.py"') == [], "the script alone"
+    assert judged("python -m pytest tests/test_host.py") == ["environment"], "not throwaway"
+    own = '.venv/Scripts/python.exe -c "import psutil; psutil.cpu_count()"'
+    assert judged(own) == ["environment"], "its own interpreter"
+
+
+# 78d19a1f and 5ba01dec: one devkit review measuring how photolab behaves on a fresh tree.
+CLONE = r"C:\Users\x\AppData\Local\Temp\claude\9e\scratchpad\review\photolab-clone"
+CLONE_RUN = (
+    f"$c='{CLONE}'; Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue; "
+    "Push-Location -LiteralPath $c; "
+    "& 'C:\\ws\\photolab\\.venv\\Scripts\\python.exe' -m pytest tests -x -q --tb=line"
+)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        CLONE_RUN,
+        f'cd "{CLONE}" && .venv/Scripts/python.exe -m pytest tests',
+        'c="/tmp/clone"; cd "$c" && pytest tests',
+        'Set-Location -Path "$env:TEMP\\clone"; python -m pytest',
+    ],
+)
+def test_a_whole_run_in_a_scratch_clone_is_a_measurement_of_the_clone(command):
+    """No gate runs that clone, and no change is in it to target, so there is nothing
+    narrower it could have been asked for; `scratch_only` says the same of a `--no-verify`
+    there."""
+    assert sf.scratch_suite(command)
+    assert "full-suite" not in classes([call(command, "1")])
+
+
+def test_where_a_command_ends_up_is_its_last_step_read_through_what_it_bound():
+    assert sf.in_scratch("$c = 'C:\\Temp\\x'; Set-Location $c")
+    assert sf.in_scratch('d="/tmp/x"; pushd "${d}"')
+    assert not sf.in_scratch("cd /tmp/x && cd /c/ws/photolab")
+    assert not sf.in_scratch("$c = 'C:\\ws\\photolab'; Set-Location $c"), "bound, not scratch"
+    assert not sf.in_scratch("cd $unbound")
+    assert not sf.in_scratch("echo /tmp/x"), "it never stepped there"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python -m pytest tests",
+        'cd "C:\\ws\\photolab" && python -m pytest tests',
+        "cd /tmp/clone && cd /c/ws/photolab && python -m pytest tests",
+        "python -m pytest tests; cd /tmp/clone && pytest tests",
+        "$c='C:\\ws\\photolab'; Push-Location -LiteralPath $c; python -m pytest tests",
+        "cd /tmp/clone && python scripts/run_push_gate.py",
+    ],
+)
+def test_a_whole_run_anywhere_else_is_still_filed(command):
+    assert not sf.scratch_suite(command)
+    assert "full-suite" in classes([call(command, "1")])
+
+
+def test_a_scratch_clones_run_under_another_checkouts_venv_owes_the_tree_nothing(tmp_path):
+    """The module photolab's static `.venv` lacked is no environment any tree of this
+    session was owed: `uv sync` in the clone settled it two calls later."""
+    tree = _git_tree(tmp_path / "devkit", {"x.py": "\n"})
+    said = "Exit code 4\ntests\\conftest.py:19: in <module>\nE   ModuleNotFoundError: No module named 'httpx'\n"
+    rows = [call(CLONE_RUN, "1"), result(said, "1")]
+    events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+    assert "environment" in classes(rows), "the premise"
+    assert [row[0] for row in sf.judged(events, str(tree), tmp_path)] == []
 
 
 def _bash_spelling(path: Path) -> str:

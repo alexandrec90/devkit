@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import json
 import subprocess
 from pathlib import Path
 
@@ -77,7 +78,17 @@ def test_idle_is_forever_where_there_is_no_session_to_disturb(monkeypatch):
 # --- one project --------------------------------------------------------------------------
 
 
-def fake_git(branch: str = "main", dirty: str = "", fetch: int = 0, ff: int = 0, log=None):
+def fake_git(
+    branch: str = "main",
+    dirty: str = "",
+    fetch: int = 0,
+    ff: int = 0,
+    log=None,
+    on_origin: bool = True,
+    tip: str = "b31b60cbbbbb",
+):
+    """`on_origin`: whether origin's tip carries the contract. `tip` "" is no origin."""
+
     def git(*args):
         if log is not None:
             log.append(args)
@@ -90,8 +101,10 @@ def fake_git(branch: str = "main", dirty: str = "", fetch: int = 0, ff: int = 0,
             out = dirty
         elif args[0] == "merge":
             code = ff
+        elif args[0] == "cat-file":
+            code = 0 if on_origin else 1
         elif args[0] == "rev-parse":
-            out = "b31b60cbbbbb"
+            out, code = tip, 0 if tip else 1
         return subprocess.CompletedProcess(args, code, f"{out}\n", "fatal: said so" if code else "")
 
     return git
@@ -212,13 +225,73 @@ def _recording():
     return ran, run_one
 
 
-def test_only_projects_shipping_the_contract_run_and_the_rest_are_named(tmp_path, capsys):
+def test_a_project_whose_origin_has_no_contract_is_recorded_red_and_never_run(
+    tmp_path, monkeypatch, capsys
+):
+    """Every project owes the tier: a missing one is red, which sends its fixer to write
+    it, where it used to be listed and forgotten."""
+    monkeypatch.setattr(e2e_pass.tb, "detect_default_branch", lambda _g, fallback: "main")
     workspace = _workspace(tmp_path, ["carameli", "roguelike"], opted=["carameli"])
     ran, run_one = _recording()
-    seams = e2e_pass.Seams(idle=lambda: 1e9, now=lambda: NIGHT)
+    seams = e2e_pass.Seams(
+        root=tmp_path / "devkit",
+        idle=lambda: 1e9,
+        now=lambda: NIGHT,
+        git_for=lambda _p: fake_git(on_origin=False),
+    )
     code = e2e_pass.run_pass(workspace, [], _args(), seams, run_one)
     assert (code, ran) == (0, ["carameli"])
-    assert "roguelike: no scripts/e2e.py, so no end-to-end tier" in capsys.readouterr().out
+    recorded = results.read("roguelike", tmp_path / "devkit")
+    assert recorded is not None
+    assert (recorded.status, recorded.sha, recorded.signature) == (
+        results.FAILED,
+        "b31b60cbbbbb",
+        (results.MISSING,),
+    )
+    assert "roguelike: FAILED at b31b60cbb -- scripts/e2e.py is missing" in capsys.readouterr().out
+
+
+def test_a_checkout_behind_an_origin_that_has_the_contract_is_run(tmp_path, monkeypatch):
+    """The fast-forward brings the script in; the tier a fixer merged must stop the red
+    the next night even though the static checkout had not pulled it yet."""
+    monkeypatch.setattr(e2e_pass.tb, "detect_default_branch", lambda _g, fallback: "main")
+    workspace = _workspace(tmp_path, ["carameli", "roguelike"], opted=["carameli"])
+    ran, run_one = _recording()
+    seams = e2e_pass.Seams(
+        root=tmp_path / "devkit", idle=lambda: 1e9, now=lambda: NIGHT, git_for=lambda _p: fake_git()
+    )
+    assert e2e_pass.run_pass(workspace, [], _args(), seams, run_one) == 0
+    assert ran == ["carameli", "roguelike"]
+    assert results.read("roguelike", tmp_path / "devkit") is None
+
+
+def test_record_missing_answers_none_when_origin_has_the_contract(tmp_path):
+    seams = e2e_pass.Seams(root=tmp_path, now=lambda: NIGHT, git_for=lambda _p: fake_git())
+    assert e2e_pass.record_missing("carameli", tmp_path / "carameli", seams) is None
+    assert not results.result_dir("carameli", tmp_path).exists()
+
+
+def test_with_no_origin_a_missing_tier_is_a_skip_no_fixer_could_branch_from(tmp_path):
+    seams = e2e_pass.Seams(
+        root=tmp_path, now=lambda: NIGHT, git_for=lambda _p: fake_git(on_origin=False, tip="")
+    )
+    result = e2e_pass.record_missing("homelab", tmp_path / "homelab", seams)
+    assert result is not None
+    assert (result.status, result.reason, result.signature) == (
+        results.SKIPPED,
+        "no origin/main",
+        (),
+    )
+
+
+def test_to_run_after_all_returns_only_what_origin_already_has(tmp_path, monkeypatch, capsys):
+    workspace = _workspace(tmp_path, ["a", "b"], opted=[])
+    asked = {"a": fake_git(), "b": fake_git(on_origin=False)}
+    seams = e2e_pass.Seams(
+        root=tmp_path / "devkit", now=lambda: NIGHT, git_for=lambda path: asked[path.name]
+    )
+    assert e2e_pass.to_run_after_all(workspace, ["a", "b"], seams) == ["a"]
+    assert "b: FAILED" in capsys.readouterr().out
 
 
 def test_a_night_with_no_idle_runs_nothing_and_is_not_a_failure(tmp_path, capsys):
@@ -238,6 +311,66 @@ def test_by_hand_no_wait_runs_whoever_is_at_the_keyboard(tmp_path):
     seams = e2e_pass.Seams(idle=lambda: 0.0)
     code = e2e_pass.run_pass(workspace, ["devkit"], _args(no_wait=True), seams, run_one)
     assert (code, ran) == (0, ["devkit"])
+
+
+def _assigned(workspace: Path, hosts) -> None:
+    """Add `devkit.localE2e` with `hosts` to a `_workspace` file."""
+    text = workspace.read_text(encoding="utf-8").rstrip()[:-1]
+    setting = json.dumps({e2e_pass.SETTING: {"hosts": hosts}})
+    workspace.write_text(f'{text}, "settings": {setting}}}', encoding="utf-8")
+
+
+def test_a_machine_hosts_does_not_name_tests_nothing_and_says_who_does(tmp_path, capsys):
+    """Every PC registers the job and the workspace file is the same on all of them, so
+    without an owner each would test every project and send its own fixer at one red."""
+    workspace = _workspace(tmp_path, ["carameli", "devkit"], opted=["carameli", "devkit"])
+    _assigned(workspace, "desktop-a")
+    ran, run_one = _recording()
+    seams = e2e_pass.Seams(idle=lambda: 1e9, now=lambda: NIGHT, host="desktop-b")
+    assert e2e_pass.run_pass(workspace, [], _args(), seams, run_one) == 0
+    assert ran == []
+    assert "carameli: tested by desktop-a, not here (desktop-b)" in capsys.readouterr().out
+
+
+def test_projects_can_be_spread_across_machines(tmp_path):
+    workspace = _workspace(tmp_path, ["carameli", "devkit"], opted=["carameli", "devkit"])
+    _assigned(workspace, {"*": "desktop-a", "carameli": "desktop-b"})
+    assert e2e_pass.tested_here(workspace, ["carameli", "devkit"], "desktop-b") == ["carameli"]
+    for host, expected in (("desktop-a", ["devkit"]), ("desktop-b", ["carameli"])):
+        ran, run_one = _recording()
+        seams = e2e_pass.Seams(idle=lambda: 1e9, now=lambda: NIGHT, host=host)
+        e2e_pass.run_pass(workspace, [], _args(), seams, run_one)
+        assert ran == expected, host
+
+
+def test_a_missing_tier_is_recorded_only_by_the_machine_assigned_it(tmp_path):
+    workspace = _workspace(tmp_path, ["roguelike"], opted=[])
+    _assigned(workspace, "desktop-a")
+    seams = e2e_pass.Seams(
+        root=tmp_path / "devkit",
+        now=lambda: NIGHT,
+        host="desktop-b",
+        git_for=lambda _p: pytest.fail("another machine's project was fetched"),
+    )
+    assert e2e_pass.run_pass(workspace, [], _args(), seams, _recording()[1]) == 0
+    assert results.read("roguelike", tmp_path / "devkit") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["{", "[]", '{"settings": []}', '{"settings": {"devkit.localE2e": "pc"}}', "{}"],
+)
+def test_an_absent_or_broken_setting_assigns_nobody_so_every_machine_tests_its_own(text):
+    assert e2e_pass.assignment(text).hosts == ()
+
+
+def test_the_canonical_workspace_assigns_the_nightly_run_to_a_machine():
+    """With several PCs registering the job, an absent setting would have each of them
+    test every project; the committed file names the one that does."""
+    canonical = (Path(__file__).resolve().parents[1] / "workspace.jsonc").read_text(
+        encoding="utf-8"
+    )
+    assert e2e_pass.assignment(canonical).hosts
 
 
 def test_registered_reads_the_workspace_and_opted_in_splits_it_by_the_contract(tmp_path):

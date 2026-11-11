@@ -350,8 +350,11 @@ def newest_release(devkit: Path) -> str:
     return next((line.strip() for line in tags.stdout.splitlines() if line.strip()), "")
 
 
-def default_branch_runs(gh: Gh, base: str, workflow: str = GATE_WORKFLOW) -> list[dict]:
-    """The newest runs of `workflow` on `base`, newest first; empty when `gh` cannot say."""
+def default_branch_runs(
+    gh: Gh, base: str, workflow: str = GATE_WORKFLOW, limit: int = RUN_LIMIT
+) -> list[dict]:
+    """The newest `limit` runs of `workflow` on `base`, newest first; empty when `gh`
+    cannot say."""
     listed = gh_json(
         gh(
             "run",
@@ -361,7 +364,7 @@ def default_branch_runs(gh: Gh, base: str, workflow: str = GATE_WORKFLOW) -> lis
             "--workflow",
             workflow,
             "--limit",
-            str(RUN_LIMIT),
+            str(limit),
             "--json",
             RUN_LIST_FIELDS,
         )
@@ -444,7 +447,9 @@ def evidence_slot(failure: fix_plan.Failure) -> str:
     project under a directory named for the project would overwrite each other.
     """
     where = failure.number or tb.slugify(failure.head or failure.base or "?")
-    return f"{failure.project}-{failure.kind}-{where}"
+    # The two local tiers share a kind and a base, and a project can be red in both.
+    kind = "medium-tier" if failure.workflow == fix_plan.MEDIUM_TIER else failure.kind
+    return f"{failure.project}-{kind}-{where}"
 
 
 def pr_failure(project: str, pr: dict) -> fix_plan.Failure:
@@ -586,6 +591,7 @@ def read_default_branch(
         unread=unread,
         evidence=str(where) if texts else "",
         attempt=run_attempt(gh, run_id, sig),
+        hooks=fix_plan.failed_hooks(texts),
     )
 
 

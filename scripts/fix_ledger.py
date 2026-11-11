@@ -65,6 +65,10 @@ ATTEMPTS = 2
 # A problem with no evidence cannot show progress: its one session is all it gets.
 BLIND_ATTEMPTS = 1
 
+# The third field of a medium tier red's key, which a local end-to-end red shares the kind
+# and base with: it is what tells a project's open medium tier session from any other.
+MEDIUM_TARGET = "medium"
+
 
 # --- the keys -------------------------------------------------------------------------
 
@@ -73,8 +77,10 @@ def failure_key(failure: fix_plan.Failure) -> str:
     """What one dispatch is remembered as: the failure, at the commit it was seen on."""
     digest = hashlib.sha256("\n".join(failure.signature).encode("utf-8")).hexdigest()
     # A nightly is keyed at its base's tip when that is known: a re-run of an old red
-    # run is made once per tip, and made again once the tip moves.
-    at = failure.tip or failure.sha or failure.run_id or "?"
+    # run is made once per tip, and made again once the tip moves. A medium tier red that
+    # came back is keyed where it was first seen, or every merge after it is a new key
+    # and a second session sent while the first still works.
+    at = failure.first_seen or failure.tip or failure.sha or failure.run_id or "?"
     return f"{failure.kind}:{failure.project}:{target(failure)}:{at}:{digest[:KEY_DIGEST]}"
 
 
@@ -90,6 +96,8 @@ def target(failure: fix_plan.Failure) -> str:
     """
     if failure.kind == fix_plan.COMMIT and failure.head:
         return failure.head
+    if failure.workflow == fix_plan.MEDIUM_TIER:
+        return MEDIUM_TARGET
     return str(failure.number)
 
 
@@ -410,13 +418,44 @@ def already_sent(
         return when
     if entry.get("dead"):
         return ""
+    return when if _recent(when, now) else ""
+
+
+def _recent(when: str, now: _dt.datetime) -> bool:
+    """Whether `when` is inside `RESEND_AFTER` of `now`; a time it cannot read is."""
     try:
         sent_at = _dt.datetime.fromisoformat(when)
     except ValueError:
-        return when
+        return True
     if sent_at.tzinfo is None:
         sent_at = sent_at.replace(tzinfo=_dt.UTC)
-    return "" if now - sent_at >= RESEND_AFTER else when
+    return now - sent_at < RESEND_AFTER
+
+
+def open_medium_session(
+    decision: fix_plan.Decision, ledger: dict[str, dict], now: _dt.datetime, since: str = ""
+) -> str:
+    """When a medium tier session that may still be working went to this project, or "".
+
+    The key digests the signature, so a red that gained one flaky test is a new problem,
+    which is right for `ATTEMPTS` and wrong while a fixer is still at the first: a tier
+    that runs every 15 minutes can widen a signature within the hour. The ledger records
+    no session's end, so "may still be working" is what `RESEND_AFTER` already takes it
+    to be: sent inside the window, and not reported dead or blocked.
+    """
+    prefixes = tuple(
+        f"{fix_plan.LOCAL}:{failure.project}:{MEDIUM_TARGET}:"
+        for failure in decision.failures
+        if failure.workflow == fix_plan.MEDIUM_TIER
+    )
+    for key, entry in ledger.items() if prefixes else ():
+        if not key.startswith(prefixes) or not isinstance(entry, dict):
+            continue
+        if _since(entry, since) and not (entry.get("dead") or entry.get("blocked")):
+            when = str(entry.get("when", "?"))
+            if _recent(when, now):
+                return when
+    return ""
 
 
 def render(decisions: Iterable[fix_plan.Decision], ledger: dict[str, dict]) -> str:

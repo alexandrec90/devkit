@@ -171,6 +171,10 @@ MANIFEST: tuple[str, ...] = (
     # devkit's nightly `devkit-local-e2e` job runs in every checkout. Path-scoped to test
     # files, so it costs the always-loaded tier nothing.
     ".claude/rules/local-e2e.md",
+    # What a script a VS Code task runs starts as. Path-scoped to `scripts/` for the same
+    # reason: `engineering.md` has no room for it (`hot-budget.py`), and a template's
+    # `CLAUDE.md` reaches only a project generated after the fix.
+    ".claude/rules/task-scripts.md",
     # The policy's reference half, and a fixer session's own instructions. Vendored as
     # pointer targets: the rules above cite both. Both sit *outside* `.claude/rules/`,
     # where every `.md` is loaded into every session -- which neither may be.
@@ -269,6 +273,12 @@ MANIFEST: tuple[str, ...] = (
     # and the repos where that goes unnoticed longest are the existing ones.
     "scripts/merge-dependabot-prs.py",
     "scripts/hooks/tests/test_merge_dependabot_prs.py",
+    # What `dependabot-automerge.yml` runs after a merge and after a gate, vendored with
+    # it for the same reason: that file is byte-identical and cannot carry either inline.
+    "scripts/green-ref.py",
+    "scripts/hooks/tests/test_green_ref.py",
+    "scripts/tidy-main.py",
+    "scripts/hooks/tests/test_tidy_main.py",
     # The rest of the CI surface -- `dependabot.yml`, the gate, the nightly -- cannot
     # be vendored for the reason above, and `templates/` cannot keep them honest
     # either: a one-shot copy has no way to notice that a project never received a

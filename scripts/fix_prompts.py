@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
 from e2e_results import CONTRACT as E2E_CONTRACT
+from e2e_results import MEDIUM_CONTRACT, is_missing
 from fix_plan import (
     ALERT_ENTRY,
     COMMIT,
@@ -32,6 +33,7 @@ from fix_plan import (
     EVIDENCE_DIR,
     LEDGER,
     LOCAL,
+    MEDIUM_TIER,
     PR,
     PROJECT_OWNED,
     UNFETCHABLE_ENTRY,
@@ -248,7 +250,12 @@ def _local_logs(failure: Failure) -> str:
         if failure.evidence
         else "Its output did not come down."
     )
-    return f"{where}{LOCAL_RERUN}"
+    return f"{where}{_rerun(failure)}"
+
+
+def _rerun(failure: Failure) -> str:
+    """How this `LOCAL` red is reproduced, by the tier it came from."""
+    return MEDIUM_RERUN if failure.workflow == MEDIUM_TIER else LOCAL_RERUN
 
 
 # How a local end-to-end red is reproduced, said once wherever one is sent, the upstream
@@ -256,9 +263,21 @@ def _local_logs(failure: Failure) -> str:
 LOCAL_RERUN = (
     f" A Local E2E run happened on this machine, from the static checkout, as python "
     f"{E2E_CONTRACT}; run that same command in the worktree you fix it in, before changing "
-    "anything and again after, and say in the intent what it printed. The PR gate does "
-    "not run these tests, so its green is no evidence about them; the scheduled local run "
-    "re-tests once the fix merges."
+    "anything and again after, and say in the intent what it printed. devkit's takes the "
+    "failing test ids as arguments: name them, since its whole tier holds this machine for "
+    "over half an hour while the scheduled jobs run. The PR gate does not run these tests, "
+    "so its green is no evidence about them; the scheduled local run re-tests once the fix "
+    "merges."
+)
+
+# The medium tier's: the same tests the gate runs, on the machine the gate does not.
+MEDIUM_RERUN = (
+    " A Medium Tier run happened on this machine, on Windows, in a disposable tree at that "
+    f"commit, as python {MEDIUM_CONTRACT} over its whole suite, or as the medium_tier command "
+    "in the [delivery] table of .devkit.toml where that is set; run the failing tests the "
+    "same way in the worktree you fix it in, before changing anything and again after, and "
+    "say in the intent what it printed. The PR gate runs on Linux, so its green is no "
+    "evidence about a failure on Windows; the scheduled tier re-tests once the fix merges."
 )
 
 
@@ -475,7 +494,7 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
         "worktree, one directory per failure that uploaded any; for the rest, read the "
         "run at its URL."
         + "".join(_ledger_log(f) + LEDGER_STEPS for f in ordered if f.kind == LEDGER)
-        + (LOCAL_RERUN if any(f.kind == LOCAL for f in ordered) else "")
+        + "".join(dict.fromkeys(_rerun(f) for f in ordered if f.kind == LOCAL))
         + f" This worktree is on the fresh branch {branch} off the default branch. Say in "
         f"the intent which of these the fix unblocks: {urls}. {OWN_DIFF} {FINISH}"
     )
@@ -537,14 +556,93 @@ def local_prompt(failure: Failure, branch: str) -> str:
     """A default branch red in the scheduled local end-to-end run: fix on a fresh branch.
 
     `fix_plan.is_stale_local` holds a run older than the tip, so the run was at the tip
-    this tree was cut from, and the failure reproduces here.
+    this tree was cut from, and the failure reproduces here. A project with no tier at
+    all (`e2e_results.MISSING`) is sent to write one instead. The medium tier's own red
+    has its own shape (`medium_body`).
     """
+    medium = failure.workflow == MEDIUM_TIER
+    if is_missing(failure.signature):
+        return _framed(missing_medium(failure, branch) if medium else missing_tier(failure, branch))
+    if medium:
+        return _framed(medium_body(failure, branch))
     return _framed(
         f"The {failure.workflow} run in {failure.project} -- the tests no hosted runner can "
         f"run, run on this machine -- is red on origin/{failure.base} at "
         f"{failure.sha[:12] or 'its head'}. Failing: {_ids(failure.signature)}. "
         f"{_logs(failure)} This worktree is on the fresh branch {branch} off "
         f"origin/{failure.base}. Fix what the run is failing on. {FINISH}"
+    )
+
+
+def medium_body(failure: Failure, branch: str) -> str:
+    """The body of a fixer's prompt for a medium tier red: it spans many merges, so bisect.
+
+    The tier tests only the tip, so nothing says which of the merges since its last green
+    broke this. No quotes or backticks, for `_unfetchable_note`'s reason.
+    """
+    red = (failure.first_seen or failure.sha)[:12] or "its head"
+    good = failure.green_sha[:12]
+    start = (
+        f"git bisect start {red} {good}, the two ends of what the tier has seen"
+        if good
+        else "git bisect, from a commit you have shown is good, since the tier has judged "
+        "none green yet"
+    )
+    return (
+        f"The {failure.workflow} run in {failure.project} -- the tests of this project, run "
+        f"on this Windows machine every 15 minutes at the tip of origin/{failure.base} -- is "
+        f"red, first seen at {red}. Failing: {_ids(failure.signature)}. {_logs(failure)} "
+        "This tier tests only the tip, so one red spans every merge since the last commit "
+        f"it judged green, many of them on a busy day: bisect with {start}, running only the "
+        "failing tests at each step, and name the merge that broke it before you change anything. "
+        "Where every step fails, the cause is Windows and no one merge; say so in the "
+        f"intent. This worktree is on the fresh branch {branch} off origin/{failure.base}, "
+        f"which may be ahead of that commit. Fix what the run is failing on. {FINISH}"
+    )
+
+
+def missing_medium(failure: Failure, branch: str) -> str:
+    """The body of a fixer's prompt for a project with nothing for the medium tier to run.
+
+    No quotes or backticks, for `_unfetchable_note`'s reason.
+    """
+    return (
+        f"{failure.project} has nothing for the medium tier to run: origin/{failure.base} at "
+        f"{failure.sha[:12] or 'its head'} carries no {MEDIUM_CONTRACT} and sets no "
+        "medium_tier command in the [delivery] table of .devkit.toml, so the tests of this "
+        "project run only on Linux, in CI, and nothing checks them on Windows. Every project "
+        f"owes the script. Write {MEDIUM_CONTRACT}: exit 0 green, anything else red, each "
+        "failure printed as a pytest FAILED line, the failing ids also in "
+        "logs/test-failures.log, and the whole suite run under --all. Then run it here and "
+        "say in the intent what it printed; a red it finds that is not a mistake in the "
+        "script itself is for the next run of the tier to send a fixer at, not for this "
+        f"change. This worktree is on the fresh branch {branch} off origin/{failure.base}. "
+        f"{FINISH}"
+    )
+
+
+LOCAL_E2E_RULE = ".claude/rules/local-e2e.md"
+
+
+def missing_tier(failure: Failure, branch: str) -> str:
+    """The body of a fixer's prompt for a project that owes a local end-to-end tier.
+
+    No quotes or backticks, for `_unfetchable_note`'s reason: the prompt crosses a `wt`
+    command line.
+    """
+    return (
+        f"{failure.project} has no local end-to-end tier: origin/{failure.base} at "
+        f"{failure.sha[:12] or 'its head'} carries no {E2E_CONTRACT}, so the tests no hosted "
+        "runner can run -- a browser, the Docker stack, a credential, a GUI, live services "
+        "-- run nowhere, and every project owes them. Write the tier as "
+        f"{LOCAL_E2E_RULE} says; if that rule is not in this tree, run python "
+        "scripts/sync-devkit.py --pull first. Put the tests that need this machine behind "
+        "a marker the default run deselects, add a real end-to-end test where there is "
+        f"none, and write {E2E_CONTRACT} to run exactly that tier. Then run python "
+        f"{E2E_CONTRACT} here and say in the intent what it printed; a red it finds that "
+        "is not a mistake in the tier itself is for the next night to send a fixer at, "
+        f"not for this change. This worktree is on the fresh branch {branch} off "
+        f"origin/{failure.base}. {FINISH}"
     )
 
 

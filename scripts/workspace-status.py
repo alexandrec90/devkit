@@ -69,6 +69,7 @@ import notify as _notify
 import schedule_health
 import sweep
 import task_branch
+import toolchain
 import vscode_extensions
 import worktree
 import wt_profile
@@ -783,8 +784,19 @@ def _age(seconds: float) -> str:
     return f"{hours}h" if hours < 24 else f"{hours // 24}d {hours % 24}h"
 
 
+def launcher_lines(workspace: Path = DEFAULT_WORKSPACE) -> list[str]:
+    """One line per checkout with console scripts that name a gone interpreter; [] for
+    none, or no workspace to read. No gate runs a launcher, and a filed line is a fixer."""
+    try:
+        names = sweep.parse_workspace(workspace.read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    gaps = ((name, toolchain.launcher_gap(workspace.parent / name)) for name in names)
+    return [f"{name}: {gap.line}" for name, gap in gaps if gap]
+
+
 def toolchain_lines(
-    which=shutil.which, git=None, extensions=None, codex=None, terminal=None
+    which=shutil.which, git=None, extensions=None, codex=None, terminal=None, launchers=None
 ) -> list[str]:
     """The workstation prerequisites nothing else reports missing; [] when they are set.
 
@@ -824,6 +836,7 @@ def toolchain_lines(
         extensions or vscode_extensions.report_lines,
         codex or codex_context.report_lines,
         terminal or wt_profile.status_lines,
+        launchers or launcher_lines,
     )
     return lines + [line for report in reporters for line in report()]
 
@@ -953,10 +966,8 @@ def held_line(workspace: Path, payload: dict, problems: list[str]) -> str:
     Still a line, naming the branch: a branch that never merges keeps it in the toast,
     and past `devkit_project.HELD_DAYS` the branch stops counting and the failure returns.
     """
-    held = devkit_project.held_on_branches(
-        problems, payload, devkit_project.pending_copies(workspace)
-    )
-    if not held or set(devkit_project.live_only(problems)) - held.keys():
+    held = devkit_project.awaited_merge(problems, payload, devkit_project.pending_copies(workspace))
+    if not held:
         return ""
     return (
         f"{workspace.name}: {len(problems)} difference(s), not published -- its own edits "

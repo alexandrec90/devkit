@@ -31,6 +31,21 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = REPO_ROOT / "templates"
 
+# The one job exempt from "scheduled jobs run unelevated", by installer, with the reason.
+# `tests/test_installer_contract.py` and `tests/test_scheduled_jobs.py` read this and
+# nothing else: a second name here is a second elevated job, which is a design change.
+ELEVATED_EXEMPTION: dict[str, str] = {
+    "install-elevated-worker.py": (
+        "Ending a stuck WSLService is refused to every unelevated token (its DACL grants no "
+        "start or stop), and that recovery otherwise waits on a person. A central admin "
+        "dispatcher was refused because it would run merged code as admin. So this one job "
+        "has one verb, run from a copy in an admin-only folder, under an interpreter copied "
+        "there too, and takes no input but a file name. An administrator registers it once "
+        "per PC, so nothing unelevated maintains it; it runs nothing from a checkout, so it "
+        "cannot be wrapped by log-wrap.py or write logs/."
+    ),
+}
+
 # The harness kill switch, cleared for this whole process. `scripts/hooks/tests/` does the
 # same thing in its `conftest.py` and for the same reason: the variable lives in a
 # `settings.json` `env` block, so it is present in the environment of every agent session
@@ -112,9 +127,9 @@ box_teardown = worktree.box_teardown
 # The live multi-root registry: a workstation file that sits *beside* the checkout, so
 # it exists on the desktop this harness drives and never in a CI clone. The handful of
 # tests that assert against the real file (rather than a fixture) carry the marker
-# below; without it they fail on GitHub with a FileNotFoundError naming a path no
-# runner could have. Skipping is deliberate — the coverage they add is "the registry on
-# *this* machine is intact", which is exactly the thing CI has no opinion about.
+# below: `local` keeps them off a runner, where `addopts` deselects it, and the skip is
+# for a by-hand `-m local` on a machine without the file. The coverage they add is "the
+# registry on *this* machine is intact", which is exactly the thing CI has no opinion about.
 LIVE_WORKSPACE = devkit_project.DEFAULT_WORKSPACE
 
 _live_workspace_skip = pytest.mark.skipif(
@@ -123,10 +138,10 @@ _live_workspace_skip = pytest.mark.skipif(
 )
 
 # What the two markers below add beside their skip: the test is in the end-to-end tier
-# `scripts/e2e.py` runs nightly on this workstation. Skipped in CI and in every box, each
-# such test ran only when a person happened to run the suite on `main`; the marker is
-# what gives it a runner, and putting it inside the same decorator means no test can be
-# skipped for wanting this machine without also being run on it.
+# `scripts/e2e.py` runs nightly on this workstation, and `addopts` deselects it from every
+# other run. Before it each such test ran only when a person happened to run the suite on
+# `main`; the marker is what gives it a runner, and putting it inside the same decorator
+# means no test can be skipped for wanting this machine without also being run on it.
 local = pytest.mark.local
 
 
@@ -193,9 +208,9 @@ def in_an_ephemeral_box(root: Path) -> bool:
 # checkout's canonical copy. The live workspace is rendered from the static checkout once
 # a branch merges, so from a box the comparison reads a file describing merged `main`
 # against a canonical copy carrying an un-merged edit -- and reports the edit as drift.
-# It began as the drift check alone, and the registration/retirement pair in
-# `test_devkit_project.py` was added to it after a branch that introduced a picker made
-# both of them assert that its own un-merged edit had already landed.
+# It holds the registration/retirement pair in `test_devkit_project.py`, after a branch
+# that introduced a picker made both of them assert that its own un-merged edit had
+# already landed; the drift check itself now reads `origin/<default>` from a box instead.
 # Every task that touches `workspace.jsonc` therefore failed the Stop gate at the finish
 # line, with the failure's own first suggestion (`--adopt-workspace`) being the one move
 # that deletes the branch's edit. Rendering early is not the answer either: the live file

@@ -24,6 +24,12 @@ def _unelevated(monkeypatch):
     monkeypatch.setattr(supervise.agent_tabs, "is_elevated", lambda: False)
 
 
+@pytest.fixture(autouse=True)
+def _fresh(monkeypatch):
+    """`main` refuses a dispatch from a tree behind origin; the suite may run in one."""
+    monkeypatch.setattr(supervise.fix_send, "stale_tree", lambda root: "")
+
+
 # --- the record ---------------------------------------------------------------------------
 
 
@@ -136,6 +142,64 @@ def test_an_elevated_dispatch_is_refused_before_the_first_iteration(tmp_path, mo
     argv = ["--mode", "plan", "--iterations", "1", "--workspace", str(workspace)]
     assert supervise.main(argv) == supervise.EXIT_CLEAN
     assert ran == ["plan"], "a rehearsal launches nothing, so it may run elevated"
+
+
+def test_a_dispatch_from_a_tree_behind_origin_is_refused_before_the_first_iteration(
+    tmp_path, monkeypatch, capsys
+):
+    """Supervision 2026-11-08: origin moved seven scripts/ commits after the rehearsal,
+    `fix_send.dispatch_mode` ran each dispatch as a plan, and three iterations spent 24
+    minutes reporting only `mode=plan`, the reason left on a stderr nothing read."""
+    workspace = _workspace(tmp_path)
+    monkeypatch.setattr(supervise.fix_send, "stale_tree", lambda root: "abc..def")
+    monkeypatch.setattr(supervise, "iterate", lambda *a: pytest.fail("a stale run iterated"))
+    monkeypatch.setattr(supervise, "REPO_ROOT", tmp_path)
+    assert supervise.main(["--workspace", str(workspace)]) == supervise.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "abc..def" in err and "merge the default branch" in err
+    ran = []
+    monkeypatch.setattr(
+        supervise,
+        "iterate",
+        lambda ws, n, mode, clock, since=None: (
+            ran.append(mode) or supervise.Iteration(n, clock().isoformat(), 0, "")
+        ),
+    )
+    argv = ["--mode", "plan", "--iterations", "1", "--workspace", str(workspace)]
+    assert supervise.main(argv) == supervise.EXIT_CLEAN
+    assert ran == ["plan"], "a plan is what a stale tree runs anyway"
+
+
+def test_stale_dispatch_names_the_lag_only_for_a_dispatch(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        supervise.fix_send, "stale_tree", lambda root: seen.append(root) or "abc..def"
+    )
+    assert supervise.stale_dispatch("plan", tmp_path) == "" and seen == []
+    why = supervise.stale_dispatch("dispatch", tmp_path)
+    assert seen == [tmp_path] and "abc..def" in why and "as a plan" in why
+    monkeypatch.setattr(supervise.fix_send, "stale_tree", lambda root: "")
+    assert supervise.stale_dispatch("dispatch", tmp_path) == ""
+
+
+def test_origin_moving_mid_run_stops_the_run_with_the_reason(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    lags = iter(["", "abc..def"])  # fresh at the start, behind before iteration 2
+    monkeypatch.setattr(supervise.fix_send, "stale_tree", lambda root: next(lags))
+    runs = []
+
+    def fake_iterate(ws, number, mode, clock, since=None):
+        runs.append(number)
+        return supervise.Iteration(number, clock().isoformat(), 0, "fix-pass: mode=dispatch")
+
+    monkeypatch.setattr(supervise, "iterate", fake_iterate)
+    monkeypatch.setattr(supervise, "REPO_ROOT", tmp_path)
+    argv = ["--iterations", "3", "--min-gap", "0", "--workspace", str(workspace)]
+    assert supervise.main(argv) == supervise.EXIT_VIOLATED
+    assert runs == [1]
+    [report] = json.loads((tmp_path / supervise.REPORT).read_text(encoding="utf-8"))
+    [why] = report["violations"]
+    assert why.startswith("stopped before iteration 2:") and "abc..def" in why
 
 
 def test_the_pass_failing_itself_is_a_violation():

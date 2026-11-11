@@ -934,6 +934,16 @@ def test_one_slot_per_failure_named_for_what_it_is():
     ) == ("devkit-branch-main")
 
 
+def test_a_project_red_in_both_local_tiers_keeps_both_runs_output():
+    """One upstream session can hold both, and they share a kind and a base."""
+    e2e = fix_plan.Failure(fix_plan.LOCAL, "devkit", 0, "", "", base="main", workflow="Local E2E")
+    medium = fix_plan.Failure(
+        fix_plan.LOCAL, "devkit", 0, "", "", base="main", workflow=fix_plan.MEDIUM_TIER
+    )
+    assert ev.evidence_slot(e2e) == "devkit-local-main"
+    assert ev.evidence_slot(medium) == "devkit-medium-tier-main"
+
+
 def test_the_newest_completed_run_at_the_tip_is_the_branchs_verdict(monkeypatch, tmp_path):
     """An unfinished run for some other commit above it says nothing; the completed one
     at the tip is the verdict."""
@@ -998,6 +1008,13 @@ def test_a_red_default_branch_is_a_failure_with_its_run_downloaded(monkeypatch, 
     assert failure.signature == ("tests/test_x.py::test_y",)
     assert Path(failure.evidence) == tmp_path / "ev" / "carameli-branch-main"
     assert failure.green_at == "", "no run read passed"
+
+
+def test_a_red_default_branch_keeps_the_hooks_its_logs_name(monkeypatch, tmp_path):
+    """What lets the direct flow tell formatting from the rest of the pre-commit step."""
+    branch_world(monkeypatch, "failure", f"{SUMMARY}\n- hook id: ruff-format\n", "")
+    _, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert failure.hooks == (("", "ruff-format"),)
 
 
 def test_a_red_default_branch_says_when_its_gate_last_passed(monkeypatch, tmp_path):
@@ -1194,6 +1211,18 @@ def test_the_default_branch_runs_are_the_listed_dicts_newest_first_or_nothing():
     assert ev.default_branch_runs(table({("run", "list"): runs}), "main") == [runs[0], runs[2]]
     assert ev.default_branch_runs(table({}), "main") == []
     assert ev.default_branch_runs(table({("run", "list"): {"not": "a list"}}), "main") == []
+
+
+def test_the_default_branch_runs_read_as_many_as_asked():
+    asked = []
+
+    def gh(*args):
+        asked.append(args)
+        return subprocess.CompletedProcess(args, 0, "[]", "")
+
+    ev.default_branch_runs(gh, "main")
+    ev.default_branch_runs(gh, "main", limit=7)
+    assert [a[a.index("--limit") + 1] for a in asked] == [str(ev.RUN_LIMIT), "7"]
 
 
 def test_the_runs_behind_failing_checks_are_read_off_the_rollup():

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import e2e_results
 import fix_plan
 import fix_prompts
 import fix_reports
@@ -101,6 +102,12 @@ def every_prompt() -> list[str]:
         fix_prompts.branch_prompt(red_main(), "agent/fix"),
         fix_prompts.nightly_prompt(failure(kind=fix_plan.NIGHTLY, number=3), "agent/fix"),
         fix_prompts.local_prompt(local_red(), "agent/fix"),
+        fix_prompts.local_prompt(local_red(signature=(e2e_results.MISSING,)), "agent/fix"),
+        fix_prompts.local_prompt(local_red(workflow=fix_plan.MEDIUM_TIER), "agent/fix"),
+        fix_prompts.local_prompt(
+            local_red(workflow=fix_plan.MEDIUM_TIER, signature=(e2e_results.MEDIUM.missing,)),
+            "agent/fix",
+        ),
     ]
 
 
@@ -140,6 +147,88 @@ def test_the_local_prompt_says_it_ran_here_and_how_to_run_it_again(tmp_path):
     assert "Its output did not come down" in fix_prompts.local_prompt(local_red(), "b")
 
 
+def test_a_missing_tier_sends_its_fixer_to_write_one_not_to_fix_a_run():
+    """Every project owes the tier; one without it is red with the one `MISSING`
+    signature, and its fixer has nothing to reproduce -- it has a tier to write."""
+    text = fix_prompts.local_prompt(local_red(signature=(e2e_results.MISSING,)), "agent/e2e")
+    for expected in (
+        "carameli has no local end-to-end tier",
+        "origin/main at 59a4ef5aaaaa carries no scripts/e2e.py",
+        fix_prompts.LOCAL_E2E_RULE,
+        "sync-devkit.py --pull",
+        "agent/e2e",
+    ):
+        assert expected in text, expected
+    assert "Fix what the run is failing on" not in text
+    body = fix_prompts.missing_tier(local_red(signature=(e2e_results.MISSING,)), "agent/e2e")
+    own = body.removesuffix(fix_prompts.FINISH)
+    assert own != body
+    assert not set("`'\"") & set(own), "the prompt crosses a wt command line"
+
+
+def test_a_medium_tier_fixer_is_told_its_tier_and_that_it_must_bisect(tmp_path):
+    """The tier tests only the tip, so one red spans every merge since its last green."""
+    (tmp_path / "output.log").write_text("FAILED x\n", encoding="utf-8")
+    red_run = local_red(
+        workflow=fix_plan.MEDIUM_TIER,
+        evidence=str(tmp_path),
+        green_sha="a1b2c3d4e5f60000",  # pragma: allowlist secret
+    )
+    text = fix_prompts.local_prompt(red_run, "agent/fix-medium")
+    for expected in (
+        "Medium Tier run in carameli",
+        "first seen at 59a4ef5aaaaa",
+        "test_every_picker_draws",
+        "spans every merge",
+        "bisect with git bisect start 59a4ef5aaaaa a1b2c3d4e5f6",
+        "Medium Tier run happened on this machine, on Windows",
+        "python scripts/run-tests.py",
+        "The PR gate runs on Linux",
+        "agent/fix-medium",
+    ):
+        assert expected in text, expected
+    assert fix_prompts.LOCAL_RERUN.strip() not in text
+    assert "python scripts/e2e.py" not in text
+
+
+def test_a_medium_tier_red_with_no_green_on_record_says_so_rather_than_naming_nothing():
+    text = fix_prompts.local_prompt(local_red(workflow=fix_plan.MEDIUM_TIER), "b")
+    assert "git bisect, from a commit you have shown is good" in text
+
+
+def test_the_medium_prompts_cross_a_wt_command_line():
+    red_run = local_red(workflow=fix_plan.MEDIUM_TIER, green_sha="a1b2c3d4e5f60000")
+    for body in (fix_prompts.medium_body(red_run, "b"), fix_prompts.missing_medium(red_run, "b")):
+        own = body.removesuffix(fix_prompts.FINISH)
+        assert own != body
+        assert not set("`'\"") & set(own), own
+
+
+def test_a_project_with_no_runner_sends_its_fixer_to_write_one():
+    missing = local_red(workflow=fix_plan.MEDIUM_TIER, signature=(e2e_results.MEDIUM.missing,))
+    text = fix_prompts.local_prompt(missing, "agent/runner")
+    for expected in (
+        "carameli has nothing for the medium tier to run",
+        "carries no scripts/run-tests.py",
+        "medium_tier",
+        "whole suite run under --all",
+        "agent/runner",
+    ):
+        assert expected in text, expected
+    assert "bisect" not in text
+
+
+def test_a_devkit_medium_red_folded_upstream_is_told_how_to_reproduce_it():
+    both = (
+        local_red(project="devkit"),
+        local_red(project="devkit", workflow=fix_plan.MEDIUM_TIER),
+    )
+    text = fix_prompts.upstream_prompt(both, "agent/fix")
+    assert "devkit origin/main (medium tier) -- Medium Tier failing" in text
+    assert text.count(fix_prompts.MEDIUM_RERUN.strip()) == 1
+    assert text.count(fix_prompts.LOCAL_RERUN.strip()) == 1
+
+
 def test_a_devkit_local_red_folded_upstream_is_told_how_to_reproduce_it():
     """devkit's own local red is harness-shaped, so it reaches the upstream session,
     whose shared sentence otherwise points at a run URL a local run does not have."""
@@ -147,6 +236,7 @@ def test_a_devkit_local_red_folded_upstream_is_told_how_to_reproduce_it():
     assert "devkit origin/main (local e2e) -- Local E2E failing" in text
     assert text.count(fix_prompts.LOCAL_RERUN.strip()) == 1
     assert fix_prompts.LOCAL_RERUN.strip() not in fix_prompts.upstream_prompt((failure(),), "b")
+    assert "takes the failing test ids" in text, "not a half-hour run per red, before and after"
 
 
 def test_every_prompt_ends_on_the_one_narrow_exit():

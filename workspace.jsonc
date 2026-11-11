@@ -73,6 +73,12 @@
 		},
 		{
 			"path": "homelab"
+		},
+		{
+			"path": "agent-terminal"
+		},
+		{
+			"path": "d2-trader"
 		}
 	],
 	"extensions": {
@@ -1319,7 +1325,7 @@
 			// second ticked checkout could only queue behind the first or collide with it.
 			{
 				"label": "IBKR: Open Trader UI",
-				"detail": "Build the frontend if it is stale, then serve ibkr_trader's local web UI on 127.0.0.1:8001 (UI_PORT in .env overrides) and open the browser. Runs until you close the terminal; its database pages are empty unless the db container is up.",
+				"detail": "Build the frontend if it is stale, then serve ibkr_trader's local web UI on 127.0.0.1:8001 (UI_PORT in .env overrides) and open the browser. Runs until you close the terminal; ibkr_trader's scripts/ui-task.py says what else it needs.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1371,6 +1377,36 @@
 					"panel": "new",
 					"showReuseMessage": false,
 					"close": false
+				},
+				"problemMatcher": []
+			},
+			// --- scoped: photolab -------------------------------------------------
+			// A literal checkout, not a picker: the album binds fixed ports, so a second
+			// checkout could only collide with the first.
+			{
+				"label": "Photolab: Open Album",
+				"detail": "Start Postgres in Docker and the API and Vite on this machine, then open the album on localhost (FRONTEND_HOST_PORT in .env, 5180 by default). Needs .env with PHOTO_LIBRARY_HOST_DIR. Runs until you close the terminal. AI images and subscription annotation use the codex and claude commands on this machine.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"photolab",
+					"album"
+				],
+				"icon": {
+					"id": "device-camera",
+					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
 				},
 				"problemMatcher": []
 			},
@@ -1790,7 +1826,9 @@
 								"productivity-tracker",
 								"skinamp",
 								"photolab",
-								"homelab"
+								"homelab",
+								"agent-terminal",
+								"d2-trader"
 							]
 						}
 					]
@@ -1833,7 +1871,9 @@
 								"productivity-tracker",
 								"skinamp",
 								"photolab",
-								"homelab"
+								"homelab",
+								"agent-terminal",
+								"d2-trader"
 							]
 						}
 					]
@@ -1878,6 +1918,8 @@
 								"reap-schedule",
 								"reconcile-task",
 								"release-schedule",
+								"ship-schedule",
+								"tier-schedule",
 								"tray",
 								"upgrade-schedule",
 								"workspace-status",
@@ -1972,7 +2014,9 @@
 					"productivity-tracker",
 					"skinamp",
 					"photolab",
-					"homelab"
+					"homelab",
+					"agent-terminal",
+					"d2-trader"
 				],
 				"default": "carameli"
 			},
@@ -2674,7 +2718,9 @@
 					"productivity-tracker",
 					"skinamp",
 					"photolab",
-					"homelab"
+					"homelab",
+					"agent-terminal",
+					"d2-trader"
 				],
 				"default": "carameli"
 			},
@@ -3112,6 +3158,15 @@
 			"permissionMode": "bypassPermissions",
 			"hosts": "desktop-b9fc8vp"
 		},
+		// Which machine runs each project's nightly local end-to-end tests
+		// (`devkit-local-e2e`, `scripts/e2e-pass.py`). Every PC registers the job; at fire
+		// time each tests only what `hosts` assigns it, so two PCs never test, record and
+		// send fixers at the same red. Same shape as `devkit.remoteControl`'s: one name for
+		// every project, or {"*": "pc-a", "carameli": "pc-b"} to spread them. Moving the
+		// job to another PC is editing this value -- nothing is re-registered.
+		"devkit.localE2e": {
+			"hosts": "desktop-b9fc8vp"
+		},
 		// Ingestion that runs with nobody connected, kept going by `devkit-collectors` --
 		// see README, "Ingestion collectors". Declared here for every machine; RUN on none
 		// until `collectors.py run-here` on that machine, which is recorded in devkit's
@@ -3131,7 +3186,9 @@
 				"service": "app",
 				"health": ["ibkr-trader", "health"],
 				"buildsFrom": ["data-lake"],
-				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"]
+				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"],
+				// Its `app` and `db` caps. Not `rebalance`: the move carries the whole database.
+				"memoryGb": 3
 			},
 			// `handoff`: as ibkr_trader's. The data-lake store it imports lazily is declared
 			// in no form (its pyproject says why), so the argv brings the sibling itself:
@@ -3142,7 +3199,10 @@
 				"health": ["sports-betting", "health", "--quiet"],
 				"handoff": [
 					"uv", "run", "--with-editable", "../data-lake[archive]", "python", "scripts/handoff.py"
-				]
+				],
+				// Its one container's cap. `rebalance`: the only collector whose move is cheap.
+				"memoryGb": 0.5,
+				"rebalance": true
 			},
 			// On the host, not in a container: it drives the installed Chrome with the
 			// browser profiles in its checkout. `handoff`: dumps its `db` through the
@@ -3151,7 +3211,10 @@
 				"command": ["uv", "run", "social-scraper", "scrape"],
 				"minutes": 30,
 				"needs": ["db"],
-				"handoff": ["uv", "run", "python", "scripts/handoff.py"]
+				"handoff": ["uv", "run", "python", "scripts/handoff.py"],
+				// An estimate of its `db` and Chrome, which `docker stats` sees only half of.
+				// Not `rebalance`: its browser logins belong to one machine.
+				"memoryGb": 2
 			}
 		},
 		// Options an installer should keep, keyed by installer file name. The daily

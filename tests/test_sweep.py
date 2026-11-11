@@ -914,6 +914,35 @@ def test_sync_never_rewrites_history():
     assert not any(step[0] in {"rebase", "reset", "push"} for step in steps)
 
 
+def test_sync_takes_the_pass_s_checkout_to_green_and_never_past_it():
+    """Reconcile syncs every checkout every 15 minutes. Taken to the tip, the checkout the
+    pass runs from would reach the commit a bad merge just broke, which following `green`
+    exists to prevent, and `merge --ff-only` could not bring it back."""
+    state = replace(on_default(behind=3), follows="origin/green")
+    merges = [step for step in sweep.sync_plan(state, sweep.NEEDS_PULL).steps if step[0] == "merge"]
+    assert merges == [("merge", "--ff-only", "origin/green")]
+
+
+def test_sync_takes_any_other_checkout_to_its_default_branch():
+    merges = [
+        step
+        for step in sweep.sync_plan(on_default(behind=3), sweep.NEEDS_PULL).steps
+        if step[0] == "merge"
+    ]
+    assert merges == [("merge", "--ff-only", "origin/main")]
+
+
+def test_follows_names_green_only_for_devkit_s_own_checkout(tmp_path):
+    def answering(code: int):
+        return lambda *args: subprocess.CompletedProcess(args, code, "", "")
+
+    assert sweep.follows(tmp_path, answering(0)) == "", "a project's checkout is only read"
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "devkit_manifest.py").write_text("", encoding="utf-8")
+    assert sweep.follows(tmp_path, answering(0)) == "origin/green"
+    assert sweep.follows(tmp_path, answering(1)) == "", "before its gate has ever passed"
+
+
 def test_sync_reaps_merged_task_branches_it_is_not_standing_on():
     state = on_default(merged_task_branches=("claude/a-0701", "claude/b-0702"))
     steps = sweep.sync_plan(state, sweep.CLEAN).steps
@@ -1817,6 +1846,14 @@ def test_a_failed_pr_creation_is_reported_not_swallowed():
         (EMPTY_REPLY, True),
         ("error: RPC failed; curl 56 Recv failure: Connection was reset", True),
         ("fatal: unable to access 'https://github.com/o/r.git/': error: 403", False),
+        # 9c48bdc9, 9cde3743: two carameli ships in one pass, each through on the next.
+        (
+            "pull request create failed: GraphQL: Something went wrong while executing your "
+            "query on 2026-11-05T16:03:03Z. Please include `39F5:2DD702` when reporting",
+            True,
+        ),
+        ("remote: fatal error in commit_refs\n ! [remote rejected] x -> x (failure)", True),
+        ("GraphQL: Resource not accessible by integration (createPullRequest)", False),
     ],
 )
 def test_transient_tells_githubs_failure_from_a_refusal(said, transient):

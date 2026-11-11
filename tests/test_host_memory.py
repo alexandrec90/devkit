@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import fix_send
 import host_memory
 
 MEMINFO = "MemTotal:       16303440 kB\nMemFree:          812344 kB\nMemAvailable:    6970112 kB\n"
@@ -22,6 +23,10 @@ def test_this_machine_answers_with_a_plausible_figure():
     """The one probe a stub cannot vouch for: the platform call on the machine running it."""
     free = host_memory.available_mb()
     assert free is None or 0 < free < 10_000_000
+
+
+def test_the_floor_is_one_value_however_many_jobs_ask():
+    assert fix_send.MEMORY_FLOOR_MB == host_memory.FLOOR_MB
 
 
 def test_a_probe_that_fails_reads_as_no_answer(monkeypatch, tmp_path):

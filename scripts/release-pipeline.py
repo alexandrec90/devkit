@@ -501,11 +501,10 @@ def tag_missing(devkit: Path, version: str) -> str:
 def regate_default_branch(devkit: Path, branch: str = "") -> str:
     """Re-run the gate on the default branch now the tag exists; what to say about it.
 
-    The merge's own gate ran before the tag was pushed, so `EXPECTED_RED_TEST` failed
-    there by construction and left the default branch red on GitHub until the next push
-    (v0.11.31). The pass reads that red as green once the commit is tagged; this makes
-    the gate say so too. Not waited on, and a dispatch that fails is said, not fatal:
-    the release is cut either way.
+    The merge's own gate ran before the tag was pushed, and `EXPECTED_RED_TEST` excuses
+    that only by recognising the commit's subject. A run with the tag in place compares
+    the constant for real, and that is the verdict worth leaving on the branch. Not waited
+    on, and a dispatch that fails is said, not fatal: the release is cut either way.
     """
     branch = branch or task_branch.detect_default_branch(sweep.git_for(devkit), fallback="main")
     done = _run(["gh", "workflow", "run", gate_evidence.GATE_WORKFLOW, "--ref", branch], cwd=devkit)
@@ -797,6 +796,31 @@ def newest_workflow_run(devkit: Path, workflow: str = RELEASE_WORKFLOW) -> int:
     return 0
 
 
+def tag_run_in_flight(devkit: Path) -> int:
+    """The `release.yml` run still going, or 0; 0 too where `gh` cannot say.
+
+    A bump on main with no tag reads as a release to resume, and is one just as much
+    while another run's tag workflow is testing the commit: the job fires at 02:00 on
+    every workstation, and that gap has neither a PR nor a tag to see (28102da8)."""
+    runs = _gh_json(
+        [
+            "run",
+            "list",
+            "--workflow",
+            RELEASE_WORKFLOW,
+            "--limit",
+            "5",
+            "--json",
+            "databaseId,status",
+        ],
+        devkit,
+    )
+    for run in runs if isinstance(runs, list) else []:
+        if isinstance(run, dict) and run.get("status") != "completed":
+            return int(run.get("databaseId") or 0)
+    return 0
+
+
 def dispatch_tag_workflow(devkit: Path, version: str) -> tuple[int, str]:
     """Dispatch `release.yml phase=tag` and return `(run_id, error)`.
 
@@ -843,6 +867,32 @@ def _stop(message: str) -> int:
     return 1
 
 
+def push_tag(devkit: Path, version: str) -> int | None:
+    """Have `release.yml` tag `version` and see it through: None once it did, else the
+    code the pipeline ends on -- 0 when another run got there first."""
+    _say(f"dispatching {RELEASE_WORKFLOW} phase=tag -- it tests the tagged commit before pushing")
+    run_id, error = dispatch_tag_workflow(devkit, version)
+    if error:
+        print(f"release-pipeline: {error}", file=sys.stderr)
+        return 2
+    watched = _run(["gh", "run", "watch", str(run_id), "--exit-status"], cwd=devkit, capture=False)
+    if watched.returncode != 0:
+        # Two runs dispatched in the same seconds both pass `tag_run_in_flight`, and the
+        # slower fails on "releases are immutable" with the release it wanted cut.
+        if not tag_missing(devkit, version):
+            _say(f"run {run_id} failed, but another run pushed {version} -- leaving the rest to it")
+            return 0
+        return _stop(
+            f"the tag workflow failed -- {version} was NOT pushed. "
+            f"`gh run view {run_id} --log-failed` has the reason."
+        )
+
+    if missing := tag_missing(devkit, version):
+        return _stop(missing)
+    _say(f"{version} is tagged; {regate_default_branch(devkit)}.")
+    return None
+
+
 def run_pipeline(
     devkit: Path,
     version: str,
@@ -856,6 +906,9 @@ def run_pipeline(
         # the tag is missing. Re-running the task after a network failure at step 7
         # should finish the release, not refuse it as half-done.
         _say(f"{release.FALLBACK_CONST} already names {version} on main -- skipping to the tag")
+        if another := tag_run_in_flight(devkit):
+            _say(f"{RELEASE_WORKFLOW} run {another} is already at it -- leaving the rest to that")
+            return 0
     else:
         number, failure = prepare_pr(devkit, version)
         if number <= 0:
@@ -889,21 +942,8 @@ def run_pipeline(
             return 2
         _say(f"merged #{number}")
 
-    _say(f"dispatching {RELEASE_WORKFLOW} phase=tag -- it tests the tagged commit before pushing")
-    run_id, error = dispatch_tag_workflow(devkit, version)
-    if error:
-        print(f"release-pipeline: {error}", file=sys.stderr)
-        return 2
-    watched = _run(["gh", "run", "watch", str(run_id), "--exit-status"], cwd=devkit, capture=False)
-    if watched.returncode != 0:
-        return _stop(
-            f"the tag workflow failed -- {version} was NOT pushed. "
-            f"`gh run view {run_id} --log-failed` has the reason."
-        )
-
-    if missing := tag_missing(devkit, version):
-        return _stop(missing)
-    _say(f"{version} is tagged; {regate_default_branch(devkit)}.")
+    if (ended := push_tag(devkit, version)) is not None:
+        return ended
 
     if not adopt:
         _say("skipping adoption (--no-adopt); consumers stay on the previous release")

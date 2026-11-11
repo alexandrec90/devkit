@@ -21,6 +21,10 @@ from pathlib import Path
 
 MEMINFO = Path("/proc/meminfo")
 
+# What anything a job starts must leave free: the person at the machine's room for their
+# own work.
+FLOOR_MB = 2048
+
 
 class _MemoryStatus(ctypes.Structure):
     _fields_ = [

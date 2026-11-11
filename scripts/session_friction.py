@@ -38,6 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fix_findings
+import project_settings
 import session_transcripts as st
 import sweep
 
@@ -54,7 +55,8 @@ SNIPPET = 90
 # missing. Each pattern names the class it files under; the first match wins.
 #
 # Claude Code's own worktree isolation guard ("session is isolated in the worktree",
-# "too complex to verify") is deliberately absent. `.claude/rules/engineering.md` says
+# "too complex to verify") and its `rm` check ("Dangerous rm operation", which says
+# "requires explicit approval") are deliberately absent. `.claude/rules/engineering.md` says
 # no setting and nothing in devkit changes what it accepts, and already carries the
 # spellings that get past it; filed here, every refusal reopened one group that each
 # sweep could only retire again with that same note.
@@ -77,11 +79,21 @@ RESULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("patch-failed", re.compile(r'File "<stdin>", line \d+[\s\S]{0,600}?AssertionError')),
 )
 # Claude Code's own refusal of a foreground `sleep`, which names the right wait in the
-# same message. Absent from `blocked-call` for the isolation guard's reason, and it
-# retracts its call's `poll` too: a refused sleep waited for nothing, so the one refusal
-# was filed as two groups neither of which devkit could fix (9854b541, 363d8be7). It
-# refuses PowerShell's `Start-Sleep 40; Get-Content` in the same words (228353d8).
+# same message. Absent from `blocked-call` for the isolation guard's reason: the one
+# refusal was filed as two groups neither of which devkit could fix (9854b541, 363d8be7).
+# It refuses PowerShell's `Start-Sleep 40; Get-Content` in the same words (228353d8).
 SLEEP_GUARD = re.compile(r"<tool_use_error>Blocked: (?:sleep|Start-Sleep) \d+ followed by")
+# A result that opens this way came from something that stopped the call, so the command
+# never ran: a refused heredoc wrote nothing, a refused `--no-verify` skipped nothing, a
+# refused sleep waited for nothing. The command classes read a call's text before its
+# result exists, so `failed` takes them back; 2865249b and 004d53f9 recurred 7 and 4 times
+# with each fix narrowing what the text had to say, and the last two were refused calls.
+# Anchored: a command that ran and failed opens `Exit code N`, whatever its output quotes.
+NEVER_RAN = re.compile(
+    r"\A(?:<tool_use_error>Blocked:|[^\n]*\bRefusing to run it\b|"
+    r"Permission for this command was denied|"
+    r"The user doesn't want to proceed with this tool use)"
+)
 # The least a wait holds its turn for to be a `poll`: the `sleep\s+\d{2,}` pattern's own
 # floor. An until-loop ends when its condition holds, so its shape says nothing of its
 # cost: one waiting nine seconds for a database out of recovery was filed as the eighth
@@ -99,6 +111,11 @@ SETTLE = re.compile(
     re.M,
 )
 SETTLE_MAX = 30  # seconds: longer than a run takes to attach is a wait, not a settle
+# Claude Code taking a foreground call out of the foreground, which it does at 180 s
+# whatever the call's `timeout` said. A top-level session is told when it ends and can
+# stop; a subagent that stops has returned, so the rule has it run the job in the
+# foreground, and this leaves it one loop on the file it was told to read (2d4d52ac).
+MOVED_TO_BACKGROUND = re.compile(r"\ACommand was moved to the background \(ID: (\w+)\)")
 # A pause between the *different* runs of one experiment re-reads nothing: `for S in
 # "set a" "set b"; do restart; run "$S"; sleep 20; done` paces three measurements, each
 # its own work, where a poll asks one question again. A session comparing a database's
@@ -189,7 +206,7 @@ ASSERTION = re.compile(r"\bassert\b|AssertionError")
 # name may sit between, and nothing else: a `\nifty-lark\` in a Windows path is no escape.
 ESCAPED_NEWLINE = re.compile(r"\\n[ \t]*(?:[\w.]+(?:Error|Exception): [^\\\n]*)?$")
 
-# Commands that are friction whatever they return.
+# Commands that are friction whatever they return, once they ran (`NEVER_RAN`).
 NO_VERIFY = re.compile(r"\bgit\b[^\n]*--no-verify")
 COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("no-verify", NO_VERIFY),
@@ -252,6 +269,19 @@ SCRATCH_DIR = re.compile(
     r"(?:^|[\\/])(?:tmp\w*|temp)(?:[\\/]|$)|\$(?:env:)?\{?(?:TMP|TEMP|TMPDIR)\b", re.I
 )
 GIT_C = re.compile(r"\bgit\s(?:[^\n]*?\s)?-C\s+(\S+)")
+# What `scratch_only` follows a scratch repository through: a shell variable naming it and
+# a step down inside it (004d53f9). A value that is itself an expansion binds nothing.
+ASSIGNMENT = re.compile(r"\s*(?P<name>[A-Za-z_]\w*)=(?P<value>\"[^\"$`]*\"|'[^']*'|[^\s\"'$`]*)\s*")
+EXPANSION = re.compile(r"\$(?:(?P<bare>[A-Za-z_]\w*)|\{(?P<braced>[A-Za-z_]\w*)\})")
+ROOTED = re.compile(r"[\\/~$]|\w:")
+# What `taken_back` reads. A WIP commit is how a session carries a dirty tree over a rebase,
+# since the stash stack is shared: undone in the call that made it, it reached nothing a
+# hook guards (ded3ca52). `GIT_UNDO` is a `reset` to some steps behind `HEAD`.
+GIT_COMMIT = re.compile(r"\bgit\s(?:[^\n]*?\s)?commit\b")
+GIT_PUSH = re.compile(r"\bgit\s(?:[^\n]*?\s)?push\b")
+GIT_UNDO = re.compile(
+    r"\bgit\s+reset\b(?:\s+-\S+)*\s+(?:HEAD|@)(?:~(?P<steps>\d*)|(?P<carets>\^+))"
+)
 # A heredoc and the rest of its `<<TAG` line, which can name the file it writes
 # (`cat <<EOF > a.txt`); `printed_back` drops the body.
 HEREDOC_SPAN = re.compile(
@@ -271,8 +301,12 @@ STATEMENTS = re.compile(r"&&?|\|\|?|[;\n]")
 
 # A command reading back text the harness wrote, which quotes the very patterns above:
 # the triage log, the ledger, a transcript, a friction file. Its output is never friction.
+# So for the pass's own record and what the triage script prints, which quote every
+# project's failure they filed: `grep psutil logs/fix-pass.log` beside a `git log` was
+# filed as devkit missing a module it never imports (8860784d).
 READS_HARNESS_TEXT = re.compile(
-    r"harness-triage\.log|harness-events[^\s'\"]*\.log|\.jsonl\b|friction[^\s'\"/\\]*\.md"
+    r"harness-triage\.log|harness-events[^\s'\"]*\.log|\.jsonl\b|friction[^\s'\"/\\]*\.md|"
+    r"fix-pass[\w.-]*\.log|harness_triage\.py|logs[\\/]findings[\\/]"
 )
 # The machine's interpreter by bare name, in command position. In a tree whose own
 # `.venv` is there, its "No module named pytest" is the session picking the wrong
@@ -283,6 +317,9 @@ READS_HARNESS_TEXT = re.compile(
 BARE_INTERPRETER = re.compile(
     r"(?:^|[;&|]\s*)(?:python3?|py)(?:\.exe)?" + INTERPRETER_FLAGS + r"\s+-[A-Za-z]*[mc]\s", re.M
 )
+# The same interpreter running anything at all: `_environment_excused` asks it of a
+# throwaway program, which may be a script by its path rather than a `-c`.
+MACHINE_INTERPRETER = re.compile(r"(?:^|[;&|]\s*)(?:python3?|py)(?:\.exe)?\s", re.M)
 # A command whose output is read for an environment failure even when it exited 0.
 SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pytest|git)\b", re.M)
 # A quoted argument, whose `|`, `;` and newlines separate no statements: the `\|pytest` of
@@ -594,18 +631,54 @@ def only_prints(statement: str) -> bool:
     return bool(words) and words[0] in PRINTERS and not WRITES_OUTPUT.search(statement)
 
 
+def entered(where: str, target: str) -> str:
+    """The directory a step to `target` from `where` lands in, as far as `SCRATCH_DIR` needs
+    it. A relative step down stays in a scratch tree; any other target stands for itself,
+    so `cd ../../ws` or an unbound `$REPO` reads as having left."""
+    if SCRATCH_DIR.search(where) and target and ".." not in target:
+        if not ROOTED.match(target):
+            return f"{where}/{target}"
+    return target
+
+
 def scratch_only(command: str) -> bool:
     """Every `--no-verify` git statement in `command` runs in a scratch repository: after
-    a `cd` into one, or with `git -C` naming one."""
+    a `cd` into one, or with `git -C` naming one, spelled through a variable the command
+    set or a step down from a scratch directory."""
     where, verdicts = "", []
+    names: dict[str, str] = {}
+
+    def expanded(word: str) -> str:
+        return EXPANSION.sub(lambda m: names.get(m["bare"] or m["braced"], m[0]), word)
+
     for part in STATEMENT.split(command):
         words = [word.strip("'\"") for word in part.split()]
-        if words and words[0] in ("cd", "pushd"):
-            where = words[1] if len(words) > 1 else ""
+        if bound := ASSIGNMENT.fullmatch(part):
+            names[bound["name"]] = bound["value"].strip("'\"")
+        elif words and words[0] in ("cd", "pushd"):
+            where = entered(where, expanded(words[1]) if len(words) > 1 else "")
         elif NO_VERIFY.search(part):
             target = GIT_C.search(part)
-            verdicts.append(bool(SCRATCH_DIR.search(target[1].strip("'\"") if target else where)))
+            at = entered(where, expanded(target[1].strip("'\""))) if target else where
+            verdicts.append(bool(SCRATCH_DIR.search(at)))
     return bool(verdicts) and all(verdicts)
+
+
+def taken_back(command: str) -> bool:
+    """Every `--no-verify` in `command` is on a commit a `git reset` later in the same call
+    undoes, with nothing pushed: work carried over a rebase, not a commit let past a hook."""
+    commits, undone, skipped = 0, 0, False
+    for part in STATEMENT.split(command):
+        if GIT_PUSH.search(part):
+            return False
+        if GIT_COMMIT.search(part):
+            commits += 1
+            skipped = skipped or bool(NO_VERIFY.search(part))
+        elif NO_VERIFY.search(part):
+            return False
+        elif commits and (undo := GIT_UNDO.search(part)):
+            undone += int(undo["steps"] or len(undo["carets"] or "^"))
+    return skipped and undone >= commits
 
 
 def changes_the_suite(event: Event) -> bool:
@@ -648,7 +721,7 @@ def _command_classes(
     for cls, pattern in COMMAND_PATTERNS:
         if cls == "heredoc-write" and not damageable_heredoc(command):
             continue
-        if cls == "no-verify" and scratch_only(command):
+        if cls == "no-verify" and (scratch_only(command) or taken_back(command)):
             continue
         if pattern.search(command):
             yield cls, COMMAND_DETAIL[cls]
@@ -870,6 +943,7 @@ class _Session:
     rejected: tuple[str, str] | None = None
     started: dict[str, str] = field(default_factory=dict)  # call id -> when it was made
     settled: bool = False  # it spent the one `SETTLE` a session is excused
+    moved: set[str] = field(default_factory=set)  # task ids `MOVED_TO_BACKGROUND` named
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -925,19 +999,25 @@ class _Session:
         """What the call's command is friction as, less what this session was excused."""
         checked = frozenset(self.checked) if self.checked is not None else None
         for cls, what in _command_classes(event.command, checked, self.targeted_runner):
-            if cls == "full-suite" and self.suite_asked:
+            if cls == "full-suite" and (self.suite_asked or scratch_suite(event.command)):
                 continue
-            # A `Monitor` until-loop is the wait Claude Code's `SLEEP_GUARD` prescribes, and
-            # a backgrounded one is a single call and its completion notice -- the shape
-            # the engineering rule asks a long wait to take, not a loop of turns.
-            if cls == "poll" and (event.tool in WAIT_TOOLS or event.background):
-                continue
-            if cls == "poll" and paced(event.command):
-                continue
-            if cls == "poll" and not self.settled and settles(event.command):
-                self.settled = True
+            if cls == "poll" and self._excused_wait(event):
                 continue
             self.note(cls, what, event)
+
+    def _excused_wait(self, event: Event) -> bool:
+        """A poll-shaped call that holds no turn for nothing. A `Monitor` until-loop is the
+        wait Claude Code's `SLEEP_GUARD` prescribes, and a backgrounded one is a single
+        call and its completion notice -- the shape the engineering rule asks a long wait
+        to take, not a loop of turns."""
+        if event.tool in WAIT_TOOLS or event.background or paced(event.command):
+            return True
+        if event.sidechain and any(task in event.command for task in self.moved):
+            return True
+        if not self.settled and settles(event.command):
+            self.settled = True
+            return True
+        return False
 
     def say(self, event: Event) -> None:
         self.last_said = event
@@ -976,13 +1056,16 @@ class _Session:
     def _unclaim(self, event: Event) -> None:
         """Hand back the roots a whole run claimed when pytest says it ran nothing."""
         claimed = self.claimed.pop(event.call_id, set())
-        if self.checked is not None and RAN_NOTHING.search(event.text):
+        if self.checked is not None and (
+            RAN_NOTHING.search(event.text) or NEVER_RAN.match(event.text)
+        ):
             self.checked -= claimed
 
     def succeeded(self, event: Event) -> None:
         """A call that exited 0 still failed if it was a test run or a git call reporting
         a missing environment: `| tail` hides pytest's exit code."""
         command = self.calls.get(event.call_id, "")
+        self.moved.update(MOVED_TO_BACKGROUND.findall(event.text))
         self._brief_wait(event)
         self._unclaim(event)
         # Once: the same dirty lock in every later `git status` is no new change.
@@ -1001,8 +1084,10 @@ class _Session:
         event = replace(event, command=command)
         self._brief_wait(event)
         self._unclaim(event)
+        if NEVER_RAN.match(event.text):
+            for cls, what in COMMAND_DETAIL.items():
+                self.retract(cls, what, event.call_id)
         if SLEEP_GUARD.search(event.text):
-            self.retract("poll", COMMAND_DETAIL["poll"], event.call_id)
             return
         if not READS_HARNESS_TEXT.search(command):
             cls, what = _result_class(event.text, command)
@@ -1074,6 +1159,34 @@ def asks_for_targeted_runs(cwd: str, workspace_root: Path, project: str) -> bool
     return True
 
 
+# How a test file is spelled, and how many a project is generated with: `tests/test_smoke.py`.
+# The vendored tier's are not the project's suite, and no run of its own reads them.
+TEST_FILE = re.compile(r"(?:^|/)(?:test_[^/]*|[^/]*_test)\.py$")
+VENDORED_TESTS = "scripts/hooks/tests/"
+GENERATED_TEST_FILES = 1
+
+
+def suite_is_this_change(cwd: str, runner=sweep.run_windowless) -> bool:
+    """`cwd`'s HEAD holds no more of a suite than a project is generated with, so whatever
+    a whole run reads is the session's own unshipped work, and naming each file would
+    have run the same tests: 435e2137, an agent-terminal session running the 16 test files
+    it had written over a generated commit. Git unable to say: the finding stands."""
+    try:
+        done = runner(
+            ["git", "-C", cwd, "ls-tree", "-r", "--name-only", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if done.returncode != 0:
+        return False
+    tracked = (path for path in (done.stdout or "").splitlines() if TEST_FILE.search(path))
+    return sum(not path.startswith(VENDORED_TESTS) for path in tracked) <= GENERATED_TEST_FILES
+
+
 # The vendored rule's ban on writing a file through Bash, as it has led since #503. A tree
 # whose copy predates it was told only in passing, and the fix is the pull its project is
 # held from: 45bd36c5 was a sports_betting session on v0.11.32 (`devkit.onHold`), filed
@@ -1125,15 +1238,43 @@ def outside_the_tree(found: list, cwd: str) -> list:
 PYTHON_SCRIPT = re.compile(r"\S*python\S*\s+(?:-\S+\s+)*[\"']?(?P<script>[^\s\"';&|]+\.py)\b")
 # The directory a call changes into, and a path that does not lean on it.
 CD_INTO = re.compile(
-    r"(?:^|[;&|]\s*)(?:cd|pushd|Set-Location)\s+[\"']?(?P<dir>[^\"';&|\n]+)", re.I | re.M
+    r"(?:^|[;&|]\s*)(?:cd|pushd|Set-Location|Push-Location)\s+(?:-(?:Literal)?Path\s+)?"
+    r"[\"']?(?P<dir>[^\"';&|\n]+)",
+    re.I | re.M,
 )
 ABSOLUTE_PATH = re.compile(r"^(?:[A-Za-z]:)?[\\/]|^[~$]")
+# A quoted path bound to a variable, in either shell: `c="/tmp/x"`, `$c = 'C:\Temp\x'`.
+QUOTED_BINDING = re.compile(
+    r"(?:^|[;&|]\s*)\$?(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<q>[\"'])(?P<value>[^\"'\n]*)(?P=q)",
+    re.M,
+)
+
+
+def in_scratch(command: str) -> bool:
+    """The last directory `command` changes into is a scratch one, by its name or through
+    a variable it bound."""
+    names = {found["name"]: found["value"] for found in QUOTED_BINDING.finditer(command)}
+    steps = [found["dir"].strip() for found in CD_INTO.finditer(command)]
+    return bool(steps) and bool(
+        SCRATCH_DIR.search(
+            EXPANSION.sub(lambda m: names.get(m["bare"] or m["braced"], m[0]), steps[-1])
+        )
+    )
+
+
+def scratch_suite(command: str) -> bool:
+    """Every test run in `command` runs in a scratch directory: a clone a session measures
+    a project with, which no gate runs and which holds no change to target. A devkit
+    review timing photolab's suite on a fresh tree was filed as the habit (78d19a1f)."""
+    runs = list(TEST_RUN.finditer(command_position(command)))
+    return bool(runs) and all(in_scratch(command[: run.start()]) for run in runs)
 
 
 def ad_hoc_program(command: str) -> bool:
     """`command` runs a program the session wrote for itself: inline (`python -c`, any
-    flags first), or a script in a scratch directory, by its path or beside a `cd` there."""
-    if PYTHON_C.search(command):
+    flags first), a script in a scratch directory, by its path or beside a `cd` there, or
+    the suite of a scratch clone (`scratch_suite`, 5ba01dec)."""
+    if PYTHON_C.search(command) or scratch_suite(command):
         return True
     beside = any(SCRATCH_DIR.search(found["dir"]) for found in CD_INTO.finditer(command))
     return any(
@@ -1224,6 +1365,18 @@ def reached_past_the_tree(row: tuple[str, str, Event], roots: list[Path]) -> boo
     )
 
 
+def builds_its_own_venv(cwd: str) -> bool:
+    """The tree is a project that installs a package of its own, so `claude --worktree` links
+    it no `.venv` (`project_settings.borrows_venv`) and it builds one on its first test or
+    lint run. Until then nothing is owed to a program that is neither of those."""
+    tree = Path(cwd) if cwd else None
+    return (
+        tree is not None
+        and (tree / "pyproject.toml").is_file()
+        and not project_settings.borrows_venv(tree)
+    )
+
+
 def runner_defaults_targeted(cwd: str, workspace_root: Path, project: str) -> bool:
     """The session's `RUNNER` takes `--all`, so a bare run of it is targeted: the tree's
     copy decides, its project's checkout once the tree is gone. Neither there to read,
@@ -1265,7 +1418,8 @@ def task_branch(cwd: str, runner=sweep.run_windowless) -> str:
 
 def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tuple[str, str, Event]]:
     """`detect`, judged against the tree the session ran in: whether its runner is
-    targeted bare, and whether it was asked for targeted runs at all. The one judgement
+    targeted bare, whether it was asked for targeted runs at all, and whether it had a
+    suite to narrow (`suite_is_this_change`). The one judgement
     both the pass's filing and `fix-pass-supervise.py`'s audit make, so they agree.
     A dispatched session was handed the ban in its system prompt (`agent_tabs.FILE_WRITES`),
     so a stale rule excuses none of its heredoc writes."""
@@ -1278,12 +1432,20 @@ def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tupl
         for row in outside_the_tree(detect(events, targeted), cwd)
         if not _environment_excused(row, cwd, roots, workspace_root)
     ]
-    if not asks_for_targeted_runs(cwd, workspace_root, project):
+    if _whole_run_excused(found, cwd, workspace_root, project):
         found = [row for row in found if row[0] != "full-suite"]
     dispatched = any(event.kind == "user" and DISPATCHED in event.text for event in events)
     if not dispatched and not bans_shell_writes(cwd, workspace_root, project):
         found = [row for row in found if row[0] != "heredoc-write"]
     return found
+
+
+def _whole_run_excused(found: list, cwd: str, workspace_root: Path, project: str) -> bool:
+    """`found` holds a whole run, and its tree never asked for a narrower one or had no
+    suite to narrow. Git is asked only once there is a whole run to judge."""
+    return any(row[0] == "full-suite" for row in found) and (
+        not asks_for_targeted_runs(cwd, workspace_root, project) or suite_is_this_change(cwd)
+    )
 
 
 def _environment_excused(
@@ -1293,10 +1455,20 @@ def _environment_excused(
     has its own, or a package only the session's own program wanted. Or one with no tree
     to explain it: a module missing from a session at the workspace root, which no
     provisioner serves (308378fa, a scratch scan wanting `boto3`, which `imported_by_tree`
-    then found in a project under that root)."""
+    then found in a project under that root). Or a throwaway program on the machine's
+    interpreter in a tree that has not built its `.venv` yet (27c0d85a): a test run is not
+    throwaway, so one failing that way there is still filed."""
     if row[0] != "environment":
         return False
     if has_own_venv(cwd) and BARE_INTERPRETER.search(row[2].command):
+        return True
+    command = row[2].command
+    if (
+        MISSING_MODULE.search(row[1])
+        and ad_hoc_program(command)
+        and MACHINE_INTERPRETER.search(command)
+        and builds_its_own_venv(cwd)
+    ):
         return True
     if MISSING_MODULE.search(row[1]) and cwd and Path(cwd).resolve() == workspace_root.resolve():
         return True

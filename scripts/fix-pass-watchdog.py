@@ -43,9 +43,12 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import fix_switch
 import harness_events
 import worktree_tiers
 
@@ -63,7 +66,6 @@ MIN_RERUN = _dt.timedelta(minutes=5)
 # seconds this run of the pass has before it is stopped, which it launches no session past.
 WINDOW_ENV = "DEVKIT_FIX_PASS_SECONDS"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-MODE = re.compile(r'"devkit\.fixPass"\s*:\s*"(\w+)"')
 RESCUE_PREFIX = "agent/fix-pass-rescue"
 INTENT = Path("logs") / "ship-intent.md"
 # `fix_reports.ORIGIN_FILE`, spelled here because this file imports nothing the pass
@@ -128,11 +130,7 @@ def mode_of(argv: list[str], workspace: Path) -> str:
     """`--mode` when the caller passed one, else the workspace file's switch, else off."""
     if "--mode" in argv and argv.index("--mode") + 1 < len(argv):
         return argv[argv.index("--mode") + 1]
-    try:
-        found = MODE.search(workspace.read_text(encoding="utf-8"))
-    except OSError:
-        return "off"
-    return found.group(1) if found else "off"
+    return fix_switch.workspace_mode(workspace)
 
 
 def workspace_of(argv: list[str]) -> Path | None:
@@ -158,10 +156,19 @@ _SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
 # `pass-stale` rows it has filed (7599a153, a 2026-10-02 TLS reset, 6d06634e) healed at a
 # later fire on its own, each after sending a session at nothing. The pass still runs and
 # the note is still in its record; the next fire is the fix, and only one that is not
-# says anything about the machine.
+# says anything about the machine. Two fires are half an hour, which a stall can span:
+# 2026-11-05 two fires running timed out up to 02:30 local and the next one's went through
+# (bb04d04d), its cause never found. Six are three hours: a lost login or remote still
+# files, and a stall that lasts that long is worth a session.
 FETCH_FAILED = "could not fetch"
 FETCH_STREAK = "fetch_failures"
-FETCH_FIRES = 2
+FETCH_FIRES = 6
+
+# The branch `dependabot-automerge.yml` keeps at the newest commit whose gate passed.
+GREEN = "green"
+# How far it may trail the default branch before that is filed. A day: a red `main` gets a
+# fixer within a pass and fix-or-revert within hours, so a day means the gate itself stopped.
+GREEN_STALE_SECONDS = 24 * 60 * 60
 
 
 def fetch(root: Path, base: str) -> str:
@@ -201,6 +208,56 @@ def worth_filing(state: dict, ok: bool, what: str) -> bool:
     return state[FETCH_STREAK] >= FETCH_FIRES
 
 
+def update_target(root: Path, base: str) -> str:
+    """The ref the checkout follows: `origin/green` once it exists, else `origin/<base>`.
+
+    Merging no longer means tested, and the pass is what repairs a bad merge: running one
+    would break the repair of itself. `green` is the newest commit whose gate passed, so a
+    red `main` leaves the pass on code that works and the fixers it sends cut from `main`.
+    A repository with no `green` yet is one whose gate has not passed since it was added.
+
+    Decided by the ref being known here, not by this fetch: a fetch that failed for a
+    moment must leave the checkout on the last `green`, never move it to the unjudged tip.
+
+    The refspec's source is spelled in full. `+green:...` exits 0 and writes no ref when
+    the commit is already here, which it always is: `green` trails what `main` fetched.
+    """
+    ref = f"refs/remotes/origin/{GREEN}"
+    git(root, "fetch", "--quiet", "origin", f"+refs/heads/{GREEN}:{ref}")
+    known = git(root, "rev-parse", "--verify", "--quiet", ref)
+    return f"origin/{GREEN}" if known.returncode == 0 else f"origin/{base}"
+
+
+def stale_green(
+    root: Path,
+    base: str,
+    limit: float = GREEN_STALE_SECONDS,
+    clock: Callable[[], float] = time.time,
+) -> str:
+    """What to file when a commit has waited more than `limit` to reach `green`, else "".
+
+    Following `green` means a broken gate stops the machine updating, quietly. Nothing
+    should act on the tip while that lasts, but past this the wait stops being the safe
+    answer and becomes the failure.
+
+    Measured from the oldest commit `green` has not reached, against the clock. The gap
+    between the two commits would call a quiet weekend followed by one merge days stale
+    while that merge's gate was still running. Filed apart from `self_update`, whose False
+    would also stop the rerun: the checkout is up to date with everything judged good.
+    """
+    ref = f"refs/remotes/origin/{GREEN}"
+    if git(root, "rev-parse", "--verify", "--quiet", ref).returncode != 0:
+        return ""
+    waiting = git(root, "log", "--reverse", "--format=%ct", f"{ref}..origin/{base}").stdout.split()
+    try:
+        oldest = int(waiting[0]) if waiting else 0
+    except ValueError:
+        return ""
+    if not oldest or clock() - oldest <= limit:
+        return ""
+    return f"origin/{base} has commits {GREEN} has not reached in a day: its gate is not passing"
+
+
 def self_update(root: Path) -> tuple[bool, str]:
     """Fast-forward the checkout the pass runs from; `(ok, what happened)`.
 
@@ -218,8 +275,9 @@ def self_update(root: Path) -> tuple[bool, str]:
     if failed := fetch(root, base):
         return False, f"{FETCH_FAILED} origin/{base} -- {failed}"
     before = git(root, "rev-parse", "HEAD").stdout.strip()
-    if git(root, "merge", "--ff-only", "--quiet", f"origin/{base}").returncode != 0:
-        return False, f"{base} has diverged from origin/{base}"
+    target = update_target(root, base)
+    if git(root, "merge", "--ff-only", "--quiet", target).returncode != 0:
+        return False, f"{base} has diverged from {target}"
     after = git(root, "rev-parse", "HEAD").stdout.strip()
     return True, "current" if before == after else f"updated {before[:9]}..{after[:9]}"
 
@@ -324,6 +382,10 @@ THREAD_TRACE = re.compile(
     r"^Exception in thread [^\n]*\nTraceback \(most recent call last\):\n(?:[ \t][^\n]*\n)*(\S[^\n]*)",
     re.MULTILINE,
 )
+# Python's own, which starts at column 0. The words alone are not one: a finding the pass
+# files can quote a project's traceback on a line of the record, and the 01:30 fire of
+# 2026-11-05 finished cleanly, filed one, and had a rescue sent at it for doing so.
+TRACEBACK = re.compile(r"^Traceback \(most recent call last\):", re.MULTILINE)
 # What a session is sent at: the pass stopped. A refusal needs something outside the
 # repository and a thread error left the pass running, so both are only filed.
 RESCUED = ("pass-crashed", "pass-hung")
@@ -337,13 +399,13 @@ def judge(code: int | None, output: str) -> tuple[str, str]:
             f"the fix pass ran past {int(TIMEOUT.total_seconds() // 60)} minutes and was stopped",
         )
     threads = THREAD_TRACE.findall(output)
-    if code in REPORTED and "Traceback (most recent call last)" not in THREAD_TRACE.sub("", output):
+    if code in REPORTED and not TRACEBACK.search(THREAD_TRACE.sub("", output)):
         # A background thread's traceback -- a reader thread that could not decode a
         # child's output -- lost output but did not stop the pass: filed, not rescued.
         return ("pass-thread-error", threads[0].strip()[:240]) if threads else ("", "")
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     last = lines[-1] if lines else f"exit {code}"
-    kind = "pass-refused" if code == 2 and "Traceback" not in output else "pass-crashed"
+    kind = "pass-refused" if code == 2 and not TRACEBACK.search(output) else "pass-crashed"
     return kind, re.sub(r"\s+", " ", last)[:240]
 
 
@@ -535,6 +597,9 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
             file_once(
                 state, signature("pass-stale", what, head), "pass-stale", what, str(REPO_ROOT), now
             )
+        if stale := stale_green(REPO_ROOT, default_branch(REPO_ROOT)):
+            sig = signature("green-stale", stale, head)
+            file_once(state, sig, "green-stale", stale, str(REPO_ROOT), now)
     code, output = run_current(argv, mode, notes, began)
     print(output, end="")  # pythonw.exe runs this job with sys.stdout None
     kind, detail = judge(code, output)

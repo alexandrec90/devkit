@@ -77,6 +77,8 @@ class Context:
     # When the machine last started (`fix_reports.booted_at`); None judges a session by
     # its silence alone.
     booted: _dt.datetime | None = None
+    # The projects in the direct flow (`delivery.direct_projects`), read once per pass.
+    direct: frozenset[str] = frozenset()
 
     @property
     def writes(self) -> bool:
@@ -155,6 +157,7 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
         closed.verified += journal.step(
             "signed-in", retire_login, ctx, closed.signed_in, default=[]
         )
+        closed.verified += journal.step("trusted", retire_trusted, ctx, default=[])
         runner = ship_intent.run_quiet
         closed.stopped = journal.step(
             "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
@@ -370,7 +373,7 @@ def judge_dead(
     if state in (fix_reports.INTERRUPTED, fix_reports.LOGGED_OUT, fix_reports.UNTRUSTED):
         # The machine went down under it, nobody was logged in, or nobody trusted the
         # checkout: no attempt spent, only a re-send, which finds a PR's tree as the
-        # session left it.
+        # session left it. The last is held until someone does (`fix_send._untrusted`).
         if ctx.writes:
             fix_ledger.mark_interrupted(ctx.ledger_path, key, state)
         if state == fix_reports.LOGGED_OUT:
@@ -381,6 +384,7 @@ def judge_dead(
             detail = untrusted_detail(ctx.root / tree.project)
             cited = str(tree.path / fix_reports.LAUNCH_FILE)
             journal.add(Finding(UNTRUSTED_KIND, tree.project, detail, evidence=cited))
+            return [f"{where} -- {state}; held until {tree.project} is trusted"]
         return [f"{where} -- {state}; sent again"]
     # No key: a dead session is re-sent at once, not parked behind the finding. One
     # that never started is cited by what its launcher said, when it left a record.
@@ -954,6 +958,38 @@ def retire_login(ctx: Context, signed_in: str) -> list[str]:
     note = f"the login works again: a fixer session begun at {signed_in} reached an outcome"
     triage.resolve([item.id for item in stale], note, root=ctx.devkit_dir)
     return [f"retired [{item.id}] -- {note}" for item in stale]
+
+
+def _open_untrusted(history: list[triage.Item]) -> list[triage.Item]:
+    """Each open `UNTRUSTED_KIND` row in `history`, the ledger as `triage.load` reads it."""
+    marker = f"{UNTRUSTED_KIND}: "
+    return [
+        item
+        for item in triage.open_items(history, (fix_findings.FINDING,))
+        if item.fields.get("detail", "").startswith(marker)
+    ]
+
+
+def awaiting_trust(history: list[triage.Item]) -> frozenset[str]:
+    """The projects with a launch refusal still open: `fix_send._untrusted` holds them."""
+    return frozenset(item.project for item in _open_untrusted(history))
+
+
+def retire_trusted(ctx: Context) -> list[str]:
+    """Retire each open `UNTRUSTED_KIND` row whose checkout is trusted now; lines for the
+    record. `retire_login`'s reason, and no re-send has to prove it: Claude Code's own
+    file says, and 1d0d0887 sat open a day past the step, telling the toast to take it."""
+    stale = [
+        item
+        for item in _open_untrusted(triage.load(ctx.devkit_dir))
+        if fix_reports.trusted(ctx.root / item.project)
+    ]
+    lines = []
+    for item in stale:
+        note = f"{item.project} is trusted now: Claude Code holds the prompt's answer"
+        triage.resolve([item.id], note, root=ctx.devkit_dir)
+        lines.append(f"retired [{item.id}] -- {note}")
+    return lines
 
 
 # Between a person's step and the command that retires its group: the tray cuts there

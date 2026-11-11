@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
+import tomllib
 from pathlib import Path
 
+import pytest
 import support
 from support import load_script
 
@@ -41,6 +45,36 @@ def test_the_report_is_read_into_ids_pytest_s_summary_would_print(tmp_path):
         ),
         e2e.Case("tests/test_c.py::TestD::test_broke", "failed", "fixture blew up"),
     ]
+
+
+def test_the_marker_says_the_tier_is_deselected_not_skipped():
+    """`addopts` is what keeps the tier out of a default run. A marker saying "skipped"
+    sent a project's fixer to write a skip the structural ratchet then refused."""
+    config = tomllib.loads((support.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    pytest_config = config["tool"]["pytest"]["ini_options"]
+    assert f"not {e2e.MARKER}" in pytest_config["addopts"]
+    described = next(m for m in pytest_config["markers"] if m.startswith(f"{e2e.MARKER}:"))
+    assert "deselected" in described
+    assert "skipped" not in described
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".claude/rules/vscode-tasks.md",
+        "README.md",
+        "scripts/e2e.py",
+        "tests/support.py",
+        "tests/test_workspace_task_index.py",
+        "tests/test_workspace_tasks_live.py",
+    ],
+)
+def test_nothing_describing_the_tier_says_ci_skips_it(path):
+    """No tier test can skip in CI: `addopts` deselects the marker first. homelab's fixer
+    read that framing in the rule, wrote a skip, and was refused by the ratchet; the rule
+    is corrected, and devkit's own `scripts/e2e.py` is the model a project's tier resembles."""
+    text = (support.REPO_ROOT / path).read_text(encoding="utf-8")
+    assert not re.search(r"(?i)\bCI skips\b|\bskip\w*\s+in\s+CI\b", text)
 
 
 def test_an_unreadable_report_is_no_cases(tmp_path):
@@ -86,6 +120,32 @@ def test_the_run_selects_the_local_tier_and_writes_a_report_naming_files():
     assert argv[:4] == ["py", "-m", "pytest", "tests"]
     assert argv[argv.index("-m", 2) + 1] == "local and not paid"
     assert f"--junitxml={Path('logs/r.xml')}" in argv
+
+
+def test_named_tests_are_run_in_the_tiers_place_and_stay_in_the_tier():
+    """A fixer sent at one red spent 2143 s on the whole tier and began a second run on
+    the machine the night's jobs run on (42c3bba5, 50917bb2). The marker stays, so a name
+    outside the tier deselects to nothing, which `verdict` reads as no pass."""
+    named = "tests/test_x.py::test_y"
+    argv = e2e.pytest_argv("py", Path("logs/r.xml"), [named])
+    assert argv[:4] == ["py", "-m", "pytest", named] and "tests" not in argv
+    assert argv[argv.index("-m", 2) + 1] == "local and not paid"
+
+
+def test_main_hands_its_arguments_to_pytest(monkeypatch, tmp_path, capsys):
+    seen = {}
+
+    def run(argv, **_kwargs):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(e2e, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(e2e, "cases", lambda _report: [PASS])
+    monkeypatch.setattr(e2e.sweep, "run_windowless", run)
+    monkeypatch.delenv(e2e.ENV_FLAG, raising=False)
+    assert e2e.main(["tests/test_x.py::test_y"]) == 0
+    assert seen["argv"][3] == "tests/test_x.py::test_y"
+    capsys.readouterr()
 
 
 def test_only_the_scheduled_run_is_strict():

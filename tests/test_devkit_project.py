@@ -21,6 +21,7 @@ from support import (
     in_an_ephemeral_box,
     needs_live_workspace,
     needs_the_static_checkout,
+    on_a_task_branch,
     worktree,
     worktree_tiers,
 )
@@ -338,6 +339,42 @@ def test_stack_actions_are_devkit_owned_with_a_project_override(checkouts, tmp_p
         plan_command(ACTIONS[key], checkouts / "beta", [], devkit_root)
 
 
+def test_the_template_names_the_cli_contract_the_dispatcher_demands():
+    """d02a3ddd: the template still owed `docker-up.py` and `docker-down.py`, which are
+    DEVKIT-owned now and which photolab, correctly, has neither of. The comment is the
+    only place a generated project reads its contract, so it is held to `ACTIONS`."""
+    template = support.REPO_ROOT / "templates" / "core" / "dot-vscode" / "tasks.json.tmpl"
+    text = template.read_text(encoding="utf-8")
+    contract = text[text.index("the CLI CONTRACT") : text.index("`devkit_project.py --check`")]
+    owed = {
+        action.script
+        for action in ACTIONS.values()
+        if action.owner == devkit_project.PROJECT and not action.projects
+    }
+    assert set(re.findall(r"`(scripts/[\w-]+\.py)`", contract)) == owed
+
+
+def test_the_generated_instructions_say_how_a_task_runs_a_script(checkouts, tmp_path):
+    """f33fd4ed: photolab's `scripts/album.py` was written importing `dotenv` and relying
+    on Ctrl+C, then rewritten once a task was asked for, since its `CLAUDE.md` said neither
+    where tasks live nor what a dispatched script starts as. This holds those words to
+    the argv that is their whole basis, and `log-wrap.py`'s windowless spawn."""
+    devkit_root = tmp_path / "devkit"
+    (devkit_root / "scripts").mkdir(parents=True)
+    command = plan_command(ACTIONS["test"], checkouts / "alpha", [], devkit_root)
+    assert command[-2:] == ["python", "scripts/run-tests.py"], "not the machine's `python`"
+    log_wrap = (support.REPO_ROOT / "scripts" / "log-wrap.py").read_text(encoding="utf-8")
+    assert "creationflags=NO_WINDOW" in log_wrap
+
+    core = support.REPO_ROOT / "templates" / "core"
+    for name in ("CLAUDE.md.tmpl", "dot-vscode/tasks.json.tmpl"):
+        said = " ".join((core / name).read_text(encoding="utf-8").replace("//", " ").split())
+        assert "under the machine's `python`, not" in said, name
+        assert "no console" in said and "Ctrl+C" in said, name
+    claude = (core / "CLAUDE.md.tmpl").read_text(encoding="utf-8")
+    assert "A task lives in the workspace file" in claude
+
+
 def test_hook_tests_is_devkit_owned_so_every_checkout_can_run_it(checkouts, tmp_path):
     """`pytest scripts/hooks/tests/ -q` is byte-identical in every consumer.
 
@@ -501,6 +538,9 @@ def test_the_scoped_actions_cover_every_hoisted_project_task():
         # Born scoped, by capability: only ibkr_trader ships the web UI.
         # `scripts/ui-task.py` is the contract.
         "trader-ui",
+        # Born scoped, by capability: only photolab ships the album.
+        # `scripts/album.py` is the contract.
+        "album",
     }
 
 
@@ -706,6 +746,39 @@ def test_the_trader_ui_names_its_missing_script(tmp_path):
     """A checkout without the UI branch merged is a conformance failure by name."""
     with pytest.raises(ProjectError, match=r"scripts/ui-task\.py"):
         plan_command(ACTIONS["trader-ui"], tmp_path, [])
+
+
+def test_the_album_is_photolab_scoped_and_runs_the_script_bare(tmp_path):
+    """`album.py` reads its ports from the checkout's .env, so the dispatch adds nothing
+    between the interpreter and the script, and only photolab owes the script."""
+    action = ACTIONS["album"]
+    assert action.script == "scripts/album.py"
+    assert action.label == "Photolab: Open Album"
+    assert action.args == ()
+    assert action.projects == devkit_project.PHOTOLAB == ("photolab",)
+    assert action.owner == devkit_project.PROJECT
+    assert "album" in expected_actions("photolab")
+    assert "album" not in expected_actions("devkit")
+
+    checkout = tmp_path / "photolab"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "album.py").write_text("", encoding="utf-8")
+    argv = plan_command(action, checkout, [])
+    assert argv[-2:] == ["python", "scripts/album.py"]
+
+
+def test_the_album_task_names_its_checkout_rather_than_asking(canonical):
+    """The album binds fixed ports, so a second checkout could only collide with the first.
+    A literal `--project` asks nothing; the literal-scope test holds it to the action."""
+    task = next(t for t in canonical["tasks"] if t["label"] == "Photolab: Open Album")
+    args = [str(a) for a in task["args"]]
+    assert args[args.index("--project") + 1 :] == ["photolab", "album"]
+
+
+def test_the_album_names_its_missing_script(tmp_path):
+    """A checkout without `album.py` is a conformance failure by name."""
+    with pytest.raises(ProjectError, match=r"scripts/album\.py"):
+        plan_command(ACTIONS["album"], tmp_path, [])
 
 
 def test_the_host_preview_pair_is_one_script_told_apart_by_a_flag():
@@ -1056,12 +1129,10 @@ def test_a_workspace_without_a_folders_array_is_refused():
 def test_registering_against_the_real_workspace_file():
     """The shape assertions above are on a fixture; this proves them on the live file.
 
-    Skipped from a box for the reason `test_the_live_workspace_matches_the_canonical_copy`
-    is: the live file is main's render, so a branch that ADDS a picker is asserting here
-    that its own un-merged edit has already landed. That is not hypothetical — adding
-    `adoptProjects` reddened exactly this test and its retirement twin, at the Stop gate,
-    with nothing wrong. The marker's comment in `support.py` describes the drift check
-    alone; the pair below reads the same file and needed it just as much.
+    Skipped from a box: the live file is main's render, so a branch that ADDS a picker is
+    asserting here that its own un-merged edit has already landed. That is not
+    hypothetical — adding `adoptProjects` reddened exactly this test and its retirement
+    twin, at the Stop gate, with nothing wrong.
     """
     text = LIVE_WORKSPACE.read_text(encoding="utf-8")
     updated = register(text, ["probe", "probe-b"])
@@ -1273,6 +1344,12 @@ def test_the_rule_sends_an_editor_to_the_canonical_copy_first():
 
 
 # --- the whole file: drift, render, adopt ------------------------------------
+
+# A project no `workspace.jsonc` will ever hold. The real file is the fixture's seed, so a
+# test that registered the name of a PR still open went red the moment that PR merged:
+# `workspace_pair` had made its directory, and `register` no-ops on a known name. #729 did
+# exactly that to `agent-terminal`, on the default branch.
+UNREGISTERED = "a-project-on-no-default-branch"
 
 
 @pytest.fixture
@@ -1725,6 +1802,81 @@ def test_held_on_branches_names_the_branch_holding_each_live_edit():
         problems[1]: "origin/older",
     }
     assert devkit_project.held_on_branches(problems, payload, []) == {}
+
+
+def test_awaited_merge_answers_only_for_the_whole_of_the_live_edits():
+    """A branch holding one edit of two leaves the other a decision someone owes, and
+    drift with no live edit at all is a publish owed: neither is a merge awaited."""
+    payload = {"folders": [{"path": "devkit"}, {"path": "photolab"}], "settings": {"x": 1}}
+    folder = "folder in the workspace but not in devkit: photolab"
+    setting = "setting in the workspace but not in devkit: x"
+    ahead = f"{devkit_project.CANONICAL_AHEAD[0]}Some Task"
+    registers = ("origin/agent/register-photolab", {"folders": payload["folders"]})
+    keeps_both = ("origin/both", {"folders": payload["folders"], "settings": {"x": 1}})
+
+    assert devkit_project.awaited_merge([folder, setting], payload, [keeps_both]) == {
+        folder: "origin/both",
+        setting: "origin/both",
+    }
+    assert devkit_project.awaited_merge([folder, ahead], payload, [registers]) == {
+        folder: "origin/agent/register-photolab"
+    }, "what the canonical copy has ahead waits for that publish, not against it"
+    assert devkit_project.awaited_merge([folder, setting], payload, [registers]) == {}
+    assert devkit_project.awaited_merge([ahead], payload, [keeps_both]) == {}
+    assert devkit_project.awaited_merge([], payload, [keeps_both]) == {}
+
+
+def test_live_drift_against_a_named_copy_ignores_the_unmerged_edit_on_disk(workspace_pair):
+    """42c3bba5: from a box this check could only skip, so the command a fixer is told to
+    run before and after could not show the failure it was sent at. Handed what has merged,
+    a branch's own edit is no drift and a live file behind `main` still is."""
+    canonical, live = workspace_pair
+    merged = canonical.read_text(encoding="utf-8")
+    assert devkit_project.live_drift(live) == []
+    canonical.write_text(devkit_project.unregister(merged, ["carameli"]), encoding="utf-8")
+    assert devkit_project.live_drift(live), "the branch's edit reads as drift on disk"
+    assert devkit_project.live_drift(live, merged) == []
+    behind = devkit_project.register(merged, [UNREGISTERED])
+    (live.parent / UNREGISTERED).mkdir()
+    assert devkit_project.live_drift(live, behind), "merged, and not in the live file yet"
+
+
+def test_merged_canonical_reads_the_default_branch_or_says_it_cannot(monkeypatch):
+    calls = []
+
+    def git(*args):
+        calls.append(args)
+        if args[0] == "symbolic-ref":
+            return subprocess.CompletedProcess(args, 0, "origin/trunk\n", "")
+        code = 0 if answers else 128
+        return subprocess.CompletedProcess(args, code, "merged text" if answers else "", "")
+
+    monkeypatch.setattr(devkit_project.sweep, "git_for", lambda _root: git)
+    answers = True
+    assert devkit_project.merged_canonical() == "merged text"
+    assert calls[-1] == ("show", "origin/trunk:workspace.jsonc")
+    answers = False
+    assert devkit_project.merged_canonical() == ""
+
+
+def test_live_drift_reads_a_registration_on_its_branch_as_no_drift(workspace_pair, monkeypatch):
+    """agent-terminal's #729, green and waiting on a person: its live registration turned
+    Local E2E red and sent a fixer at a state nothing is wrong with, while the daily status
+    line read the same drift as a merge awaited. And #733 had moved a task meanwhile, which
+    only `judged_drift` can tell from a live edit."""
+    _canonical, live = workspace_pair
+    registered = devkit_project.register(live.read_text(encoding="utf-8"), [UNREGISTERED])
+    live.write_text(registered, encoding="utf-8", newline="\n")
+    (live.parent / UNREGISTERED).mkdir()
+    assert devkit_project.canonical_view(live)[1] == [], "this machine holds the whole registry"
+    assert devkit_project.live_only(devkit_project.live_drift(live)), "no branch holds it yet"
+
+    branch = devkit_jsonc_loads(registered)
+    monkeypatch.setattr(devkit_project, "pending_copies", lambda _: iter([("origin/reg", branch)]))
+    assert devkit_project.live_drift(live) == []
+
+    _set_switches(live, **{"terminal.integrated.fontSize": 9})
+    assert devkit_project.live_drift(live), "an edit no branch holds is drift still"
 
 
 def test_pending_copies_are_the_pushed_commits_head_lacks(workspace_pair):
@@ -3336,7 +3488,6 @@ def test_a_checkout_git_cannot_answer_for_is_not_treated_as_pre_merge(tmp_path, 
 
 
 @needs_live_workspace
-@needs_the_static_checkout
 def test_the_live_workspace_matches_the_canonical_copy():
     """The check `--check-workspace` runs, as a test so devkit's own gate catches drift.
 
@@ -3345,18 +3496,22 @@ def test_the_live_workspace_matches_the_canonical_copy():
     project existed only in the copy with no history — and that list is what every
     sweep, status line and `--project` picker resolves against.
 
-    Skipped from a box: the live file is rendered from the static checkout *after* a
-    branch merges, so there the comparison asks whether an un-merged edit has already
-    landed. See `support.needs_the_static_checkout` for why rendering early is not the
-    way out of that.
+    From a box it compares what has merged, not this tree's copy: the live file is
+    rendered from the static checkout *after* a branch merges, so the tree's own copy
+    would ask whether an un-merged edit has already landed. It used to skip there, and a
+    fixer sent at this very test could not see it fail (42c3bba5).
+
+    Green while a pushed branch holds every live edit (`devkit_project.live_drift`): that
+    is `new-project.py`'s registration waiting on its PR, a merge and not a defect, and
+    the daily status line names the branch. Past `HELD_DAYS` it goes red here again.
     """
-    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
+    merged = ""
+    if in_an_ephemeral_box(REPO_ROOT) or on_a_task_branch(REPO_ROOT):
+        merged = devkit_project.merged_canonical()
+        assert merged, "this tree cannot read workspace.jsonc off origin's default branch"
     # This machine's view, as every real comparison is: a project registered from
     # another workstation and not cloned here is left out of the render, not drift.
-    problems = devkit_project.workspace_drift(
-        devkit_jsonc_loads(text),
-        devkit_jsonc_loads(devkit_project.canonical_view(LIVE_WORKSPACE)[0]),
-    )
+    problems = devkit_project.live_drift(LIVE_WORKSPACE, merged)
     keep = (
         "or --adopt-workspace to keep the live edits"
         if not devkit_project.canonical_only(problems)
@@ -3753,3 +3908,25 @@ def test_a_kept_failure_never_overwrites_the_one_log_wrap_keeps(tmp_path, ledger
     assert artifact is not None
     assert artifact != "logs/lint-run.failed.log"
     assert (tmp_path / artifact).is_file()
+
+
+def test_every_project_is_told_what_a_task_script_starts_as(checkouts, tmp_path):
+    """983bc6e6: "instruction budget: hot 5547/5550 tok" left `engineering.md` no room for
+    this, so the fact reached only projects generated after the fix. A path-scoped rule in
+    the `MANIFEST` reaches every project at its next pull and costs the hot tier nothing.
+    The words are held to the argv that is their whole basis, and to the windowless spawn."""
+    devkit_root = tmp_path / "devkit"
+    (devkit_root / "scripts").mkdir(parents=True)
+    command = plan_command(ACTIONS["test"], checkouts / "alpha", [], devkit_root)
+    assert command[-2:] == ["python", "scripts/run-tests.py"], "not the machine's `python`"
+    log_wrap = (support.REPO_ROOT / "scripts" / "log-wrap.py").read_text(encoding="utf-8")
+    assert "creationflags=NO_WINDOW" in log_wrap
+
+    rel = ".claude/rules/task-scripts.md"
+    manifest = (support.REPO_ROOT / "scripts" / "devkit_manifest.py").read_text(encoding="utf-8")
+    assert f'"{rel}"' in manifest, "not vendored, so no existing project ever reads it"
+    text = (support.REPO_ROOT / rel).read_text(encoding="utf-8")
+    assert re.search(r"^paths:$", text, re.M), "unscoped, so it is back on the hot budget"
+    said = " ".join(text.split())
+    assert "under the machine's `python`, not this project's `.venv`" in said
+    assert "no console" in said and "Ctrl+C" in said

@@ -7,7 +7,10 @@ the two total functions stay total.
 
 from __future__ import annotations
 
+import concurrent.futures as futures
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -140,7 +143,7 @@ def test_trees_for_counts_from_the_checkout_without_a_rev_list_per_worktree(monk
                 "refs/remotes/origin/main",
             ),
             ("for-each-ref", fmt, "refs/heads"): (0, "agent/topic-0905\t\t\t3 0\n"),
-            ("status", "--porcelain"): (0, ""),
+            agent_worktree.STATUS: (0, ""),
         }
         answer = fake_git(table)
 
@@ -264,7 +267,7 @@ def test_trees_for_reads_each_worktree_in_its_own_directory(monkeypatch):
         return fake_git(
             {
                 ("worktree", "list", "--porcelain"): (0, listing),
-                ("status", "--porcelain"): (0, " M a.py\n?? b.py\n"),
+                agent_worktree.STATUS: (0, " M a.py\n?? b.py\n"),
                 ("rev-list", "--count", "agent/topic-0905@{u}..HEAD"): (0, "1\n"),
             }
         )
@@ -276,6 +279,81 @@ def test_trees_for_reads_each_worktree_in_its_own_directory(monkeypatch):
         aw.Tree("topic", "C:/ws/devkit/.claude/worktrees/topic", "agent/topic-0905", 2, 1)
     ]
     assert asked[-1] == Path("C:/ws/devkit/.claude/worktrees/topic")
+
+
+def test_a_dropdown_opening_takes_no_lock_in_a_worktree():
+    """A bare `git status` refreshes the index and so takes `index.lock`, in trees a live
+    session may be committing from. Reading rows must not be able to fail its `git add`."""
+    assert agent_worktree.STATUS[0] == "--no-optional-locks"
+    assert agent_worktree.STATUS[1:3] == ("status", "--porcelain")
+
+
+def many_trees(project: str, count: int) -> str:
+    """`git worktree list --porcelain` for `project` holding `count` agent trees."""
+    head = f"worktree C:/ws/{project}\nHEAD 1a\nbranch refs/heads/main\n\n"
+    return head + "\n".join(
+        f"worktree C:/ws/{project}/.claude/worktrees/t{n}\nHEAD 2b\nbranch refs/heads/t{n}\n"
+        for n in range(count)
+    )
+
+
+def test_a_checkouts_statuses_run_wider_than_its_checkouts_fan_out(monkeypatch):
+    """worktreeRow drew 96 trees in 2.1s warm and 25s cold at the old width of 8, and 8s
+    cold at 32. The wait is on the disk, not on a core. Every status here waits until the
+    whole width has arrived, so a pool narrower than `STATUS_WORKERS` breaks the barrier."""
+    arrived = threading.Barrier(agent_worktree.STATUS_WORKERS, timeout=20)
+    listing = many_trees("devkit", agent_worktree.STATUS_WORKERS)
+
+    def git_for(_path: Path):
+        answer = fake_git({("worktree", "list", "--porcelain"): (0, listing)})
+
+        def git(*args: str):
+            if args == agent_worktree.STATUS:
+                arrived.wait()
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return answer(*args)
+
+        return git
+
+    monkeypatch.setattr(agent_worktree.sweep, "git_for", git_for)
+    found = agent_worktree.trees_for(Path("C:/ws/devkit"))
+    assert len(found) == agent_worktree.STATUS_WORKERS
+
+
+def test_the_status_width_is_shared_across_checkouts(monkeypatch):
+    """Eight checkouts at once each with a pool of their own would be a hundred `git status`
+    processes on eight cores for one ticked-everything dropdown."""
+    lock = threading.Lock()
+    running = [0, 0]  # now, the most seen
+
+    def git_for(path: Path):
+        project = next(part for part in path.parts if part.startswith("p"))
+        answer = fake_git(
+            {
+                ("worktree", "list", "--porcelain"): (
+                    0,
+                    many_trees(project, agent_worktree.STATUS_WORKERS),
+                )
+            }
+        )
+
+        def git(*args: str):
+            if args != agent_worktree.STATUS:
+                return answer(*args)
+            with lock:
+                running[0] += 1
+                running[1] = max(running)
+            time.sleep(0.01)
+            with lock:
+                running[0] -= 1
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        return git
+
+    monkeypatch.setattr(agent_worktree.sweep, "git_for", git_for)
+    with futures.ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(agent_worktree.trees_for, [Path(f"C:/ws/p{n}") for n in range(3)]))
+    assert running[1] <= agent_worktree.STATUS_WORKERS
 
 
 def test_a_checkout_git_will_not_list_contributes_no_rows(monkeypatch):

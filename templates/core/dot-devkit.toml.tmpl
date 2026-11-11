@@ -26,6 +26,14 @@ unit_tests = "{{ unit_tests }}"
 [python]
 version = "{{ python_version }}"
 
+# How a finished session's work reaches the default branch. `gated`, the default, is a
+# PR the gate decides. `direct` merges first: the ship task opens a PR labelled
+# `merge-now`, nothing waits on a gate, and every check runs after the merge and repairs
+# what it finds.
+#
+# [delivery]
+# flow = "direct"
+
 # The Bash output cap `invoke-capped.py` applies. `enforce-capped-bash.py` (vendored,
 # not wired as a hook) quotes the same `max_bytes`, so one field feeds both.
 #
@@ -199,3 +207,6 @@ runtime = "win-x64"
 [desktop]
 enabled = false
 {{/desktop}}
+
+# In a `[delivery]` table, `medium_tier` names the command the medium test tier runs at a
+# commit in place of `scripts/run-tests.py --all`; it is how a project with a database opts in.

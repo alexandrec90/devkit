@@ -3,22 +3,26 @@
 
 devkit's copy of the contract `scripts/e2e-pass.py` runs in every registered checkout
 (`e2e_results.py` owns it): exit 0 green, anything else red, each failing test printed as
-pytest's `FAILED <id>` line. What it runs is every test marked `local` -- which
-`tests/support.py`'s `needs_live_workspace` and `needs_the_static_checkout` apply
-themselves, so a test that skips in CI for wanting this machine is in this tier by the
-same decorator that skips it there.
+pytest's `FAILED <id>` line. What it runs is every test marked `local`, which `addopts`
+deselects from every other run, CI's included: that, not a skip, is what keeps the tier
+off a runner. `tests/support.py`'s `needs_live_workspace` and `needs_the_static_checkout`
+apply the mark themselves, beside a skip for a by-hand run where the test cannot work.
 
-**A skip is a failure when the scheduler runs it.** Every test here skips somewhere by
-design: CI has no live workspace, a box is not the static checkout. Under the scheduled
-pass (`e2e-pass.ENV_FLAG` set) the checkout is the static one on its default branch, so
-nothing has a reason left to skip, and one that does is the machine drifting from what
-the tests assume -- a moved workspace file, a checkout off its branch. Each skip is
+**A skip is a failure when the scheduler runs it.** A by-hand run can skip on purpose: a
+box is not the static checkout, and a second machine has no live workspace. Under the
+scheduled pass (`e2e-pass.ENV_FLAG` set) the checkout is the static one on its default
+branch, so nothing has a reason left to skip, and one that does is the machine drifting
+from what the tests assume -- a moved workspace file, a checkout off its branch. Each skip is
 printed as a `FAILED` line naming its reason, so it signs the result like any failure.
 By hand, in a box, the skips are listed and do not fail the run: that is a fixer
 reproducing what it can, and the scheduled run re-tests the rest.
 
 **A run that executed nothing is red**, whoever ran it: a green from zero tests is the
 skip-as-pass `hook-tests-live.py` exists to refuse.
+
+**Test ids on the command line run those alone, still inside the tier.** The whole tier
+holds this machine for over half an hour and opens VS Code; the scheduled pass names
+nothing, and a fixer reproducing one `FAILED` line names that line's id.
 
 **Under the scheduler it publishes the workspace file first.** The live file is rendered
 from the canonical copy once a day (`devkit-workspace-status`), so a task merged in the
@@ -37,6 +41,7 @@ import html
 import os
 import re
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -126,12 +131,12 @@ def publish(live: Path = devkit_project.DEFAULT_WORKSPACE) -> str:
     return f"e2e: workspace publish -- {outcome}" + "".join(f"\n  {d}" for d in differences)
 
 
-def pytest_argv(python: str, report: Path) -> list[str]:
+def pytest_argv(python: str, report: Path, named: Sequence[str] = ()) -> list[str]:
     return [
         python,
         "-m",
         "pytest",
-        "tests",
+        *(named or ["tests"]),
         "-m",
         f"{MARKER} and not paid",
         "-rfE",
@@ -142,7 +147,7 @@ def pytest_argv(python: str, report: Path) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    del argv  # no options: the scheduled pass and a fixer run it the same way
+    named = sys.argv[1:] if argv is None else argv
     strict = scheduled()
     if strict:
         print(publish(), flush=True)
@@ -156,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     # nothing writes to the hidden console it was given, not to the pipe the pass reads,
     # and the result's `output.log` would hold none of pytest's `FAILED` lines.
     done = sweep.run_windowless(
-        pytest_argv(python, report),
+        pytest_argv(python, report, named),
         cwd=str(REPO_ROOT),
         capture_output=True,
         encoding="utf-8",

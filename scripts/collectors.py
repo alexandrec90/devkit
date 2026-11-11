@@ -2290,6 +2290,7 @@ def main(
         return 0
     base = config.home(args.devkit.expanduser().resolve())
     now = _dt.datetime.now()
+    collector_tasks.keep_docker_on_path()
     if args.mode in SINGLE:
         return single(args, base, now, run, spawner, streamer)
     report = Report()

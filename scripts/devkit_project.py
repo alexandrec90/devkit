@@ -122,6 +122,7 @@ CREATE_VISIBILITY = "--public"
 CARAMELI = ("carameli",)
 IBKR = ("ibkr_trader",)
 SOCIAL_SCRAPER = ("social-scraper",)
+PHOTOLAB = ("photolab",)
 
 # The source checkout, as a scope. One action is genuinely devkit-only rather than
 # merely implemented here: the live-CLI hook smokes live in `tests/`, which is the tree
@@ -411,6 +412,12 @@ ACTIONS: dict[str, Action] = {
     # scrape reuses. The platform rides in from the task as a trailing argument, so a
     # Reddit row is a task-file edit rather than a second action.
     "scraper-login": Action("scripts/login.py", "Scraper: Log In", projects=SOCIAL_SCRAPER),
+    # --- scoped to photolab ---
+    #
+    # The trader UI's shape: in the foreground until its terminal closes. On the host rather
+    # than in Docker because the `codex` and `claude` commands and their logins are out
+    # here. Fixed ports, which is why the task names the checkout.
+    "album": Action("scripts/album.py", "Photolab: Open Album", projects=PHOTOLAB),
     # --- scoped to the checkouts that have a database ---
     #
     # The last task to leave a `.vscode/tasks.json`, and the only one that was in the
@@ -1451,6 +1458,46 @@ def held_on_branches(
     return held
 
 
+def awaited_merge(
+    problems: list[str], payload: dict, pending: Iterable[tuple[str, dict]]
+) -> dict[str, str]:
+    """`held_on_branches`, when it accounts for every `live_only` line; else nothing.
+
+    The one reading of "this drift is a merge awaited, not a defect". The daily line had
+    it and the nightly test did not, so agent-terminal's #729, green and waiting on a
+    person, turned Local E2E red and sent a fixer at a state nothing is wrong with: the
+    live file cannot publish until that branch merges, and everything it carries is in
+    git. Drift with no live edit is no such thing: that is a publish owed, not a merge.
+    """
+    edits = set(live_only(problems))
+    held = held_on_branches(problems, payload, pending) if edits else {}
+    return held if edits and not edits - held.keys() else {}
+
+
+def live_drift(live: Path, canonical: str = "") -> list[str]:
+    """What the live file owes the canonical copy, as the check every copy agrees on reads
+    it: `judged_drift`, and nothing at all while `awaited_merge` explains it. `canonical`
+    is the copy to read in place of this tree's own (`merged_canonical`).
+
+    `workspace_drift` alone is the wrong question for a verdict. A task devkit changed
+    last week reads as "definition differs" until git is asked who moved it, and past
+    `HELD_DAYS` the branch stops counting, so a PR nobody merges goes red by itself.
+    """
+    payload = devkit_jsonc.loads(live.read_text(encoding="utf-8"))
+    problems = judged_drift(live, payload, devkit_jsonc.loads(canonical_view(live, canonical)[0]))
+    return [] if awaited_merge(problems, payload, pending_copies(live)) else problems
+
+
+def merged_canonical() -> str:
+    """`workspace.jsonc` on `origin/<default>`, or "" where git cannot say: what the live
+    file is rendered from, for a tree whose own copy may carry an un-merged edit."""
+    git = sweep.git_for(CANONICAL_WORKSPACE.parent)
+    head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    branch = (head.stdout or "").strip() if head.returncode == 0 else ""
+    shown = git("show", f"{branch or 'origin/main'}:{CANONICAL_WORKSPACE.name}")
+    return shown.stdout if shown.returncode == 0 else ""
+
+
 def stamp_path(workspace: Path) -> Path:
     """Where the render stamp for `workspace` lives.
 
@@ -1771,15 +1818,16 @@ def machine_view(text: str, root: Path) -> tuple[str, list[str]]:
     return unregister(text, absent), absent
 
 
-def canonical_view(live: Path) -> tuple[str, list[str]]:
-    """`machine_view` of devkit's copy, for the workstation `live` belongs to.
+def canonical_view(live: Path, canonical: str = "") -> tuple[str, list[str]]:
+    """`machine_view` of devkit's copy, or of the `canonical` text handed in, for the
+    workstation `live` belongs to.
 
     Every comparison of the live file against the canonical copy goes through here --
     the publish, the check, the adopt, the session-start sync line and the plug
     script's early refusal -- because a comparison against the unfiltered copy reports
     every project this machine does not hold as drift, on every run, forever.
     """
-    return machine_view(canonical_text(), live.parent)
+    return machine_view(canonical or canonical_text(), live.parent)
 
 
 def left_out_line(left_out: list[str]) -> str:

@@ -2783,6 +2783,29 @@ def test_fire_runs_the_command_and_exits_with_its_code(tmp_path, monkeypatch):
     assert not (root / collectors.ARTIFACT).exists(), "the pass's log is not the fire's"
 
 
+@pytest.mark.parametrize("argv", [["fire", "social-scraper"], ["maintain"]])
+def test_every_run_can_find_docker_before_it_asks_anything(tmp_path, monkeypatch, argv):
+    """7c00ca1a: a run begun while Docker Desktop's installer has its bin directory off the
+    machine PATH keeps that PATH for its whole life, and no retry of `docker` could work."""
+    scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN, "ibkr_trader": RUN})
+    order = []
+    monkeypatch.setattr(
+        collectors.collector_tasks, "keep_docker_on_path", lambda: order.append("path")
+    )
+
+    def spawner(argv, cwd, timeout, env=None):
+        order.append("docker")
+        return 0, ""
+
+    class Docker(FakeDocker):
+        def ps(self):
+            order.append("docker")
+            return super().ps()
+
+    collectors.main(argv, docker=Docker([]), run=FakeSchtasks(), spawner=spawner)
+    assert order[0] == "path" and "docker" in order
+
+
 def test_fire_on_a_machine_not_assigned_runs_nothing(tmp_path, monkeypatch):
     """A task the pass has not deleted yet must not become a second writer."""
     scraper_home(tmp_path, monkeypatch, {"social-scraper": STOP})
