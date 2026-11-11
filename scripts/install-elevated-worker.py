@@ -516,8 +516,11 @@ def uninstall(run: installer_cli.Runner = _run_argv) -> int:
     handled = installer_cli.answer(
         TASK_NAME, status=False, uninstall=True, apply=True, run=run, windows=WINDOWS
     )
-    if handled:
-        return handled
+    # `answer` returns 0 both for a task it deleted and, off Windows, for "nothing to do
+    # here", so the platform decides whether `ROOT` goes too: never on a machine it just
+    # said it would leave alone.
+    if handled or not WINDOWS:
+        return handled or 0
     if os.path.isdir(ROOT):
         shutil.rmtree(ROOT, onexc=_clear_and_retry)
     return 0

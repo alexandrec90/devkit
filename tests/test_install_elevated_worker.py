@@ -813,7 +813,7 @@ def test_a_reinstall_replaces_the_interpreter_and_keeps_the_rate_limit(planted):
     assert (planted / "elevated" / "rate-limit.json").is_file()
 
 
-def test_uninstall_takes_the_task_and_the_folder(planted):
+def test_uninstall_takes_the_task_and_the_folder(planted, windows):
     planted.mkdir()
     (planted / "x").touch()
     run = Fake()
@@ -821,7 +821,7 @@ def test_uninstall_takes_the_task_and_the_folder(planted):
     assert not planted.exists()
 
 
-def test_uninstall_is_not_jammed_by_a_read_only_file(planted):
+def test_uninstall_is_not_jammed_by_a_read_only_file(planted, windows):
     planted.mkdir()
     jam = planted / "x"
     jam.touch()
@@ -830,9 +830,17 @@ def test_uninstall_is_not_jammed_by_a_read_only_file(planted):
     assert not planted.exists()
 
 
-def test_uninstall_stops_at_a_task_it_could_not_delete(planted):
+def test_uninstall_stops_at_a_task_it_could_not_delete(planted, windows):
     planted.mkdir()
     assert installer.uninstall(Fake(fail="/Delete", held="x")) == 1
+    assert planted.exists()
+
+
+def test_uninstall_off_windows_touches_nothing(planted, monkeypatch):
+    """Off Windows the verb says it has nothing to do, so it must not delete anything."""
+    monkeypatch.setattr(installer, "WINDOWS", False)
+    planted.mkdir()
+    assert installer.uninstall(Fake()) == 0
     assert planted.exists()
 
 
