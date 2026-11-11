@@ -1292,11 +1292,30 @@ def test_a_closed_pr_is_never_resumed_behind_the_closers_back(monkeypatch):
     assert "prepare" in steps
 
 
-def test_an_open_pr_is_reused_and_nothing_is_pushed(monkeypatch):
+def test_an_open_pr_is_reused_after_main_is_brought_into_it(monkeypatch):
+    """#762, 2026-11-11: release/v0.11.86 was cut on 11-08 from a main whose Linux gate
+    was red. The fix landed on main, but the reused PR still carried the old tree, so its
+    gate stayed red and every run stopped on it, citing a red that main no longer had."""
     steps = _pr_stage(monkeypatch, "OPEN", "")
 
     assert rp.prepare_pr(Path("devkit"), "v0.0.2") == (7, "")
-    assert steps == []
+    assert steps == ["gh pr update-branch"]
+
+
+def test_a_reused_pr_that_cannot_take_main_stops_the_release(monkeypatch):
+    """Its gate would judge a tree that is not main's, so the release does not go on."""
+    steps = _pr_stage(monkeypatch, "OPEN", "")
+
+    def refuse(cmd, **_kw):
+        steps.append(" ".join(cmd[:3]))
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="merge conflict")
+
+    monkeypatch.setattr(rp, "_run", refuse)
+
+    number, why = rp.prepare_pr(Path("devkit"), "v0.0.2")
+    assert number == 0
+    assert "#7" in why and "merge conflict" in why
+    assert steps == ["gh pr update-branch"]
 
 
 REJECTED = "`git push -u origin release/v0.0.2`: ! [remote rejected] (reference already exists)"
