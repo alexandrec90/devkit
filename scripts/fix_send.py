@@ -18,12 +18,14 @@ import sys
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import TypeVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
 import branch_facts
 import fix_budget
+import fix_claims
 import fix_cycle
 import fix_findings
 import fix_ledger
@@ -43,6 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 fix_prs = load_by_path("fix_prs", REPO_ROOT / "scripts" / "fix-prs.py")
 
 Journal = fix_findings.Journal
+Said = TypeVar("Said")
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -166,9 +169,7 @@ def hold_if_moved(
     )
 
 
-# A background fixer measured ~450 MB (the session and its pty host) once it loads no
-# MCP server.
-SESSION_MB = 500
+SESSION_MB = host_memory.SESSION_MB
 MEMORY_FLOOR_MB = host_memory.FLOOR_MB
 HELD_FOR_MEMORY = "held for memory"
 # Why a session is not launched by a pass past its deadline (`fix-pass.SEND_RESERVE_SECONDS`
@@ -310,7 +311,8 @@ def send_all(
     became of each problem's escalation; `closed` says which devkit session is still
     working, which holds another, and which tree each problem's fixer worked in, which
     is what an escalation names. At or past the journal's deadline (`Journal.left`), no
-    session is launched (`HELD_FOR_TIME`).
+    session is launched (`HELD_FOR_TIME`). What is left is claimed first, so a second PC
+    running this pass sends nothing this one did (`fix_claims`).
     """
     left = None if journal is None else journal.left
     closed = closed or fix_loop.Closed()
@@ -319,6 +321,7 @@ def send_all(
     capped: list[tuple[fix_plan.Decision, str]] = []
     worst = EXIT_OK
     room = host_memory.available_mb()
+    turn = fix_claims.Turn(ctx.root, ctx.writes, room, closed.harness_busy, left)
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         if why := _held(decision, ctx, closed, items or []):
@@ -332,17 +335,25 @@ def send_all(
         if verdict.finding and journal is not None:
             since = fix_budget.since_for(decision, escalated)
             journal.add(verdict.finding.at(closed.tree_after(problem, since)))
-        why = verdict.why if not verdict.go else _no_memory(decision, room)
-        if why := why or _no_time(decision, left):
+        if why := _kept_back(decision, verdict, room, left, turn):
             capped.append((decision, why))
             continue
         if room is not None and decision.action not in fix_plan.NO_SESSION:
             room -= SESSION_MB
         line, code = _send_one(decision, ctx, launch, verdict.effort, journal)
-        sent.append(f"{names} -- {line}")
+        sent.append(f"{names} -- {line}{turn.note(decision)}")
         worst = max(worst, code)
+        if code != EXIT_OK:
+            turn.failed(decision)
         ledger = fix_ledger.read_ledger(ctx.ledger_path)
     return sent, capped, worst
+
+
+def _kept_back(decision, verdict, room, left, turn: fix_claims.Turn) -> str:
+    """Why `decision` is not sent this pass, or "". The claim is asked last: it is the one
+    question that pushes a ref, so nothing already held costs a call to GitHub."""
+    why = verdict.why if not verdict.go else _no_memory(decision, room)
+    return why or _no_time(decision, left) or turn.held(decision)
 
 
 def _no_memory(decision: fix_plan.Decision, room: int | None) -> str:
@@ -456,7 +467,7 @@ def _send_one(
         return gone, EXIT_OK
     how = agent_models.Launch(launch.agent, launch.model, effort) if effort else launch
     problem = fix_ledger.problem_key(decision)
-    code, said = _saying(dispatch, decision, ctx.root, how, problem)
+    code, said = saying(dispatch, decision, ctx.root, how, problem)
     if code != EXIT_OK:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         detail, kind = f"{names}: {decision.note[:160]}", f"{decision.action}-failed"
@@ -503,7 +514,7 @@ class _Tee(io.TextIOBase):
             self.on.flush()
 
 
-def _saying(fn, *args) -> tuple[int, str]:
+def saying(fn: Callable[..., Said], *args) -> tuple[Said, str]:
     """`(fn(*args), what it printed to either stream)`; the printing still happens."""
     kept = io.StringIO()
     with redirect_stdout(_Tee(sys.stdout, kept)), redirect_stderr(_Tee(sys.stderr, kept)):

@@ -33,10 +33,11 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import after_merge
 import fix_findings
 import project_settings
 import session_transcripts as st
@@ -47,6 +48,8 @@ harness_events = fix_findings.harness_events
 
 CURSOR_NAME = "friction-cursor.json"
 LOOKBACK = _dt.timedelta(days=3)
+# How long a transcript stays quiet before its last words count as how it ended.
+ENDING_QUIET = _dt.timedelta(hours=2)
 # A repeated failure: the same command failing this many times in one session.
 REPEATS = 3
 SNIPPET = 90
@@ -343,6 +346,12 @@ SILENT = frozenset({"cd", "pushd", "popd"})
 
 # The opening message of a session the fix pass dispatched: every prompt's finish line.
 DISPATCHED = "the fix pass commits, pushes"
+# ... and every prompt's first sentence, which a prompt cut short still carries, and the
+# mark the pass leaves in a tree it cut (`fix_reports.ORIGIN_FILE`, spelled here because
+# that module is imported by what imports this one), which outlives the first message
+# when a later harvest reads a later chunk.
+DISPATCHED_MARKS = (DISPATCHED, "dispatched by the fix pass")
+ORIGIN_FILE = Path("logs") / "fix-origin"
 # Skills whose own checklist runs the suite whole, so a session that invoked one was asked
 # for the whole run: `supervise-fix-pass` §4 has the supervisor run `posix-rehearsal.py`
 # before each iteration (3db42b06, filed at a supervisor's rehearsal run). Held to that
@@ -461,6 +470,71 @@ HANDED_BACK = re.compile(
     r"\b(?:should|shall) I\b|\bwant me to\b",
     re.I,
 )
+# A session's last words giving the person a job, which they will forget: "you need to run
+# X", "once this merges, rebuild Y", "run Z on each PC". What such a session owed instead
+# is a task in `QUEUE_DIR` (the ship skill's last section). Narrow on purpose, matched a
+# sentence at a time and held to an instruction, not a mention: a first cut matched 54 of
+# 393 endings, many of them only saying a PR waits for a merge or that something was once
+# done by hand. So no bare "manually", and "merge" and "review" are not among the verbs,
+# which is what a gated PR rightly asks of its person.
+QUEUE_DIR = after_merge.QUEUE_DIR
+LEFT_TO_DO_CLASS = "left-to-do"
+TODO_VERB = (
+    r"(?:re-?run|run|re-?build|build|re-?start|start|re-?load|re-?deploy|deploy|pull|upgrade|"
+    r"install|apply|execute|reboot|log ?in|sign ?in|resolve|tell)"
+)
+LEFT_TO_DO = re.compile(
+    r"\b(?:what|the (?:one )?things?|one thing) you(?:'ll| will)? (?:still )?(?:need|have) to do\b|"
+    r"\byou need to act\b|\bneeds your action\b|"
+    rf"\bneeds? you to {TODO_VERB}\b|"
+    rf"\byou(?:'ll| will)? (?:still |also |then )?(?:need|have) to (?:\w+ )?{TODO_VERB}\b|"
+    rf"\b(?:until|unless|once|after) you {TODO_VERB}\b|"
+    # An instruction waiting on a merge: the imperative, right after the clause that names it.
+    rf"\b(?:after|once|when) (?:this|it|that|the PR|PR #\d+|#\d+) (?:merges|lands|is merged)\b"
+    rf"[^.\n]{{0,90}}[,:] *{TODO_VERB}\b|"
+    # An instruction by where it must happen: only as an imperative, opening its clause.
+    rf"(?:^|[:,;] )[\W\d]*{TODO_VERB}\b[^.\n]{{0,90}}"
+    r"\b(?:yourself|by hand|manually|on (?:each|every|your other|the other) (?:machine|PC|computer))\b",
+    re.I,
+)
+# What turns a matching sentence back into an offer, or into nobody's job. `/ship` is the
+# one instruction a session may leave a person: its own ending says so.
+TODO_EXCUSED = re.compile(
+    r"\bnothing (?:for you|you need|to do)|\bno need\b|"
+    r"\b(?:don't|do not|won't|will not|never) (?:need|have) to\b|"
+    r"\bif you (?:want|would like|'d like|prefer|need)\b|/ship\b|\byou (?:can|could)\b|\boptional",
+    re.I,
+)
+# Someone else's words being reported: a session sent at a `left-to-do` row says what the
+# row said on its way to saying it did the job, and filed, each would send a session at
+# its own report. Read before the match only, or "I said so" after a real job excuses it.
+TODO_REPORTED = re.compile(
+    r"\b(?:had said|said|says|quoted|quotes|named|names|told|claimed|asked|stated)\b|[\"“]"
+)
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+FENCE = "```"
+
+
+def _hands_over(sentence: str) -> bool:
+    """`sentence` gives the person a job, in its own voice."""
+    found = LEFT_TO_DO.search(sentence)
+    if found is None or TODO_EXCUSED.search(sentence):
+        return False
+    return not TODO_REPORTED.search(sentence[: found.start()])
+
+
+def left_to_do(text: str) -> str:
+    """The first sentence of `text` handing the person a job, or "". A fenced block is the
+    job's command, and the line introducing it is what names it as theirs."""
+    fenced = False
+    for line in text.splitlines():
+        if line.strip().startswith(FENCE):
+            fenced = not fenced
+            continue
+        for sentence in () if fenced else SENTENCE_END.split(line):
+            if _hands_over(sentence):
+                return sentence.strip()
+    return ""
 
 
 # --- the detectors ------------------------------------------------------------------------
@@ -943,6 +1017,7 @@ class _Session:
     rejected: tuple[str, str] | None = None
     started: dict[str, str] = field(default_factory=dict)  # call id -> when it was made
     settled: bool = False  # it spent the one `SETTLE` a session is excused
+    queued: bool = False  # it wrote a task into `QUEUE_DIR`, which is what a to-do owes
     moved: set[str] = field(default_factory=set)  # task ids `MOVED_TO_BACKGROUND` named
 
     def note(self, cls: str, what: str, event: Event) -> None:
@@ -964,7 +1039,7 @@ class _Session:
                 self.retract("user-rejected", *self.rejected)
             self.rejected = None
         if self.spoken == 0:
-            self.dispatched = DISPATCHED in event.text
+            self.dispatched = any(mark in event.text for mark in DISPATCHED_MARKS)
         if any(name in WHOLE_SUITE_SKILLS for name in INVOKED_SKILL.findall(event.text)):
             self.suite_asked = True
         self.note("user-frustration", _complaint(event, self.spoken), event)
@@ -975,6 +1050,8 @@ class _Session:
         self.started[event.call_id] = event.at
         if event.tool != "AskUserQuestion":
             self.last_said = None  # it went on working: that text was not how it ended
+        if QUEUE_DIR in f"{event.path} {event.command}":
+            self.queued = True
         if changes_the_suite(event):
             self.checked = set()
         if said := declared_text(event):
@@ -1042,6 +1119,11 @@ class _Session:
         said = self.last_said
         if self.dispatched and said and HANDED_BACK.search(said.text):
             self.note("handed-back", "a dispatched session ended on a decision for nobody", said)
+        owed = said and not self.queued and not self.dispatched
+        if said and owed and (job := left_to_do(said.text)):
+            # The job leads the detail, so two sessions' jobs are two groups: the ledger
+            # files one open row per detail, and the second job would go unfiled.
+            self.note(LEFT_TO_DO_CLASS, normalize(job)[:SNIPPET], said)
 
     def _rerun(self, event: Event) -> None:
         # The whole run, not `SNIPPET` of it: a long `cd` into the tree filled the cut, and
@@ -1437,7 +1519,33 @@ def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tupl
     dispatched = any(event.kind == "user" and DISPATCHED in event.text for event in events)
     if not dispatched and not bans_shell_writes(cwd, workspace_root, project):
         found = [row for row in found if row[0] != "heredoc-write"]
+    return _unqueued(found, cwd)
+
+
+def _unqueued(found: list, cwd: str) -> list:
+    """`found` without its to-do when the tree queued it or the pass cut the tree, a session
+    that answers to the pass. Git is asked only if there is one."""
+    if not any(row[0] == LEFT_TO_DO_CLASS for row in found):
+        return found
+    if (Path(cwd) / ORIGIN_FILE).is_file() or queue_file_in_tree(cwd):
+        return [row for row in found if row[0] != LEFT_TO_DO_CLASS]
     return found
+
+
+def queue_file_in_tree(cwd: str, runner=sweep.run_windowless) -> bool:
+    """`cwd` holds a change to `QUEUE_DIR`: a session may queue the task and still say what
+    it queued. Git unable to say, or the tree gone: the transcript has already answered."""
+    try:
+        done = runner(
+            ["git", "-C", cwd, "status", "--porcelain", "--", QUEUE_DIR],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0 and bool((done.stdout or "").strip())
 
 
 def _whole_run_excused(found: list, cwd: str, workspace_root: Path, project: str) -> bool:
@@ -1517,8 +1625,9 @@ def session_findings(
 def _said(cls: str, event: Event, cwd: str) -> str:
     """What rides in a finding's `command`: the call, or a complaint whole with the tree
     it was said in -- the detail is a snippet, and a sweep parsed a 5,672-line transcript
-    to read one, then spent 5 calls learning that session had its fix open already."""
-    if cls != "user-frustration":
+    to read one, then spent 5 calls learning that session had its fix open already. So
+    for a to-do, whose session is gone and whose reader has only this to go on."""
+    if cls not in ("user-frustration", LEFT_TO_DO_CLASS):
         return event.command[:300]
     return f"said in {cwd}: {' '.join(ANSI.sub('', event.text).split())[:1500]}"
 
@@ -1539,6 +1648,7 @@ def _under(cwd: str, root: Path) -> bool:
 # answer. Every other class is one event's alone, so today's detectors can re-judge it.
 WHOLE_SESSION = frozenset(
     {"repeat-failure", "rerun-unchanged", "handed-back", "asked-user", "user-frustration"}
+    | {LEFT_TO_DO_CLASS}
 )
 
 
@@ -1610,13 +1720,38 @@ def _start_of(path: Path, now: _dt.datetime) -> int:
     return stat.st_size
 
 
+def held_ending(
+    seen: dict, found: list[fix_findings.Finding], moved: bool, now: _dt.datetime
+) -> tuple[list[fix_findings.Finding], dict | None]:
+    """`(what to file from `found`, the to-do to keep holding)`; `moved`: the transcript
+    has new events since the last read.
+
+    A to-do is only one once the session has ended, and the last thing a live session said
+    reads the same: the person may yet answer it, or the session go on and do the job
+    itself. So a to-do waits in the cursor until its transcript has stayed quiet for
+    `ENDING_QUIET`, and anything the session then said or did drops it.
+    """
+    endings = [finding for finding in found if finding.kind == LEFT_TO_DO_CLASS]
+    rest = [finding for finding in found if finding.kind != LEFT_TO_DO_CLASS]
+    held = seen.get("ending") if not moved else None
+    if endings:
+        held = {"finding": asdict(endings[-1]), "since": now.isoformat()}
+    if not isinstance(held, dict):
+        return rest, None
+    since = _when(str(held.get("since", ""))) or now
+    if now - since < ENDING_QUIET:
+        return rest, held
+    return [*rest, fix_findings.Finding(**held["finding"])], None
+
+
 def harvest(
     workspace_root: Path, cursor_path: Path, now: _dt.datetime, paths: list[Path] | None = None
 ) -> list[fix_findings.Finding]:
     """Every new friction since the cursor, across every transcript; the cursor moves on.
 
     The cursor keeps each transcript's working directory too, because only a Codex
-    session's first line names it and a later read starts past that line.
+    session's first line names it and a later read starts past that line, and any to-do
+    still held (`held_ending`).
     """
     cursor = _load_cursor(cursor_path)
     found: list[fix_findings.Finding] = []
@@ -1628,8 +1763,14 @@ def harvest(
         cwd = str(seen.get("cwd", "")) or next(
             (st.cwd_of(r) for _, r in chunk.rows if st.cwd_of(r)), ""
         )
-        found.extend(session_findings(path, chunk, cwd, workspace_root))
+        moved = bool(st.events(path, chunk.rows))
+        filed, ending = held_ending(
+            seen, session_findings(path, chunk, cwd, workspace_root), moved, now
+        )
+        found.extend(filed)
         cursor[str(path)] = {"offset": chunk.offset, "cwd": cwd}
+        if ending:
+            cursor[str(path)]["ending"] = ending
     cursor_path.parent.mkdir(parents=True, exist_ok=True)
     cursor_path.write_text(json.dumps(cursor, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     return found
