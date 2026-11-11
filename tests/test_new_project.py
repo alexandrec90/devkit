@@ -24,6 +24,7 @@ import pytest
 from support import (
     REPO_ROOT,
     TEMPLATES,
+    checks_a_red_check_skips,
     devkit_jsonc,
     devkit_ports,
     devkit_project,
@@ -33,7 +34,6 @@ from support import (
     load_script,
     make_args,
     registry,
-    tiers_a_red_tier_skips,
     vendor_manifest,
 )
 
@@ -2264,7 +2264,7 @@ def test_generated_gate_runs_the_hook_tests_when_the_application_suite_is_red(tm
     workflows = generate(tmp_path, {}) / ".github" / "workflows"
     for name in ("pr-gate.yml", "nightly.yml"):
         parsed = yaml.safe_load((workflows / name).read_text(encoding="utf-8"))
-        assert not tiers_a_red_tier_skips(parsed), name
+        assert not checks_a_red_check_skips(parsed), name
 
 
 def test_generated_gate_is_least_privilege_and_re_runnable(tmp_path):

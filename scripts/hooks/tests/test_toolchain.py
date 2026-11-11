@@ -235,6 +235,22 @@ def test_a_launcher_naming_a_deleted_tree_is_dead_and_one_naming_a_live_venv_is_
     assert [path.stem for path in tc.dead_launchers(root)] == ["mypy"]
 
 
+def test_a_drive_letter_path_reads_as_a_path_on_any_platform(tmp_path):
+    """The tests above use `tmp_path`, POSIX on the CI: this keeps the spelling a real
+    trampoline carries under test there too."""
+    root, _ = _scripted(tmp_path, {"mypy": b"MZ\x00#!C:\\gone\\tree\\.venv\\Scripts\\python.exe\n"})
+    assert [path.stem for path in tc.dead_launchers(root)] == ["mypy"]
+
+
+def test_a_slash_inside_a_word_does_not_open_a_path(tmp_path):
+    """Otherwise `and/or` in a binary would swallow the live path after it, and read as a
+    file that is not there."""
+    root, python = _scripted(tmp_path, {})
+    body = b"MZ\x00and/or #!" + str(python).encode() + b"\n"
+    (root / ".venv/Scripts/mypy.exe").write_bytes(body)
+    assert tc.dead_launchers(root) == ()
+
+
 def test_no_venv_or_a_venv_of_shell_scripts_has_no_dead_launcher(tmp_path):
     """POSIX's console scripts live under `bin/`, each a `#!` the kernel names itself."""
     assert tc.dead_launchers(_checkout(tmp_path, {"bin/mypy": "#!/gone/python\n"})) == ()
