@@ -567,6 +567,33 @@ def test_a_seeded_url_on_the_sources_port_is_moved_onto_the_boxs():
     assert rebased == {"DATABASE_URL": BOX_DB_URL}
 
 
+def test_a_checkout_with_no_env_seeds_the_box_from_its_example(tmp_path):
+    """d2-trader, 2026-11-11: its checkout had no `.env`, so its box got the port lines
+    and no `DATABASE_URL`, and every database test in the push gate failed. The example
+    is what the project says a working `.env` holds, ports rebased like any other."""
+    (tmp_path / ".env.example").write_text(
+        "DB_HOST_PORT=5442\nDATABASE_URL=postgresql+psycopg://u:p@127.0.0.1:5442/d\n",
+        encoding="utf-8",
+    )
+
+    rebased = worktree.seed_env(tmp_path / ".env", tmp_path / "box.env", {"DB_HOST_PORT": "5443"})
+
+    written = (tmp_path / "box.env").read_text(encoding="utf-8")
+    assert rebased == {"DATABASE_URL": "postgresql+psycopg://u:p@127.0.0.1:5443/d"}
+    assert "DATABASE_URL=postgresql+psycopg://u:p@127.0.0.1:5443/d" in written
+
+
+def test_a_checkout_env_wins_over_its_example(tmp_path):
+    (tmp_path / ".env").write_text("SECRET=real\n", encoding="utf-8")
+    (tmp_path / ".env.example").write_text("SECRET=placeholder\n", encoding="utf-8")
+
+    worktree.seed_env(tmp_path / ".env", tmp_path / "box.env", {})
+
+    written = (tmp_path / "box.env").read_text(encoding="utf-8")
+    assert "SECRET=real" in written
+    assert "placeholder" not in written
+
+
 def test_the_rebased_value_wins_in_the_written_env(tmp_path):
     (tmp_path / "src.env").write_text(IBKR_ENV, encoding="utf-8")
     managed = worktree.managed_env("ibkr_trader--x-1011", registry(ibkr_trader=1), 3)

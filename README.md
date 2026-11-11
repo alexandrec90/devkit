@@ -1236,7 +1236,14 @@ There is no list of machines. A PC joins by being on the tailnet with this check
 same place under its home and accepting the SSH key of the PC you run this from. One that
 does not answer costs a row saying why, and changes nothing else: `fleet.py` holds no state
 and a move is still `collectors.py move`, run over SSH on the machine that owns the
-collector and picked up by the destination's next pass.
+collector and picked up by the destination's next pass. A PC that answers but whose
+checkout predates `fleet.py` says so rather than reading as unreachable: pull devkit there.
+
+An assignment is a file on each PC, so it can outlive what acts on it. A `problem:` line
+names a collector assigned to a PC whose `devkit-collectors` job is disabled or missing,
+as happens when a PC is stood down by hand with its assignment left behind. That
+collector runs nowhere. Move it with `fleet.py move`, or `collectors.py run-here` on the
+PC that should run it and `stop-here` on the one standing down.
 
 `rebalance` picks only a collector declaring `"rebalance": true`, and only when the
 destination keeps at least four gigabytes afterwards. `memoryGb` declares what a collector
