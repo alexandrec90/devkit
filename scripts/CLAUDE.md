@@ -275,6 +275,45 @@ is `tier-pass.py`'s to say. It tests only the tip, in a tree nobody works in
 not applicable, never red (`tier_command.not_applicable`), and what stops a run judging
 at all is a backoff and a count, not a ledger row (`tier_state.py`).
 
+## The after-merge queue, and claims across PCs
+
+`.devkit-queue/<name>.toml` is data a project commits; `after_merge.py` decides,
+`after-merge-pass.py` acts, and neither is vendored. **A claim is a ref only one PC can
+create** (`job_claims.py`, which says why each detail of the push is the way it is): keep
+its commit unique per call, keep `FAILED` distinct from `LOST`, and keep `--no-verify`
+inside `_push`, which refuses anything outside `refs/devkit/`.
+
+**No task may be silently lost, so a change here keeps these:**
+
+- A task's id is a hash of its path and the commit that added it. Nothing about its bytes
+  goes in, or a fixer rewriting whitespace runs a finished task again.
+- A task is open, handed, done or failed, and those are refs every PC reads. Done means
+  finished: a session that shipped, a command that passed, a request the worker took. A
+  launch or a request written is handed at most, and `removable` counts done alone.
+- A handed task is read back by the pass on the machine holding it, not by `fix_loop`,
+  which leaves those trees alone: the second PC runs with `devkit.fixPass` off.
+- Every state that is not over has a clock, `after_merge.UNCLAIMED_AFTER_DAYS`.
+- A winner asks the server before it acts, and a re-read of origin confirms the file right
+  before a task runs. A claim goes back only once the server holds the done ref.
+- Queue claims fail closed, and the fix pass's fail open (`fix_claims.py`).
+
+`fix_claims.py` puts the fix pass's sends behind the same claims, so a second PC can run
+`devkit.fixPass: dispatch` without sending a second fixer at the same red. **That is all
+it solves.** What stays per machine, and is not papered over:
+
+- **The dispatch ledger.** `fix_ledger.ATTEMPTS` is counted per machine, so a problem can
+  get that many fixers from each PC, and a dead session is read back only where its tree
+  is.
+- **A commit that moves under a running fixer.** The claim is per commit, and busy trees
+  are per machine, so `update-branch` from either PC is a new key the other may send at
+  while the first fixer still works.
+- **The harness ledger.** Each machine files to its own shard, and one PC reads another's
+  only through `ledger-pool.py`'s shared folder, so a finding can be filed, and worked,
+  twice. A PC with `devkit.fixPass` off drains nothing, so a finding the queue files there
+  waits for pooling or for that switch.
+- **The pass's other writes.** `merge_green_adoptions`, `cut_release` and `tend` take no
+  claim.
+
 ## The events ledger: append-only, and that is why resolution is an event
 
 `harness_events.py` is the write half and `harness_triage.py` the read half.
