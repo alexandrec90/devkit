@@ -96,6 +96,7 @@ def test_two_machines_racing_never_both_win(pcs):
         won = [attempt for attempt in attempts if attempt.won]
         assert len(won) == 1, attempts
         assert all(a.outcome in (jc.WON, jc.LOST, jc.FAILED) for a in attempts)
+        assert sweep._until is None, "two racing pushes leave no deadline behind them"
 
 
 def test_a_claim_carries_no_files_and_names_its_holder(pcs):

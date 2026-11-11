@@ -18,6 +18,7 @@ import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import pytest
 from support import (
@@ -291,6 +292,7 @@ def test_a_desktop_project_is_a_csharp_solution_with_no_python_package(tmp_path)
         "src/DemoProject/Program.cs",
         "src/DemoProject/app.manifest",
         "tests/DemoProject.Tests/DemoProject.Tests.csproj",
+        "tests/DemoProject.Tests/MainWindowTests.cs",
         ".github/workflows/release.yml",
     ):
         assert (root / rel).is_file(), rel
@@ -344,6 +346,45 @@ def test_the_desktop_driver_arrives_through_the_gated_tier_only_where_it_is_on(t
     assert not (bare / "scripts" / "desktop.py").exists()
 
 
+@pytest.mark.parametrize("updater", [False, True], ids=["static", "updater"])
+def test_every_generated_csharp_xml_file_is_well_formed(tmp_path, updater):
+    """Nothing in the build parses `app.manifest`: the compiler embeds it as bytes.
+
+    A `--` in one of its comments, which XML forbids, built with zero warnings and passed
+    every test, and Windows then refused to start the executable at all ("side-by-side
+    configuration is incorrect"): no desktop project this template generated could run.
+    """
+    root = generate(tmp_path, {"desktop": True, "updater": updater})
+    suffixes = {".manifest", ".xaml", ".csproj", ".props", ".slnx"}
+    found = [p for p in root.rglob("*") if p.suffix in suffixes and ".venv" not in p.parts]
+    assert {".manifest", ".xaml", ".csproj", ".props", ".slnx"} <= {p.suffix for p in found}
+    for path in found:
+        ElementTree.parse(path)  # noqa: S314 - the template this suite just rendered
+
+
+@pytest.mark.parametrize(
+    ("features", "gated"),
+    [
+        pytest.param({"desktop": True}, "scripts/desktop.py", id="desktop"),
+        pytest.param({"electron": True}, "frontend/src/worktreePort.ts", id="electron"),
+    ],
+)
+def test_the_generator_itself_delivers_the_gated_tier(tmp_path, features, gated):
+    """A real pull, because `generate` copies the gated files and so cannot see this.
+
+    The gate reads the consumer's `harness_config.py`, which the first pull is what
+    delivers, so a one-pull generator left every gated file behind: skinamp's whole shape
+    arrived with no `scripts/desktop.py`, for its PR gate and `release.yml` to die on.
+    """
+    args = make_args(parent=str(tmp_path), **features)
+    new_project.resolve_features(args)
+    the_plan = new_project.plan(args, registry())
+    the_plan.root.mkdir(parents=True)
+    new_project.render_tree(the_plan, dry_run=False)
+    new_project.vendor_harness(the_plan, dry_run=False)
+    assert (the_plan.root / gated).is_file()
+
+
 def test_the_gate_builds_the_desktop_app_on_windows(tmp_path):
     yaml = pytest.importorskip("yaml")
     root = generate(tmp_path, {"desktop": True})
@@ -380,6 +421,175 @@ def test_a_release_is_a_tag_and_the_tag_never_reaches_the_shell_as_code(tmp_path
     step = next(s for s in release["jobs"]["release"]["steps"] if s.get("name") == "Release")
     assert "${{" not in step["run"], "an expression in `run` is spliced in as script"
     assert step["env"]["RELEASE_TAG"] == "${{ github.ref_name }}"
+
+
+# --- the desktop-web shape -----------------------------------------------------
+
+
+@pytest.mark.parametrize("other", ["desktop", "updater"])
+def test_an_electron_project_is_not_also_the_csharp_one(other):
+    """Each owns the source tree, the installer and `release.yml`."""
+    args = make_args(electron=True, **{other: True})
+    with pytest.raises(new_project.GeneratorError, match="pick one"):
+        new_project.resolve_features(args)
+
+
+@pytest.mark.parametrize("stack", ["postgres", "docker", "frontend", "redis", "archive"])
+def test_an_electron_project_cannot_carry_a_compose_stack(stack):
+    args = make_args(electron=True, **{stack: True})
+    with pytest.raises(new_project.GeneratorError, match="compose stack"):
+        new_project.resolve_features(args)
+
+
+@pytest.mark.parametrize(
+    ("owner", "package", "expected"),
+    [
+        ("alexandrec90", "demo_project", "io.github.alexandrec90.demo-project"),
+        ("MixedCase", "tool", "io.github.mixedcase.tool"),
+    ],
+)
+def test_the_electron_app_id_is_a_valid_bundle_identifier(owner, package, expected):
+    assert new_project.electron_app_id(owner, package) == expected
+
+
+def test_an_electron_project_is_a_frontend_with_no_python_package(tmp_path):
+    root = generate(tmp_path, {"electron": True})
+    for rel in (
+        "frontend/package.json",
+        "frontend/.nvmrc",
+        "frontend/electron-builder.yml",
+        "frontend/playwright.config.ts",
+        "frontend/e2e/app.spec.ts",
+        "frontend/src/main/index.ts",
+        "frontend/src/preload/index.ts",
+        "frontend/src/renderer/App.tsx",
+        "frontend/src/renderer/index.html",
+        ".github/workflows/release.yml",
+    ):
+        assert (root / rel).is_file(), rel
+    assert not (root / "demo_project").exists(), "a second, Python 'app' beside the TypeScript one"
+    assert not (root / "tests" / "test_smoke.py").exists(), "it imports a package not made"
+    assert not (root / "docker-compose.yml").exists()
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["uv"]["package"] is False
+    assert "build-system" not in pyproject
+    ignored = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert {"/.venv", "/frontend/node_modules", "frontend/release/"} <= set(ignored)
+
+
+def test_the_electron_app_is_the_frontend_tier_and_not_the_desktop_one(tmp_path):
+    """What points `run-tests.py` and `lint-all.py` at it, and vendors `worktreePort`,
+    which `electron.vite.config.ts` imports."""
+    root = generate(tmp_path, {"electron": True})
+    config = harness_config.load(root)
+    assert config.frontend.enabled is True
+    assert config.desktop.enabled is False
+    assert config.app_dir == config.frontend.src == "frontend/src/"
+    manifest = json.loads((root / "frontend/package.json").read_text(encoding="utf-8"))
+    assert {config.frontend.test_cmd[1], config.frontend.typecheck_cmd[1]} <= set(
+        manifest["scripts"]
+    )
+    assert (root / "frontend/src/worktreePort.ts").is_file()
+
+
+def test_the_electron_app_runs_as_commonjs(tmp_path):
+    """A sandboxed preload cannot be an ES module, and `"type": "module"` makes one."""
+    root = generate(tmp_path, {"electron": True})
+    manifest = json.loads((root / "frontend/package.json").read_text(encoding="utf-8"))
+    assert "type" not in manifest
+    main = (root / "frontend/src/main/index.ts").read_text(encoding="utf-8")
+    assert "sandbox: true" in main and "'../preload/index.js'" in main
+
+
+def test_the_gate_drives_the_packaged_electron_app_on_windows(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"electron": True})
+    gate = yaml.safe_load((root / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8"))
+    job = gate["jobs"]["electron"]
+    assert job["runs-on"] == "windows-latest"
+    runs = [step.get("run", "") for step in job["steps"]]
+    assert {"npm ci", "npm run typecheck", "npm run test:run"} <= set(runs)
+    assert "npm run test:e2e:packaged" in runs, "the source passing says nothing of the installer"
+    upload = next(s for s in job["steps"] if s.get("name") == "Upload what the app drew")
+    assert upload["if"] == "always()", "the screenshot is wanted on a pass too"
+    assert "desktop" not in gate["jobs"]
+    bare = yaml.safe_load(
+        (generate(tmp_path / "bare", {}) / ".github/workflows/pr-gate.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "electron" not in bare["jobs"]
+
+
+def test_an_electron_release_never_splices_the_tag_into_the_shell(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"electron": True})
+    release = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    assert release[True]["push"]["tags"] == ["v*"]
+    assert release["permissions"] == {"contents": "write"}
+    steps = release["jobs"]["release"]["steps"]
+    assert all("${{" not in step.get("run", "") for step in steps)
+    stamp = next(s for s in steps if s.get("name") == "Stamp the version from the tag")
+    assert stamp["env"]["RELEASE_TAG"] == "${{ github.ref_name }}"
+
+
+def test_the_installer_publishes_to_the_projects_own_repository(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"electron": True})
+    builder = yaml.safe_load((root / "frontend/electron-builder.yml").read_text(encoding="utf-8"))
+    assert builder["appId"] == "io.github.alexandrec90.demo-project"
+    assert builder["publish"]["owner"] == "alexandrec90"
+    assert builder["publish"]["repo"] == "demo_project"
+
+
+def test_an_electron_project_is_told_how_to_ship(tmp_path, capsys):
+    the_plan = new_project.plan(make_args(parent=str(tmp_path), electron=True), registry())
+    new_project.desktop_hint(the_plan)
+    out = capsys.readouterr().out
+    assert "git tag v0.1.0" in out and "CSC_LINK" in out and "VPK_SIGN_PARAMS" not in out
+
+
+@pytest.mark.parametrize(
+    ("features", "pulls"),
+    [
+        pytest.param({}, 1, id="bare"),
+        pytest.param({"desktop": True}, 2, id="desktop"),
+        pytest.param({"electron": True}, 2, id="electron"),
+    ],
+)
+def test_only_a_shape_with_a_gate_on_pays_for_a_second_pull(tmp_path, monkeypatch, features, pulls):
+    the_plan = new_project.plan(make_args(parent=str(tmp_path), **features), registry())
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        new_project, "run", lambda cmd, cwd, dry_run, check=True: ran.append(list(cmd)) or 0
+    )
+    new_project.vendor_harness(the_plan, dry_run=True)
+    assert sum("--pull" in cmd for cmd in ran) == pulls
+
+
+def test_only_an_electron_project_locks_npm(tmp_path, monkeypatch):
+    locked: list[Path] = []
+    monkeypatch.setattr(new_project, "lock_node_dependencies", lambda app, dry: locked.append(app))
+    argv = ["--parent", str(tmp_path), "--no-remote"]
+    assert new_project.main(["plain", "--preset", "bare", *argv]) == 0
+    assert locked == []
+    assert new_project.main(["shipped", "--preset", "desktop-web", *argv]) == 0
+    assert locked == [tmp_path.resolve() / "shipped" / "frontend"]
+
+
+def test_every_preset_is_generated_by_the_gate():
+    """The loop named five of them, RELEASING.md said every one, and the two desktop bugs
+    the loop could have shown went unseen until someone launched a generated app."""
+    gate = (REPO_ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
+    loop = re.search(r"for preset in ([^;]+);", gate)
+    assert loop and set(loop[1].split()) == set(new_project.PRESETS)
+
+
+def test_every_preset_is_offered_by_the_task_picker():
+    text = (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
+    inputs = devkit_jsonc.loads(text)["tasks"]["inputs"]
+    picker = next(entry for entry in inputs if entry["id"] == "newProjectPreset")
+    assert {option["value"] for option in picker["options"]} == set(new_project.PRESETS)
 
 
 def test_a_plan_is_the_decisions_and_writes_nothing(tmp_path):
@@ -496,6 +706,7 @@ FEATURE_MATRIX = [
     # The desktop shape excludes the stack, so it is the matrix's other end.
     pytest.param({"desktop": True, "updater": True}, id="desktop"),
     pytest.param({"desktop": True}, id="desktop-static"),
+    pytest.param({"electron": True}, id="desktop-web"),
 ]
 
 
@@ -677,8 +888,9 @@ def test_generated_harness_manifest_is_readable_by_harness_config(tmp_path, feat
     # The frontend tier ships off even when the feature is on: the feature wires the
     # compose service but scaffolds no frontend/ tree, and an enabled tier whose
     # `src` prefix matches nothing is inert without ever saying so. The paths are
-    # still rendered, ready for the project to flip once it has a frontend.
-    assert config.frontend.enabled is False
+    # still rendered, ready for the project to flip once it has a frontend. The Electron
+    # shape does render that tree, so its tier arrives on.
+    assert config.frontend.enabled is bool(features.get("electron"))
     if features.get("frontend"):
         assert config.frontend.src == "frontend/src/"
         assert config.frontend.test_cmd == ("run", "test:run")
@@ -2154,6 +2366,7 @@ DEPENDABOT_ECOSYSTEMS = [
     pytest.param({"frontend": True}, {"uv", "github-actions", "docker"}, id="frontend"),
     # `uv` stays: the harness and scripts are Python, locked in `uv.lock`.
     pytest.param({"desktop": True}, {"uv", "github-actions", "nuget"}, id="desktop"),
+    pytest.param({"electron": True}, {"uv", "github-actions", "npm"}, id="electron"),
 ]
 # What Dependabot fetches for each ecosystem under the entry's `directory`, as a glob:
 # a solution is named after the project. dependabot-core's nuget discovery enters a
@@ -2547,10 +2760,12 @@ def _in_history(tag: str, repo: Path) -> bool:
     return done.returncode != 1 if repo.is_dir() else True
 
 
-def _nothing_to_compare(constant: str, tag: str | None, repo: Path = REPO_ROOT) -> str:
+def _nothing_to_compare(
+    constant: str, tag: str | None, repo: Path = REPO_ROOT, base: str = ""
+) -> str:
     """Why this comparison cannot be made, or "" when it can.
 
-    Two reasons. A checkout with no tags has nothing to compare against at all.
+    Four reasons. A checkout with no tags has nothing to compare against at all.
 
     The second is the local push gate looking at a release in flight, and it takes two
     conditions -- the second being why the first cannot be used to silence the test.
@@ -2575,6 +2790,14 @@ def _nothing_to_compare(constant: str, tag: str | None, repo: Path = REPO_ROOT) 
     default branch's verdict could tell that from a real failure. A release PR's gate
     runs on GitHub's merge commit instead, whose subject is not this one, so it stays
     red and `gate_verdict` keeps judging it.
+
+    The fourth is a branch whose untagged constant came with its base: the release commit
+    is in `base` (`origin/` + the PR's base ref, else `main`) and HEAD is not. A tag phase
+    that fails leaves that state on main, and then every PR is red for a tag none of them
+    can push -- on 2026-11-11 the one PR that fixed the failure included (#760). Main
+    itself is not excused once past its release commit, so the missing tag stays red
+    there, where `release-pipeline.py` resumes the tag phase. A release PR's bump is not
+    in its base yet, so it stays red too.
     """
     if tag is None:
         return "no tags to compare against"
@@ -2584,6 +2807,9 @@ def _nothing_to_compare(constant: str, tag: str | None, repo: Path = REPO_ROOT) 
     ahead = bumped is not None and released is not None and bumped > released
     if ahead and _is_release_commit(constant, repo):
         return f"HEAD is the release commit for {constant}, whose tag comes after it"
+    base = base or f"origin/{os.environ.get('GITHUB_BASE_REF') or 'main'}"
+    if ahead and _bump_came_with(base, constant, repo):
+        return f"{constant}'s release commit came with {base}, which owes its tag; this branch does not"
     gate = load_script("scripts/precommit/run_push_gate.py")
     if not os.environ.get(gate.RELEASE_PREPARE_ENV):
         return ""
@@ -2603,9 +2829,30 @@ def _is_release_commit(constant: str, repo: Path) -> bool:
     )
     if done.returncode != 0:
         return False
-    return (
-        re.fullmatch(rf"Release {re.escape(constant)}( \(#\d+\))?", done.stdout.strip()) is not None
-    )
+    return _release_subject(constant).fullmatch(done.stdout.strip()) is not None
+
+
+def _release_subject(constant: str) -> re.Pattern[str]:
+    return re.compile(rf"Release {re.escape(constant)}( \(#\d+\))?")
+
+
+def _bump_came_with(base: str, constant: str, repo: Path) -> bool:
+    """`base` holds the release commit for `constant` and HEAD is not in `base`.
+
+    False whenever git cannot say -- no such ref, no repo -- so the comparison is made.
+    """
+    cwd = repo if repo.is_dir() else None
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+
+    subjects = git("log", "--format=%s", base)
+    if subjects.returncode != 0:
+        return False
+    pattern = _release_subject(constant)
+    if not any(pattern.fullmatch(line.strip()) for line in subjects.stdout.splitlines()):
+        return False
+    return git("merge-base", "--is-ancestor", "HEAD", base).returncode == 1
 
 
 def _repo_with_head(path: Path, subject: str) -> Path:
@@ -2633,6 +2880,37 @@ def test_a_stale_constant_on_a_release_commit_is_still_caught(tmp_path):
     """The subject excuses a constant ahead of the tag, never one behind it."""
     repo = _repo_with_head(tmp_path, "Release v0.0.9 (#742)")
     assert _nothing_to_compare("v0.0.9", "v0.1.0", repo) == ""
+
+
+def test_a_branch_is_not_red_for_an_untagged_release_it_merged_from_main(tmp_path, monkeypatch):
+    """PR #760, 2026-11-11: v0.11.87's release PR merged, its tag phase failed on a race
+    this very PR fixes, and the PR's gate went red here on a constant main had bumped.
+    The tag could only come once the fix merged, and the fix could only merge once the
+    tag existed. The missing tag is main's to answer for, and main still does."""
+    gate = load_script("scripts/precommit/run_push_gate.py")
+    monkeypatch.delenv(gate.RELEASE_PREPARE_ENV, raising=False)
+    repo, git = _repo_with_tags(tmp_path, ["v1.0.0"])
+    git("checkout", "-q", "-b", "release/v1.1.0")
+    git("commit", "-q", "--allow-empty", "-m", "Release v1.1.0")
+    git("commit", "-q", "--allow-empty", "-m", "Merge abc into def")  # GitHub's merge commit
+    assert _nothing_to_compare("v1.1.0", "v1.0.0", repo, "main") == "", (
+        "a release PR's own bump is not in its base yet: it stays red for gate_verdict"
+    )
+    git("checkout", "-q", "main")
+    git("commit", "-q", "--allow-empty", "-m", "Release v1.1.0 (#9)")
+    git("checkout", "-q", "-b", "agent/fix")
+    git("commit", "-q", "--allow-empty", "-m", "Fix the race")
+    why = _nothing_to_compare("v1.1.0", "v1.0.0", repo, "main")
+    assert "came with main" in why
+    assert _nothing_to_compare("v0.9.0", "v1.0.0", repo, "main") == "", "a stale constant"
+    assert _nothing_to_compare("v1.1.0", "v1.0.0", repo, "origin/main") == "", (
+        "a base git cannot resolve: compare, as before"
+    )
+    git("checkout", "-q", "main")
+    git("commit", "-q", "--allow-empty", "-m", "Something else (#10)")
+    assert _nothing_to_compare("v1.1.0", "v1.0.0", repo, "main") == "", (
+        "main itself, past its release commit, stays red until the tag exists"
+    )
 
 
 def test_latest_devkit_tag_is_none_outside_a_git_repo(tmp_path):

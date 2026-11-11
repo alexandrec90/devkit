@@ -220,10 +220,10 @@ KILL_GRACE = 10
 
 # The `time.monotonic()` past which no `run_bounded` call runs on, whatever its own
 # timeout: a caller's own stop, set with `until`. None outside one. Always the earliest
-# of `_active`, the deadlines whose `until` has not exited yet, in any thread.
+# of `_deadlines`, the open `until` blocks' own, which `_deadlines_lock` guards.
 _until: float | None = None
-_active: list[float] = []
-_active_lock = threading.Lock()
+_deadlines: list[float] = []
+_deadlines_lock = threading.Lock()
 
 
 @contextmanager
@@ -237,25 +237,24 @@ def until(deadline: float | None) -> Iterator[None]:
     twelve minutes later, each `gh` call inside its own 600 s, and the watchdog stopped
     the pass with no record written (2e2e7804).
 
-    **Kept as the deadlines in force, not as the value before.** Process-wide on
-    purpose, so a pool's workers are bounded by the step that started them. But
-    restoring "the value before" on exit leaked across threads: two `job_claims` pushes
-    racing in two threads each entered here, the second exit restored the first's
-    deadline, and every later call in the process ran under a deadline long past.
+    The bound is the process's, so a pool's workers inside a block are held to it. Each
+    block adds and removes only its own deadline: restoring what it saw on entry left a
+    racing thread's deadline set for good once two blocks ended out of order, and every
+    later test on that worker inherited it (2026-11-11).
     """
-    global _until
     if deadline is None:
         yield
         return
-    with _active_lock:
-        _active.append(deadline)
-        _until = min(_active)
+    global _until
+    with _deadlines_lock:
+        _deadlines.append(deadline)
+        _until = min(_deadlines)
     try:
         yield
     finally:
-        with _active_lock:
-            _active.remove(deadline)
-            _until = min(_active) if _active else None
+        with _deadlines_lock:
+            _deadlines.remove(deadline)
+            _until = min(_deadlines, default=None)
 
 
 def past_until() -> bool:

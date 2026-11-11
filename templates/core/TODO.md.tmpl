@@ -24,9 +24,19 @@ because guessing them wrong is worse than leaving them blank.
 ## First real work
 
 - [ ] Replace the placeholder in `{{ app_dir }}` with something that does the job
-{{^desktop}}
+{{^shipped}}
 - [ ] Delete `{{ tests_dir }}test_smoke.py` once real tests exist
-{{/desktop}}
+{{/shipped}}
+{{#electron}}
+
+## Shipping
+
+- [ ] Buy a code-signing certificate and add it as the `CSC_LINK` and `CSC_KEY_PASSWORD`
+      repository secrets — until then SmartScreen warns every download
+- [ ] Decide `appId` in `frontend/electron-builder.yml` before the first release: installed
+      copies only accept updates carrying the id they were installed with
+- [ ] Tag `v0.1.0` and push it: `.github/workflows/release.yml` publishes the installer
+{{/electron}}
 {{#desktop}}
 
 ## Shipping

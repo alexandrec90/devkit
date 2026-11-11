@@ -2924,12 +2924,19 @@ def seed_env(
 ) -> dict[str, str]:
     """Write the box's `.env`: the source checkout's, plus the managed overrides.
 
+    A checkout with no `.env` seeds from the `.env.example` beside it instead: the
+    managed block alone is ports and no `DATABASE_URL`, so every database test in the
+    box's push gate failed (d2-trader, 2026-11-11). The example's ports are rebased
+    like any other seeded value's.
+
     `published` is the source checkout's own `*_HOST_PORT` env (`checkout_ports`); every
     seeded value naming one of those ports on a local host is moved onto the box's
     (`rebase_seeded_ports`). Returns those rebased keys, for the spawn's notes.
     """
+    example = source.with_name(".env.example")
+    seed = source if source.is_file() else example
     try:
-        existing = source.read_text(encoding="utf-8") if source.is_file() else ""
+        existing = seed.read_text(encoding="utf-8") if seed.is_file() else ""
     except OSError:
         existing = ""
     rebased = rebase_seeded_ports(existing, published or {}, env)

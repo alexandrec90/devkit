@@ -168,9 +168,23 @@ skin = "frontend/src"
 test_cmd = ["run", "test:run"]
 typecheck_cmd = ["run", "typecheck"]
 {{/frontend}}
+{{#electron}}
+# The Electron app is this tier: `run-tests.py` runs vitest over what changed under `src`,
+# and `lint-all.py` typechecks. Playwright is not a tier here: it runs from the PR gate's
+# electron job, and by hand with `npm run test:e2e`.
+[frontend]
+enabled = true
+dir = "frontend"
+src = "frontend/src/"
+skin = "frontend/src"
+test_cmd = ["run", "test:run"]
+typecheck_cmd = ["run", "typecheck"]
+{{/electron}}
 {{^frontend}}
+{{^electron}}
 [frontend]
 enabled = false
+{{/electron}}
 {{/frontend}}
 
 {{#desktop}}

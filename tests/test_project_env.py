@@ -90,6 +90,50 @@ def test_provisioning_is_skipped_without_uv_and_never_runs_under_dry_run(
     assert calls == []
 
 
+def test_npm_locking_resolves_without_installing_or_running_anything(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(project_env.shutil, "which", _which("npm"))
+    calls = _recording_run(monkeypatch)
+
+    project_env.lock_node_dependencies(tmp_path, dry_run=False)
+
+    [(cmd, cwd)] = calls
+    assert cmd == ["/bin/npm", "install", "--package-lock-only", "--ignore-scripts"]
+    assert cwd == tmp_path
+    assert "package-lock.json" in capsys.readouterr().out
+
+
+def test_npm_locking_runs_nothing_under_dry_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(project_env.shutil, "which", _which("npm"))
+    calls = _recording_run(monkeypatch)
+
+    project_env.lock_node_dependencies(tmp_path, dry_run=True)
+
+    assert calls == []
+    assert "--package-lock-only" in capsys.readouterr().out
+
+
+def test_npm_locking_without_npm_says_what_the_gate_will_need(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(project_env.shutil, "which", _which())
+    calls = _recording_run(monkeypatch)
+
+    project_env.lock_node_dependencies(tmp_path, dry_run=False)
+
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "npm ci" in out and "npm install --package-lock-only" in out
+
+
+def test_a_failed_npm_lock_warns_with_npms_own_reason(tmp_path, capsys, monkeypatch):
+    """Not fatal: the tree is complete, and the commit gives its own verdict."""
+    monkeypatch.setattr(project_env.shutil, "which", _which("npm"))
+    _recording_run(monkeypatch, returncode=1, stderr="npm error ETARGET no matching version")
+
+    project_env.lock_node_dependencies(tmp_path, dry_run=False)
+
+    out = capsys.readouterr().out
+    assert "npm ci" in out and "ETARGET" in out
+
+
 def test_locking_runs_uv_lock_in_the_new_root(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(project_env.shutil, "which", _which("uv"))
     calls = _recording_run(monkeypatch)

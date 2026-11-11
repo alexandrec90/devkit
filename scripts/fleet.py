@@ -47,6 +47,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collector_handoff as handoff
 import collectors_config as config
+import devkit_schtasks
 import host_memory
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +79,18 @@ SSH = (
 TAILSCALE_TIMEOUT = 15
 PROBE_TIMEOUT = 60
 DOCKER_TIMEOUT = 30
+SCHTASKS_TIMEOUT = 30
+
+# The job that keeps a machine's collectors running (`install-collectors.py`'s
+# `TASK_NAME`). An assignment of `run` on a machine where it is disabled or missing is
+# a collector nothing runs, and that machine's own `collectors.py status` cannot say so:
+# it reads the assignment, not whether anything will act on it.
+KEEPER = "devkit-collectors"
+WINDOWS = sys.platform == "win32"
+
+# Said for a machine that answered SSH but whose devkit checkout predates this script:
+# reachable, with the remedy, rather than the bare interpreter error it printed.
+OUTDATED = "answers, but its devkit checkout has no scripts/fleet.py -- pull devkit there"
 
 Runner = Callable[[Sequence[str], int], tuple[int, str]]
 Mover = Callable[[Sequence[str]], int]
@@ -115,6 +128,9 @@ class Machine:
     measured_gb: Mapping[str, float] = field(default_factory=dict)
     ready: frozenset[str] = frozenset()
     error: str = ""
+    # Whether `KEEPER` is registered and enabled there; None when it was not asked (off
+    # Windows, or a probe from a checkout older than the question).
+    kept: bool | None = None
 
     @property
     def runs(self) -> list[str]:
@@ -185,7 +201,18 @@ def probe(root: Path = REPO_ROOT, run: Runner = spawn) -> dict[str, Any]:
             if (workspace / c.project / ".git").exists()
             and (workspace / c.project / ".env").exists()
         ],
+        "kept": keeper_enabled(run),
     }
+
+
+def keeper_enabled(run: Runner) -> bool | None:
+    """Whether `KEEPER` is registered and enabled here; None off Windows, where there is
+    no scheduler to ask. A query that finds no task document reads as not kept."""
+    if not WINDOWS:
+        return None
+    _code, out = run(devkit_schtasks.query_xml_argv(KEEPER), SCHTASKS_TIMEOUT)
+    registered = devkit_schtasks.parse_task(out)
+    return registered is not None and registered.enabled
 
 
 def machine_from(payload: Mapping[str, Any]) -> Machine:
@@ -196,6 +223,7 @@ def machine_from(payload: Mapping[str, Any]) -> Machine:
         assignment=dict(payload["assignment"]),
         measured_gb=dict(payload["measured_gb"]),
         ready=frozenset(payload["ready"]),
+        kept=payload.get("kept"),
     )
 
 
@@ -211,6 +239,8 @@ def ask(host: str, here: str, root: Path, run: Runner) -> Machine:
         return machine_from(probe(root, run))
     code, out = run(remote_script(host, root, "fleet.py", "probe"), PROBE_TIMEOUT)
     if code != 0:
+        if "can't open file" in out and "fleet.py" in out:
+            return Machine(host, error=OUTDATED)
         lines = [line for line in out.splitlines() if line.strip()]
         return Machine(host, error=(lines[-1] if lines else f"ssh exited {code}")[:120])
     try:
@@ -248,6 +278,12 @@ def anomalies(machines: Sequence[Machine], collectors: Sequence[config.Collector
             found.append(f"{collector.project} is assigned to {', '.join(runners)}: two writers")
         elif not runners and not blind:
             found.append(f"{collector.project} runs nowhere")
+    for machine in machines:
+        if machine.kept is False and machine.runs:
+            found.append(
+                f"{', '.join(machine.runs)} assigned to {machine.host}, whose {KEEPER} job "
+                f"is disabled or missing: nothing runs it there"
+            )
     return found
 
 
@@ -383,7 +419,9 @@ def render(machines: Sequence[Machine], collectors: Sequence[config.Collector]) 
     """The table `fleet.py` prints, shortest machine first, the silent ones last."""
     lines = []
     for machine in sorted(machines, key=lambda m: (bool(m.error), m.available_gb)):
-        if machine.error:
+        if machine.error == OUTDATED:
+            lines.append(f"{machine.host:<20} {machine.error}")
+        elif machine.error:
             lines.append(f"{machine.host:<20} unreachable: {machine.error}")
             continue
         runs = ", ".join(machine.runs) or "no collectors"

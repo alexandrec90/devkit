@@ -37,11 +37,22 @@ node_modules/
 frontend/dist/
 frontend/.vite/
 {{/frontend}}
-{{#desktop}}
+{{#shipped}}
 # Claude Code links these into every `claude --worktree` tree (worktree.symlinkDirectories
 # in .claude/settings.json). A link is a file to git, which a `dir/` pattern never matches.
 /.venv
+{{#electron}}
+/frontend/node_modules
+{{/electron}}
 
+{{/shipped}}
+{{#electron}}
+# The Electron app: dependencies, electron-vite's build, electron-builder's output.
+node_modules/
+frontend/out/
+frontend/release/
+{{/electron}}
+{{#desktop}}
 # .NET build output, and what `scripts/desktop.py release` stages before upload.
 bin/
 obj/

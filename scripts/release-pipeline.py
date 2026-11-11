@@ -673,6 +673,12 @@ def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
     number, state = release_pr(devkit, branch)
     if state == "OPEN":
         _say(f"reusing the open prepare PR #{number} for {branch}")
+        # A PR left open by an earlier run carries the main it was cut from. Its gate
+        # judges that tree, so a red since fixed on main stays red there for good (#762).
+        refreshed = _run(["gh", "pr", "update-branch", str(number)], cwd=devkit)
+        if refreshed.returncode != 0:
+            detail = (refreshed.stderr or refreshed.stdout).strip()
+            return 0, f"could not bring #{number} up to date with main: {detail}"
         return number, ""
     if not (refusal := resume_refusal(devkit, version, state)):
         _say(f"{branch} is on origin with no PR -- an earlier run stopped before opening it")

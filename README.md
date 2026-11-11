@@ -1236,7 +1236,14 @@ There is no list of machines. A PC joins by being on the tailnet with this check
 same place under its home and accepting the SSH key of the PC you run this from. One that
 does not answer costs a row saying why, and changes nothing else: `fleet.py` holds no state
 and a move is still `collectors.py move`, run over SSH on the machine that owns the
-collector and picked up by the destination's next pass.
+collector and picked up by the destination's next pass. A PC that answers but whose
+checkout predates `fleet.py` says so rather than reading as unreachable: pull devkit there.
+
+An assignment is a file on each PC, so it can outlive what acts on it. A `problem:` line
+names a collector assigned to a PC whose `devkit-collectors` job is disabled or missing,
+as happens when a PC is stood down by hand with its assignment left behind. That
+collector runs nowhere. Move it with `fleet.py move`, or `collectors.py run-here` on the
+PC that should run it and `stop-here` on the one standing down.
 
 `rebalance` picks only a collector declaring `"rebalance": true`, and only when the
 destination keeps at least four gigabytes afterwards. `memoryGb` declares what a collector
@@ -1600,17 +1607,35 @@ because a window opened on the project it creates sees no task list at all.
 | `fullstack` | + redis, frontend | `carameli` |
 | `desktop` | desktop, updater — a C#/WPF app, Velopack installer, self-update | `skinamp` |
 | `desktop-static` | desktop — the same app and installer, no updater | — |
+| `desktop-web` | electron — a TypeScript Electron app, electron-builder installer, self-update | — |
 
-Individual `--with-*` flags add to a preset; they never subtract. The desktop shape
-refuses every stack feature: an executable on someone else's PC has no compose stack.
+Individual `--with-*` flags add to a preset; they never subtract. The desktop shapes
+refuse every stack feature: an executable on someone else's PC has no compose stack.
+
+**Which shape for an installable app:**
+
+| Choose | When | Why |
+| --- | --- | --- |
+| `desktop-web` | the app's work is its UI | an agent drives the real app with Playwright and reads a screenshot of it |
+| `desktop` | it needs the Win32, COM or registry surface | typed access to those, and a compiler that fails on warnings |
+| `bare` | a tool you run yourself, in Python | no installer to build, so no frozen-build failures |
 
 **The desktop shape** renders a .NET solution (`<Name>.slnx`, the app under
 `src/<Name>/`, xUnit tests under `tests/<Name>.Tests/`), a PR-gate job that builds and
 tests it on Windows, and `.github/workflows/release.yml`, which turns a `v*` tag into a
-GitHub release carrying the installer. The recipe all three run is
+GitHub release carrying the installer. `MainWindowTests` is its UI check: it fails on a
+broken `{Binding}`, launches the real executable, and writes `logs/ui/main-window.png`.
+The recipe all three run is
 `scripts/desktop.py` (`lint`, `test`, `release`). It is not templated: it reaches each
 project through the gated tier, keyed on `[desktop] enabled` in `.devkit.toml`, so a fix
 to how releases are built lands everywhere on the next `sync-devkit.py --pull`.
+
+**The `desktop-web` shape** renders an Electron app under `frontend/` (React, electron-vite,
+vitest), Playwright tests in `frontend/e2e/`, a Windows PR-gate job that drives the
+packaged app and uploads its screenshot, and a `release.yml` that publishes the installer
+through electron-builder. There is no driver to vendor: the recipe is `package.json`'s
+scripts, and `.devkit.toml` turns the existing `[frontend]` tier on, which is what points
+`run-tests.py` and `lint-all.py` at it.
 
 Everything local and reversible happens before the two outward-facing steps
 (creating the GitHub repo, pushing). A failure before that leaves a directory you

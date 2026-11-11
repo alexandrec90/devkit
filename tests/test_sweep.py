@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -2559,31 +2560,27 @@ def test_until_keeps_the_earlier_deadline_and_restores_the_outer_one():
     assert sweep._until is None
 
 
-def test_two_threads_leaving_out_of_order_leave_no_deadline_behind():
-    """Two `job_claims` pushes in two threads: the first in exits first. Restoring the
-    value each saw on entry put the first one's deadline back as the second left, and
-    every later call in the process ran under a deadline long past -- the serial suite
-    failed a reconcile test on it, a deadline ~90 s after the race."""
-    first, second = sweep.until(100.0), sweep.until(200.0)
+@pytest.mark.parametrize("later", [200.0, 50.0])
+def test_until_blocks_that_end_out_of_order_leave_no_deadline_behind(later):
+    """Two threads' blocks interleave -- A enters, B enters, A leaves, B leaves -- as
+    `test_job_claims`' racing claimers do. Restoring what each saw on entry put A's
+    deadline back when B left, and every later test on that worker inherited it: the
+    PR gate and the v0.11.87 release run both failed on it (2026-11-11)."""
+    first, second = sweep.until(100.0), sweep.until(later)
     first.__enter__()
     second.__enter__()
-    assert sweep._until == 100.0
+    assert sweep._until == min(100.0, later)
     first.__exit__(None, None, None)
-    assert sweep._until == 200.0, "the deadline still in force, not the one that ended"
+    assert sweep._until == later, "the block still open keeps its own deadline"
     second.__exit__(None, None, None)
     assert sweep._until is None
 
 
-def test_a_deadline_set_in_one_thread_bounds_a_worker_thread():
-    """Process-wide on purpose: a pool's workers run under the step that started them."""
-    import threading
-
-    seen: list[float | None] = []
-    with sweep.until(100.0):
-        worker = threading.Thread(target=lambda: seen.append(sweep._until))
-        worker.start()
-        worker.join()
-    assert seen == [100.0]
+def test_until_bounds_a_worker_thread_started_inside_it():
+    """The bound is the process's, not the thread's: `fix_visibility` and
+    `pr_mergeability` make their `gh` calls from a pool inside a bounded step."""
+    with sweep.until(100.0), ThreadPoolExecutor(1) as pool:
+        assert pool.submit(lambda: sweep._until).result() == 100.0
 
 
 def test_a_bounded_run_returns_what_a_finished_command_said():

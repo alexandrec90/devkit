@@ -1,0 +1,52 @@
+name: Release
+
+# A tag is a release. Push `v<major>.<minor>.<patch>` and this builds the app, packs the
+# installer with electron-builder, and publishes it as the GitHub release for that tag --
+# which is the feed every installed copy checks.
+
+on:
+  push:
+    tags: ["v*"]
+  # Re-runs a release by hand: the tag to release is the ref you pick.
+  workflow_dispatch:
+
+# Uploading a release writes to the repository; nothing else here does.
+permissions:
+  contents: write
+
+# Two pushes of one tag must not race each other's uploads.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, pack and publish
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Stamp the version from the tag
+        shell: pwsh
+        env:
+          # Through the environment, never spliced into the command line: a ref name is
+          # text someone typed, and the shell would read it as script.
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: npm version "$env:RELEASE_TAG" --no-git-tag-version --allow-same-version
+      - name: Release
+        run: npm run dist -- --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A base64 .pfx and its password. Unset, the installer is unsigned and
+          # SmartScreen warns whoever downloads it; add both once a code-signing
+          # certificate exists.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
