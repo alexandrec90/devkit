@@ -1975,25 +1975,33 @@ def test_runs_is_the_exit_code_and_an_unspawnable_binary_is_false(monkeypatch):
 
 def gh_answering(status_code, status_said):
     def fake(argv, **_kwargs):
-        if argv[:3] == ["gh", "auth", "status"]:
+        if list(argv) == list(fix_pass.GH_PROBE):
             return subprocess.CompletedProcess(argv, status_code, "", status_said)
+        if argv[:3] == ["gh", "auth", "status"]:
+            # What gh 2.98 says with the network down: the probe must never ask this.
+            said = "X Failed to log in to github.com\n- The token in keyring is invalid."
+            return subprocess.CompletedProcess(argv, 0, said, "")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     return fake
 
 
 def test_github_not_answering_is_not_a_gh_missing_from_path(monkeypatch):
-    """f455f3fe: `gh auth status` asks api.github.com, and its failing on a network blip
-    refused the pass as "not usable from this PATH" with `gh` installed and logged in."""
-    said = "X Timeout trying to log in to github.com account alexandrec90 (keyring)"
-    monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", gh_answering(1, said))
-    assert MISSING_TOOLS() == []
+    """f455f3fe: a network blip refused the pass as "not usable from this PATH" with `gh`
+    installed and logged in. 08d09ea5 is the same through `gh auth status`, which says
+    the token is invalid when it cannot reach GitHub at all; these are `gh api`'s words
+    for a dead connection and a dead name, as it printed them."""
+    for said in (
+        'Get "https://api.github.com/user": proxyconnect tcp: dial tcp 127.0.0.1:9: '
+        "connectex: No connection could be made because the target machine actively refused it.",
+        'Get "https://api.github.com/user": dial tcp: lookup api.github.com: no such host',
+    ):
+        monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", gh_answering(1, said))
+        assert MISSING_TOOLS() == [], said
 
 
 def test_a_token_github_refuses_is_still_a_missing_gh(monkeypatch):
-    said = (
-        "X Failed to log in to github.com account a (keyring)\n- The token in keyring is invalid."
-    )
+    said = "gh: Bad credentials (HTTP 401)"  # gh 2.98, `GH_TOKEN` set to a bogus token
     monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", gh_answering(1, said))
     assert MISSING_TOOLS() == ["gh"]
 
@@ -2017,7 +2025,7 @@ def test_no_stored_credential_is_a_missing_gh_without_asking_github(monkeypatch)
 
     monkeypatch.setattr(fix_pass.ship_intent.subprocess, "run", fake)
     assert MISSING_TOOLS() == ["gh"]
-    assert ["gh", "auth", "status"] not in spawned
+    assert list(fix_pass.GH_PROBE) not in spawned
 
 
 def test_missing_tools_is_empty_when_every_tool_runs(monkeypatch):

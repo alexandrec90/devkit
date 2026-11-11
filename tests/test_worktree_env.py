@@ -120,7 +120,7 @@ def test_an_absent_env_is_created_with_the_note_and_the_assignment():
 
 def test_an_existing_env_is_appended_to_rather_than_rewritten():
     """The file is the project's, not devkit's. The box tier owns a whole managed block
-    in a `.env` it seeded itself; this hook seeds nothing and adds one line."""
+    in a `.env` it seeded itself; this hook copies a missing one and adds one line."""
     out = wt_env.rendered("DATABASE_URL=postgres://x\n", "carameli-topic")
     assert out.startswith("DATABASE_URL=postgres://x\n")
     assert "COMPOSE_PROJECT_NAME=carameli-topic" in out
@@ -245,6 +245,49 @@ def test_name_compose_project_reports_a_write_and_is_silent_on_a_rerun(tmp_path)
     tree = _worktree(checkout, tmp_path / "wt")
     assert "COMPOSE_PROJECT_NAME=carameli-wt" in wt_env.name_compose_project(tree, checkout)
     assert wt_env.name_compose_project(tree, checkout) == ""
+
+
+def test_a_tree_gets_its_checkouts_env_before_the_compose_name(tmp_path):
+    """481859f1: a productivity-tracker tree held only the managed line, so no
+    `DATABASE_URL`, and every Postgres test errored until a session improvised one."""
+    checkout = _repo(tmp_path / "tracker")
+    (checkout / ".env").write_text("DATABASE_URL=the-checkouts-db\n", "utf-8")
+    tree = _worktree(checkout, tmp_path / "wt")
+    said = wt_env.name_compose_project(tree, checkout)
+    assert "seeded from the checkout's .env" in said
+    written = (tree / ".env").read_text(encoding="utf-8")
+    assert written.startswith("DATABASE_URL=the-checkouts-db\n")
+    assert "COMPOSE_PROJECT_NAME=tracker-wt" in written
+
+
+def test_a_checkout_with_no_env_seeds_the_tree_from_its_example(tmp_path):
+    checkout = _repo(tmp_path / "d2-trader")
+    (checkout / ".env.example").write_text("DATABASE_URL=the-example-db\n", "utf-8")
+    tree = _worktree(checkout, tmp_path / "wt")
+    assert "seeded from the checkout's .env.example" in wt_env.name_compose_project(tree, checkout)
+    assert (tree / ".env").read_text(encoding="utf-8").startswith("DATABASE_URL=")
+
+
+def test_a_trees_own_env_is_never_reseeded(tmp_path):
+    checkout = _repo(tmp_path / "carameli")
+    (checkout / ".env").write_text("DATABASE_URL=checkout\n", "utf-8")
+    tree = _worktree(checkout, tmp_path / "wt")
+    (tree / ".env").write_text("DATABASE_URL=mine\n", encoding="utf-8")
+    assert "seeded" not in wt_env.name_compose_project(tree, checkout)
+    assert (tree / ".env").read_text(encoding="utf-8").startswith("DATABASE_URL=mine\n")
+
+
+def test_a_tree_on_a_pinned_stack_still_gets_the_checkouts_env(tmp_path):
+    """The pin keeps the compose name off, never the database settings: ibkr_trader's
+    trees share its one database, which they can reach only with its `.env`."""
+    checkout = _repo(tmp_path / "ibkr_trader")
+    (checkout / "docker-compose.yml").write_text("name: ibkr_trader\nservices: {}\n", "utf-8")
+    (checkout / ".env").write_text("DATABASE_URL=shared\n", encoding="utf-8")
+    _git(checkout, "commit", "-qam", "pin")
+    tree = _worktree(checkout, tmp_path / "wt")
+    said = wt_env.name_compose_project(tree, checkout)
+    assert "seeded" in said and "shares that stack" in said
+    assert (tree / ".env").read_text(encoding="utf-8") == "DATABASE_URL=shared\n"
 
 
 def test_a_compose_file_that_pins_its_name_keeps_every_worktree_on_one_stack(tmp_path):

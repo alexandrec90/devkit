@@ -163,13 +163,15 @@ UNSENT: tuple[tuple, tuple, int] = ((), (), EXIT_FAILED)
 # no credential is stored, and reads nothing but the store.
 REQUIRED_TOOLS = {"git": ("--version",), "gh": ("auth", "token"), "python3": ("-c", "")}
 # A stored token can still be one GitHub refuses, and a `gh` whose token expired answers
-# every read with nothing, which reads as nothing red -- so `gh auth status` is asked
-# too. But it asks api.github.com, and failing on its exit code alone refused the whole
-# pass as "not usable from this PATH", telling the operator to restart VS Code, when
-# GitHub merely did not answer (f455f3fe, `gh` installed and logged in). Only its saying
-# the token is invalid counts; GitHub being down is each step's to meet, not the PATH's.
-GH_STATUS = ("gh", "auth", "status")
-GH_REFUSED_SAYS = "invalid"
+# every read with nothing, which reads as nothing red -- so GitHub is asked too. Only
+# GitHub's own refusal counts: failing on any error refused the whole pass as "not usable
+# from this PATH", telling the operator to restart VS Code, when GitHub merely did not
+# answer (f455f3fe). And not `gh auth status`, whose "the token in keyring is invalid" is
+# also what it says when the network is down (gh 2.98, reproduced through a dead proxy):
+# 08d09ea5 refused the pass that way twice while this PC changed networks. `gh api` names
+# the refusal itself, `Bad credentials (HTTP 401)`, and a failed connection as one.
+GH_PROBE = ("gh", "api", "user", "--jq", ".login")
+GH_REFUSED_SAYS = "http 401"
 
 
 def window(env: Mapping[str, str] = os.environ) -> float:
@@ -194,10 +196,10 @@ def runs(argv: list[str]) -> bool:
 
 
 def gh_token_refused() -> bool:
-    """Whether `gh auth status` says the stored token is invalid; a status that failed
-    for any other reason -- GitHub not answering -- is not that."""
+    """Whether GitHub refused the stored token (`GH_PROBE` answering HTTP 401); a probe
+    that failed for any other reason -- GitHub not answering -- is not that."""
     try:
-        done = ship_intent.run_quiet(list(GH_STATUS))
+        done = ship_intent.run_quiet(list(GH_PROBE))
     except OSError:
         return False
     said = f"{done.stdout or ''}\n{done.stderr or ''}".lower()

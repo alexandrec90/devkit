@@ -551,6 +551,16 @@ def test_the_ship_task_outliving_a_fire_is_the_schedule_working():
     assert not [line for line in health.problems([ship], NOW) if "overlapping" in line]
 
 
+def test_the_medium_tier_outliving_a_fire_is_the_schedule_working():
+    """Its pass may run far past its own interval by design, so the skip is expected; the
+    reason is read off the two scripts, so it stops holding the day either changes."""
+    tier = load_script("scripts/tier-pass.py")
+    installer = load_script("scripts/install-tier-schedule.py")
+    assert tier.DEFAULT_PASS_MINUTES > installer.EVERY_MINUTES
+    medium = job(name=installer.TASK_NAME, last_result=health.SCHED_REFUSED_ALREADY_RUNNING)
+    assert not [line for line in health.problems([medium], NOW) if "overlapping" in line]
+
+
 def test_both_spellings_of_the_refusal_code_are_recognised():
     """`schtasks` signs the HRESULT and `Get-ScheduledTaskInfo` does not, so the same
     refusal reaches this module as either value depending on which one was read."""

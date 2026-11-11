@@ -27,7 +27,12 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 from collections.abc import Mapping
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import host_memory
 
 # An operator turning the parallel run off -- for a suite that has grown a shared
 # resource, or to read an interleaved failure in order. Same asymmetry as
@@ -64,19 +69,46 @@ def available() -> bool:
         return False
 
 
+# What one worker running a suite is assumed to hold, an estimate in the spirit of
+# `tier-pass.RUN_MB`. `-n auto` alone is one worker per CPU whatever is free, and on a
+# 16 GB PC beside running sessions the push gate's workers got the gate killed for low
+# memory three runs in a row, so devkit's red main never left the machine (90f90636).
+WORKER_MB = 512
+
+
+def workers_for(free_mb: int | None, cpus: int | None) -> str:
+    """xdist's `-n` for a machine with `free_mb` free: `auto` while a worker per CPU fits
+    above `host_memory.FLOOR_MB`, fewer when they do not, "" (serial) under two. A probe
+    that failed is `auto`, read as no guard the way `host_memory` asks."""
+    if free_mb is None:
+        return DEFAULT_WORKERS
+    fit = (free_mb - host_memory.FLOOR_MB) // WORKER_MB
+    if cpus is not None and fit >= cpus:
+        return DEFAULT_WORKERS
+    return str(fit) if fit >= 2 else ""
+
+
+_PROBE = object()
+
+
 def args(
     *,
-    workers: str = DEFAULT_WORKERS,
+    workers: str | None = None,
     environ: Mapping[str, str] | None = None,
     have_xdist: bool | None = None,
+    free_mb: int | object | None = _PROBE,
 ) -> list[str]:
     """`["-n", workers]` when the run should be parallel, `[]` when it should not.
 
-    `have_xdist` is injected by the tests so the decision can be exercised on a machine
-    whose answer is the opposite; production passes nothing and it is probed.
+    `workers` unset is decided by free memory (`workers_for`). `have_xdist` and `free_mb`
+    are injected by the tests so the decision can be exercised on a machine whose answer
+    is the opposite; production passes neither and both are probed.
     """
     if disabled(environ):
         return []
-    if available() if have_xdist is None else have_xdist:
-        return ["-n", workers]
-    return []
+    if not (available() if have_xdist is None else have_xdist):
+        return []
+    if workers is None:
+        free = host_memory.available_mb() if free_mb is _PROBE else free_mb
+        workers = workers_for(free if isinstance(free, int) else None, os.cpu_count())
+    return ["-n", workers] if workers else []

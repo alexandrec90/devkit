@@ -1585,6 +1585,59 @@ def test_branch_delete_defers_to_git_when_commits_are_only_local():
     )
 
 
+def _linked_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """A checkout that ignores `.env`, has a stack and a `.env`, and a tree cut from it."""
+    checkout = tmp_path / "productivity-tracker"
+    checkout.mkdir()
+
+    def git(*args: str) -> None:
+        hooks = f"core.hooksPath={tmp_path / 'no-hooks'}"
+        subprocess.run(["git", "-c", hooks, *args], cwd=checkout, capture_output=True, check=True)
+
+    git("init", "-q", "-b", "main")
+    (checkout / ".gitignore").write_text(".env\n", encoding="utf-8")
+    (checkout / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed")
+    (checkout / ".env").write_text("DATABASE_URL=the-checkouts-db\n", "utf-8")
+    tree = tmp_path / "wt"
+    git("worktree", "add", "--quiet", str(tree), "-b", "topic")
+    return checkout, tree
+
+
+def test_provision_seeds_a_tree_no_hook_reached(tmp_path):
+    """481859f1: Claude Code cuts `claude --worktree` trees with hooks off, so the
+    `post-checkout` that seeds `.env` never ran there; `provision` is what reaches it."""
+    _checkout, tree = _linked_tree(tmp_path)
+    said = worktree.seed_tree_env(tree)
+    assert any("seeded from the checkout's .env" in line for line in said)
+    assert (tree / ".env").read_text(encoding="utf-8").startswith("DATABASE_URL=")
+    assert worktree.seed_tree_env(tree) == [], "a tree with a .env is left as it is"
+
+
+def test_provision_seeds_nothing_in_a_checkout(tmp_path):
+    checkout, _tree = _linked_tree(tmp_path)
+    assert worktree.seed_tree_env(checkout) == []
+
+
+def test_a_box_whose_tree_landed_deletes_its_never_pushed_branch_with_capital_D():
+    """agent-terminal's `fix-pr8-1111` (c70da35f): `ready`, five commits never pushed,
+    its tree already on the default branch under another PR. `reapable` freed it, the
+    tree went, and `-d` then refused the squashed commits: the reap ended `FAILED at
+    git branch -d`, exit 1, on a box that held nothing."""
+    landed = state(upstream="", ahead=5, unpushed=-1)
+    plan = reap(sweep.READY, state=landed, reason="5 commit(s), never pushed", work_is_landed=True)
+    assert not plan.refusal
+    assert [step for step in plan.steps if step[0] == "branch"] == [
+        ("branch", "-D", "claude/voicemail-0806")
+    ]
+
+
+def test_landed_evidence_never_licenses_capital_D_on_a_dirty_or_unreadable_state():
+    for unsafe in (state(ahead=5, unpushed=-1, dirty=1), state(is_git=False, ahead=5)):
+        assert worktree.branch_delete_flag(unsafe, pr_merged=False, work_is_landed=True) == "-d"
+
+
 def test_branch_delete_defers_to_git_when_there_is_no_upstream():
     """`unpushed` is -1 for a branch that was never pushed -- not 0, which would read
     as "nothing outstanding" and force-delete the only copy."""
@@ -4222,11 +4275,47 @@ def test_reconcile_asks_for_the_sessions_only_when_it_reaps(workspace, monkeypat
     assert worktree.reconcile(workspace, apply=True)[0] == 0
 
 
-def test_agent_sessions_is_what_claude_agents_lists(monkeypatch):
-    rows = [{"id": "a1", "cwd": "C:\\ws\\x"}]
-    asked: list[object] = []
-    monkeypatch.setattr(worktree.bg_sessions, "listed", lambda run: asked.append(run) or rows)
-    assert REAL_AGENT_SESSIONS() == rows and asked == [worktree.sweep.run_windowless]
+def test_agent_sessions_is_what_claude_agents_lists_under_a_tree_ending_bound(monkeypatch):
+    """`claude agents` ran with no timeout at all, on the reap path a7efb9b3 stalled in."""
+    asked: list[tuple[list[str], float]] = []
+
+    def bounded(argv, timeout, **_kwargs):
+        asked.append((argv, timeout))
+        return subprocess.CompletedProcess(argv, 0, '[{"id": "a1", "cwd": "C:/ws/x"}]', "")
+
+    monkeypatch.setattr(worktree.sweep, "run_bounded", bounded)
+    assert REAL_AGENT_SESSIONS() == [{"id": "a1", "cwd": "C:/ws/x"}]
+    assert asked == [(["claude", "agents", "--json"], worktree.PROBE_TIMEOUT)]
+
+
+def test_a_claude_agents_that_did_not_answer_is_unknown_not_empty(monkeypatch):
+    """Empty would read as "nobody in the box" and reap over a live session."""
+    ended = subprocess.CompletedProcess([], worktree.sweep.TIMED_OUT, "", "timed out")
+    monkeypatch.setattr(worktree.sweep, "run_bounded", lambda argv, timeout, **_k: ended)
+    assert REAL_AGENT_SESSIONS() is None
+
+
+def test_a_reap_whose_sessions_are_unknown_waits(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "apply_reap", lambda *_a: pytest.fail("reaped blind"))
+    doomed = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "x"))
+    action, ok, notes = worktree.reap_vacated(doomed, tmp_path, None, engine_down=str)
+    assert (action, ok) == (worktree.WAIT, True)
+    assert "claude agents" in notes[0]
+
+
+def test_claude_stop_is_bounded_too(tmp_path, monkeypatch):
+    """`vacate`'s stop goes through the same runner, so it cannot outlast the pass."""
+    seen = {}
+
+    def vacate(path, sessions, run):
+        seen["run"] = run
+        return [], []
+
+    monkeypatch.setattr(worktree.box_teardown, "vacate", vacate)
+    monkeypatch.setattr(worktree, "apply_reap", lambda *_a: (True, []))
+    doomed = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "x"))
+    assert worktree.reap_vacated(doomed, tmp_path, [], engine_down=str)[0] == worktree.REAP
+    assert seen["run"] is worktree.bounded_cli
 
 
 def test_settle_reap_asks_for_the_sessions_only_to_apply_a_reap_it_may_make(tmp_path, monkeypatch):
@@ -4419,24 +4508,30 @@ def test_reap_vacated_asks_the_engine_only_about_a_box_with_a_stack(tmp_path, mo
         (subprocess.CompletedProcess([], 0, "\n", ""), "Docker's engine named no server version"),
         (subprocess.CompletedProcess([], 1, "", "permission denied"), ""),
         (FileNotFoundError("docker"), ""),
-        (subprocess.TimeoutExpired("docker", 60), "Docker's engine did not answer in 60s"),
+        (
+            subprocess.CompletedProcess([], worktree.sweep.TIMED_OUT, "", "timed out"),
+            "Docker's engine did not answer in 60s",
+        ),
     ],
 )
 def test_docker_engine_down_reads_what_docker_info_says(monkeypatch, outcome, expected):
     """The 2026-10-01 run's own stderr is the first case. An error that is not the engine
     is no reason to wait, and no docker at all leaves `compose_down` to say so. Asked
-    with `docker version`: `docker info --format` exits 0 over a stopped engine."""
-    asked: list[list[str]] = []
+    with `docker version`: `docker info --format` exits 0 over a stopped engine. Through
+    `sweep.run_bounded`, never `subprocess.run(timeout=)`, which ends `docker.exe` alone
+    and then waits on the pipes its children hold (a7efb9b3)."""
+    asked: list[tuple[list[str], float]] = []
 
-    def run(argv, *_a, **_k):
-        asked.append(list(argv))
+    def bounded(argv, timeout, **_k):
+        asked.append((list(argv), timeout))
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
-    monkeypatch.setattr(worktree.subprocess, "run", run)
+    monkeypatch.setattr(worktree.sweep, "run_bounded", bounded)
+    monkeypatch.setattr(worktree.subprocess, "run", lambda *a, **k: pytest.fail("unbounded"))
     assert REAL_DOCKER_ENGINE_DOWN() == expected
-    assert asked == [["docker", "version", "--format", "{{.Server.Version}}"]]
+    assert asked == [(["docker", "version", "--format", "{{.Server.Version}}"], 60.0)]
 
 
 def test_reconcile_never_reaps_a_box_holding_work(workspace, monkeypatch):

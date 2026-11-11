@@ -228,7 +228,7 @@ def rendered(existing: str, name: str) -> str:
 
     Appended rather than rewritten because this file is the project's, not devkit's --
     the box tier owns a whole managed block in a `.env` it seeded itself, and this hook
-    seeds nothing: it adds one line to whatever is (usually not) there.
+    only copies a missing one (`seed_env`), then adds one line to whatever is there.
     """
     if already_named(existing):
         return existing
@@ -337,19 +337,50 @@ def name_compose_project(here: Path, checkout: Path) -> str:
     # nothing either way, so stdout cannot tell the two answers apart.
     if not ignores_env(here):
         return ""
+    seeded = seed_env(here, checkout)
     if pinned := pinned_name(here):
-        return f"devkit: compose pins `name: {pinned}`, so this worktree shares that stack"
+        shared = f"devkit: compose pins `name: {pinned}`, so this worktree shares that stack"
+        return "\n".join(line for line in (seeded, shared) if line)
     name = compose_project(checkout.name, here.name)
     target = here / ENV_FILE
     try:
         existing = target.read_text(encoding="utf-8") if target.is_file() else ""
         updated = rendered(existing, name)
         if updated == existing:
-            return ""
+            return seeded
         target.write_text(updated, encoding="utf-8")
     except OSError:
+        return seeded
+    named = f"devkit: {ENV_FILE} {KEY}={name} (this worktree's own compose project)"
+    return "\n".join(line for line in (seeded, named) if line)
+
+
+ENV_EXAMPLE = ".env.example"
+
+
+def seed_env(here: Path, checkout: Path) -> str:
+    """Give a tree with no `.env` a copy of its checkout's, else of its `.env.example`;
+    the line to print, or "" when nothing was written.
+
+    Without it a linked tree -- a fixer's, a `claude --worktree` one -- held only the
+    managed line, or nothing where compose pins a name, so no `DATABASE_URL`: every
+    database test errored, and the session started a throwaway Postgres by hand and
+    polled it (productivity-tracker, 481859f1 and 9ca50d6a). The copy keeps the
+    checkout's ports, so the tree reaches the database the checkout runs; a box rebases
+    them onto its own stack instead (`worktree.seed_env`). A `.env` already there is
+    the tree's own and is never touched.
+    """
+    target = here / ENV_FILE
+    if target.exists():
         return ""
-    return f"devkit: {ENV_FILE} {KEY}={name} (this worktree's own compose project)"
+    for source in (checkout / ENV_FILE, checkout / ENV_EXAMPLE):
+        try:
+            if source.is_file():
+                target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                return f"devkit: {ENV_FILE} seeded from the checkout's {source.name}"
+        except OSError:
+            return ""
+    return ""
 
 
 # --- the worktree's own interpreter -------------------------------------------

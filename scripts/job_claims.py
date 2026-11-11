@@ -79,6 +79,7 @@ ELEVATED = "elevated"  # a queue task's spool request
 TIDY = "tidy"  # the queue's daily clean-up PR
 FIX = "fix"  # one fixer at one problem at one commit
 HARNESS = "harness"  # the single devkit session
+TIER = "tier"  # one medium-tier run of one project at one commit (`tier-pass.py`)
 TTL: dict[str, _dt.timedelta] = {
     # Past `after-merge-pass.RUN_TIMEOUT` and its fast-forward, or a live run is broken.
     RUN: _dt.timedelta(hours=2),
@@ -89,6 +90,9 @@ TTL: dict[str, _dt.timedelta] = {
     # looks again when this one would: `fix_ledger.RESEND_AFTER`, held equal by a test.
     FIX: _dt.timedelta(hours=6),
     HARNESS: _dt.timedelta(hours=6),
+    # Past `tier-pass.DEFAULT_TIMEOUT_MINUTES` plus its tree's cut and provision, held by
+    # a test, or a run still going is broken and the same commit tested twice.
+    TIER: _dt.timedelta(hours=1, minutes=15),
 }
 DEFAULT_TTL = _dt.timedelta(hours=1)
 
