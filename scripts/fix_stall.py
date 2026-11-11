@@ -37,6 +37,9 @@ TRACKED = (
     "backing off",
     "already dispatched",
     "held until the devkit session",
+    # Another PC's claim, which frees itself at its TTL (`fix_claims.CLAIMED_BY`). The one
+    # hold a claim makes: one that could not be made sends anyway.
+    "claimed by",
     fix_budget.DAILY_CAPPED,
 )
 

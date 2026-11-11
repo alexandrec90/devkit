@@ -1905,6 +1905,7 @@
 							"label": "Tick jobs, or none for all",
 							"minCount": 0,
 							"options": [
+								"after-merge-schedule",
 								"agent-env",
 								"collectors",
 								"docker-prune",
