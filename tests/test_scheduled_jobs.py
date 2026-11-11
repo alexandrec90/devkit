@@ -354,6 +354,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/git_trust.py": "the git config --global safe.directory a dispatching pass adds",
     "scripts/log-wrap.py": "the wrapper every job but the tray is launched through",
     "scripts/e2e-pass.py": "devkit-local-e2e runs it nightly; it spawns each project's e2e.py",
+    "scripts/after-merge-pass.py": "devkit-after-merge runs it every 5 min; it spawns queued commands",
     "scripts/e2e.py": "the pass spawns devkit's own; it spawns pytest over the local tier",
     "scripts/tier-pass.py": "devkit-medium-tier runs it every 15 minutes; it spawns each suite",
     "scripts/disposable_tree.py": "the git worktree add and remove that pass makes per run",
@@ -402,6 +403,7 @@ DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/session_trees.py": "scripts/sweep.py",
     "scripts/e2e-pass.py": "scripts/sweep.py",
     "scripts/e2e.py": "scripts/sweep.py",
+    "scripts/after-merge-pass.py": "scripts/sweep.py",
     "scripts/tier-pass.py": "scripts/sweep.py",
     "scripts/disposable_tree.py": "scripts/sweep.py",
 }
