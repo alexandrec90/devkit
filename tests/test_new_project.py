@@ -2683,10 +2683,12 @@ def _in_history(tag: str, repo: Path) -> bool:
     return done.returncode != 1 if repo.is_dir() else True
 
 
-def _nothing_to_compare(constant: str, tag: str | None, repo: Path = REPO_ROOT) -> str:
+def _nothing_to_compare(
+    constant: str, tag: str | None, repo: Path = REPO_ROOT, base: str = ""
+) -> str:
     """Why this comparison cannot be made, or "" when it can.
 
-    Two reasons. A checkout with no tags has nothing to compare against at all.
+    Four reasons. A checkout with no tags has nothing to compare against at all.
 
     The second is the local push gate looking at a release in flight, and it takes two
     conditions -- the second being why the first cannot be used to silence the test.
@@ -2711,6 +2713,14 @@ def _nothing_to_compare(constant: str, tag: str | None, repo: Path = REPO_ROOT) 
     default branch's verdict could tell that from a real failure. A release PR's gate
     runs on GitHub's merge commit instead, whose subject is not this one, so it stays
     red and `gate_verdict` keeps judging it.
+
+    The fourth is a branch whose untagged constant came with its base: the release commit
+    is in `base` (`origin/` + the PR's base ref, else `main`) and HEAD is not. A tag phase
+    that fails leaves that state on main, and then every PR is red for a tag none of them
+    can push -- on 2026-11-11 the one PR that fixed the failure included (#760). Main
+    itself is not excused once past its release commit, so the missing tag stays red
+    there, where `release-pipeline.py` resumes the tag phase. A release PR's bump is not
+    in its base yet, so it stays red too.
     """
     if tag is None:
         return "no tags to compare against"
@@ -2720,6 +2730,9 @@ def _nothing_to_compare(constant: str, tag: str | None, repo: Path = REPO_ROOT) 
     ahead = bumped is not None and released is not None and bumped > released
     if ahead and _is_release_commit(constant, repo):
         return f"HEAD is the release commit for {constant}, whose tag comes after it"
+    base = base or f"origin/{os.environ.get('GITHUB_BASE_REF') or 'main'}"
+    if ahead and _bump_came_with(base, constant, repo):
+        return f"{constant}'s release commit came with {base}, which owes its tag; this branch does not"
     gate = load_script("scripts/precommit/run_push_gate.py")
     if not os.environ.get(gate.RELEASE_PREPARE_ENV):
         return ""
@@ -2739,9 +2752,30 @@ def _is_release_commit(constant: str, repo: Path) -> bool:
     )
     if done.returncode != 0:
         return False
-    return (
-        re.fullmatch(rf"Release {re.escape(constant)}( \(#\d+\))?", done.stdout.strip()) is not None
-    )
+    return _release_subject(constant).fullmatch(done.stdout.strip()) is not None
+
+
+def _release_subject(constant: str) -> re.Pattern[str]:
+    return re.compile(rf"Release {re.escape(constant)}( \(#\d+\))?")
+
+
+def _bump_came_with(base: str, constant: str, repo: Path) -> bool:
+    """`base` holds the release commit for `constant` and HEAD is not in `base`.
+
+    False whenever git cannot say -- no such ref, no repo -- so the comparison is made.
+    """
+    cwd = repo if repo.is_dir() else None
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+
+    subjects = git("log", "--format=%s", base)
+    if subjects.returncode != 0:
+        return False
+    pattern = _release_subject(constant)
+    if not any(pattern.fullmatch(line.strip()) for line in subjects.stdout.splitlines()):
+        return False
+    return git("merge-base", "--is-ancestor", "HEAD", base).returncode == 1
 
 
 def _repo_with_head(path: Path, subject: str) -> Path:
@@ -2769,6 +2803,37 @@ def test_a_stale_constant_on_a_release_commit_is_still_caught(tmp_path):
     """The subject excuses a constant ahead of the tag, never one behind it."""
     repo = _repo_with_head(tmp_path, "Release v0.0.9 (#742)")
     assert _nothing_to_compare("v0.0.9", "v0.1.0", repo) == ""
+
+
+def test_a_branch_is_not_red_for_an_untagged_release_it_merged_from_main(tmp_path, monkeypatch):
+    """PR #760, 2026-11-11: v0.11.87's release PR merged, its tag phase failed on a race
+    this very PR fixes, and the PR's gate went red here on a constant main had bumped.
+    The tag could only come once the fix merged, and the fix could only merge once the
+    tag existed. The missing tag is main's to answer for, and main still does."""
+    gate = load_script("scripts/precommit/run_push_gate.py")
+    monkeypatch.delenv(gate.RELEASE_PREPARE_ENV, raising=False)
+    repo, git = _repo_with_tags(tmp_path, ["v1.0.0"])
+    git("checkout", "-q", "-b", "release/v1.1.0")
+    git("commit", "-q", "--allow-empty", "-m", "Release v1.1.0")
+    git("commit", "-q", "--allow-empty", "-m", "Merge abc into def")  # GitHub's merge commit
+    assert _nothing_to_compare("v1.1.0", "v1.0.0", repo, "main") == "", (
+        "a release PR's own bump is not in its base yet: it stays red for gate_verdict"
+    )
+    git("checkout", "-q", "main")
+    git("commit", "-q", "--allow-empty", "-m", "Release v1.1.0 (#9)")
+    git("checkout", "-q", "-b", "agent/fix")
+    git("commit", "-q", "--allow-empty", "-m", "Fix the race")
+    why = _nothing_to_compare("v1.1.0", "v1.0.0", repo, "main")
+    assert "came with main" in why
+    assert _nothing_to_compare("v0.9.0", "v1.0.0", repo, "main") == "", "a stale constant"
+    assert _nothing_to_compare("v1.1.0", "v1.0.0", repo, "origin/main") == "", (
+        "a base git cannot resolve: compare, as before"
+    )
+    git("checkout", "-q", "main")
+    git("commit", "-q", "--allow-empty", "-m", "Something else (#10)")
+    assert _nothing_to_compare("v1.1.0", "v1.0.0", repo, "main") == "", (
+        "main itself, past its release commit, stays red until the tag exists"
+    )
 
 
 def test_latest_devkit_tag_is_none_outside_a_git_repo(tmp_path):
