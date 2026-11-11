@@ -1822,6 +1822,27 @@ def test_an_existing_pr_is_reused_rather_than_recreated():
     assert not any(call[:2] == ("pr", "create") for call in gh.calls)
 
 
+def test_a_pr_the_view_missed_is_reused_from_the_refusal_that_names_it():
+    """12b705c9: the view said no PR, and `gh pr create` then refused with this, so the
+    ship was filed as failed while agent-terminal's #7 stood open on the branch."""
+    refusal = (
+        'a pull request for branch "worktree-unified-swimming-quilt" into branch "main" '
+        "already exists:\nhttps://github.com/alexandrec90/agent-terminal/pull/7"
+    )
+    calls = []
+
+    def gh(*args):
+        calls.append(args)
+        refused = args[:2] in (("pr", "view"), ("pr", "create"))
+        said = refusal if args[:2] == ("pr", "create") else ""
+        return subprocess.CompletedProcess(["gh", *args], int(refused), "", said)
+
+    url, created, error = sweep.ensure_pr(gh, LABELED_PLAN)
+    assert (url, created) == ("https://github.com/alexandrec90/agent-terminal/pull/7", False)
+    assert error == ""
+    assert ("pr", "edit", "agent/upgrade", "--add-label", "automerge") in calls
+
+
 def test_a_failed_pr_creation_is_reported_not_swallowed():
     _, created, error = sweep.ensure_pr(FakeGh(create_fails="gh: not authenticated"), SHIP_PLAN)
     assert not created

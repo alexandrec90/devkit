@@ -239,3 +239,66 @@ def test_a_task_the_user_can_reach_is_filed_and_is_no_persons_step(tmp_path):
     assert triage.person_step(row) == ""
     run_pass(ctx, CURRENT)
     assert open_rows(ctx) == []
+
+
+# --- the pieces the pass is built from -------------------------------------------------
+
+
+def test_the_step_names_the_machine_and_the_exact_command(tmp_path):
+    said = fix_elevated.step("pc-one", tmp_path)
+    assert said.startswith("on pc-one, from an elevated terminal, run `")
+    assert f"`{elevated_request.install_command(tmp_path)}`" in said
+    assert said.endswith("which no job can take for you")
+
+
+def test_the_waiting_detail_is_stable_and_carries_the_step(tmp_path):
+    """No count and no date: a finding is filed only when no open one shares it."""
+    said = fix_elevated.waiting_detail("pc-one", tmp_path, VERB)
+    assert said.startswith(f"{VERB} was requested on pc-one, which has no elevated worker -- ")
+    assert said.endswith(fix_elevated.step("pc-one", tmp_path))
+    assert triage.PERSON_STEP in said
+    assert said == fix_elevated.waiting_detail("pc-one", tmp_path, VERB)
+
+
+def test_what_is_owed_is_a_line_per_wait_exposure_and_bad_run(tmp_path):
+    outcomes = {
+        "zz-verb": (elevated_request.FAILED, "did not answer"),
+        VERB: (elevated_request.REFUSED, "inside its window"),
+        "fine": ("recovered", "answers again"),
+    }
+    said = fix_elevated.owed("pc-one", tmp_path, EXPOSED, [VERB], outcomes)
+    assert said == [
+        fix_elevated.waiting_detail("pc-one", tmp_path, VERB),
+        f"the elevated worker on pc-one is exposed: {EXPOSED[1]}",
+        f"{VERB} on pc-one refused: inside its window",
+        "zz-verb on pc-one failed: did not answer",
+    ]
+
+
+def test_nothing_is_owed_by_a_current_worker_with_good_runs(tmp_path):
+    assert fix_elevated.owed("pc-one", tmp_path, CURRENT, [], {VERB: ("healthy", "x")}) == []
+
+
+def test_retiring_resolves_only_this_machines_rows_not_kept(tmp_path):
+    ctx = _ctx(tmp_path)
+    asked(ctx)
+    run_pass(ctx, MISSING)
+    [row] = open_rows(ctx)
+    detail = row.fields["detail"]
+    assert fix_elevated.retire(ctx, "pc-one", {detail}) == []
+    assert fix_elevated.retire(ctx, "pc-two", set()) == []
+    assert open_rows(ctx) == [row]
+    note = "no longer true of this PC, as of this pass"
+    assert fix_elevated.retire(ctx, "pc-one", set()) == [f"retired [{row.id}] -- {note}"]
+    assert open_rows(ctx) == []
+
+
+def test_a_rehearsal_only_says_what_it_would_retire(tmp_path):
+    ctx = _ctx(tmp_path)
+    asked(ctx)
+    run_pass(ctx, MISSING)
+    [row] = open_rows(ctx)
+    rehearsal = _ctx(tmp_path, fix_cycle.PLAN)
+    [line] = fix_elevated.retire(rehearsal, "pc-one", set())
+    assert line.startswith(f"would retire [{row.id}]")
+    assert open_rows(ctx) == [row]

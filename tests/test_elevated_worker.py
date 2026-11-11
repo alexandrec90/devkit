@@ -345,6 +345,16 @@ def test_the_attribute_is_only_cleared_on_a_plain_file(rig, monkeypatch):
     assert cleared == [str(plain)]
 
 
+def test_off_windows_clearing_the_attribute_touches_nothing(tmp_path, monkeypatch):
+    held = tmp_path / "a"
+    held.touch()
+    held.chmod(0o444)
+    monkeypatch.setattr(worker.sys, "platform", "linux")
+    worker.clear_readonly(str(held))
+    assert not held.stat().st_mode & stat.S_IWRITE
+    held.chmod(0o666)
+
+
 # --- 2. no command, path, environment or parameter from an unelevated process ------
 
 
@@ -938,3 +948,166 @@ def test_the_fixed_environment_is_enough_for_the_health_check_here():
     assert worker.run_step(worker.WSL_LIST, worker.WSL_ANSWER_TIMEOUT) == 0
     for program in (worker.SC, worker.TASKKILL, worker.WSL):
         assert os.path.isfile(program)
+
+
+# --- the pieces a cycle is built from ------------------------------------------------
+
+
+def test_a_report_collects_lines_failure_and_each_subjects_latest_result():
+    report = worker.Report()
+    report.say("first")
+    assert not report.failed
+    report.result(RESTART, worker.HEALTHY, "left alone")
+    other = worker.Report()
+    other.say("second", failed=True)
+    other.result(RESTART, worker.FAILED, "why")
+    other.result(worker.WORKER, worker.HEALTHY, "")
+    report.absorb(other)
+    assert report.lines == ["first", "second"]
+    assert report.failed, "a failure absorbed is not forgotten"
+    assert report.results == {RESTART: (worker.FAILED, "why"), worker.WORKER: (worker.HEALTHY, "")}
+    report.absorb(worker.Report())
+    assert report.failed
+
+
+def test_the_service_state_is_read_with_its_own_query_and_bound():
+    seen = []
+
+    def query(argv, timeout):
+        seen.append((tuple(argv), timeout))
+        return listing("STOP_PENDING")
+
+    machine = worker.Machine(lambda _a, _t: pytest.fail("ran"), query)
+    assert worker.wsl_state(machine) == "STOP_PENDING"
+    assert seen == [(worker.WSL_QUERY, worker.QUERY_TIMEOUT)]
+
+
+def test_a_query_that_said_nothing_is_no_state():
+    machine = worker.Machine(lambda _a, _t: 0, lambda _a, _t: "")
+    assert worker.wsl_state(machine) == ""
+
+
+def test_verbatim_turns_win32_name_rewriting_off_only_on_windows(monkeypatch):
+    path = r"C:\ProgramData\devkit\requests"
+    monkeypatch.setattr(worker.os, "name", "nt")
+    rewritten = worker.verbatim(path)
+    already = worker.verbatim("\\\\?\\" + path)
+    monkeypatch.setattr(worker.os, "name", "posix")
+    elsewhere = worker.verbatim(path)
+    monkeypatch.undo()
+    assert rewritten == "\\\\?\\" + path
+    assert already == "\\\\?\\" + path, "never prefixed twice"
+    assert elsewhere == path
+
+
+def test_json_is_replaced_whole_and_leaves_no_temporary(tmp_path):
+    path = str(tmp_path / "x.json")
+    worker.write_json(path, {"a": 1})
+    worker.write_json(path, {"b": 2})
+    assert json.loads(Path(path).read_text(encoding="utf-8")) == {"b": 2}
+    assert os.listdir(tmp_path) == ["x.json"]
+
+
+def test_limits_written_are_the_limits_read(tmp_path):
+    path = str(tmp_path / worker.LIMITS_NAME)
+    worker.write_limits(path, {RESTART: NOW})
+    assert worker.read_limits(path, NOW + 5) == {RESTART: NOW}
+
+
+def test_no_limits_record_is_no_window_spent(tmp_path):
+    path = tmp_path / worker.LIMITS_NAME
+    assert worker.read_limits(str(path), NOW) == {}
+    assert not path.exists(), "nothing to rewrite"
+
+
+def test_a_limits_record_that_will_not_read_is_every_verb_just_run(tmp_path):
+    path = tmp_path / worker.LIMITS_NAME
+    path.write_text("not json", encoding="utf-8")
+    assert worker.read_limits(str(path), NOW) == {RESTART: NOW}
+    assert json.loads(path.read_text(encoding="utf-8")) == {RESTART: NOW}, "and rewritten"
+
+
+def test_results_are_written_only_for_a_subject_that_changed(tmp_path):
+    path = tmp_path / worker.RESULTS_NAME
+    worker.write_results(str(path), {RESTART: (worker.FAILED, "why")}, NOW)
+    worker.write_results(str(path), {RESTART: (worker.FAILED, "why")}, NOW + 300)
+    held = json.loads(path.read_text(encoding="utf-8"))
+    assert held == {RESTART: {"result": worker.FAILED, "detail": "why", "at": NOW}}
+    worker.write_results(str(path), {worker.WORKER: (worker.HEALTHY, "")}, NOW + 600)
+    held = json.loads(path.read_text(encoding="utf-8"))
+    assert held[RESTART]["at"] == NOW, "another subject is kept as it was"
+    assert held[worker.WORKER] == {"result": worker.HEALTHY, "detail": "", "at": NOW + 600}
+
+
+def test_nothing_new_writes_no_results_file(tmp_path):
+    path = tmp_path / worker.RESULTS_NAME
+    worker.write_results(str(path), {}, NOW)
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("text", ["not json", "[1]"])
+def test_a_results_file_that_will_not_read_is_started_again(tmp_path, text):
+    path = tmp_path / worker.RESULTS_NAME
+    path.write_text(text, encoding="utf-8")
+    worker.write_results(str(path), {RESTART: (worker.HEALTHY, "left alone")}, NOW)
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        RESTART: {"result": worker.HEALTHY, "detail": "left alone", "at": NOW}
+    }
+
+
+def entry_for(path: Path):
+    return worker.Entry(path.name, str(path), regular=True, directory=False)
+
+
+def test_serving_a_stuck_service_spends_the_window_then_recovers(rig):
+    limits: dict[str, float] = {}
+    request_file = rig.ask()
+    report = worker.serve(entry_for(request_file), RESTART, limits, rig.layout, rig.machine)
+    assert report.results == {RESTART: (worker.RECOVERED, "answers again")}
+    assert not report.failed
+    assert limits == {RESTART: NOW}
+    assert json.loads((rig.home / worker.LIMITS_NAME).read_text(encoding="utf-8")) == limits
+    assert not request_file.exists()
+    assert report.lines[0] == f"{RESTART}: WSLService is stuck in STOP_PENDING"
+
+
+def test_serving_a_healthy_service_spends_nothing(tmp_path):
+    rig = Rig(tmp_path, stuck=False)
+    limits: dict[str, float] = {}
+    request_file = rig.ask()
+    report = worker.serve(entry_for(request_file), RESTART, limits, rig.layout, rig.machine)
+    assert report.results == {RESTART: (worker.HEALTHY, "left alone")}
+    assert limits == {}
+    assert not request_file.exists()
+
+
+def test_serving_inside_the_window_refuses_and_runs_nothing(rig):
+    limits = {RESTART: NOW - 60}
+    report = worker.serve(entry_for(rig.ask()), RESTART, limits, rig.layout, rig.machine)
+    assert report.results[RESTART][0] == worker.REFUSED
+    assert rig.killed == 0
+    assert limits == {RESTART: NOW - 60}
+
+
+def test_serving_a_verb_runs_its_own_recovery_and_reports_its_failure(rig, monkeypatch):
+    """Whatever the verb: the order is the same, and a recovery that did not take fails."""
+    tried = []
+
+    def recover(machine):
+        tried.append(machine)
+        return False, ["tried once"]
+
+    verb = worker.Verb(lambda _machine: "it is sick", recover, 60)
+    monkeypatch.setitem(worker.VERBS, "probe", verb)
+    limits: dict[str, float] = {}
+    request_file = rig.spool / "probe.request"
+    request_file.touch()
+    report = worker.serve(entry_for(request_file), "probe", limits, rig.layout, rig.machine)
+    assert len(tried) == 1
+    assert report.lines == ["probe: it is sick", "probe: tried once"]
+    assert report.failed
+    assert report.results == {
+        "probe": (worker.FAILED, "it is sick, and a restart did not bring it back")
+    }
+    assert limits == {"probe": NOW}
+    assert verb.every == 60

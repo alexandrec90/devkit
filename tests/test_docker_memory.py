@@ -194,3 +194,79 @@ def test_the_log_directory_follows_localappdata(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert memory.log_dir() == tmp_path / "Docker/log/host"
     assert memory.gib(1.5 * GIB) == "1.5 GiB"
+
+
+# --- by hand: what holds the memory, in bounded time ---------------------------------
+VM_ROW = '"vmmemWSL","11480","Services","0","4,000,000 K"\n'
+
+
+def _machine(stats: tuple[int, str], tasks: tuple[int, str] = (0, VM_ROW)):
+    """A `Run` answering `docker stats` with `stats` and `tasklist` with `tasks`."""
+    asked = []
+
+    def run(argv, timeout):
+        asked.append((argv[0], timeout))
+        return stats if argv[0] == "docker" else tasks
+
+    return run, asked
+
+
+def test_a_hung_docker_stats_still_says_the_vm_is_at_its_cap(tmp_path):
+    """39ffd291: `docker stats --no-stream` hung past 60 s with the VM at its 8 GB cap,
+    so asking what ate the memory said nothing. The engine is asked with a timeout, and
+    the VM's own size is read from Windows, which answers while it is full."""
+    (tmp_path / ".wslconfig").write_text("[wsl2]\nmemory=4GB\n", encoding="utf-8")
+    run, asked = _machine((memory.TIMED_OUT, "timed out after 20s"))
+    lines = memory.memory_report(run, tmp_path / ".wslconfig", tmp_path, KILLED_AT, True)
+    assert lines[0] == "docker stats did not answer: timed out after 20s"
+    assert lines[1].startswith("the WSL VM holds 3.8 GiB of its 4.0 GiB cap -- at its cap")
+    assert ("docker", memory.STATS_TIMEOUT) in asked
+
+
+def test_an_answering_engine_lists_each_container_and_the_vm_under_its_cap(tmp_path):
+    (tmp_path / ".wslconfig").write_text("[wsl2]\nmemory=8GB\n", encoding="utf-8")
+    run, _ = _machine((0, "app-db-1\t1.2GiB / 4GiB\n\n"))
+    lines = memory.memory_report(run, tmp_path / ".wslconfig", tmp_path, KILLED_AT, True)
+    assert lines == ["app-db-1\t1.2GiB / 4GiB", "the WSL VM holds 3.8 GiB of its 8.0 GiB cap"]
+
+
+def test_recent_oom_kills_are_named_and_off_windows_only_the_engine_is_asked(tmp_path):
+    (tmp_path / memory.BACKEND_LOG).write_text(OOM_REQUEST + "\n", encoding="utf-8")
+    os.utime(tmp_path / memory.BACKEND_LOG, (KILLED_AT, KILLED_AT))
+    run, asked = _machine((0, ""), (1, "no tasklist"))
+    lines = memory.memory_report(run, tmp_path / "absent", tmp_path, KILLED_AT + 60, True)
+    assert lines[:2] == ["no container runs", "the WSL VM is not running"]
+    assert "1 OOM kill(s)" in lines[2]
+    run, asked = _machine((0, ""))
+    assert memory.memory_report(run, tmp_path, tmp_path, 0.0, False) == ["no container runs"]
+    assert [program for program, _ in asked] == ["docker"]
+
+
+def test_the_vm_line_names_a_missing_cap():
+    assert memory.vm_line(GIB, None) == "the WSL VM holds 1.0 GiB, and .wslconfig sets no cap"
+
+
+def test_a_spawn_that_times_out_or_cannot_start_is_a_code(monkeypatch):
+    def hang(*_args, **_kwargs):
+        raise memory.subprocess.TimeoutExpired("docker", 20)
+
+    monkeypatch.setattr(memory.subprocess, "run", hang)
+    assert memory._spawn(["docker"], 20) == (memory.TIMED_OUT, "timed out after 20s")
+
+    def absent(*_args, **_kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(memory.subprocess, "run", absent)
+    assert memory._spawn(["docker"], 20) == (127, "docker")
+
+
+def test_a_spawn_that_runs_reads_both_streams(monkeypatch):
+    done = memory.subprocess.CompletedProcess(["docker"], 1, stdout="out ", stderr="err")
+    monkeypatch.setattr(memory.subprocess, "run", lambda *_a, **_k: done)
+    assert memory._spawn(["docker"], 20) == (1, "out err")
+
+
+def test_main_prints_the_report_and_reads_as_success(monkeypatch, capsys):
+    monkeypatch.setattr(memory, "memory_report", lambda *_args: ["a line"])
+    assert memory.main() == 0
+    assert capsys.readouterr().out == "a line\n"
