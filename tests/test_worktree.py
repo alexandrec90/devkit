@@ -4250,6 +4250,8 @@ def test_reap_vacated_waits_out_a_stopped_docker_engine_rather_than_strand_the_s
 
 def test_reap_decided_settles_the_plan_and_fails_a_plan_it_cannot_make(tmp_path, monkeypatch):
     plan = worktree.ReapPlan(box="demo--x-0806")
+    steps: list[str] = []
+    monkeypatch.setattr(worktree.reconcile_journal, "step", steps.append)
     monkeypatch.setattr(worktree, "plan_reap", lambda box, ws, **k: plan)
     settled = worktree.reap_decided(
         "demo--x-0806",
@@ -4260,6 +4262,7 @@ def test_reap_decided_settles_the_plan_and_fails_a_plan_it_cannot_make(tmp_path,
         fetch=False,
     )
     assert settled == (worktree.WAIT, True, ["demo--x-0806"])
+    assert steps == ["reap demo--x-0806"], "the journal names the box a pass is reaping"
 
     def refuse(box, ws, **k):
         raise worktree.WorktreeError("no such box")
@@ -4646,6 +4649,131 @@ def test_reconcile_syncs_the_checkouts_by_default(workspace, monkeypatch):
     assert called == [True]
 
 
+def test_a_pass_past_its_deadline_begins_nothing_more(workspace, monkeypatch):
+    """3fa66640: 2026-11-07 the 00:30 pass was still going at 00:45 and the scheduler
+    skipped that fire. Every call it made was bounded; the pass was not. Past its
+    deadline it inspects no box, reaps none and syncs no checkout -- each left to the
+    next pass, which the report names -- and it destroys nothing it did not begin."""
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
+    )
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: pytest.fail("reaped past it"))
+    monkeypatch.setattr(
+        worktree, "sync_checkouts", lambda *a, **k: pytest.fail("synced past the deadline")
+    )
+
+    with sweep.until(worktree.time.monotonic() - 1):
+        code, report = worktree.reconcile(workspace, apply=True)
+
+    assert code == 0, "the next pass takes it: a deferral is not a failure"
+    assert report["deferred"] == ["demo--done-0806", "the checkout sync"]
+    assert report["boxes"] == []
+    assert "demo--done-0806" in worktree.read_leases(root)
+    rendered = worktree.render_reconcile(report)
+    assert "left to the next pass" in rendered and "demo--done-0806" in rendered
+
+
+def test_a_box_inspected_in_time_is_not_reaped_once_the_deadline_passes(workspace, monkeypatch):
+    """The deadline checked before each destroying step, not only at the pass's start."""
+    _reconcilable(workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED")
+    deadline = worktree.time.monotonic() + 600
+
+    def inspect_then_run_out(*args, **kwargs):
+        # The clock reaching the deadline mid-inspection; `until`'s exit restores it.
+        sweep._until = deadline - 1200
+        return state(), sweep.NEEDS_PR, "pushed"
+
+    monkeypatch.setattr(worktree, "inspect_box", inspect_then_run_out)
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: pytest.fail("reaped past it"))
+    monkeypatch.setattr(worktree, "sync_checkouts", lambda *a, **k: pytest.fail("synced"))
+
+    with sweep.until(deadline):
+        _code, report = worktree.reconcile(workspace, apply=True)
+
+    assert report["deferred"] == ["demo--done-0806", "the checkout sync"]
+
+
+def test_a_pass_with_time_left_defers_nothing(workspace, monkeypatch):
+    _reconcilable(workspace, monkeypatch, "demo--busy-0806", sweep.READY, "2 uncommitted", "OPEN")
+    monkeypatch.setattr(
+        worktree, "sync_checkouts", lambda *a, **k: (0, {"rows": [], "failed": False})
+    )
+    with sweep.until(worktree.time.monotonic() + 600):
+        _code, report = worktree.reconcile(workspace, apply=True)
+    assert report["deferred"] == []
+    assert "left to the next pass" not in worktree.render_reconcile(report)
+
+
+def test_inspect_boxes_reads_none_past_the_deadline(monkeypatch):
+    monkeypatch.setattr(
+        worktree, "inspect_box", lambda *a, **k: pytest.fail("read a box past the deadline")
+    )
+    deferred: list[str] = []
+    steps: list[str] = []
+    monkeypatch.setattr(worktree.reconcile_journal, "step", steps.append)
+    boxes = {"b--two-0806": box("b--two-0806"), "a--one-0806": box("a--one-0806")}
+    with sweep.until(worktree.time.monotonic() - 1):
+        rows, landed = worktree.inspect_boxes(boxes, Path("ws"), False, deferred)
+    assert (rows, landed) == ([], set())
+    assert steps == [], "a box left for the next pass is not a step this one reached"
+    assert deferred == ["a--one-0806", "b--two-0806"], "in the order a pass reads them"
+
+
+def test_sync_in_time_runs_the_sync_only_when_asked_and_in_time(workspace, monkeypatch):
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        worktree,
+        "sync_checkouts",
+        lambda ws, apply, fetch: (calls.append(apply), (1, {"rows": [], "failed": True}))[1],
+    )
+    deferred: list[str] = []
+    assert worktree.sync_in_time(workspace, False, True, False, deferred) == (0, {})
+    assert worktree.sync_in_time(workspace, True, True, False, deferred)[0] == 1
+    with sweep.until(worktree.time.monotonic() - 1):
+        assert worktree.sync_in_time(workspace, True, True, False, deferred) == (0, {})
+    assert calls == [True] and deferred == ["the checkout sync"]
+
+
+def test_render_deferred_and_render_empty_name_what_was_left():
+    left = {"deferred": ["demo--a-0806", "the checkout sync"]}
+    line = "left to the next pass, this one's time having run out: demo--a-0806, the checkout sync"
+    assert worktree.render_deferred(left) == [line]
+    assert worktree.render_deferred(left, lead="\n  ") == [f"\n  {line}"]
+    assert worktree.render_deferred({}) == []
+    assert worktree.render_empty(left) == line
+    assert worktree.render_empty({"deferred": []}) == worktree.NOTHING_TO_RECONCILE
+
+
+def test_add_reconcile_scope_args_pairs_the_checkouts_flag_and_takes_a_budget():
+    parser = worktree.argparse.ArgumentParser()
+    worktree.add_reconcile_scope_args(parser)
+    assert vars(parser.parse_args([])) == {"checkouts": True, "budget": None}
+    assert vars(parser.parse_args(["--no-checkouts", "--budget", "720"])) == {
+        "checkouts": False,
+        "budget": 720.0,
+    }
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--checkouts", "--no-checkouts"])
+
+
+def test_the_reconcile_cli_bounds_the_pass_by_its_budget(workspace, monkeypatch):
+    seen: list = []
+
+    def reconcile(*args, **kwargs):
+        seen.append(sweep._until)
+        return 0, {"boxes": [], "checkouts": {}, "deferred": []}
+
+    monkeypatch.setattr(worktree, "reconcile", reconcile)
+    monkeypatch.setattr(worktree, "write_reconcile_log", lambda *a, **k: None)
+    before = worktree.time.monotonic()
+    argv = ["reconcile", "--no-fetch", "--workspace", str(workspace)]
+    assert worktree.main([*argv, "--budget", "720"]) == 0
+    assert worktree.main(argv) == 0
+    assert seen[0] is not None and before + 720 <= seen[0] <= worktree.time.monotonic() + 720
+    assert seen[1] is None, "a pass run by hand is unbounded"
+    assert sweep._until is None, "and the bound ends with the pass"
+
+
 def test_reconcile_can_be_scheduled_for_boxes_only(workspace, monkeypatch):
     monkeypatch.setattr(
         worktree,
@@ -4830,6 +4958,38 @@ def test_a_dry_run_leaves_the_scheduled_passs_log_untouched(tmp_path):
     )
 
     assert log.read_text(encoding="utf-8") == before
+    assert not (workspace.parent / worktree.reconcile_journal.HISTORY).exists()
+
+
+def test_the_reconcile_cli_records_when_its_pass_started_and_its_steps(tmp_path, monkeypatch):
+    """1f44005c: the log stamped only its end, and only the latest pass, so how long the
+    overlapping 00:30 pass ran, and in which step, could not be read anywhere."""
+    workspace = tmp_path / "ws" / "probe.code-workspace"
+    workspace.parent.mkdir()
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+
+    def reconcile(*_a, **_k):
+        worktree.reconcile_journal.step("inspect demo--x-0806")
+        return 0, {"boxes": [], "checkouts": {}, "deferred": []}
+
+    monkeypatch.setattr(worktree, "reconcile", reconcile)
+    argv = ["reconcile", "--yes", "--no-fetch", "--workspace", str(workspace)]
+    assert worktree.main(argv) == 0
+    root = workspace.parent
+    body = (root / worktree.RECONCILE_LOG).read_text(encoding="utf-8")
+    assert "started=" in body and "took=" in body and "inspect demo--x-0806@" in body
+    assert worktree.main(argv) == 0
+    rows = (root / worktree.reconcile_journal.HISTORY).read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 2, "every pass is kept, not only the latest"
+    assert not (root / worktree.reconcile_journal.RUNNING).exists()
+
+
+def test_a_reconcile_pass_names_each_box_and_the_sync_as_it_reaches_them(workspace, monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(worktree.reconcile_journal, "step", seen.append)
+    monkeypatch.setattr(worktree, "sync_checkouts", lambda *a, **k: (0, {}))
+    worktree.reconcile(workspace, apply=True)
+    assert seen[-1] == "sync checkouts"
 
 
 # --- the scheduled pass opens no windows ------------------------------------

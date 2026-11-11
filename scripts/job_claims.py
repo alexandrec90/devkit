@@ -429,7 +429,7 @@ def delay_seconds(free_mb: int | None) -> float:
     so it neither beats a machine that knows it is empty nor loses to every other."""
     if free_mb is None:
         return MAX_DELAY_SECONDS / 2
-    floor = host_memory.SESSION_MB + host_memory.MEMORY_FLOOR_MB
+    floor = host_memory.SESSION_MB + host_memory.FLOOR_MB
     if free_mb >= PROMPT_MB:
         return 0.0
     share = (PROMPT_MB - max(free_mb, floor)) / (PROMPT_MB - floor)

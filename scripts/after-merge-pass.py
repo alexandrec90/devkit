@@ -412,16 +412,22 @@ def _perform_run(task: Task, board: Board, cycle: Cycle) -> tuple[str, str]:
 def _perform_elevated(task: Task, cycle: Cycle) -> tuple[str, str]:
     """`<verb>.request` in the spool: `(REQUESTED, "")`, or `("", why not)`.
 
-    The file's name is the whole request: the worker never reads its content, so what is
-    written is only a record for a person looking in the folder, and two tasks wanting
-    one verb are rightly one request."""
+    The file's name is the whole request and it stays empty, as `elevated_worker.py` has
+    it: the worker never opens a request, so the record of who asked is this task's
+    result, and two tasks wanting one verb are rightly one request."""
     path = cycle.seams.spool / f"{task.elevated}{after_merge.REQUEST_SUFFIX}"
-    body = {"project": task.project, "task": task.name, "id": task.id, "host": cycle.seams.host}
     try:
-        path.write_text(json.dumps({**body, "at": cycle.seams.now()}) + "\n", encoding="utf-8")
+        os.close(os.open(path, os.O_CREAT | os.O_WRONLY))
     except OSError as why:
         return "", f"could not write {path.name}: {why}"
-    _write_result(task, cycle.seams, status=REQUESTED, request=str(path))
+    _write_result(
+        task,
+        cycle.seams,
+        status=REQUESTED,
+        request=str(path),
+        requested_by=cycle.seams.host,
+        requested_at=cycle.seams.now(),
+    )
     return REQUESTED, ""
 
 

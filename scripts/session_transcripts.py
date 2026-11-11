@@ -47,6 +47,7 @@ class Event:
     path: str = ""  # the file an edit call names: `Edit`'s `file_path`
     background: bool = False  # a call run with `run_in_background`: its wait holds no turn
     at: str = ""  # the record's ISO `timestamp`, "" when it has none
+    sidechain: bool = False  # a subagent's record: nothing reaches it once it has returned
 
 
 @dataclass(frozen=True)
@@ -157,7 +158,7 @@ def codex_events(row: dict, line: int) -> Iterator[Event]:
 def events(path: Path, rows: tuple[tuple[int, dict], ...]) -> list[Event]:
     reader = codex_events if is_codex(path) else claude_events
     return [
-        replace(event, at=str(row.get("timestamp") or ""))
+        replace(event, at=str(row.get("timestamp") or ""), sidechain=row.get("isSidechain") is True)
         for number, row in rows
         for event in reader(row, number)
     ]

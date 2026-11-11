@@ -6,10 +6,10 @@ task's state may and may not become is `tests/test_after_merge_lifecycle.py`.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import time
 
+import elevated_request
 import pytest
 from after_merge_world import (
     TOUCH,
@@ -378,8 +378,20 @@ def test_an_elevated_task_writes_its_request_for_the_worker(world):
     assert [path.name for path in world.spool.iterdir()] == ["restart-wsl-service.request"], (
         "the name is the whole request, and nothing else belongs in the folder"
     )
-    request = json.loads((world.spool / "restart-wsl-service.request").read_text(encoding="utf-8"))
-    assert request["id"] == task and request["project"] == "carameli", "kept as a record"
+    assert (world.spool / "restart-wsl-service.request").stat().st_size == 0, (
+        "an unelevated process leaves only an empty file (elevated_worker.py)"
+    )
+    record = world.result(task)
+    assert record["id"] == task and record["project"] == "carameli", "kept as a record"
+    assert record["requested_by"] == world.host and record["status"] == "requested"
+
+
+def test_the_queue_spells_the_request_as_the_worker_reads_it():
+    """One spelling, owned by `elevated_request.py`, so a verb the worker gains or a spool
+    it moves reaches the queue without a second edit."""
+    assert am.ELEVATED_VERBS == elevated_request.VERBS
+    assert am.ELEVATED_SPOOL == elevated_request.SPOOL
+    assert am.REQUEST_SUFFIX == elevated_request.REQUEST_SUFFIX
 
 
 @pytest.mark.parametrize("verb", am.ELEVATED_VERBS)

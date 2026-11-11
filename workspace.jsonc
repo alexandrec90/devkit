@@ -76,6 +76,9 @@
 		},
 		{
 			"path": "agent-terminal"
+		},
+		{
+			"path": "d2-trader"
 		}
 	],
 	"extensions": {
@@ -1377,6 +1380,36 @@
 				},
 				"problemMatcher": []
 			},
+			// --- scoped: photolab -------------------------------------------------
+			// A literal checkout, not a picker: the album binds fixed ports, so a second
+			// checkout could only collide with the first.
+			{
+				"label": "Photolab: Open Album",
+				"detail": "Start Postgres in Docker and the API and Vite on this machine, then open the album on localhost (FRONTEND_HOST_PORT in .env, 5180 by default). Needs .env with PHOTO_LIBRARY_HOST_DIR. Runs until you close the terminal. AI images and subscription annotation use the codex and claude commands on this machine.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"photolab",
+					"album"
+				],
+				"icon": {
+					"id": "device-camera",
+					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
 			// --- scoped: the checkouts that have a database -----------------------
 			{
 				// The last task to leave a .vscode/tasks.json anywhere, and the only one
@@ -1794,7 +1827,8 @@
 								"skinamp",
 								"photolab",
 								"homelab",
-								"agent-terminal"
+								"agent-terminal",
+								"d2-trader"
 							]
 						}
 					]
@@ -1838,7 +1872,8 @@
 								"skinamp",
 								"photolab",
 								"homelab",
-								"agent-terminal"
+								"agent-terminal",
+								"d2-trader"
 							]
 						}
 					]
@@ -1883,6 +1918,8 @@
 								"reap-schedule",
 								"reconcile-task",
 								"release-schedule",
+								"ship-schedule",
+								"tier-schedule",
 								"tray",
 								"upgrade-schedule",
 								"workspace-status",
@@ -1978,7 +2015,8 @@
 					"skinamp",
 					"photolab",
 					"homelab",
-					"agent-terminal"
+					"agent-terminal",
+					"d2-trader"
 				],
 				"default": "carameli"
 			},
@@ -2677,7 +2715,8 @@
 					"skinamp",
 					"photolab",
 					"homelab",
-					"agent-terminal"
+					"agent-terminal",
+					"d2-trader"
 				],
 				"default": "carameli"
 			},
@@ -3143,7 +3182,9 @@
 				"service": "app",
 				"health": ["ibkr-trader", "health"],
 				"buildsFrom": ["data-lake"],
-				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"]
+				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"],
+				// Its `app` and `db` caps. Not `rebalance`: the move carries the whole database.
+				"memoryGb": 3
 			},
 			// `handoff`: as ibkr_trader's. The data-lake store it imports lazily is declared
 			// in no form (its pyproject says why), so the argv brings the sibling itself:
@@ -3154,7 +3195,10 @@
 				"health": ["sports-betting", "health", "--quiet"],
 				"handoff": [
 					"uv", "run", "--with-editable", "../data-lake[archive]", "python", "scripts/handoff.py"
-				]
+				],
+				// Its one container's cap. `rebalance`: the only collector whose move is cheap.
+				"memoryGb": 0.5,
+				"rebalance": true
 			},
 			// On the host, not in a container: it drives the installed Chrome with the
 			// browser profiles in its checkout. `handoff`: dumps its `db` through the
@@ -3163,7 +3207,10 @@
 				"command": ["uv", "run", "social-scraper", "scrape"],
 				"minutes": 30,
 				"needs": ["db"],
-				"handoff": ["uv", "run", "python", "scripts/handoff.py"]
+				"handoff": ["uv", "run", "python", "scripts/handoff.py"],
+				// An estimate of its `db` and Chrome, which `docker stats` sees only half of.
+				// Not `rebalance`: its browser logins belong to one machine.
+				"memoryGb": 2
 			}
 		},
 		// Options an installer should keep, keyed by installer file name. The daily

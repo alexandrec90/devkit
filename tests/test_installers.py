@@ -61,10 +61,29 @@ def test_installers_are_found_by_name_and_reported_in_order(tmp_path):
 
 def test_every_real_installer_is_discovered():
     """The property `tests/test_installer_contract.py` builds on: a new `install-*.py`
-    is in scope the moment it exists, with no list to forget it in."""
+    is in scope the moment it exists, with no list to forget it in, bar `HELD_OUT`."""
     found = {p.name for p in installers.discover(REPO_ROOT)}
-    assert found == {p.name for p in (REPO_ROOT / "scripts").glob("install-*.py")}
+    every = {p.name for p in (REPO_ROOT / "scripts").glob("install-*.py")}
+    assert found == every - installers.HELD_OUT
     assert "install-installers-schedule.py" in found
+
+
+def test_the_elevated_installer_is_never_driven_by_the_pass(tmp_path):
+    """It stays out of `maintain`, `status` and `uninstall` alike: all three start at
+    `discover`, and each `--yes` would be an unelevated run that can only refuse."""
+    root = a_checkout(tmp_path, "install-tray.py", "install-elevated-worker.py")
+    runner = Answers({"install-tray.py": 1}, {"install-tray.py": 0})
+    outcomes = installers.reconcile(root, True, {}, runner)
+    assert [outcome.installer for outcome in outcomes] == ["install-tray.py"]
+    assert not any("install-elevated-worker.py" in " ".join(argv) for argv in runner.calls)
+
+
+def test_a_stood_down_elevated_job_is_not_an_orphan(tmp_path):
+    """`HELD_OUT` is about driving it. It still has an installer here."""
+    root = a_checkout(tmp_path, "install-elevated-worker.py")
+    script = root / "scripts" / "install-elevated-worker.py"
+    script.write_text('TASK_NAME = "devkit-elevated"\n', encoding="utf-8")
+    assert installers.stood_down_without_installer(frozenset({"devkit-elevated"}), root) == []
 
 
 def test_the_task_name_is_read_off_the_source_without_importing_it(tmp_path):

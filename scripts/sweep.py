@@ -448,6 +448,8 @@ class State:
     is_git: bool = True
     host: str = "other"
     default_branch: str = ""
+    # The ref a sync fast-forwards to when it is not `origin/<default_branch>`: see `follows`.
+    follows: str = ""
     branch: str = ""
     dirty: int = 0
     # The changed paths behind `dirty`, for the generated PR body. Empty is a
@@ -517,13 +519,18 @@ class Result:
 # authorization rather than a request.
 AUTOMERGE_LABEL = "automerge"
 AUTOFIX_LABEL = "autofix"
+# A project in the direct flow (`delivery.py`): merge with no gate consulted, where
+# `automerge` means once the gate passes. The drain job is what acts on it.
+MERGE_NOW_LABEL = "merge-now"
 
 # Colour and description per label `ensure_pr` may need to create. The `automerge`
 # spelling matches `dependabot-automerge.yml`'s `gh label create` exactly -- both
-# use `--force`, so two spellings would flip the label back and forth per run.
+# use `--force`, so two spellings would flip the label back and forth per run. Anything
+# else that creates `merge-now` has to spell it exactly as this does, for the same reason.
 LABEL_SPECS: dict[str, tuple[str, str]] = {
     AUTOMERGE_LABEL: ("0e8a16", "PR the harness may merge once the gate passes"),
     AUTOFIX_LABEL: ("1d76db", "Mechanical changes produced by a repository task"),
+    MERGE_NOW_LABEL: ("d93f0b", "PR the harness merges now, with no gate consulted"),
 }
 
 
@@ -1249,7 +1256,7 @@ def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
     # Unconditional: `behind` was measured against the *old* HEAD, so after a
     # checkout it says nothing about where `home` sits. `--ff-only` makes an
     # already-current branch a no-op and a diverged one an error, never a merge.
-    steps.append(("merge", "--ff-only", f"origin/{state.default_branch}"))
+    steps.append(("merge", "--ff-only", state.follows or f"origin/{state.default_branch}"))
     steps += _reap_steps(state, verdict, home)
 
     # Only linked worktrees need the record: a primary can always fall back to the
@@ -1559,6 +1566,20 @@ def _dirty_files(git: Git, porcelain: str) -> tuple[str, ...]:
     return dirty_files
 
 
+def follows(path: Path, git: Git) -> str:
+    """`origin/green` for devkit's own checkout once that ref exists, else "".
+
+    That checkout is the code the pass runs, and `fix-pass-watchdog.update_target` holds it
+    on the newest commit whose gate passed, so a bad merge cannot break the pass that
+    repairs it. This job syncs every checkout, so taking this one to the tip would undo
+    that every fifteen minutes. A project's checkout is only what a person reads.
+    """
+    if not (path / "scripts" / "devkit_manifest.py").is_file():
+        return ""
+    known = git("rev-parse", "--verify", "--quiet", "refs/remotes/origin/green")
+    return "origin/green" if known.returncode == 0 else ""
+
+
 def inspect(
     name: str,
     path: Path,
@@ -1660,9 +1681,9 @@ def inspect(
     return State(
         name=name,
         path=str(path),
-        is_git=True,
         host=remote_host(remote_url),
         default_branch=default_branch,
+        follows=follows(path, git),
         branch=branch,
         dirty=len(dirty_files),
         dirty_files=dirty_files,

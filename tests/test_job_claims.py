@@ -356,7 +356,7 @@ def test_old_claims_are_pruned_and_nothing_else(pcs):
 # --- who may claim, and how soon ---------------------------------------------------------------
 
 
-FLOOR = host_memory.SESSION_MB + host_memory.MEMORY_FLOOR_MB
+FLOOR = host_memory.SESSION_MB + host_memory.FLOOR_MB
 
 
 def test_a_machine_under_the_hold_does_not_claim_at_all():

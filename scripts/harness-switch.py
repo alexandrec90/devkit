@@ -103,6 +103,7 @@ BRANCH_DELIVERY_JOBS = (
     "devkit-upgrade-projects",
     "devkit-release",
     "devkit-fix-pass",
+    "devkit-ship",
     "devkit-after-merge",
 )
 

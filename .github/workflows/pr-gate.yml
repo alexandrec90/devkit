@@ -38,8 +38,12 @@ permissions:
 # would throw away the only CI signal that commit will ever get — and the Dependabot
 # merge job gates on `workflow_run.conclusion == 'success'`, which a cancelled run
 # never reports.
+#
+# A default-branch run is keyed on its commit. GitHub keeps one pending run per group, so
+# with the ref as the key a burst of merges kept only the newest, and the commits between
+# never got the verdict that says which of them broke the branch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

@@ -58,7 +58,9 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import elevated_request
 import harness_events
 
 QUEUE_DIR = ".devkit-queue"
@@ -78,13 +80,13 @@ ELEVATED = "elevated"
 KINDS = (RUN, AGENT, ELEVATED)
 FIELDS = frozenset({"when", "on", *KINDS})
 
-# The verb the elevated worker takes, and the folder it reads requests from. The worker is
-# its own package and may not be installed, so these are the contract's spelling rather
-# than an import of it. One verb on purpose: nothing else justifies running as admin, so
-# any other asked for is a malformed task, and an agent handles it some other way.
-ELEVATED_VERBS = ("restart-wsl-service",)
-ELEVATED_SPOOL = r"C:\ProgramData\devkit\requests"
-REQUEST_SUFFIX = ".request"
+# The verbs the elevated worker takes, and the folder it reads requests from, as
+# `elevated_request.py` spells them. One verb on purpose: nothing else justifies running
+# as admin, so any other asked for is a malformed task, and an agent handles it some other
+# way.
+ELEVATED_VERBS = elevated_request.VERBS
+ELEVATED_SPOOL = elevated_request.SPOOL
+REQUEST_SUFFIX = elevated_request.REQUEST_SUFFIX
 # `-I -S` before anything loads: the installer's own re-exec cannot undo a first `site`.
 ELEVATED_INSTALL = "python -I -S scripts/install-elevated-worker.py --yes"
 

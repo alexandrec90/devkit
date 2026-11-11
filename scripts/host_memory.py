@@ -22,9 +22,11 @@ from pathlib import Path
 MEMINFO = Path("/proc/meminfo")
 
 # A background fixer measured ~450 MB (the session and its pty host) once it loads no
-# MCP server; the floor leaves the person at the machine room for their own work.
+# MCP server.
 SESSION_MB = 500
-MEMORY_FLOOR_MB = 2048
+# What anything a job starts must leave free: the person at the machine's room for their
+# own work.
+FLOOR_MB = 2048
 
 
 class _MemoryStatus(ctypes.Structure):
@@ -73,7 +75,7 @@ def available_mb() -> int | None:
 def room_for_session(free_mb: int | None) -> bool:
     """`free_mb` holds one more session above the floor; True for a probe that failed,
     for the reason the module docstring gives."""
-    return free_mb is None or free_mb - SESSION_MB >= MEMORY_FLOOR_MB
+    return free_mb is None or free_mb - SESSION_MB >= FLOOR_MB
 
 
 if __name__ == "__main__":

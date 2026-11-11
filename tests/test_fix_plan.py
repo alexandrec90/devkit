@@ -62,6 +62,163 @@ def failure(**fields) -> fix_plan.Failure:
 # --- the signature ------------------------------------------------------------------
 
 
+# --- the direct flow ----------------------------------------------------------------
+
+RED_BASE = {"kind": fix_plan.BRANCH, "number": 0, "head": "", "workflow": "PR Gate"}
+PRE_COMMIT_JOB = "Pre-commit gate"
+PRE_COMMIT_STEP = f"{PRE_COMMIT_JOB} / Run every hook over the whole repo"
+
+
+def moves(*direct: str, red: list) -> list[str]:
+    """What the plan does with `red`, with `direct` named as the direct-flow projects."""
+    return [decision.action for decision in fix_plan.plan(red, "", PREFIXES, direct)]
+
+
+def test_a_red_base_holds_no_conflict_resolver_in_the_direct_flow():
+    """Nothing waits on the base being green, and a conflicted PR is the one thing the
+    drain skips."""
+    red = [
+        failure(project="roguelike", signature=("tests/test_a.py::t",), **RED_BASE),
+        failure(project="roguelike", number=2, head="agent/b", signature=(fix_plan.CONFLICT,)),
+    ]
+    assert fix_plan.RESOLVE in moves("roguelike", red=red)
+    assert fix_plan.RESOLVE not in moves(red=red)
+
+
+def test_a_direct_flow_pr_red_on_its_own_stays_held_by_a_red_base():
+    """Only the conflict is special: a failing PR against a red base inherits its red."""
+    red = [
+        failure(project="roguelike", signature=("tests/test_a.py::t",), **RED_BASE),
+        failure(project="roguelike", number=2, head="agent/b", signature=("tests/test_b.py::t",)),
+    ]
+    assert fix_plan.HOLD in moves("roguelike", red=red)
+
+
+def test_another_projects_flow_changes_nothing_here():
+    red = [
+        failure(project="carameli", signature=("tests/test_a.py::t",), **RED_BASE),
+        failure(project="carameli", number=2, head="agent/b", signature=(fix_plan.CONFLICT,)),
+    ]
+    assert fix_plan.RESOLVE not in moves("roguelike", red=red)
+
+
+@pytest.mark.parametrize(
+    ("sig", "hooks"),
+    [
+        (("Lint + hook-script tests / Format",), ()),
+        ((fix_plan.MIRROR_TEST,), ()),
+        ((fix_plan.MIRROR_TEST, "Lint + hook-script tests / Format"), ()),
+        ((PRE_COMMIT_STEP,), ((PRE_COMMIT_JOB, "ruff-format"),)),
+        (
+            (PRE_COMMIT_STEP, "Lint / Lint"),
+            ((PRE_COMMIT_JOB, "end-of-file-fixer"), ("Lint", "ruff-format")),
+        ),
+        (
+            (PRE_COMMIT_STEP,),
+            ((PRE_COMMIT_JOB, "codex-skill-mirror"), (PRE_COMMIT_JOB, "trailing-whitespace")),
+        ),
+    ],
+)
+def test_formatting_and_the_codex_mirror_are_tidys(sig, hooks):
+    assert fix_plan.is_tidy_owned(sig, hooks)
+
+
+@pytest.mark.parametrize(
+    ("sig", "hooks"),
+    [
+        ((), ()),
+        (("tests/test_a.py::t",), ()),
+        ((fix_plan.MIRROR_TEST, "tests/test_a.py::t"), ()),
+        (("lint scripts/a.py",), ()),
+        ((PRE_COMMIT_STEP,), ()),  # a log that names no hook says nothing either way
+        ((PRE_COMMIT_STEP,), ((PRE_COMMIT_JOB, "ruff-format"), (PRE_COMMIT_JOB, "detect-secrets"))),
+        (("Tests / Application suite",), (("Tests", "ruff-format"),)),
+        ((f"{fix_plan.MIRROR_TEST.split('::')[0]}::test_mirror_tree_removes_x",), ()),
+    ],
+)
+def test_anything_else_is_not(sig, hooks):
+    assert not fix_plan.is_tidy_owned(sig, hooks)
+
+
+def test_a_hook_named_by_one_job_excuses_no_other():
+    """D6: `Lint / Lint` red for its own reason, beside a formatting hook in the pre-commit
+    job, was read as tidy's."""
+    sig = (PRE_COMMIT_STEP, "Lint / Lint")
+    assert not fix_plan.is_tidy_owned(sig, ((PRE_COMMIT_JOB, "ruff-format"),))
+
+
+def test_the_hooks_a_failed_log_names_are_read_past_a_job_logs_prefix():
+    prefix = "Pre-commit gate\tRun every hook\t2026-11-06T09:00:00.0000000Z "
+    log = (
+        f"{prefix}ruff format.....Failed\n{prefix}- hook id: ruff-format\n"
+        f"{prefix}- files were modified by this hook\n"
+        f"{prefix}\x1b[1m- hook id: detect-secrets\x1b[0m\n"
+    )
+    assert fix_plan.failed_hooks([log]) == (
+        ("Pre-commit gate", "detect-secrets"),
+        ("Pre-commit gate", "ruff-format"),
+    )
+    assert fix_plan.failed_hooks(["FAILED tests/a.py::t\n"]) == ()
+
+
+def test_a_hook_with_no_log_prefix_belongs_to_no_job_unless_lint_all_wrote_it():
+    """`lint-all.py` keeps the terminal to a status line, so a generated gate's `Would
+    reformat` is in its artifact, whose header says whose it is."""
+    assert fix_plan.failed_hooks(["Would reformat: a.py\n"]) == (("", "ruff-format"),)
+    lint = f"{fix_plan.LINT_ARTIFACT}\n# ruff\nWould reformat: a.py\n"
+    assert fix_plan.failed_hooks([lint]) == (("Lint", "ruff-format"),)
+    assert fix_plan.is_tidy_owned(("Lint / Lint",), fix_plan.failed_hooks([lint]))
+
+
+def test_a_default_branch_only_tidy_owes_sends_no_fixer_and_holds_no_pr():
+    """Tidy runs on every merge; a fixer would race it, and a PR held behind this base
+    would wait on no one."""
+    red = [
+        failure(
+            project="roguelike",
+            signature=(PRE_COMMIT_STEP,),
+            hooks=((PRE_COMMIT_JOB, "ruff-format"),),
+            **RED_BASE,
+        ),
+        failure(project="roguelike", number=2, head="agent/b", signature=("tests/test_b.py::t",)),
+    ]
+    assert moves("roguelike", red=red) == [fix_plan.SKIP, fix_plan.DISPATCH]
+
+
+def test_a_tidy_red_past_its_grace_gets_a_fixer_and_holds_prs_like_any_other():
+    """D5: `.github/workflows` whitespace is one input tidy can never land, so the skip
+    cannot be forever."""
+    assert fix_plan.TIDY_GRACE == _dt.timedelta(hours=1)
+    red = [
+        failure(project="roguelike", signature=("Job / Format",), tidy_lapsed=True, **RED_BASE),
+        failure(project="roguelike", number=2, head="agent/b", signature=("tests/test_b.py::t",)),
+    ]
+    assert moves("roguelike", red=red) == [fix_plan.HOLD, fix_plan.DISPATCH]
+
+
+def test_only_a_direct_default_branch_is_owned_by_tidy():
+    formatting = failure(project="roguelike", signature=("Job / Format",), **RED_BASE)
+    assert fix_plan.owned_by_tidy(formatting, frozenset({"roguelike"}))
+    assert not fix_plan.owned_by_tidy(formatting, frozenset())
+    a_pr = failure(project="roguelike", signature=("Job / Format",))
+    assert not fix_plan.owned_by_tidy(a_pr, frozenset({"roguelike"}))
+    assert "Job / Format" in fix_plan.tidy_note(formatting) and "tidy" in (
+        fix_plan.tidy_note(formatting)
+    )
+
+
+def test_a_gated_default_branch_red_on_formatting_still_gets_its_fixer():
+    """Inert for a gated project: nothing tidies it."""
+    red = [failure(signature=("Lint + hook-script tests / Format",), **RED_BASE)]
+    assert moves(red=red) == [fix_plan.DISPATCH]
+
+
+def test_a_formatting_red_with_anything_else_in_it_still_gets_its_fixer():
+    sig = ("Lint + hook-script tests / Format", "tests/test_a.py::t")
+    red = [failure(project="roguelike", signature=sig, **RED_BASE)]
+    assert moves("roguelike", red=red) == [fix_plan.DISPATCH]
+
+
 def test_the_signature_is_the_failed_ids_sorted_and_deduped():
     assert fix_plan.signature_from_logs([SUMMARY]) == (
         "scripts/hooks/tests/test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
@@ -851,3 +1008,39 @@ def test_a_job_log_line_is_read_past_its_prefix_and_colour():
 def test_a_vitest_entry_names_its_file():
     assert fix_plan.entry_path("src/a.test.ts > suite > case") == "src/a.test.ts"
     assert fix_plan.entry_path("tests/test_a.py::test_b") == "tests/test_a.py"
+
+
+def test_a_fixture_failure_is_signed_by_its_test():
+    """pytest prints a fixture failure as `ERROR`, so a run with no other failure named
+    nothing and every project's read the same."""
+    log = (
+        "ERROR tests/test_a.py::test_x - RuntimeError: DATABASE_URL is not set\n"
+        "ERROR tests/test_b.py - ImportError: no module\n"
+        "FAILED tests/test_c.py::test_y - assert 1 == 2\n"
+    )
+    assert fix_plan.signature_from_logs([log]) == (
+        "tests/test_a.py::test_x",
+        "tests/test_b.py",
+        "tests/test_c.py::test_y",
+    )
+
+
+def test_a_log_line_that_merely_says_error_is_no_test():
+    log = "ERROR: could not connect\nERROR Connection refused\nERROR 500 at /api\n"
+    assert fix_plan.signature_from_logs([log]) == ()
+
+
+def test_a_medium_tier_red_is_named_for_its_tier_and_gets_a_fixer():
+    medium = _local(workflow=fix_plan.MEDIUM_TIER)
+    assert fix_plan.name_of(medium) == "origin/main (medium tier)"
+    assert fix_plan.local_name(_local()) == "local e2e"
+    [decision] = fix_plan.plan([medium], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.DISPATCH
+    assert decision.note.startswith("Medium Tier failing on origin/main on this machine: ")
+
+
+def test_a_medium_tier_red_the_tip_has_moved_past_is_held_like_a_local_one():
+    stale = _local(workflow=fix_plan.MEDIUM_TIER, tip="ffffffffffff")
+    [decision] = fix_plan.plan([stale], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.HOLD
+    assert "the next scheduled local run re-tests the tip" in decision.note

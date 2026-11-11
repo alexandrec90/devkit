@@ -60,6 +60,20 @@ GROUP = "delivery"
 
 DEFAULT_INTERVAL_MINUTES = 15
 
+# How long before its next fire a pass must have ended (`pass_budget`): a pass still
+# running when the scheduler fires again skips that fire. It covers the one call a
+# deadline cannot cut short -- a reap's tree ended at the bound and given its grace --
+# and the log written after. 3fa66640: the 00:30 pass of 2026-11-07 ran past 00:45.
+BUDGET_MARGIN_S = 3 * 60
+
+
+def pass_budget(minutes: int) -> int:
+    """The `--budget` a pass every `minutes` runs with: the interval less
+    `BUDGET_MARGIN_S`, and never less than half of it."""
+    seconds = minutes * 60
+    return max(seconds // 2, seconds - BUDGET_MARGIN_S)
+
+
 # Where this job's account of itself lives -- `worktree.write_reconcile_log` writes it,
 # and `schedule_health.ARTIFACTS` sends a reader here when the scheduler reports a
 # failure. Declared on the installer because that is the one place that knows a job
@@ -135,6 +149,12 @@ def reconcile_arguments(
     if min_free_gb > 0:
         parts += ["--min-free-gb", str(min_free_gb)]
     return " ".join(parts)
+
+
+def with_budget(arguments: str, minutes: int) -> str:
+    """`arguments` for a task firing every `minutes`, holding each pass to its
+    `pass_budget` so it has ended before the next fire."""
+    return f"{arguments} --budget {pass_budget(minutes)}"
 
 
 def task_document(python: str, arguments: str, minutes: int, root: Path = REPO_ROOT) -> str:
@@ -288,13 +308,16 @@ def main(argv: list[str] | None = None) -> int:
 
     workspace = (args.workspace or sweep.default_workspace(REPO_ROOT)).resolve()
     python = windowless(sys.executable)
-    arguments = reconcile_arguments(
-        worktree_script(),
-        workspace,
-        args.automerge,
-        args.min_free_gb,
-        args.checkouts,
-        args.merge_label,
+    arguments = with_budget(
+        reconcile_arguments(
+            worktree_script(),
+            workspace,
+            args.automerge,
+            args.min_free_gb,
+            args.checkouts,
+            args.merge_label,
+        ),
+        args.minutes,
     )
     if args.check:
         code, message = devkit_schtasks.run_check(

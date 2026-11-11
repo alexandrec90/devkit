@@ -54,6 +54,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adoption_prs
 import agent_models
 import agent_tabs
+import delivery
 import devkit_project
 import fix_ledger
 import fix_plan
@@ -352,7 +353,7 @@ def fresh_prompt(decision: fix_plan.Decision, root: Path, branch: str) -> tuple[
     if first.kind == fix_plan.BRANCH:
         return fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
     if first.kind == fix_plan.LOCAL:
-        return fix_prompts.local_prompt(first, branch), f"{project} local e2e"
+        return fix_prompts.local_prompt(first, branch), f"{project} {fix_plan.local_name(first)}"
     if first.kind == fix_plan.DEPENDABOT:
         return fix_prompts.dependabot_prompt(first, branch), f"{project} dependabot"
     return fix_prompts.nightly_prompt(first, branch), f"{project} {first.workflow}"
@@ -422,7 +423,8 @@ def run_plan(
     found = menu.scan(workspace)
     failures = gate_evidence.collect(workspace, found)
     newest = gate_evidence.newest_release(root / DEVKIT)
-    decisions = fix_plan.plan(failures, newest, adoption_prs.adoption_prefixes())
+    direct = delivery.direct_projects(root, found)
+    decisions = fix_plan.plan(failures, newest, adoption_prs.adoption_prefixes(), direct)
     ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
     ledger = fix_ledger.read_ledger(ledger_path)
     print(fix_ledger.render(decisions, ledger))
