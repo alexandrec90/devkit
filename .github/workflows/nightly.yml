@@ -55,6 +55,8 @@ jobs:
           # which needs the tags and a history reaching them. See pr-gate.yml.
           fetch-depth: 0
       - uses: ./.github/actions/setup-python-env
+        # Every check after the first runs once this has, as in pr-gate.yml (f872ef7c).
+        id: env
         with:
           python-version: "3.12"
       - name: Format
@@ -62,6 +64,7 @@ jobs:
         # design, so running it earlier repairs drift and then reports clean.
         run: uv run ruff format --check .
       - name: Lint + typecheck via the wrapper devkit ships
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         run: uv run python scripts/lint-all.py
       - name: Upload lint artifact
         if: failure()
@@ -71,10 +74,11 @@ jobs:
           path: logs/lint-errors.log
       - name: Hook-script tests (vendored tier)
         id: hooks-tests
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         run: uv run python -m pytest scripts/hooks/tests/ -q
       - name: devkit tests (generator, ports, renderer)
-        # After a red vendored tier too, as in pr-gate.yml (ledger f07541c7).
-        if: success() || steps.hooks-tests.outcome == 'failure'
+        # After a red vendored tier or lint too, as in pr-gate.yml (f07541c7, f872ef7c).
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         run: uv run python scripts/run-tests.py
       - name: Upload test artifact
         if: failure()
@@ -98,6 +102,7 @@ jobs:
       - name: Install uv
         run: pip install uv
       - name: Resolve the dev group at its newest allowed versions
+        id: env
         # `--upgrade` re-resolves instead of replaying the lock. The result is never
         # committed back: a nightly that pushed a resolution would be choosing devkit's
         # toolchain unattended, which is Dependabot's job precisely because it is
@@ -120,12 +125,14 @@ jobs:
       - name: Format
         run: uv run ruff format --check .
       - name: Lint + typecheck
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         run: uv run python scripts/lint-all.py
       - name: Hook-script tests (vendored tier)
         id: hooks-tests
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         run: uv run python -m pytest scripts/hooks/tests/ -q
       - name: devkit tests (generator, ports, renderer)
-        if: success() || steps.hooks-tests.outcome == 'failure'
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         run: uv run python scripts/run-tests.py
       - name: Upload artifacts
         if: failure()

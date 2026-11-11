@@ -286,17 +286,32 @@ def policy_skipped(env: Mapping[str, str]) -> bool:
     return env.get(SKIP_ENV_VAR, "").strip().lower() not in _OFF_VALUES
 
 
+DETACHED_HEAD = (
+    "commit blocked on detached HEAD; create a fresh branch from the parked commit first"
+)
+# Mid-merge, `git switch -c` refuses ("cannot switch branch while merging") and
+# `git checkout -b` succeeds by dropping MERGE_HEAD, so the merge commit is silently
+# lost (86eaa68b). Naming the branch and pointing HEAD at it keeps both.
+DETACHED_MID_MERGE = (
+    "commit blocked on detached HEAD mid-merge; put the merge on a fresh branch without "
+    "leaving it: git branch <new-name> HEAD && git symbolic-ref HEAD refs/heads/<new-name> "
+    "(`git switch -c` refuses while merging, and `git checkout -b` drops the merge)"
+)
+
+
+def detached_head_error(runner: Runner) -> str:
+    """The refusal for a commit on a detached HEAD, naming the remedy that works there."""
+    merging = _git(runner, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0
+    return DETACHED_MID_MERGE if merging else DETACHED_HEAD
+
+
 def evaluate_pre_commit(runner: Runner = run_command) -> Decision:
     branch_result = _git(runner, "branch", "--show-current")
     if branch_result.returncode != 0:
         return Decision(errors=("commit blocked: could not determine the current branch",))
     branch = branch_result.stdout.strip()
     if not branch:
-        return Decision(
-            errors=(
-                "commit blocked on detached HEAD; create a fresh branch from the parked commit first",
-            )
-        )
+        return Decision(errors=(detached_head_error(runner),))
 
     remote = _config_value(runner, REMOTE_KEY, DEFAULT_REMOTE)
     remote_url = _remote_url(runner, remote)

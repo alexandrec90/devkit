@@ -360,6 +360,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
     "scripts/collector_tasks.py": "the schtasks that pass makes, and each scheduled collector's fire",
     "scripts/collector_handoff.py": "the project's handoff command that pass asks and imports through",
+    "scripts/docker_memory.py": "collectors.py imports it; its _spawn serves the by-hand report",
     "scripts/elevated_worker.py": "devkit-elevated runs the installed copy every 5 minutes",
     "scripts/elevated_request.py": "the schtasks query the fix pass asks after the worker with",
     # reached from `workspace-status.py --notify`, which is the one script that imports

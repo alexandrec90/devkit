@@ -445,8 +445,13 @@ def missing_toolchain(root: Path, cfg: harness_config.Config | None = None) -> t
 # A console script uv installs on Windows: a small trampoline holding the interpreter's
 # absolute path as plain bytes, which it dies on with `uv trampoline failed to canonicalize
 # script path` once that path is gone. Anything larger is the tool itself, as ruff is.
+# The path is read in either spelling, drive letter or POSIX root, so the check means the
+# same on the Linux CI as on the PC; a `/` only opens one at the start of a token, so a
+# slash inside some other string in the binary is not read as a path.
 LAUNCHER_MAX_BYTES = 1 << 20
-EMBEDDED_INTERPRETER = re.compile(rb"[A-Za-z]:[\\/][^\x00\r\n]{1,400}?pythonw?\.exe")
+EMBEDDED_INTERPRETER = re.compile(
+    rb"(?:[A-Za-z]:[\\/]|(?<![^\x00-\x20!\"'])/)[^\x00\r\n]{1,400}?pythonw?\.exe"
+)
 VENV_INTERPRETERS = frozenset({"python", "pythonw"})
 
 

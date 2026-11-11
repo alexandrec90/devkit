@@ -1717,6 +1717,12 @@ def transient(said: str) -> bool:
     return bool(_TRANSIENT.search(said))
 
 
+# `gh pr create`'s refusal for a head that already has an open PR, which names it.
+PR_ALREADY_EXISTS = re.compile(
+    r"a pull request for branch .* already exists:\s*(?P<url>https://\S+/pull/\d+)"
+)
+
+
 def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
     """Open a PR for `plan.pr_head`, or find the one already open.
 
@@ -1761,10 +1767,20 @@ def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
         *label_args,
     )
     if created.returncode != 0:
-        return "", False, (created.stderr or created.stdout or "").strip()
+        return _reuse_named(gh, plan, (created.stderr or created.stdout or "").strip())
     # `gh pr create` prints the URL as its last line of output.
     lines = [line.strip() for line in created.stdout.splitlines() if line.strip()]
     return (lines[-1] if lines else ""), True, ""
+
+
+def _reuse_named(gh: Git, plan: Plan, said: str) -> tuple[str, bool, str]:
+    """`ensure_pr`'s answer to a refused `gh pr create`. The view before it can miss a PR
+    GitHub already has -- one a moment old, or a view the network dropped -- and the
+    refusal then names it (12b705c9): that is the PR the call was looking for, so it is
+    reused like one the view found. Any other refusal is the error."""
+    if found := PR_ALREADY_EXISTS.search(said):
+        return found["url"], False, _apply_labels(gh, plan, found["url"])
+    return "", False, said
 
 
 def _ensure_label(gh: Git, label: str):

@@ -150,7 +150,9 @@ Memory is the one limit the machine sets regardless: `fix_send` holds a session 
 free memory cannot take (`held for memory` in the record), and the next pass sends it.
 A background fixer loads no MCP server for the same reason. Holds on every iteration
 mean something else is eating the memory -- find it (`claude agents` for finished
-sessions still alive, `docker stats` for stacks) rather than lowering the floor.
+sessions still alive, `python scripts/docker_memory.py` for stacks) rather than lowering
+the floor. Not a bare `docker stats`: it hangs once the VM is at its `.wslconfig` cap, the
+case you are asking about, where that script still reads the VM's size from Windows.
 
 ## 5. Your own turns
 

@@ -317,6 +317,8 @@ def clear_readonly(path: str) -> None:
     """Take the read-only attribute off, which `os.open(..., 0o444)` sets with nothing but
     the right to add a file, and which refuses a delete even to an administrator. By the
     API and not `os.chmod`, which follows a link on some of the Pythons this runs under."""
+    if sys.platform != "win32":  # also what tells mypy `windll` exists below
+        return
     try:
         ctypes.windll.kernel32.SetFileAttributesW(path, FILE_ATTRIBUTE_NORMAL)
     except (AttributeError, OSError):
