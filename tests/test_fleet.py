@@ -112,6 +112,7 @@ def test_probe_reports_memory_assignment_and_only_checkouts_that_could_run(
     declared = [collector("cheap"), collector("heavy")]
     monkeypatch.setattr(fleet.config, "declared", lambda root: (declared, []))
     monkeypatch.setattr(fleet.host_memory, "available_mb", lambda: 2048)
+    monkeypatch.setattr(fleet, "WINDOWS", False)
 
     said = fleet.probe(here, lambda argv, timeout: (0, "cheap-app-1 1GiB"))
 
@@ -121,6 +122,7 @@ def test_probe_reports_memory_assignment_and_only_checkouts_that_could_run(
         "assignment": {"cheap": "run"},
         "measured_gb": {"cheap": 1.0},
         "ready": ["cheap"],
+        "kept": None,
     }
     assert fleet.machine_from(said) == fleet.Machine(
         HERE, 2.0, {"cheap": "run"}, {"cheap": 1.0}, frozenset({"cheap"})
@@ -145,6 +147,58 @@ def test_ask_gives_the_last_line_of_a_refusal_as_the_reason(here: Path):
     assert fleet.ask(FAR, HERE, here, lambda argv, timeout: (255, answer)) == fleet.Machine(
         FAR, error="alexa@far: Permission denied (publickey)"
     )
+
+
+def task_document(enabled: bool) -> str:
+    state = "true" if enabled else "false"
+    return (
+        "<Task><Settings><Enabled>" + state + "</Enabled></Settings>"
+        "<Actions><Exec><Command>pythonw.exe</Command><Arguments>x</Arguments></Exec>"
+        "</Actions></Task>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("answer", "kept"),
+    [
+        ((0, task_document(enabled=True)), True),
+        ((0, task_document(enabled=False)), False),
+        ((1, "ERROR: The system cannot find the file specified."), False),
+    ],
+)
+def test_keeper_enabled_reads_the_collectors_job(
+    monkeypatch: pytest.MonkeyPatch, answer: tuple[int, str], kept: bool
+):
+    monkeypatch.setattr(fleet, "WINDOWS", True)
+    asked: list[Sequence[str]] = []
+
+    def run(argv: Sequence[str], timeout: int) -> tuple[int, str]:
+        asked.append(argv)
+        return answer
+
+    assert fleet.keeper_enabled(run) is kept
+    assert asked == [fleet.devkit_schtasks.query_xml_argv(fleet.KEEPER)]
+
+
+def test_keeper_enabled_asks_nothing_off_windows(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(fleet, "WINDOWS", False)
+    assert fleet.keeper_enabled(lambda argv, timeout: pytest.fail("asked")) is None
+
+
+def test_a_probe_from_an_older_checkout_has_not_been_asked_about_its_keeper():
+    payload = {"host": FAR, "available_gb": 4, "assignment": {}, "measured_gb": {}, "ready": []}
+    assert fleet.machine_from(payload).kept is None
+
+
+def test_ask_says_a_machine_with_an_older_checkout_answers(here: Path):
+    """What the interpreter prints when `fleet.py` is not there yet is not "unreachable"."""
+    answer = (
+        "C:\\Users\\me\\python.exe: can't open file "
+        "'C:\\\\Users\\\\me\\\\vs-code\\\\devkit\\\\scripts\\\\fleet.py': [Errno 2] No such file"
+    )
+    machine = fleet.ask(FAR, HERE, here, lambda argv, timeout: (2, answer))
+    assert machine.error == fleet.OUTDATED
+    assert fleet.render([machine], [])[0].split() == [FAR, *fleet.OUTDATED.split()]
 
 
 def test_ask_with_no_output_says_how_ssh_exited(here: Path):
@@ -224,6 +278,20 @@ def test_anomalies_name_two_writers():
 
 def test_anomalies_name_a_collector_nothing_runs():
     assert fleet.anomalies([machine(HERE, 8)], [collector()]) == ["cheap runs nowhere"]
+
+
+def test_anomalies_name_a_collector_assigned_where_nothing_keeps_it():
+    """A `run` on a machine whose collectors job is off is a collector nothing runs."""
+    machines = [machine(HERE, 8), machine(FAR, 8, ["cheap"], kept=False)]
+    assert fleet.anomalies(machines, [collector()]) == [
+        f"cheap assigned to {FAR}, whose {fleet.KEEPER} job is disabled or missing: "
+        "nothing runs it there"
+    ]
+
+
+def test_anomalies_take_an_unasked_keeper_on_trust():
+    machines = [machine(HERE, 8, ["cheap"], kept=None)]
+    assert fleet.anomalies(machines, [collector()]) == []
 
 
 def test_anomalies_do_not_guess_about_a_machine_that_did_not_answer():
