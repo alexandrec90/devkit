@@ -25,6 +25,11 @@ So the pass now does two things with this module:
 
 And a third, so the VM holds no more of Windows' memory than its containers use
 (`reclaim_argv`): it drops the VM's file cache and compacts what that freed.
+
+Run by hand, it answers "what holds the memory" in bounded time (`memory_report`),
+where a bare `docker stats` hangs once the VM is full:
+
+    python scripts/docker_memory.py
 """
 
 from __future__ import annotations
@@ -32,6 +37,9 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import re
+import subprocess
+import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -251,3 +259,88 @@ def silent_vm_evidence(kills: Sequence[float], working_set: int | None, cap: int
 def reclaim_argv(distro: str) -> list[str]:
     """The `wsl` call that runs `RECLAIM` as root inside `distro`."""
     return ["wsl", "-d", distro, "-u", "root", "-e", "sh", "-c", RECLAIM]
+
+
+# --- `docker_memory.py` by hand: what holds the memory, in bounded time --------------
+# `docker stats --no-stream` hung past 60 s while the VM sat at its cap, so a session
+# asking what ate the memory got nothing in exactly the case it asked about (39ffd291).
+STATS_ARGV = ["docker", "stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}"]
+STATS_TIMEOUT = 20
+TASKLIST_TIMEOUT = 10
+TIMED_OUT = 124
+NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+Run = Callable[[list[str], int], tuple[int, str]]
+
+
+def vm_line(working_set: int | None, cap: int | None) -> str:
+    """The VM's working set against its `.wslconfig` cap, as one line."""
+    if working_set is None:
+        return "the WSL VM is not running"
+    held = f"the WSL VM holds {gib(working_set)}"
+    if not cap:
+        return f"{held}, and .wslconfig sets no cap"
+    full = (
+        " -- at its cap, which is why the engine is slow to answer"
+        if (working_set >= NEAR_CAP * cap)
+        else ""
+    )
+    return f"{held} of its {gib(cap)} cap{full}"
+
+
+def memory_report(run: Run, wslconfig: Path, logs: Path, now: float, windows: bool) -> list[str]:
+    """What holds Docker's memory: each container's use while the engine answers
+    `docker stats` within `STATS_TIMEOUT`, and on Windows the VM against its cap and the
+    OOM kills of the last `OOM_LOOKBACK` either way, read from Windows rather than the
+    engine, so they stay readable when it is the full VM that keeps it from answering."""
+    code, out = run(STATS_ARGV, STATS_TIMEOUT)
+    if code == 0:
+        lines = [line for line in out.splitlines() if line.strip()] or ["no container runs"]
+    else:
+        lines = [f"docker stats did not answer: {out.strip() or f'exit {code}'}"]
+    if not windows:
+        return lines
+    listed, tasks = run(
+        ["tasklist", "/FI", f"IMAGENAME eq {VM_IMAGE}*", "/FO", "CSV", "/NH"], TASKLIST_TIMEOUT
+    )
+    try:
+        cap = wsl_cap(wslconfig.read_text(encoding="utf-8"))
+    except OSError:
+        cap = None
+    lines.append(vm_line(vm_working_set(tasks) if listed == 0 else None, cap))
+    since = now - OOM_LOOKBACK
+    if kills := oom_kills(backend_logs(logs, since), since):
+        lines.append(silent_vm_evidence(kills, None, None))
+    return lines
+
+
+def _spawn(argv: list[str], timeout: int) -> tuple[int, str]:
+    """`(exit code, stdout+stderr)`; a timeout or a missing binary is a code, not a raise."""
+    try:
+        done = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            creationflags=NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return TIMED_OUT, f"timed out after {timeout}s"
+    except OSError as error:
+        return 127, str(error)
+    return done.returncode, done.stdout + done.stderr
+
+
+def main() -> int:
+    """Print `memory_report` for this machine; always 0, since it is a reading."""
+    for line in memory_report(
+        _spawn, Path.home() / ".wslconfig", log_dir(), time.time(), os.name == "nt"
+    ):
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

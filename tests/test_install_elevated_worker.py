@@ -309,8 +309,14 @@ def test_a_real_folder_is_created_with_its_descriptor_in_one_call(tmp_path):
 
 
 def test_an_unusable_descriptor_makes_nothing(tmp_path):
-    if os.name == "nt":
-        assert installer.make_protected(str(tmp_path / "x"), "not sddl") != 0
+    assert installer.make_protected(str(tmp_path / "x"), "not sddl") != 0
+    assert not (tmp_path / "x").exists()
+
+
+def test_off_windows_nothing_is_made_and_the_answer_says_why(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer.sys, "platform", "linux")
+    sddl = installer.ROOT_DESCRIPTOR
+    assert installer.make_protected(str(tmp_path / "x"), sddl) == installer.ERROR_NOT_SUPPORTED
     assert not (tmp_path / "x").exists()
 
 
@@ -807,7 +813,7 @@ def test_a_reinstall_replaces_the_interpreter_and_keeps_the_rate_limit(planted):
     assert (planted / "elevated" / "rate-limit.json").is_file()
 
 
-def test_uninstall_takes_the_task_and_the_folder(planted):
+def test_uninstall_takes_the_task_and_the_folder(planted, windows):
     planted.mkdir()
     (planted / "x").touch()
     run = Fake()
@@ -815,7 +821,7 @@ def test_uninstall_takes_the_task_and_the_folder(planted):
     assert not planted.exists()
 
 
-def test_uninstall_is_not_jammed_by_a_read_only_file(planted):
+def test_uninstall_is_not_jammed_by_a_read_only_file(planted, windows):
     planted.mkdir()
     jam = planted / "x"
     jam.touch()
@@ -824,9 +830,17 @@ def test_uninstall_is_not_jammed_by_a_read_only_file(planted):
     assert not planted.exists()
 
 
-def test_uninstall_stops_at_a_task_it_could_not_delete(planted):
+def test_uninstall_stops_at_a_task_it_could_not_delete(planted, windows):
     planted.mkdir()
     assert installer.uninstall(Fake(fail="/Delete", held="x")) == 1
+    assert planted.exists()
+
+
+def test_uninstall_off_windows_touches_nothing(planted, monkeypatch):
+    """Off Windows the verb says it has nothing to do, so it must not delete anything."""
+    monkeypatch.setattr(installer, "WINDOWS", False)
+    planted.mkdir()
+    assert installer.uninstall(Fake()) == 0
     assert planted.exists()
 
 
@@ -923,3 +937,276 @@ def test_an_elevated_run_writes_no_bytecode_into_the_checkout():
     `elevated_writes.py` exists to catch."""
     lines = SOURCE.splitlines()
     assert lines.index("sys.dont_write_bytecode = True") < lines.index("import devkit_schtasks")
+
+
+# --- the pieces an install is built from ----------------------------------------------
+
+
+class NotIsolated:
+    isolated = 0
+    no_site = 0
+
+
+def test_the_base_python_is_the_real_interpreter_behind_a_virtualenv(tmp_path, monkeypatch):
+    (tmp_path / "python.exe").touch()
+    monkeypatch.setattr(installer.sys, "base_prefix", str(tmp_path))
+    assert installer.base_python() == os.path.join(str(tmp_path), "python.exe")
+
+
+def test_with_no_base_interpreter_it_is_this_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer.sys, "base_prefix", str(tmp_path))
+    assert installer.base_python() == sys.executable
+
+
+def test_the_isolated_argv_is_the_base_python_under_its_guards(tmp_path, monkeypatch):
+    (tmp_path / "python.exe").touch()
+    monkeypatch.setattr(installer.sys, "base_prefix", str(tmp_path))
+    monkeypatch.setattr(installer.sys, "flags", NotIsolated)
+    assert installer.isolated_argv("x.py", ["--check"]) == [
+        os.path.join(str(tmp_path), "python.exe"),
+        "-I",
+        "-S",
+        "-B",
+        "x.py",
+        "--check",
+    ]
+
+
+def test_an_isolated_run_needs_no_argv(monkeypatch):
+    class Isolated:
+        isolated = 1
+        no_site = 1
+
+    monkeypatch.setattr(installer.sys, "flags", Isolated)
+    assert installer.isolated_argv("x.py", ["--yes"]) == []
+    half = type("Half", (), {"isolated": 1, "no_site": 0})
+    monkeypatch.setattr(installer.sys, "flags", half)
+    assert installer.isolated_argv("x.py", [])[1:4] == ["-I", "-S", "-B"], "both, or re-exec"
+
+
+def test_the_task_arguments_are_the_guards_then_the_installed_copy():
+    assert installer.worker_arguments() == (
+        r'-I -S -B "C:\ProgramData\devkit\elevated\elevated_worker.py"'
+    )
+
+
+def test_elevating_adds_the_descriptor_principal_and_context_once():
+    base = (
+        "<Task>\n  <RegistrationInfo>\n  </RegistrationInfo>\n"
+        "  <Settings>\n  </Settings>\n  <Actions><Exec/></Actions>\n</Task>"
+    )
+    text = installer.elevate(base)
+    assert text.count(f"<SecurityDescriptor>{installer.SECURITY}</SecurityDescriptor>") == 1
+    assert text.index("</SecurityDescriptor>") < text.index("</RegistrationInfo>")
+    assert text.count("<RunLevel>HighestAvailable</RunLevel>") == 1
+    assert text.index("<Principals>") < text.index("<Settings>")
+    assert '<Actions Context="Author">' in text
+    assert request.task_problems(text) == []
+
+
+def test_each_elevating_replacement_is_made_once():
+    """Each replacement is bounded to one, so an `<Actions>` elsewhere is untouched."""
+    base = "<RegistrationInfo></RegistrationInfo>\n  <Settings>\n<Actions><Actions>"
+    text = installer.elevate(base)
+    assert text.count("<Principals>") == 1
+    assert text.count('<Actions Context="Author">') == 1
+    assert text.count("<Actions>") == 1
+
+
+def test_a_plain_file_a_folder_and_nothing_are_not_links(tmp_path):
+    (tmp_path / "f").touch()
+    assert not installer.is_link(str(tmp_path / "f"))
+    assert not installer.is_link(str(tmp_path))
+    assert not installer.is_link(str(tmp_path / "absent"))
+
+
+@pytest.mark.parametrize(
+    ("mode", "attributes"),
+    [
+        (stat.S_IFDIR, stat.FILE_ATTRIBUTE_REPARSE_POINT),
+        (stat.S_IFLNK, 0),
+    ],
+    ids=["junction", "symlink"],
+)
+def test_a_reparse_point_or_a_symlink_is_a_link(monkeypatch, mode, attributes):
+    info = type("Info", (), {"st_mode": mode, "st_file_attributes": attributes})
+    monkeypatch.setattr(installer.os, "lstat", lambda _path: info)
+    linked = installer.is_link("x")
+    monkeypatch.undo()
+    assert linked
+
+
+def test_judging_reads_the_descriptor_back_and_names_the_path(planted, monkeypatch):
+    planted.mkdir()
+    assert installer.judged(str(planted)) == []
+    held = f"O:{SID}D:(A;;FA;;;{SID})"
+    monkeypatch.setattr(installer.elevated_request, "descriptor", lambda _path: held)
+    assert installer.judged(str(planted)) == [
+        f"{planted}: owned by {SID}",
+        f"{planted}: {SID} holds FA",
+    ]
+    assert installer.judged(str(planted), frozenset({"FA"})) == [f"{planted}: owned by {SID}"]
+
+
+def test_a_link_is_judged_without_reading_through_it(planted, monkeypatch):
+    planted.mkdir()
+    monkeypatch.setattr(
+        installer.elevated_request, "descriptor", lambda _path: pytest.fail("read it")
+    )
+    monkeypatch.setattr(installer, "is_link", lambda _path: True)
+    assert installer.judged(str(planted)) == [f"{planted} is a link"]
+
+
+def test_the_walk_reaches_every_path_and_follows_no_link(tmp_path, monkeypatch):
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "f").touch()
+    (tmp_path / "linked").mkdir()
+    (tmp_path / "linked" / "beyond").touch()
+    monkeypatch.setattr(installer, "is_link", lambda path: Path(path).name == "linked")
+    found = {Path(path).relative_to(tmp_path).as_posix() for path in installer.walk(str(tmp_path))}
+    assert found == {"a", "a/b", "a/b/f", "linked"}
+
+
+def test_an_installed_spool_has_no_problems(planted):
+    assert installer.install(Fake()) == 0
+    (planted / "requests" / "restart-wsl-service.request").touch()
+    assert installer.spool_problems() == []
+
+
+def test_a_spool_judges_its_own_grant_and_the_sentinel_strictly(planted, monkeypatch):
+    """The spool may grant adding a file; the sentinel in it may not grant even that."""
+    assert installer.install(Fake()) == 0
+    spool = planted / "requests"
+    bad = {installer.SENTINEL: SPOOL_ACL}
+    monkeypatch.setattr(installer.elevated_request, "descriptor", descriptors(planted, bad))
+    assert installer.spool_problems() == [f"{spool / installer.SENTINEL}: {SID} holds DC"]
+
+
+def test_what_does_not_belong_in_the_spool_is_named(planted, monkeypatch):
+    assert installer.install(Fake()) == 0
+    spool = planted / "requests"
+    (spool / "folder").mkdir()
+    (spool / "link").touch()
+    monkeypatch.setattr(installer, "is_link", lambda path: Path(path).name == "link")
+    assert sorted(installer.spool_problems()) == [
+        f"{spool / 'folder'} does not belong in the spool",
+        f"{spool / 'link'} does not belong in the spool",
+    ]
+
+
+def test_installing_the_files_lays_out_the_tree_and_sets_owners(planted, tmp_path):
+    planted.mkdir()
+    run = Fake()
+    assert installer.install_files(tmp_path / "base", SID, run) == ""
+    home = planted / "elevated"
+    assert (home / installer.WORKER_NAME).read_bytes() == (
+        REPO_ROOT / "scripts" / installer.WORKER_NAME
+    ).read_bytes()
+    assert (home / "tmp").is_dir()
+    assert (home / "python" / "pythonw.exe").is_file()
+    assert (planted / "requests" / installer.SENTINEL).is_file()
+    assert run.calls == [
+        installer.own_argv(str(planted)),
+        installer.spool_argv(str(planted / "requests"), SID),
+    ]
+
+
+def test_installing_the_files_stops_at_the_first_refusal(planted, tmp_path):
+    planted.mkdir()
+    run = Fake(fail="/setowner")
+    assert installer.install_files(tmp_path / "base", SID, run) == "/setowner refused"
+    assert len(run.calls) == 1, "the spool is not granted on a tree whose owner is unset"
+
+
+def test_registering_a_first_task_leaves_no_document(planted):
+    (planted / "elevated").mkdir(parents=True)
+    run = Fake()
+    assert installer.register_task(run) == ""
+    assert not run.said("/Delete")
+    assert registered(run)
+    assert not list((planted / "elevated").iterdir())
+
+
+def test_registering_over_a_task_that_will_not_go_registers_nothing(planted):
+    (planted / "elevated").mkdir(parents=True)
+    run = Fake(held=document(), fail="/Delete")
+    said = installer.register_task(run)
+    assert said == f"the existing {installer.TASK_NAME} could not be deleted: /Delete refused"
+    assert not registered(run)
+
+
+def test_a_registration_the_scheduler_refuses_is_its_answer(planted):
+    (planted / "elevated").mkdir(parents=True)
+    assert installer.register_task(Fake(fail="/Create")) == "/Create refused"
+    assert not list((planted / "elevated").iterdir())
+
+
+def test_a_task_that_reads_back_open_is_registered_and_deleted_again(planted):
+    (planted / "elevated").mkdir(parents=True)
+    run = Fake(reads_back=document().replace(installer.SECURITY, OPENED))
+    said = installer.register_task(run)
+    assert said.startswith(f"{installer.TASK_NAME} read back wrong ({SID} holds FA)")
+    assert run.held is None
+
+
+def test_a_refusal_names_five_problems_and_runs_nothing(capsys):
+    problems = [f"problem {index}" for index in range(8)]
+    assert installer.refused(problems) == 1
+    err = capsys.readouterr().err
+    assert "problem 4" in err
+    assert "problem 5" not in err
+    assert f"Nothing was run from {installer.ROOT}" in err
+
+
+def test_why_a_run_may_not_install():
+    assert installer.refusal(elevated=True, static_checkout=True) == ""
+    unelevated = installer.refusal(elevated=False, static_checkout=True)
+    assert "needs an elevated terminal" in unelevated
+    assert request.install_command(installer.REPO_ROOT) in unelevated
+    assert "needs an elevated terminal" in installer.refusal(False, False), "elevation first"
+    assert "temporary checkout" in installer.refusal(elevated=True, static_checkout=False)
+
+
+def test_the_parser_reads_each_mode_and_the_yes():
+    parser = installer.build_parser()
+    assert parser.parse_args([]).apply is False
+    args = parser.parse_args(["--uninstall", "--yes"])
+    assert (args.uninstall, args.apply, args.check, args.status) == (True, True, False, False)
+    assert parser.parse_args(["--check"]).check
+
+
+def test_the_parser_allows_one_mode_at_a_time(capsys):
+    with pytest.raises(SystemExit):
+        installer.build_parser().parse_args(["--check", "--status"])
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_the_check_is_current_when_the_task_and_the_copy_are(monkeypatch, capsys):
+    run = Fake(held=schtasks.secured(document(), SID))
+    asked = []
+
+    def state(checkout, runner):
+        asked.append((checkout, runner))
+        return request.CURRENT, "installed and current"
+
+    monkeypatch.setattr(installer.elevated_request, "state", state)
+    assert installer.check(run) == schtasks.CHECK_CURRENT
+    assert asked == [(installer.REPO_ROOT, run)]
+    assert capsys.readouterr().err == ""
+
+
+def test_the_check_reports_a_task_that_is_not_registered_before_the_copy(monkeypatch, capsys):
+    monkeypatch.setattr(
+        installer.elevated_request, "state", lambda *_a: pytest.fail("asked about the copy")
+    )
+    assert installer.check(Fake()) == schtasks.CHECK_STALE
+    assert installer.TASK_NAME in capsys.readouterr().err
+
+
+def test_the_check_reports_an_outdated_copy_as_stale(monkeypatch, capsys):
+    run = Fake(held=schtasks.secured(document(), SID))
+    monkeypatch.setattr(
+        installer.elevated_request, "state", lambda *_a: (request.OUTDATED, "its copy differs")
+    )
+    assert installer.check(run) == schtasks.CHECK_STALE
+    assert f"{installer.TASK_NAME} is outdated: its copy differs." in capsys.readouterr().err

@@ -227,6 +227,20 @@ def test_an_unreadable_descriptor_is_a_problem():
     assert request.acl_problems("") != []
 
 
+def test_the_aces_alone_are_judged_with_no_owner_needed():
+    """A task's descriptor carries a DACL and no owner, so the ACEs are their own check."""
+    assert request.ace_problems(READ_ONLY) == []
+    held = f"{READ_ONLY}(A;;FA;;;{USER})(A;;0x1301bf;;;BU)"
+    assert request.ace_problems(held) == [f"{USER} holds FA", "BU holds 0x1301bf"]
+
+
+def test_an_ace_is_judged_against_the_rights_and_admins_it_is_given():
+    held = f"D:(A;;DC;;;{USER})(D;;FA;;;{USER})"
+    assert request.ace_problems(held) == [f"{USER} holds DC"]
+    assert request.ace_problems(held, rights=request.SPOOL_RIGHTS) == []
+    assert request.ace_problems(held, admins=frozenset({USER})) == []
+
+
 @windows_only
 def test_a_real_folder_a_user_made_reads_as_not_admin_only(tmp_path):
     """The real descriptor through the real API, for a folder this user owns."""
@@ -237,6 +251,11 @@ def test_a_real_folder_a_user_made_reads_as_not_admin_only(tmp_path):
 
 def test_a_path_nothing_can_read_is_no_descriptor():
     assert request.descriptor(r"C:\no\such\folder\anywhere") == ""
+
+
+def test_off_windows_no_descriptor_is_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(request.sys, "platform", "linux")
+    assert request.descriptor(str(tmp_path)) == ""
 
 
 # --- the task's own descriptor -------------------------------------------------------
@@ -350,6 +369,21 @@ def test_a_scheduler_that_did_not_answer_is_unknown(on_disk):
 
 def test_a_descriptor_that_could_not_be_read_is_unknown(on_disk):
     assert state_of(*on_disk, held="")[0] == request.UNKNOWN
+
+
+def test_a_copy_differs_only_when_its_bytes_do(tmp_path):
+    repo, installed = tmp_path / "repo.py", tmp_path / "installed.py"
+    repo.write_bytes(b"worker v2\n")
+    installed.write_bytes(b"worker v2\n")
+    assert not request.copy_differs(repo, installed)
+    installed.write_bytes(b"worker v2\r\n")
+    assert request.copy_differs(repo, installed), "a line ending is a different copy"
+
+
+def test_a_copy_that_cannot_be_read_raises_for_state_to_answer(tmp_path):
+    (tmp_path / "repo.py").write_bytes(b"x")
+    with pytest.raises(OSError):
+        request.copy_differs(tmp_path / "repo.py", tmp_path / "gone.py")
 
 
 def test_a_failed_spawn_cannot_read_as_not_registered(monkeypatch):
