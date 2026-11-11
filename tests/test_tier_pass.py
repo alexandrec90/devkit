@@ -89,7 +89,7 @@ def _seams(tmp_path: Path, runs=None, **fields):
         "git_for": lambda _p: fake_git(),
         "runner": runs or FakeRuns(),
         "room": lambda: 64000,
-        "claim": lambda _c, _j, _t: True,
+        "claim": lambda _c, _j: True,
         "provision": lambda _tree: "",
     }
     return tier_pass.Seams(**(base | fields))
@@ -235,43 +235,45 @@ def test_the_job_id_is_the_one_the_lead_verifies_against_package_c():
     assert tier_pass.job_id("carameli", "abcdef0123456789") == "tier-carameli-abcdef012345"
 
 
-def test_with_no_claims_module_every_run_goes():
-    def absent(name):
-        raise ModuleNotFoundError(f"No module named {name!r}", name=name)
-
-    assert tier_pass.claimed(Path("c"), "tier-x-1", 60.0, absent)
-
-
-def test_a_claims_module_that_is_there_decides_with_the_spelled_call():
-    calls = []
-
-    class Claims:
-        answer = False
-
-        @classmethod
-        def claim(cls, checkout, job_id, ttl_seconds):
-            calls.append((checkout, job_id, ttl_seconds))
-            return cls.answer
-
-    def load(name):
-        assert name == "job_claims"
-        return Claims
-
-    assert not tier_pass.claimed(Path("c"), "tier-x-1", 60.0, load)
-    Claims.answer = True
-    assert tier_pass.claimed(Path("c"), "tier-x-1", 60.0, load)
-    assert calls[0] == (Path("c"), "tier-x-1", 60.0)
+def _machines(tmp_path: Path) -> tuple[Path, Path]:
+    """Two checkouts sharing a bare remote: two PCs' copies of one project."""
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "-q", "--bare", str(remote))
+    checkouts = []
+    for name in ("pc-a", "pc-b"):
+        checkout = tmp_path / name
+        checkout.mkdir()
+        _git(checkout, "init", "-q")
+        _git(checkout, "remote", "add", "origin", remote.as_posix())
+        checkouts.append(checkout)
+    return checkouts[0], checkouts[1]
 
 
-def test_a_claims_module_that_is_broken_is_not_read_as_absent():
-    """A `job_claims` whose own import fails is not "no module": every PC would test
-    every commit, with nothing saying why."""
+def test_one_commit_is_claimed_by_one_machine_through_the_real_claims_module(tmp_path):
+    """Against `job_claims` itself, not a stand-in: the fake this replaced spelled a
+    signature the module never had, and the first scheduled pass after it landed died on
+    `claim() missing 1 required positional argument: 'host'`."""
+    a, b = _machines(tmp_path)
+    job = tier_pass.job_id("carameli", TIP)
+    assert tier_pass.claimed(a, job, host=lambda: "pc-a")
+    assert not tier_pass.claimed(b, job, host=lambda: "pc-b")
+    assert tier_pass.claimed(a, job, host=lambda: "pc-a"), "its holder asking again"
+    assert tier_pass.claimed(b, tier_pass.job_id("carameli", "c" * 16), host=lambda: "pc-b")
 
-    def broken(_name):
-        raise ModuleNotFoundError("No module named 'other'", name="other")
 
-    with pytest.raises(ModuleNotFoundError):
-        tier_pass.claimed(Path("c"), "tier-x-1", 60.0, broken)
+def test_a_claim_that_could_not_be_made_fails_open_and_says_so(tmp_path, capsys):
+    checkout = tmp_path / "pc-a"
+    checkout.mkdir()
+    _git(checkout, "init", "-q")
+    _git(checkout, "remote", "add", "origin", (tmp_path / "nowhere.git").as_posix())
+    assert tier_pass.claimed(checkout, "tier-x-1", host=lambda: "pc-a")
+    assert "claim failed open" in capsys.readouterr().out
+
+
+def test_a_claim_outlasts_a_run_at_the_default_timeout():
+    """Shorter, and a second PC breaks the claim of a run still going and tests it too."""
+    run = tier_pass.DEFAULT_TIMEOUT_MINUTES * 60 + tier_pass.CLAIM_MARGIN_SECONDS
+    assert tier_pass.job_claims.ttl_of(tier_pass.job_claims.TIER).total_seconds() > run
 
 
 def test_memory_guards_only_a_probe_that_answered():
@@ -398,17 +400,15 @@ def test_a_claim_lost_runs_nothing_and_records_nothing(tmp_path, capsys):
     runs = FakeRuns()
     asked = []
 
-    def claim(checkout, job, ttl):
-        asked.append((checkout, job, ttl))
+    def claim(checkout, job):
+        asked.append((checkout, job))
         return False
 
     seams = _seams(tmp_path, runs, claim=claim)
     assert tier_pass.judge(_target(tmp_path), 60.0, seams) is None
     assert runs.suites == []
     assert results.read("carameli", seams.root, TIER) is None
-    assert asked == [
-        (tmp_path / "carameli", f"tier-carameli-{TIP[:12]}", 60.0 + tier_pass.CLAIM_MARGIN_SECONDS)
-    ]
+    assert asked == [(tmp_path / "carameli", f"tier-carameli-{TIP[:12]}")]
     assert "claimed by another machine" in capsys.readouterr().out
 
 
@@ -426,7 +426,7 @@ def test_a_project_with_nothing_to_run_is_recorded_red_as_a_missing_tier(tmp_pat
 
 def test_a_missing_tier_is_claimed_so_one_pc_sends_one_fixer(tmp_path):
     seams = _seams(
-        tmp_path, git_for=lambda _p: fake_git(contract=False), claim=lambda _c, _j, _t: False
+        tmp_path, git_for=lambda _p: fake_git(contract=False), claim=lambda _c, _j: False
     )
     assert tier_pass.judge(_target(tmp_path), 60.0, seams) is None
     assert results.read("carameli", seams.root, TIER) is None
@@ -605,7 +605,7 @@ def test_by_hand_a_project_always_runs(tmp_path):
         runs,
         now=lambda: NOW,
         room=lambda: 100,
-        claim=lambda _c, _j, _t: False,
+        claim=lambda _c, _j: False,
     )
     _stored(seams.root, "a", sha=TIP, finished=NOW.isoformat(timespec="seconds"))
     state.write("a", state.could_not_judge(state.State(), NOW, "no network", False), seams.root)
@@ -922,7 +922,7 @@ def test_a_real_run_at_origin_s_tip_leaves_the_static_checkout_as_it_was(tmp_pat
     seams = tier_pass.Seams(
         root=tmp_path / "devkit",
         room=lambda: None,
-        claim=lambda _c, _j, _t: True,
+        claim=lambda _c, _j: True,
         provision=lambda _tree: "",
     )
     assert tier_pass.run_pass(workspace, [], _args(), seams) == 0

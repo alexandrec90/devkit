@@ -121,7 +121,10 @@ NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) |
 # A job that fires every two minutes outlives one fire whenever a ship takes its time, and
 # the fire it skips loses nothing: the running one, or the next, ships what is there.
 # Saying "its runs are overlapping" would file a finding over the schedule working.
-OVERLAP_EXPECTED = frozenset({"devkit-ship"})
+# `devkit-medium-tier` is the same by design: a pass works through every project origin
+# moved past, for up to `tier-pass.DEFAULT_PASS_MINUTES`, on a 15-minute cadence, and the
+# next pass reads every tip again (74329698 filed its 12:15 skip as a defect).
+OVERLAP_EXPECTED = frozenset({"devkit-ship", "devkit-medium-tier"})
 
 # How many intervals a job may miss before it is worth a line. One is noise: a laptop
 # asleep at 04:00 misses a daily run and catches it the next night, which is the system

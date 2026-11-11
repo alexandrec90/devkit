@@ -43,8 +43,8 @@ it, and that machine's fix pass sends the fixer, so a red on any other machine w
 lost. There a pass says why in one line and exits 0, which registers no failure.
 
 **Across machines each such PC runs this**, so a run is claimed as `tier-<project>-<sha12>`
-through `job_claims.claim`, once that module exists (`claimed`, the one place that spells
-the call). Until then each PC tests for itself.
+through `job_claims.claim` (`claimed`, the one place that spells the call). A claim that
+could not be made fails open, and that PC tests for itself.
 
 **Every project owes the script** (`e2e_results.MEDIUM`). One whose tip has neither the
 script nor a command is recorded red as a missing tier, as `e2e-pass.py` records a missing
@@ -65,20 +65,21 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as _dt
-import importlib
 import os
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent / "hooks"))
 import devkit_project
 import disposable_tree
 import e2e_results
 import fix_switch
+import harness_events
 import host_memory
+import job_claims
 import sweep
 import task_branch as tb
 import tier_command
@@ -114,11 +115,11 @@ DEFAULT_TIMEOUT_MINUTES = 45
 # allows for this plus one run and its setup.
 DEFAULT_PASS_MINUTES = 120
 
-# How long a claim holds beyond the run, for its tree and toolchain.
+# How long a claim must hold beyond the run, for its tree and toolchain: with the default
+# timeout, inside `job_claims.TTL[TIER]`, which a test holds.
 CLAIM_MARGIN_SECONDS = disposable_tree.CUT_TIMEOUT + disposable_tree.PROVISION_TIMEOUT
 
 LOCK_FILE = "pass.lock"
-CLAIMS_MODULE = "job_claims"
 
 # The last line of a pass that owes a filing: `log-wrap.py` reads the cause from it, so it
 # names the kind and nothing that differs between runs.
@@ -222,23 +223,20 @@ def job_id(project: str, sha: str) -> str:
 def claimed(
     checkout: Path,
     job: str,
-    ttl_seconds: float,
-    load: Callable[[str], Any] = importlib.import_module,
+    git_for: Callable[[Path], Git] = sweep.git_for,
+    host: Callable[[], str] = harness_events.host_name,
 ) -> bool:
-    """Whether this machine may run `job`: `job_claims.claim(checkout, job, ttl_seconds)`.
+    """Whether this machine may run `job`, claimed in `checkout`'s repository.
 
-    The one place that spells the call. The module is the queue package's and may not be
-    here yet, so its absence means nothing to claim against and the run goes. Only its
-    own absence: a `job_claims` that imports something missing is a broken claim, and
-    running on would be every PC testing the same commit with nothing saying why.
+    The one place that spells `job_claims.claim`, as a `TIER` job whose TTL outlasts a
+    run. Only a lost claim stops the run: one that could not be made (no network, a
+    refused push) fails open, as the fix pass's do (`fix_claims.py`), since a commit
+    tested twice costs a run and one tested nowhere hides a red.
     """
-    try:
-        job_claims = load(CLAIMS_MODULE)
-    except ModuleNotFoundError as exc:
-        if exc.name != CLAIMS_MODULE:
-            raise
-        return True
-    return bool(job_claims.claim(checkout, job, ttl_seconds))
+    attempt = job_claims.claim(git_for(checkout), job, job_claims.TIER, host())
+    if attempt.outcome == job_claims.FAILED:
+        print(f"{job}: claim failed open -- {attempt.said[:120]}", flush=True)
+    return attempt.outcome != job_claims.LOST
 
 
 def enough_memory(room: int | None) -> bool:
@@ -258,7 +256,7 @@ class Seams:
     git_for: Callable[[Path], Git] = sweep.git_for
     runner: Callable[..., object] = sweep.run_bounded
     room: Callable[[], int | None] = host_memory.available_mb
-    claim: Callable[[Path, str, float], bool] = claimed
+    claim: Callable[[Path, str], bool] = claimed
     provision: Callable[[Path], str] = disposable_tree.provision
 
 
@@ -362,8 +360,7 @@ def judge(target: Target, timeout: float, seams: Seams) -> e2e_results.Result | 
         room = seams.room()
         if not enough_memory(room):
             raise NoRoom(f"{room} MB free, a run needs {RUN_MB + host_memory.FLOOR_MB}")
-        ttl = timeout + CLAIM_MARGIN_SECONDS
-        if not seams.claim(target.checkout, job_id(target.name, fresh.tip), ttl):
+        if not seams.claim(target.checkout, job_id(target.name, fresh.tip)):
             print(f"{target.name}: claimed by another machine at {fresh.tip[:9]}", flush=True)
             return None
     if not command and script is None:

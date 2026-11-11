@@ -1462,6 +1462,83 @@ def test_generated_lint_runner_fails_a_changed_run_when_git_refuses_the_tree(tmp
     assert "# git\n" in artifact and "dubious ownership" in artifact
 
 
+def _two_conftest_roots(root: Path) -> list[str]:
+    """Two test trees whose `conftest.py` each export a name the other lacks."""
+    files = {
+        "tests/conftest.py": "def alpha() -> int:\n    return 1\n",
+        "tests/test_a.py": "from conftest import alpha\n\n\ndef test_a() -> None:\n    alpha()\n",
+        "tools/tests/conftest.py": "def beta() -> int:\n    return 2\n",
+        "tools/tests/test_b.py": "from conftest import beta\n\n\ndef test_b() -> None:\n    beta()\n",
+    }
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    return ["tests/test_a.py", "tools/tests/test_b.py"]
+
+
+def test_generated_lint_runner_runs_mypy_once_per_conftest_root(tmp_path, monkeypatch):
+    """cbb1017b: a `--changed` run handed mypy `tests/` and `scripts/hooks/tests/` files
+    in one invocation, so the hook tests' `from conftest import load_module` resolved to
+    `tests/conftest.py`. Each root gets its own run; vendored files get none, since
+    `[tool.mypy] exclude` does not reach a file named on the command line."""
+    root = generate(tmp_path, {})
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    _two_conftest_roots(root)
+    (root / "scripts" / "loose.py").write_text("X = 1\n", encoding="utf-8")
+
+    assert lint_all.conftest_root("tests/test_a.py") == "tests"
+    assert lint_all.conftest_root("tests/conftest.py") == "tests"
+    assert lint_all.conftest_root("tools/tests/test_b.py") == "tools/tests"
+    assert lint_all.conftest_root("scripts/loose.py") == ""
+    assert lint_all.vendored("scripts/hooks/tests/test_ship.py")
+    assert lint_all.vendored("scripts/sync-devkit.py")
+    assert not lint_all.vendored("scripts/hooksmith.py")
+
+    targets = [
+        "tests/test_a.py",
+        "scripts/hooks/tests/test_ship.py",
+        "tools/tests/test_b.py",
+        "scripts/loose.py",
+    ]
+    assert lint_all.mypy_batches(targets) == [
+        ["tests/test_a.py", "scripts/loose.py"],
+        ["tools/tests/test_b.py"],
+    ], "one batch per root, a rootless file in the first, the vendored test in none"
+    assert lint_all.mypy_batches(["scripts/loose.py"]) == [["scripts/loose.py"]]
+    assert lint_all.mypy_batches(["scripts/hooks/stop.py"]) == []
+    assert lint_all.mypy_batches([]) == []
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(lint_all, "run_tool", lambda name, cmd, _hint: ran.append(cmd) or "")
+    passed = subprocess.CompletedProcess([], 0)
+    monkeypatch.setattr(lint_all.subprocess, "run", lambda *a, **k: passed)
+    lint_all._python_passes(["scripts/hooks/stop.py"], scoped=True)
+    assert [cmd[2] for cmd in ran] == ["ruff"], "a vendored-only diff runs no mypy at all"
+
+
+def test_a_generated_changed_run_spanning_two_conftest_roots_is_clean(tmp_path, monkeypatch):
+    """cbb1017b, against a real mypy: the merged invocation the runner used to make
+    fails, and the runner's own pass over the same files does not."""
+    root = generate(tmp_path, {})
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    targets = _two_conftest_roots(root)
+
+    merged = subprocess.run(
+        [sys.executable, "-m", "mypy", *targets],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    assert merged.returncode != 0 and "attr-defined" in merged.stdout, merged.stdout
+
+    assert lint_all._python_passes(targets, scoped=True) == ""
+    # With the vendored files out of its runs, nothing puts `scripts/hooks/` on mypy's
+    # path, so the runner's own `toolchain` import must not need it: an edit to
+    # `scripts/lint-all.py` was reported `import-not-found` on that line.
+    assert (root / "scripts" / "hooks" / "toolchain.py").is_file()
+    assert lint_all._python_passes(["scripts/lint-all.py"], scoped=True) == ""
+
+
 def _frontend_project(tmp_path: Path, typecheck: str, node_modules: bool = True):
     """A generated project whose `.devkit.toml` turns the frontend tier on at its root,
     as roguelike's does, with `typecheck` as the Python the "npm" stand-in runs."""

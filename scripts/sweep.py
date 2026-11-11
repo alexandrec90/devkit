@@ -64,6 +64,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -218,8 +219,11 @@ KILL_GRACE = 10
 
 
 # The `time.monotonic()` past which no `run_bounded` call runs on, whatever its own
-# timeout: a caller's own stop, set with `until`. None outside one.
+# timeout: a caller's own stop, set with `until`. None outside one. Always the earliest
+# of `_active`, the deadlines whose `until` has not exited yet, in any thread.
 _until: float | None = None
+_active: list[float] = []
+_active_lock = threading.Lock()
 
 
 @contextmanager
@@ -232,15 +236,26 @@ def until(deadline: float | None) -> Iterator[None]:
     fix pass's `verify` read took eleven minutes and its `collect` read was still running
     twelve minutes later, each `gh` call inside its own 600 s, and the watchdog stopped
     the pass with no record written (2e2e7804).
+
+    **Kept as the deadlines in force, not as the value before.** Process-wide on
+    purpose, so a pool's workers are bounded by the step that started them. But
+    restoring "the value before" on exit leaked across threads: two `job_claims` pushes
+    racing in two threads each entered here, the second exit restored the first's
+    deadline, and every later call in the process ran under a deadline long past.
     """
     global _until
-    before = _until
-    if deadline is not None and (before is None or deadline < before):
-        _until = deadline
+    if deadline is None:
+        yield
+        return
+    with _active_lock:
+        _active.append(deadline)
+        _until = min(_active)
     try:
         yield
     finally:
-        _until = before
+        with _active_lock:
+            _active.remove(deadline)
+            _until = min(_active) if _active else None
 
 
 def past_until() -> bool:

@@ -2035,7 +2035,7 @@ def reap_decision(
     )
 
 
-def branch_delete_flag(state: sweep.State, pr_merged: bool) -> str:
+def branch_delete_flag(state: sweep.State, pr_merged: bool, work_is_landed: bool = False) -> str:
     """`-d` or `-D` for the box's branch — `-D` only when nothing can be lost by it.
 
     `-d` refuses a branch that is not an ancestor of the default branch, which is the
@@ -2061,8 +2061,17 @@ def branch_delete_flag(state: sweep.State, pr_merged: bool) -> str:
     `test_no_reap_plan_ever_emits_a_capital_D_without_the_remote_having_it` sweeps
     exactly that combination. `is_git` gates it because `ahead` is 0 by default, so a
     state nothing could be read from must not be mistaken for an empty branch.
+
+    `work_is_landed` is the fourth: `reapable` freed the box because its exact tree, or
+    the HEAD a merged PR squashed, is on `origin/<default>` (`work_landed`), so every
+    committed line is there under other shas. Those commits are ancestors of nothing, so
+    `-d` refused, and every such reap ended `FAILED at git branch -d` after the tree was
+    already gone (agent-terminal's `fix-pr8-1111`, c70da35f). Gated on a clean, readable
+    state, as `reapable` gates it: the evidence answers for the commits alone.
     """
     if pr_merged:
+        return "-D"
+    if work_is_landed and state.is_git and not state.dirty:
         return "-D"
     if state.upstream and state.unpushed == 0:
         return "-D"
@@ -2212,7 +2221,7 @@ def reap_plan(
         flag = (
             preview_branch_delete_flag(state, copy_intact=copy_intact)
             if box.kind == PREVIEW_KIND
-            else branch_delete_flag(state, pr_merged)
+            else branch_delete_flag(state, pr_merged, work_is_landed)
         )
         if force and flag == "-d":
             warning = "; ".join(
@@ -3684,6 +3693,11 @@ def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
     return True, f"stack {project_name} torn down (containers, network, volumes)"
 
 
+# How long `docker version`, `claude agents` or `claude stop` may take before a reap goes
+# on without the answer, with the whole process tree ended (`sweep.run_bounded`).
+PROBE_TIMEOUT = 60.0
+
+
 def docker_engine_down() -> str:
     """Why a box's stack cannot be downed now, or "" when Docker's engine answers.
 
@@ -3696,20 +3710,19 @@ def docker_engine_down() -> str:
     "" too when docker is not installed: then there is no engine to wait for, and
     `compose_down`'s own "not on PATH" is the report. Asked as `collector_tasks.probe`
     asks, and for its reason: `docker info --format` exits 0 over a stopped engine.
+
+    Through `sweep.run_bounded`, for `compose`'s reason: `subprocess.run(timeout=)` ends
+    `docker.exe` alone and then reads pipes its children still hold, so a wedged engine
+    kept the scheduled reconcile inside one reap for 45 minutes (a7efb9b3).
     """
     try:
-        completed = subprocess.run(
-            ["docker", "version", "--format", "{{.Server.Version}}"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-            creationflags=sweep.NO_WINDOW,
+        completed = sweep.run_bounded(
+            ["docker", "version", "--format", "{{.Server.Version}}"], PROBE_TIMEOUT
         )
     except FileNotFoundError:
         return ""
-    except subprocess.TimeoutExpired:
-        return "Docker's engine did not answer in 60s"
+    if completed.returncode == sweep.TIMED_OUT:
+        return f"Docker's engine did not answer in {PROBE_TIMEOUT:g}s"
     said = f"{completed.stderr or ''}\n{completed.stdout or ''}"
     if completed.returncode != 0 and daemon_down_note(said):
         return "Docker's engine is not running"
@@ -5346,9 +5359,27 @@ def sync_in_time(
     return sync_checkouts(workspace, apply=apply, fetch=fetch)
 
 
-def agent_sessions() -> list[dict]:
-    """Every Claude Code session on this machine, with its working directory."""
-    return bg_sessions.listed(sweep.run_windowless)
+def bounded_cli(
+    argv: Sequence[str], *_args: object, **_kwargs: object
+) -> subprocess.CompletedProcess[str]:
+    """A `subprocess.run`-shaped runner for `bg_sessions`, over `sweep.run_bounded`, which
+    captures and decodes itself: `claude agents` and `claude stop` had no bound at all."""
+    return sweep.run_bounded(list(argv), PROBE_TIMEOUT)
+
+
+def agent_sessions() -> list[dict] | None:
+    """Every Claude Code session on this machine, with its working directory; None when
+    `claude agents` did not answer in `PROBE_TIMEOUT`, which says nothing about the box."""
+    answered: list[subprocess.CompletedProcess[str]] = []
+
+    def run(
+        argv: Sequence[str], *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        answered.append(bounded_cli(argv, *args, **kwargs))
+        return answered[-1]
+
+    rows = bg_sessions.listed(run)
+    return None if answered and answered[-1].returncode == sweep.TIMED_OUT else rows
 
 
 def reap_decided(
@@ -5404,7 +5435,7 @@ def unless_reaped_elsewhere(
 def settle_reap(
     doomed: ReapPlan,
     workspace: Path,
-    sessions: Callable[[], list[dict]],
+    sessions: Callable[[], list[dict] | None],
     *,
     apply: bool,
     engine_down: Callable[[], str] | None = None,
@@ -5429,14 +5460,16 @@ def settle_reap(
 def reap_vacated(
     doomed: ReapPlan,
     workspace: Path,
-    sessions: list[dict],
+    sessions: list[dict] | None,
     engine_down: Callable[[], str] | None = None,
 ) -> tuple[str, bool, list[str]]:
     """Reap `doomed` unless a session is still in it: `(action, ok, notes)`.
 
     A session in the box is a WAIT, not a failure: the scheduled pass is what reddened
     every time a live fixer held the directory, and the next pass reaps it once the
-    session has gone. `box_teardown.vacate` stops the ones the pass may stop.
+    session has gone. `box_teardown.vacate` stops the ones the pass may stop. `sessions`
+    None is `claude agents` not answering, which is a WAIT too: it says nothing about
+    who stands in the box.
 
     So is a stack Docker's engine cannot reach (`docker_engine_down`, the default for
     `engine_down`): reaping then would strand the stack with nothing left to name it.
@@ -5450,13 +5483,25 @@ def reap_vacated(
                 f"next pass with the engine up reaps it, stack and all"
             ],
         )
-    occupants, notes = box_teardown.vacate(Path(doomed.path), sessions)
+    if sessions is None:
+        return (
+            WAIT,
+            True,
+            [
+                f"not reaped: `claude agents` did not answer in {PROBE_TIMEOUT:g}s, so "
+                f"nothing says whether a session stands in it -- the next pass asks again"
+            ],
+        )
+    occupants, notes = box_teardown.vacate(Path(doomed.path), sessions, run=bounded_cli)
     if occupants:
         notes.append(
             f"not reaped: {', '.join(occupants)} still in it -- the next pass reaps it "
             f"once the session has gone"
         )
         return WAIT, True, notes
+    # Its own journal step, so a pass that stalls here is told apart from one stalled in
+    # the probes above: a7efb9b3's journal said only "reap <box>", then 45 minutes.
+    reconcile_journal.step(f"tear down {doomed.box}")
     ok, reap_notes = apply_reap(doomed, workspace)
     return REAP, ok, notes + reap_notes
 
@@ -6279,12 +6324,26 @@ def link_siblings(path: Path, wait: float = 0.0) -> list[str]:
     return worktree_env.link_path_sources(path, checkout, wait=wait)
 
 
+def seed_tree_env(path: Path) -> list[str]:
+    """A linked tree's `.env` and compose name, as its `post-checkout` hook writes them;
+    what that printed. Here because a `claude --worktree` tree runs no hook (Claude Code
+    cuts it with `core.hooksPath=/dev/null`), so this command is the only thing that
+    reaches it. A tree with a `.env` -- every box, which `seed_env` gave one -- is left
+    as it is."""
+    checkout = worktree_env.checkout_of(path)
+    if checkout is None or (path / worktree_env.ENV_FILE).exists():
+        return []
+    said = worktree_env.name_compose_project(path, checkout)
+    return [line for line in said.splitlines() if line]
+
+
 def _run_provision(args: argparse.Namespace) -> int:
     root = args.workspace.parent
     name, path = provision_target(root, args.box)
     steps = plan_provision(path)
     # Before the sync, which resolves the path source against wherever the sibling sits.
     linked = [] if args.dry_run else link_siblings(path, wait=worktree_env.SESSION_WAIT)
+    seeded = [] if args.dry_run else seed_tree_env(path)
     if worktree_env.held(linked):
         # d32ffcc2: syncing against another run's pin relocks `uv.lock` against it.
         ok, notes = False, ["not synced: run it again once the run holding the sibling ends"]
@@ -6296,6 +6355,7 @@ def _run_provision(args: argparse.Namespace) -> int:
         payload = {
             "box": name,
             "siblings": linked,
+            "env": seeded,
             "steps": [asdict(step) for step in steps],
             "applied": not args.dry_run,
             "ok": ok,
@@ -6303,7 +6363,7 @@ def _run_provision(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2))
     else:
-        for line in linked:
+        for line in (*linked, *seeded):
             print(line)
         print(render_provision(name, steps, applied=not args.dry_run, notes=notes, ok=ok))
     return 0 if ok else 1
