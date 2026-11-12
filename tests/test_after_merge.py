@@ -63,6 +63,8 @@ def test_its_id_hashes_its_path_and_the_commit_that_added_it():
         "pr:alexandrec90/carameli#12",
         "task:rebuild-db",
         "task:carameli/rebuild-db",
+        "outside:09:30-16:00 UTC-05:00 mon-fri",
+        "inside:00:00-24:00 UTC",
     ],
 )
 def test_every_condition_the_contract_names_parses(when):
@@ -102,6 +104,9 @@ def test_each_action_is_its_own_kind(body, kind):
         ('elevated = "reboot-when-idle"', "did not happen"),
         ('elevated = "restart-docker-service"', "did not happen"),
         ('run = "x"\nwhen = "task:rebuild"', "waits on itself"),
+        ('run = "x"\nwhen = "outside:09:30-16:00 America/New_York"', "time-zone database"),
+        ('run = "x"\nwhen = "inside:16:00-09:30 UTC"', "spans midnight"),
+        ('run = "x"\nwhen = "outside:soon"', "not a window"),
         ('run = "x', "not TOML"),
     ],
 )
@@ -146,9 +151,9 @@ def test_each_flow_has_the_label_its_prs_need():
 
 
 def test_merged_is_always_true_and_nothing_else_is_by_default():
-    assert am.met(task(when=am.MERGED), facts())
+    assert am.met(task(when=am.MERGED), facts(), NOW)
     for when in (am.GREEN, am.RELEASED, "pr:x#1", "task:y"):
-        assert not am.met(task(when=when), facts()), when
+        assert not am.met(task(when=when), facts(), NOW), when
 
 
 def test_green_and_released_ask_about_the_tasks_own_commit():
@@ -157,24 +162,51 @@ def test_green_and_released_ask_about_the_tasks_own_commit():
         green=lambda commit: asked.append(commit) or True,
         released=lambda commit: asked.append(commit) or True,
     )
-    assert am.met(task(when=am.GREEN, commit="c1"), found)
-    assert am.met(task(when=am.RELEASED, commit="c2"), found)
+    assert am.met(task(when=am.GREEN, commit="c1"), found, NOW)
+    assert am.met(task(when=am.RELEASED, commit="c2"), found, NOW)
     assert asked == ["c1", "c2"]
 
 
 def test_a_pr_condition_asks_about_that_pr():
     asked = []
     found = facts(merged=lambda repo, number: asked.append((repo, number)) or True)
-    assert am.met(task(when="pr:a/b#7"), found)
+    assert am.met(task(when="pr:a/b#7"), found, NOW)
     assert asked == [("a/b", 7)]
 
 
 def test_a_task_condition_defaults_to_this_project_and_can_name_another():
     asked = []
     found = facts(done=lambda project, name: asked.append((project, name)) or True)
-    assert am.met(task(when="task:first"), found)
-    assert am.met(task(when="task:devkit/first"), found)
+    assert am.met(task(when="task:first"), found, NOW)
+    assert am.met(task(when="task:devkit/first"), found, NOW)
     assert asked == [("carameli", "first"), ("devkit", "first")]
+
+
+# NOW is Friday 08:00 UTC: 03:00 in New York's winter, before its market opens at 09:30.
+MARKET_CLOSED = "outside:09:30-16:00 UTC-05:00 mon-fri"
+TRADING = NOW + 7 * 3600  # Friday 10:00 there
+
+
+def test_a_window_condition_reads_the_clock_and_asks_nothing_else():
+    """The ibkr_trader case: a gateway restart that must wait out the trading day."""
+    asked = []
+    found = facts(done=lambda project, name: asked.append(name) or True)
+    assert am.met(task(when=MARKET_CLOSED), found, NOW)
+    assert not am.met(task(when=MARKET_CLOSED), found, TRADING)
+    assert am.met(task(when="inside:09:30-16:00 UTC-05:00 mon-fri"), found, TRADING)
+    assert asked == []
+
+
+def test_a_task_waiting_for_its_window_waits_in_the_queue_then_runs():
+    """Without a window the task could only be queued again as `merged`, a session and a
+    PR per attempt; with one it waits here, and the reason says the window's own clock."""
+    during = am.judge(task(when=MARKET_CLOSED), am.Marks(), facts(), TRADING, TRADING)
+    assert during.action == am.WAIT
+    assert MARKET_CLOSED in during.why and "Fri 10:00" in during.why
+    after = TRADING + 7 * 3600
+    assert am.judge(task(when=MARKET_CLOSED), am.Marks(), facts(), TRADING, after).action == (
+        am.TAKE
+    )
 
 
 # --- which machine ----------------------------------------------------------------------------
