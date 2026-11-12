@@ -553,8 +553,9 @@ def applied_fixes(output: str) -> list[str]:
 
     An unsafe fix changes code, not layout -- F841 deletes an assignment from a test
     being written -- so each change is printed rather than passed over as "ruff: ok".
+    Read with the colour stripped: under `FORCE_COLOR` the head arrives in escape codes.
     """
-    rows = output.splitlines()
+    rows = ANSI.sub("", output).splitlines()
     start = next((i for i, row in enumerate(rows) if FIXED_HEAD.match(row)), len(rows))
     files: list[tuple[str, list[str]]] = []
     for row in rows[start + 1 :]:
@@ -567,19 +568,8 @@ def applied_fixes(output: str) -> list[str]:
     return [f"{path} -- {', '.join(codes)}" for path, codes in files]
 
 
-def _python_passes(targets: list[str], scoped: bool) -> str:
-    """Fix what ruff can, then the artifact's sections for ruff and mypy.
-
-    A narrowed run with only an `.env` or frontend edit leaves `targets` empty, and the
-    scope would then fall back to `["."]` -- silently widening a per-turn check into a
-    whole-repo pass. So a narrowed run with no Python to lint runs no Python pass.
-    """
-    if scoped and not targets:
-        return ""
-    scope = targets or ["."]
-    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
-    # must stay sequential relative to each other, and both skip the vendored
-    # harness — see NO_FIX_SCOPE.
+def _fix_python(scope: list[str]) -> None:
+    """`ruff check --fix` then `ruff format` over `scope`, saying what the fix rewrote."""
     no_fix = [arg for path in NO_FIX_SCOPE for arg in ("--exclude", path)]
     fix = ["check", *scope, "--fix", "--unsafe-fixes", "--show-fixes", *no_fix]
     fixed = subprocess.run(
@@ -596,6 +586,25 @@ def _python_passes(targets: list[str], scoped: bool) -> str:
         cwd=REPO_ROOT,
         capture_output=True,
     )
+
+
+def _python_passes(targets: list[str], scoped: bool) -> str:
+    """Fix what ruff can, then the artifact's sections for ruff and mypy.
+
+    A narrowed run with only an `.env` or frontend edit leaves `targets` empty, and the
+    scope would then fall back to `["."]` -- silently widening a per-turn check into a
+    whole-repo pass. So a narrowed run with no Python to lint runs no Python pass.
+    """
+    if scoped and not targets:
+        return ""
+    scope = targets or ["."]
+    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
+    # must stay sequential relative to each other, and both skip the vendored
+    # harness — see NO_FIX_SCOPE, and `manifest_paths` for a named vendored file.
+    owned = manifest_paths()
+    fixable = [path for path in targets if not vendored(path, owned)] if targets else scope
+    if fixable:
+        _fix_python(fixable)
     sections = run_tool(
         "ruff",
         [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
@@ -611,9 +620,32 @@ def _python_passes(targets: list[str], scoped: bool) -> str:
     return sections
 
 
-def vendored(path: str) -> bool:
-    """True for a path under `NO_FIX_SCOPE`: the harness, which this repo may not edit."""
-    return any(path == root or path.startswith(f"{root}/") for root in NO_FIX_SCOPE)
+def manifest_paths() -> frozenset[str]:
+    """Every path `sync-devkit.py` vendors here, empty where that cannot be read.
+
+    `NO_FIX_SCOPE` names directories, and the MANIFEST also vendors scripts beside this
+    one -- `ship.py`, `log-wrap.py` -- so a narrowed run type-checked them and reported
+    `import-not-found` findings this repo may not fix. The vendored `structure_check`
+    already reads the MANIFEST literal; a copy older than its `vendored_paths` leaves
+    `NO_FIX_SCOPE` alone in charge.
+    """
+    hooks = REPO_ROOT / "scripts" / "hooks"
+    if not (hooks / "structure_check.py").is_file():
+        return frozenset()
+    if str(hooks) not in sys.path:
+        sys.path.insert(0, str(hooks))
+    try:
+        return frozenset(importlib.import_module("structure_check").vendored_paths(REPO_ROOT))
+    except (ImportError, AttributeError):
+        return frozenset()
+
+
+def vendored(path: str, owned: frozenset[str] | None = None) -> bool:
+    """True for the harness, which this repo may not edit: a path under `NO_FIX_SCOPE`
+    or one the MANIFEST names (`owned`, read here when not given)."""
+    if any(path == root or path.startswith(f"{root}/") for root in NO_FIX_SCOPE):
+        return True
+    return path in (manifest_paths() if owned is None else owned)
 
 
 def conftest_root(path: str) -> str:
@@ -636,8 +668,9 @@ def mypy_batches(targets: list[str]) -> list[list[str]]:
     named on the command line, and a finding in them is one this repo cannot fix.
     """
     batches: dict[str, list[str]] = {}
+    owned = manifest_paths()
     for path in targets:
-        if not vendored(path):
+        if not vendored(path, owned):
             batches.setdefault(conftest_root(path), []).append(path)
     loose = batches.pop("", [])
     rooted = list(batches.values())

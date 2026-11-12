@@ -91,10 +91,59 @@ def test_a_failing_job_carries_how_many_runs_in_a_row_it_has_failed():
     assert fd.recurring(failing) == "; its last 3 runs failed, the first at 2026-09-27T20:22:52Z"
 
 
-def test_a_first_failure_is_not_called_recurring():
-    assert fd.recurring({"failedRuns": 1, "failingSince": "x"}) == ""
+def test_a_first_failure_says_its_count_too():
+    """homelab: the prompt says the evidence counts each job's failures in a row, and a
+    job's first failure -- a registry's 429, gone by the next run -- said nothing at all."""
+    assert fd.recurring({"failedRuns": 1, "failingSince": "x"}) == "; 1 run in a row failed"
     assert fd.recurring({}) == ""
     assert fd.recurring({"failedRuns": "3"}) == "", "a shape the pass did not write"
+
+
+REGISTRY_LOG = (
+    "updater | 2026/11/11 11:03:08 INFO <job_1695635861> Handled error whilst updating "
+    'immich-app/immich-server: registry_error {status: 429, msg: "Registry request failed '
+    'with status 429"}\n'
+)
+
+
+def test_a_handled_errors_detail_is_read_beside_its_entry():
+    """The entry stays the package and kind, so the signature is stable across runs; the
+    detail -- the registry's status and message -- is what the fixer needs to see."""
+    entry = "run immich-app/immich-server: registry_error"
+    assert fd.run_errors(REGISTRY_LOG) == [entry]
+    assert fd.error_details(REGISTRY_LOG) == {
+        entry: 'status: 429, msg: "Registry request failed with status 429"'
+    }
+    assert fd.error_details("nothing here\n") == {}
+    bare = "INFO <job_1> Handled error whilst updating x: unknown_error\n"
+    assert fd.error_details(bare) == {}, "a kind with no detail adds no line"
+
+
+def test_still_said_keeps_the_unanswered_and_records_a_fully_answered_run():
+    ran = data_lake_run()
+    entry = "run sqlalchemy: dependency_file_content_not_changed"
+    other = "run Something else broke"
+    assert fd.still_said(ran, [entry, other], [PR_50]) == ([other], "")
+    assert fd.still_said(ran, [], [PR_50]) == ([], ""), "a silent log is still failing"
+    live, note = fd.still_said(ran, [entry], [PR_50])
+    assert live == [] and note.endswith("and #50 answered it since")
+    live, note = fd.still_said(ran, [entry], None)
+    assert live == [] and note.endswith(f"and {fd.UNREAD}")
+
+
+def test_the_evidence_carries_a_handled_errors_detail(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    runs = [{**run("docker_compose in /stacks/*", "failure", 7), "createdAt": RAN}]
+    gh, _ = gh_world(runs, logs={"7": REGISTRY_LOG})
+    failure, _ = fd.read_project("homelab", checkout, tmp_path / "ev", NOW, gh)
+    assert failure is not None
+    assert failure.signature == ("run immich-app/immich-server: registry_error",)
+    text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
+    assert (
+        '  - run immich-app/immich-server: registry_error -- status: 429, msg: "Registry '
+        'request failed with status 429"' in text
+    ), text
+    assert "1 run in a row failed" in text
 
 
 def test_the_evidence_says_a_job_has_failed_run_after_run(tmp_path, monkeypatch):
@@ -321,7 +370,9 @@ def test_a_handled_error_no_later_merge_answers_is_still_a_failure(tmp_path, mon
     assert failure is not None
     assert failure.signature == ("run sqlalchemy: dependency_file_content_not_changed",)
     text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
-    assert f"(run on 135bfa8 at {RAN})" in text, "the fixer can tell a stale run itself"
+    assert f"(run on 135bfa8 at {RAN}; 1 run in a row failed)" in text, (
+        "the fixer can tell a stale run itself, and a first failure from a streak"
+    )
 
 
 def test_read_runs_keeps_what_no_merge_answered_and_counts_only_live_runs():

@@ -1749,6 +1749,54 @@ def test_a_generated_changed_run_spanning_two_conftest_roots_is_clean(tmp_path, 
     # `scripts/lint-all.py` was reported `import-not-found` on that line.
     assert (root / "scripts" / "hooks" / "toolchain.py").is_file()
     assert lint_all._python_passes(["scripts/lint-all.py"], scoped=True) == ""
+    # The same for the other runner: skinamp's `--changed` run after an adopt reported
+    # `scripts\run-tests.py:463: ... module named "toolchain"  [import-not-found]`.
+    assert lint_all._python_passes(["scripts/run-tests.py"], scoped=True) == ""
+
+
+def test_a_generated_lint_run_leaves_every_manifest_path_alone(tmp_path, monkeypatch):
+    """skinamp: a `--changed` run after an adopt type-checked `scripts/ship.py` and
+    `scripts/log-wrap.py` -- vendored, but outside the directories `NO_FIX_SCOPE` names
+    -- and reported `import-not-found` findings no edit there may fix. Vendored is what
+    the MANIFEST says, read through the vendored `structure_check`, so a script added
+    to it upstream is never a finding here; and no pass rewrites one, or `--check` fails."""
+    root = generate(tmp_path, {})
+    (root / "DEVKIT_VERSION").write_text("0" * 40 + "\n", encoding="utf-8")
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    for rel in ("scripts/ship.py", "scripts/log-wrap.py"):
+        assert (root / rel).is_file(), f"{rel} is no longer vendored: pick another"
+        assert lint_all.vendored(rel)
+    assert not lint_all.vendored("scripts/run-tests.py")
+    assert not lint_all.vendored("scripts/lint-all.py")
+    assert lint_all.mypy_batches(["scripts/ship.py", "scripts/log-wrap.py"]) == []
+
+    ran: list[list[str]] = []
+
+    def run(cmd, **_kw):
+        ran.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(lint_all, "run_tool", lambda name, cmd, _hint: "")
+    monkeypatch.setattr(lint_all.subprocess, "run", run)
+    lint_all._python_passes(["scripts/ship.py", "scripts/run-tests.py"], scoped=True)
+    assert ran, "the fixers ran for the project's own file"
+    for cmd in ran:
+        assert "scripts/ship.py" not in cmd and "scripts/run-tests.py" in cmd, cmd
+
+    ran.clear()
+    lint_all._python_passes(["scripts/ship.py"], scoped=True)
+    assert ran == [], "a vendored-only diff rewrites nothing"
+
+
+def test_a_generated_lint_run_without_the_vendored_reader_falls_back(tmp_path, monkeypatch):
+    """A project that took the template refresh before its `--pull` may hold no
+    `structure_check.vendored_paths`: the hard-coded `NO_FIX_SCOPE` still holds."""
+    root = generate(tmp_path, {})
+    (root / "DEVKIT_VERSION").write_text("0" * 40 + "\n", encoding="utf-8")
+    (root / "scripts" / "hooks" / "structure_check.py").unlink()
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    assert lint_all.vendored("scripts/hooks/stop.py")
+    assert not lint_all.vendored("scripts/ship.py")
 
 
 def _frontend_project(tmp_path: Path, typecheck: str, node_modules: bool = True):
