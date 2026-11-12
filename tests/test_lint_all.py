@@ -231,14 +231,52 @@ def test_applied_fixes_reads_ruffs_show_fixes_block():
     assert lint_all.applied_fixes("All checks passed!\n") == []
 
 
-def test_a_fix_that_rewrote_a_file_is_said_not_passed_over_as_ok(tmp_path):
+def _template_lint_all():
+    """The generated projects' runner, loaded straight from its template."""
+    import importlib.machinery
+    import importlib.util
+
+    source = str(REPO_ROOT / "templates" / "core" / "scripts" / "lint-all.py.tmpl")
+    loader = importlib.machinery.SourceFileLoader("coloured_lint_all", source)
+    spec = importlib.util.spec_from_loader("coloured_lint_all", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("which", ["devkit", "template"])
+def test_applied_fixes_reads_the_block_ruff_coloured(which):
+    """Under `FORCE_COLOR` -- set by `log-wrap.py` on every scheduled job, and by an agent's
+    shell -- ruff colours its `--show-fixes` block even into a pipe, so `Fixed 1 error:`
+    arrived wrapped in escape codes, matched no head, and the fix went unsaid again."""
+    module = lint_all if which == "devkit" else _template_lint_all()
+    output = (
+        "\n\x1b[1;32mFixed 1 error:\x1b[0m\n\x1b[36m-\x1b[0m \x1b[1ma.py\x1b[0m\x1b[36m:\x1b[0m\n"
+        f"    1 {TIMES} \x1b[1;31mF841\x1b[0m (unused-variable)\n\n"
+        "Found 1 error (1 fixed, 0 remaining).\n"
+    )
+    assert module.applied_fixes(output) == [f"a.py -- 1 {TIMES} F841 (unused-variable)"]
+
+
+@pytest.mark.parametrize("colour", [None, "1"])
+def test_a_fix_that_rewrote_a_file_is_said_not_passed_over_as_ok(tmp_path, colour):
     """802b5602: an unsafe F841 fix deleted an assignment from a test mid-edit, and the
-    run printed only "ruff: ok". The rewrite is named on the terminal, by file and rule."""
+    run printed only "ruff: ok". The rewrite is named on the terminal, by file and rule --
+    with colour forced too, as the scheduled Medium Tier runs it under `log-wrap.py`."""
     root = build_repo(tmp_path / "repo")
     (root / "mid_edit.py").write_text(
         "def f() -> int:\n    open_now = len([])\n    return 1\n", encoding="utf-8"
     )
-    result = run_lint(root, "--changed", "--no-secrets")
+    env = {k: v for k, v in os.environ.items() if k not in {"FORCE_COLOR", "NO_COLOR"}}
+    if colour is not None:
+        env["FORCE_COLOR"] = colour
+    result = subprocess.run(
+        [sys.executable, "scripts/lint-all.py", "--changed", "--no-secrets"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
     said = f"ruff --fix changed mid_edit.py -- 1 {TIMES} F841 (unused-variable)"
     assert said in result.stdout, result.stdout + result.stderr
 

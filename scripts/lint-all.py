@@ -326,9 +326,10 @@ def applied_fixes(output: str) -> list[str]:
 
     An unsafe fix changes code, not layout: F841 deleted an assignment from a test being
     written, and the run said only "ruff: ok" (802b5602). Each change is printed so a
-    rewrite is never silent, as the commit stage's own fixers are not.
+    rewrite is never silent, as the commit stage's own fixers are not. Read with the
+    colour stripped: under `FORCE_COLOR` the head arrives wrapped in escape codes.
     """
-    rows = output.splitlines()
+    rows = ANSI.sub("", output).splitlines()
     start = next((i for i, row in enumerate(rows) if FIXED_HEAD.match(row)), len(rows))
     files: list[tuple[str, list[str]]] = []
     for row in rows[start + 1 :]:

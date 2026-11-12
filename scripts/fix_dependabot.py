@@ -110,13 +110,15 @@ JOB_ECOSYSTEMS = {
 _UPDATE_SUFFIX = re.compile(r"\s+-\s+Update\s+#\d+\s*$")
 _JOB = re.compile(r"(\S+) in (\S.*)")
 _ERROR = re.compile(r"\bERROR <job_\d+> (.+?)\s*$")
-_HANDLED = re.compile(r"Handled error whilst updating ([^:]+): (\w+)")
+_HANDLED = re.compile(r"Handled error whilst updating ([^:]+): (\w+)(?:\s*\{(.*)\})?")
 # The signature entry `run_errors` makes of a handled error: `run sqlalchemy: <kind>`.
 _HANDLED_ENTRY = re.compile(r"run ([^\s:]+): (\w+)")
 _UNFETCHABLE = re.compile(r"path based dependencies could not be retrieved: (.+?) at \S+")
 _QUOTED = re.compile(r'"([^"]+)"')
 _RELEASE = re.compile(r"\d+(?:\.\d+)*")
 _REASON_LIMIT = 160
+# The key a failing run read by `read_runs` carries `error_details` under.
+DETAILS = "errorDetails"
 
 Gh = Callable[..., object]
 
@@ -218,6 +220,22 @@ def run_errors(log: str) -> list[str]:
         elif error := _ERROR.search(line):
             found.append(f"run {error.group(1)[:_REASON_LIMIT]}")
     return list(dict.fromkeys(found))
+
+
+def error_details(log: str) -> dict[str, str]:
+    """`run_errors`'s entry -> what the updater said about it, for each handled error
+    whose line carries a `{...}` detail; the first one said wins.
+
+    The entry is the package and kind alone, so the signature holds across runs; the
+    detail is what a fixer needs. homelab's evidence said `registry_error` twice, and
+    `status: 429, msg: "Registry request failed with status 429"` was only in the log.
+    """
+    details: dict[str, str] = {}
+    for line in log.splitlines():
+        if (handled := _HANDLED.search(line)) and (said := (handled.group(3) or "").strip()):
+            entry = f"run {handled.group(1).strip()}: {handled.group(2)}"
+            details.setdefault(entry, said[:_REASON_LIMIT])
+    return details
 
 
 def _norm(name: str) -> str:
@@ -503,11 +521,15 @@ def ran_on(run: dict) -> str:
 
 
 def recurring(run: dict) -> str:
-    """`; its last 5 runs failed, the first at <time>` for a job failing run after run,
-    "" for a first failure: a fix that answers one run is not a fix for that job."""
+    """`; its last 5 runs failed, the first at <time>` for a job failing run after run --
+    a fix that answers one run is not a fix for that job -- and `; 1 run in a row failed`
+    for a first failure, which may be a registry's rate limit gone by the next run; ""
+    for a run the pass did not count."""
     count = run.get("failedRuns", 0)
-    if not isinstance(count, int) or count < 2:
+    if not isinstance(count, int) or count < 1:
         return ""
+    if count == 1:
+        return "; 1 run in a row failed"
     return f"; its last {count} runs failed, the first at {run.get('failingSince', '')}"
 
 
@@ -543,21 +565,32 @@ def read_runs(
     failing_runs = failing_updates(update_runs(gh))
     entries = read_entries() if failing_runs else []
     failing_runs, notes = drop_retired(failing_runs, entries, base)
-    read = [(run, run_errors(failed_log(gh, run))) for run in failing_runs[:LOGS_READ]]
-    handled = any(_HANDLED_ENTRY.fullmatch(e) for _, said in read for e in said)
+    logs = [(run, failed_log(gh, run)) for run in failing_runs[:LOGS_READ]]
+    read = [(run, run_errors(log), error_details(log)) for run, log in logs]
+    handled = any(_HANDLED_ENTRY.fullmatch(e) for _, said, _ in read for e in said)
     merged = merged_prs(gh) if handled else []
     failing, stale = [], []
-    for run, said in read:
-        answered = {e: _answer(e, run, merged) for e in said}
-        live = [e for e in said if not answered[e]]
-        if said and not live:
+    for run, said, details in read:
+        live, note = still_said(run, said, merged)
+        if note:
             stale.append(run)
-            by = ", ".join(sorted(set(answered.values())))
-            said_since = UNREAD if by == UNREAD else f"{by} answered it since"
-            notes.append(f"{update_job(run)} failed ({ran_on(run)}), and {said_since}")
-            continue
-        failing.append((run, live))
+            notes.append(note)
+        else:
+            # A copy carries the details, so `stale` and the count compare the originals.
+            failing.append(({**run, DETAILS: details} if details else run, live))
     return failing, [run for run in failing_runs if run not in stale], notes
+
+
+def still_said(run: dict, said: list[str], merged: list[dict] | None) -> tuple[list[str], str]:
+    """`(what `run` says that no merge since answers, "")`, or `([], a line for the
+    record)` when it said something and a merge -- or an unreadable list -- answers all."""
+    answered = {e: _answer(e, run, merged) for e in said}
+    live = [e for e in said if not answered[e]]
+    if not said or live:
+        return live, ""
+    by = ", ".join(sorted(set(answered.values())))
+    said_since = UNREAD if by == UNREAD else f"{by} answered it since"
+    return [], f"{update_job(run)} failed ({ran_on(run)}), and {said_since}"
 
 
 def evidence_text(
@@ -570,7 +603,11 @@ def evidence_text(
         for run, errors in failing:
             where = f"{ran_on(run)}{recurring(run)}"
             lines.append(f"- {update_job(run)} -- {run.get('url', '')} ({where})")
-            lines += [f"  - {error}" for error in errors] or ["  - (no error line in the log)"]
+            details = run.get(DETAILS) or {}
+            lines += [
+                f"  - {error} -- {details[error]}" if error in details else f"  - {error}"
+                for error in errors
+            ] or ["  - (no error line in the log)"]
         lines.append("")
     if wanted:
         lines += ["## Open alerts no PR answers", ""]
