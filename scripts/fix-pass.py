@@ -103,6 +103,7 @@ update_branch = fix_send.update_branch
 
 Finding = fix_loop.Finding
 Journal = fix_loop.fix_findings.Journal
+harness_events = fix_loop.fix_findings.harness_events
 
 ARTIFACT = Path("logs") / "fix-pass.log"
 HISTORY = Path("logs") / "fix-pass.history.jsonl"
@@ -204,6 +205,39 @@ def gh_token_refused() -> bool:
         return False
     said = f"{done.stdout or ''}\n{done.stderr or ''}".lower()
     return done.returncode != 0 and GH_REFUSED_SAYS in said
+
+
+def offline(lookup=None) -> bool:
+    """Whether this machine cannot look GitHub up (`harness_events.resolves`).
+
+    Every step of a pass needs the network, and a pass run without it filed what it
+    could not reach: on 2026-11-12 a night without DNS left eleven `regate-failed` rows,
+    and the four ledger fixers it sent died on their first reply, the API unreachable."""
+    return not harness_events.resolves(lookup=lookup)
+
+
+def cannot_start() -> int | None:
+    """The exit code of a pass that cannot run on this machine now, its reason printed
+    and recorded; None when it can. Offline is a clean exit, so the watchdog files
+    nothing; a CLI missing from the PATH is a person's, and a failure."""
+    if offline():
+        why = (
+            f"offline -- {harness_events.PROBE_HOST} does not resolve, so this pass ships, "
+            f"re-gates and sends nothing; the next fire on a network does"
+        )
+        print(f"fix-pass: {why}")
+        write_artifact(f"fix-pass: {why}")
+        return EXIT_OK
+    if missing := missing_tools():
+        why = (
+            f"not usable from this PATH: {', '.join(missing)} -- install it, or `gh auth "
+            f"login` (scripts/bootstrap-machine.ps1 -Yes does both), then fully restart VS "
+            f"Code: a task inherits the PATH VS Code started with"
+        )
+        print(f"fix-pass: {why}", file=sys.stderr)
+        write_artifact(f"fix-pass: FAILED -- {why}")
+        return EXIT_USAGE
+    return None
 
 
 def missing_tools() -> list[str]:
@@ -706,15 +740,8 @@ def main(argv: list[str] | None = None) -> int:
     if mode == fix_cycle.DISPATCH and not args.scheduled and agent_tabs.is_elevated():
         return hand_to_scheduled_task()
     launch = agent_models.Launch.parse(agent, args.model, args.effort)
-    if mode != fix_cycle.OFF and (missing := missing_tools()):
-        why = (
-            f"not usable from this PATH: {', '.join(missing)} -- install it, or `gh auth "
-            f"login` (scripts/bootstrap-machine.ps1 -Yes does both), then fully restart VS "
-            f"Code: a task inherits the PATH VS Code started with"
-        )
-        print(f"fix-pass: {why}", file=sys.stderr)
-        write_artifact(f"fix-pass: FAILED -- {why}")
-        return EXIT_USAGE
+    if mode != fix_cycle.OFF and (code := cannot_start()) is not None:
+        return code
     # Before any git call: a tree an elevated session made is one git refuses this
     # unelevated pass, and every push, read and re-gate in it failed (5025d284, e1463857).
     writes = mode == fix_cycle.DISPATCH

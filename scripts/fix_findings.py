@@ -132,12 +132,29 @@ def fresh(findings: Iterable[Finding], items: list[triage.Item]) -> list[Finding
 def record_all(
     findings: Iterable[Finding], items: list[triage.Item], devkit_dir: Path
 ) -> list[Finding]:
-    """Append every fresh finding to the ledger under `devkit_dir`; what was written."""
-    written = fresh(findings, items)
+    """Append every fresh finding to the ledger under `devkit_dir`; what was written.
+    Bar one that says a name could not be looked up while this machine still cannot
+    (`networked`)."""
+    written = networked(fresh(findings, items))
     for finding in written:
         harness_events.record(finding.event, finding.fields(), root=devkit_dir)
     settle(written, devkit_dir)
     return written
+
+
+def networked(findings: list[Finding], lookup=None) -> list[Finding]:
+    """`findings` bar those that say a lookup failed (`harness_events.says_unresolved`)
+    while `harness_events.PROBE_HOST` does not resolve either, which is
+    `harness_events.cut_off` asked once for the lot: offline, each probe waits.
+
+    On 2026-11-12 a night without DNS filed eleven `regate-failed` rows at 04:01, one per
+    checkout, each "check your internet connection", and a `pass-stale` for the fetch: no
+    session could act on any of them until the network came back, and then there was
+    nothing to act on."""
+    said = [f for f in findings if harness_events.says_unresolved(f"{f.detail}\n{f.command}")]
+    if not said or harness_events.resolves(lookup=lookup):
+        return findings
+    return [f for f in findings if f not in said]
 
 
 def settle(written: list[Finding], devkit_dir: Path) -> list[str]:

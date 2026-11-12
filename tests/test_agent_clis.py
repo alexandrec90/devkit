@@ -23,6 +23,14 @@ import pytest
 from support import load_script
 
 agent_clis = load_script("scripts/agent_clis.py")
+ONLINE = agent_clis.online  # the real probe, before `on_a_network` stubs it
+
+
+@pytest.fixture(autouse=True)
+def on_a_network(monkeypatch):
+    """GitHub resolves unless a test says otherwise: the suite never asks the real DNS."""
+    monkeypatch.setattr(agent_clis, "online", lambda: True)
+
 
 CLAUDE = agent_clis.AGENTS[0]
 CODEX = agent_clis.AGENTS[1]
@@ -198,6 +206,21 @@ def test_an_updater_that_could_not_reach_the_network_is_offline_not_failed():
     outcome = agent_clis.update_one(CODEX, "codex", runner)
     assert outcome.status == agent_clis.OFFLINE
     assert outcome.ok
+
+
+def test_an_updater_that_failed_silently_on_a_machine_cut_off_is_offline(monkeypatch):
+    """27c099e4: Codex's updater, offline, says only that its install script exited 1."""
+    monkeypatch.setattr(agent_clis, "online", lambda: False)
+    said = "Error: `powershell -c 'irm https://chatgpt.com/codex/install.ps1 | iex'` failed"
+    runner = FakeRunner({"update": (1, "", said)})
+    outcome = agent_clis.update_one(CODEX, "codex", runner)
+    assert outcome.status == agent_clis.OFFLINE
+    assert outcome.ok
+
+
+def test_online_asks_whether_github_resolves(monkeypatch):
+    monkeypatch.setattr(agent_clis.harness_events, "resolves", lambda: False)
+    assert ONLINE() is False
 
 
 def test_an_updater_that_broke_is_a_failure_carrying_its_last_line():

@@ -389,6 +389,42 @@ def test_a_session_refused_at_login_is_logged_out_without_waiting_out_the_quiet(
     assert fix_reports.session_state(tree, now, projects)[0] == fix_reports.DONE, "an outcome wins"
 
 
+def test_a_session_whose_last_reply_was_the_api_unreachable_is_offline(tmp_path):
+    """1f71e4cf and three before it: ledger fixers that ended on "API Error: Can't reach
+    the API server -- check your internet or DNS (ENOTFOUND)" during a night without DNS."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=9), now)
+    assert not fix_reports.api_unreachable(log), "no reply yet"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f'{{"type": "assistant", "timestamp": "{(now - _dt.timedelta(minutes=9)).isoformat()}", '
+            f'"error": "server_error", "apiError": "{fix_reports.API_UNREACHABLE}", '
+            '"isApiErrorMessage": true}\n'
+        )
+        handle.write('{"type": "cost-state"}\n')
+    assert fix_reports.api_unreachable(log)
+    assert not fix_reports.login_refused(log)
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.OFFLINE, str(log))
+    assert fix_reports.OFFLINE in fix_reports.DEAD
+
+
+def test_a_reply_after_an_unreachable_api_is_not_offline(tmp_path):
+    """A blip the session recovered from: its last reply is what counts."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=9), now)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f'{{"type": "assistant", "apiError": "{fix_reports.API_UNREACHABLE}", '
+            '"isApiErrorMessage": true}\n'
+        )
+        handle.write(_reply(now - _dt.timedelta(minutes=8)))
+    assert not fix_reports.api_unreachable(log)
+
+
 def test_the_boot_is_read_off_the_machine_and_unknown_where_it_cannot_be(monkeypatch):
     now = _dt.datetime.now(_dt.UTC)
     booted = fix_reports.booted_at(now)

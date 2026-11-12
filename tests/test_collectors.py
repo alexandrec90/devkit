@@ -2530,6 +2530,30 @@ def test_check_health_keeps_the_projects_words_in_the_log(tmp_path):
     assert "    a" in report.lines and "    b" in report.lines
 
 
+def test_a_verdict_failing_on_name_lookups_says_since_when(tmp_path):
+    """10e70909, 25193b9f: verdicts from a night without DNS. The verdict carries when it
+    first said so, kept while it goes on saying so, so the pass can hold it for a grace."""
+    out = "ipo_calendar  failing  ConnectError: [Errno -2] Name or service not known\n"
+    docker = FakeDocker(health=(1, out))
+    first = collectors.check_health(
+        target(tmp_path), ours(tmp_path), docker, collectors.Report(), {}, 1000.0
+    )
+    assert first[collectors.UNRESOLVED_SINCE] == 1000.0
+    later = collectors.check_health(
+        target(tmp_path), ours(tmp_path), docker, collectors.Report(), first, 5000.0
+    )
+    assert later[collectors.UNRESOLVED_SINCE] == 1000.0, "kept from the first"
+    other = collectors.check_health(
+        target(tmp_path),
+        ours(tmp_path),
+        FakeDocker(health=(1, "bad key")),
+        collectors.Report(),
+        later,
+        9000.0,
+    )
+    assert collectors.UNRESOLVED_SINCE not in other, "a different failure starts no grace"
+
+
 def test_a_failing_verdict_names_the_jobs_the_project_says_are_unhealthy(tmp_path):
     """6b140f4e: every failing ibkr_trader job was one row, "health check failing", so its
     `social` job missing boto3 read as the fixed `reddit` failure recurring. The project's

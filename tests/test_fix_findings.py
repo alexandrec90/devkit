@@ -41,6 +41,29 @@ def test_a_finding_already_open_is_not_filed_again(tmp_path):
     assert len(triage.open_items(triage.load(tmp_path))) == 2
 
 
+def _refused(host, port):
+    raise OSError("getaddrinfo failed")
+
+
+def test_a_finding_that_says_a_lookup_failed_is_not_filed_while_offline(tmp_path, monkeypatch):
+    """2026-11-12: a night without DNS filed eleven `regate-failed` rows at 04:01, each
+    "check your internet connection", that no session could act on."""
+    offline = finding(kind="regate-failed", detail="x main -- check your internet connection")
+    other = finding(detail="agent/y: rejected")
+    assert fix_findings.networked([offline, other], lookup=_refused) == [other]
+    answered = fix_findings.networked([offline, other], lookup=lambda host, port: [("a",)])
+    assert answered == [offline, other], "a network: the lookup failing is a finding"
+    monkeypatch.setattr(fix_findings.harness_events, "resolves", lambda **_: False)
+    assert fix_findings.record_all([offline, other], [], tmp_path) == [other]
+
+
+def test_a_batch_naming_no_lookup_asks_no_dns():
+    def never(host, port):
+        raise AssertionError("probed")
+
+    assert fix_findings.networked([finding()], lookup=never) == [finding()]
+
+
 def test_a_resolved_finding_that_recurs_is_filed_again(tmp_path):
     fix_findings.record_all([finding()], [], tmp_path)
     [item] = triage.open_items(triage.load(tmp_path))
