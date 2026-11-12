@@ -7,8 +7,9 @@ in the PR that needs it, and `after-merge-pass.py` does the rest on whichever PC
 there. It is a queue, not a change to merging, so it works for a gated project and a
 direct one alike. The file is the task:
 
-    when = "green"          # or merged, released, pr:<repo>#<n>, task:<name>, task:<repo>/<name>
-    on = "any"              # or every-machine, docker, or a hostname
+    when = "green"          # or merged, released, pr:<repo>#<n>, task:<name>, task:<repo>/<name>,
+                            # inside:/outside:<HH:MM>-<HH:MM> <zone> [<days>] (`queue_window`)
+    on = "any"             # or every-machine, docker, or a hostname
     run = "<command>"       # or agent = "<prompt>", or elevated = "<verb>": exactly one
 
 **A task is its path and the commit that added it.** That hash is its id (`task_id`), so
@@ -62,6 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import elevated_request
 import harness_events
+import queue_window
 
 QUEUE_DIR = ".devkit-queue"
 # Hex digits of the hash that names a task.
@@ -281,6 +283,12 @@ def _table(text: str) -> dict[str, str]:
 
 
 def _check_when(when: str, name: str) -> None:
+    if queue_window.is_window(when):
+        try:
+            queue_window.parse(when)
+        except ValueError as why:
+            raise _Malformed(str(why)) from why
+        return
     named = TASK_WHEN.match(when)
     if when not in (GREEN, MERGED, RELEASED) and not PR_WHEN.match(when) and not named:
         raise _Malformed(f"when = {when!r} is not a condition this queue knows")
@@ -330,11 +338,14 @@ def is_success(status: str) -> bool:
 # --- whether it is due ---------------------------------------------------------------------
 
 
-def met(task: Task, facts: Facts) -> bool:
-    """`task.when` holds now, as far as `facts` can say. Unknown is false: try next cycle."""
+def met(task: Task, facts: Facts, now: float) -> bool:
+    """`task.when` holds at `now`, as far as `facts` can say. Unknown is false: try next
+    cycle."""
     when = task.when
     if when == MERGED:
         return True
+    if queue_window.is_window(when):
+        return queue_window.holds(queue_window.parse(when), now)
     if when == GREEN:
         return facts.green(task.commit)
     if when == RELEASED:
@@ -382,7 +393,7 @@ def judge(task: Task, marks: Marks, facts: Facts, since: float, now: float) -> V
         if now - held.at < UNCLAIMED_SECONDS:
             return Verdict(WAIT, f"handed to {held.host}")
     overdue = now - since >= UNCLAIMED_SECONDS
-    if not met(task, facts):
+    if not met(task, facts, now):
         return _unmet(task, marks, overdue, now)
     if takes(task, facts.host, facts.docker):
         return Verdict(TAKE)
@@ -396,6 +407,9 @@ def _unmet(task: Task, marks: Marks, overdue: bool, now: float) -> Verdict:
     last = marks.rerouted.get(task.id)
     if overdue and (last is None or now - last >= UNCLAIMED_SECONDS):
         return Verdict(NOTE, f"when = {task.when} has not come true")
+    if queue_window.is_window(task.when):
+        clock = queue_window.local_time(queue_window.parse(task.when), now)
+        return Verdict(WAIT, f"when = {task.when}, and it is {clock} there")
     return Verdict(WAIT, f"when = {task.when}")
 
 
