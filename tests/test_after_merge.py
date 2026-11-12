@@ -146,9 +146,9 @@ def test_each_flow_has_the_label_its_prs_need():
 
 
 def test_merged_is_always_true_and_nothing_else_is_by_default():
-    assert am.met(task(when=am.MERGED), facts())
+    assert am.met(task(when=am.MERGED), facts(), NOW)
     for when in (am.GREEN, am.RELEASED, "pr:x#1", "task:y"):
-        assert not am.met(task(when=when), facts()), when
+        assert not am.met(task(when=when), facts(), NOW), when
 
 
 def test_green_and_released_ask_about_the_tasks_own_commit():
@@ -157,24 +157,73 @@ def test_green_and_released_ask_about_the_tasks_own_commit():
         green=lambda commit: asked.append(commit) or True,
         released=lambda commit: asked.append(commit) or True,
     )
-    assert am.met(task(when=am.GREEN, commit="c1"), found)
-    assert am.met(task(when=am.RELEASED, commit="c2"), found)
+    assert am.met(task(when=am.GREEN, commit="c1"), found, NOW)
+    assert am.met(task(when=am.RELEASED, commit="c2"), found, NOW)
     assert asked == ["c1", "c2"]
 
 
 def test_a_pr_condition_asks_about_that_pr():
     asked = []
     found = facts(merged=lambda repo, number: asked.append((repo, number)) or True)
-    assert am.met(task(when="pr:a/b#7"), found)
+    assert am.met(task(when="pr:a/b#7"), found, NOW)
     assert asked == [("a/b", 7)]
 
 
 def test_a_task_condition_defaults_to_this_project_and_can_name_another():
     asked = []
     found = facts(done=lambda project, name: asked.append((project, name)) or True)
-    assert am.met(task(when="task:first"), found)
-    assert am.met(task(when="task:devkit/first"), found)
+    assert am.met(task(when="task:first"), found, NOW)
+    assert am.met(task(when="task:devkit/first"), found, NOW)
     assert asked == [("carameli", "first"), ("devkit", "first")]
+
+
+# --- the clock condition -----------------------------------------------------------------------
+#
+# 39940185 / 7cc17daf: a task that had to wait for a market's close could only re-queue
+# itself with `when = "merged"`, a session and a PR each time a merge fired it early.
+
+CLOSE = "after:2026-11-12T16:05-05:00"
+CLOSE_AT = 1_794_517_500.0  # 2026-11-12 21:05 UTC
+
+
+def test_an_after_condition_parses_and_names_its_moment():
+    found = parsed(f'run = "x"\nwhen = "{CLOSE}"')
+    assert not found.malformed and found.when == CLOSE
+    assert am.not_before(CLOSE) == CLOSE_AT
+    assert am.not_before("after:2026-11-12T21:05:00Z") == CLOSE_AT
+
+
+@pytest.mark.parametrize(
+    "when, said",
+    [
+        ("after:2026-11-12T16:05", "no UTC offset"),
+        ("after:tomorrow", "is not a time"),
+        ("after:", "is not a time"),
+    ],
+)
+def test_an_after_condition_without_a_moment_every_pc_agrees_on_is_malformed(when, said):
+    found = parsed(f'run = "x"\nwhen = "{when}"')
+    assert found.kind == am.AGENT and said in found.malformed
+
+
+def test_an_after_condition_holds_from_its_moment_on():
+    clocked = task(when=CLOSE)
+    assert not am.met(clocked, facts(), CLOSE_AT - 1)
+    assert am.met(clocked, facts(), CLOSE_AT)
+    assert am.met(clocked, facts(), CLOSE_AT + DAYS)
+
+
+def test_a_time_not_yet_come_is_a_wait_however_long_ago_the_task_was_queued():
+    """Overdue is for a condition that should have come true; a clock's has not had its
+    chance, so sending an agent to look would find nothing."""
+    later = task(when="after:2028-01-01T00:00:00Z")
+    assert am.not_before(later.when) > NOW
+    verdict = am.judge(later, am.Marks(), facts(), NOW - 9 * DAYS, NOW)
+    assert verdict.action == am.WAIT and "after:" in verdict.why
+
+
+def test_a_time_come_is_taken():
+    assert am.judge(task(when=CLOSE), am.Marks(), facts(), NOW, CLOSE_AT).action == am.TAKE
 
 
 # --- which machine ----------------------------------------------------------------------------

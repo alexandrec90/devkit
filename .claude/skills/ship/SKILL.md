@@ -105,7 +105,10 @@ on = "any"         # or every-machine, docker, or a hostname
 run = "<command>"  # or agent = "<prompt>", or elevated = "<verb>": exactly one of the three
 ```
 
-`when` and `on` are optional, and these are their defaults. `run` executes in that
+`when` and `on` are optional, and these are their defaults. To wait for a time — a
+market's close, a quiet hour — write `when = "after:2026-11-12T16:05-05:00"`, ISO 8601
+with its UTC offset: the task waits once, where re-queuing with `merged` costs a session
+every time a merge fires it early. `run` executes in that
 project's checkout, and a failure goes to an agent on that machine with the output.
 `agent` starts a fresh session. `elevated` takes `restart-wsl-service` and nothing else.
 A task is its path and the commit that added it: a revert removes it, an edit never runs

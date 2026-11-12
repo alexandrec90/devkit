@@ -32,6 +32,15 @@ every module in `TRAY_MODULES`, and `--yes` restarts a tray older than its own s
 which is the half that makes the new answer something `installers.py maintain` repairs
 rather than repeats.
 
+**And whether there is a resident process at all.** The logon trigger is the tray's only
+start, so a tray that dies mid-session stays dead until the next logon. On 2026-11-12 one
+started at 12:18:18, eleven seconds after a logon, into a restart begun three seconds
+later that then failed: it died initialising (`0xC000026B`, the window station shutting
+down) and the session went on with no icon, while `--check` said "current" (4e6fe3ae).
+`dead_resident` reads the scheduler's `Status` and `Last Result`, and `--yes` starts a
+tray that is not running -- except one ended by `schtasks /End`, which is the documented
+way to stop it, and one stood down by name.
+
 Stdlib only, and every decision is an importable function tested in
 `tests/test_install_tray.py`.
 """
@@ -225,6 +234,15 @@ def last_run_argv(name: str = TASK_NAME) -> list[str]:
     return ["schtasks", "/Query", "/TN", name, "/FO", "CSV", "/V"]
 
 
+def last_job(name: str, runner: Runner = run_command) -> schedule_health.Job | None:
+    """The scheduler's row for this task, or None when it cannot say."""
+    result = runner(last_run_argv(name))
+    if result.returncode != 0:
+        return None
+    jobs = schedule_health.parse_tasks(result.stdout or "", prefix=name)
+    return jobs[0] if jobs else None
+
+
 def last_started(name: str, runner: Runner = run_command) -> _dt.datetime | None:
     """When the scheduler last started this task, or None when it cannot say.
 
@@ -241,11 +259,52 @@ def last_started(name: str, runner: Runner = run_command) -> _dt.datetime | None
     long-time settings, which is four formats and was a bug there before it was a
     docstring.
     """
-    result = runner(last_run_argv(name))
-    if result.returncode != 0:
-        return None
-    jobs = schedule_health.parse_tasks(result.stdout or "", prefix=name)
-    return jobs[0].last_run if jobs else None
+    job = last_job(name, runner)
+    return job.last_run if job else None
+
+
+# `Last Result` values that say the tray is not to be started: it is running, it has never
+# run (the logon trigger's business), or `schtasks /End` stopped it on purpose.
+SCHED_S_TASK_TERMINATED = 267014  # 0x00041306, "terminated by the user"
+LEFT_ALONE = (
+    frozenset(
+        {
+            schedule_health.SCHED_S_TASK_RUNNING,
+            schedule_health.SCHED_S_TASK_HAS_NOT_RUN,
+            SCHED_S_TASK_TERMINATED,
+        }
+    )
+    | schedule_health.OVERLAPPING
+)
+RUNNING_STATUS = "running"
+
+
+def exited(job: schedule_health.Job | None) -> str:
+    """How the resident tray ended, when it is not running and should be; "" otherwise.
+
+    **Both of the scheduler's signals must agree it is gone**: `Status` not `Running`, and
+    a `Last Result` that is an exit code rather than a status. `schtasks` writes `Status`
+    in the machine's language, so on its own it would read a running tray as dead and
+    restart it on every pass; the result code is the same in every locale.
+    """
+    if job is None or job.last_run is None or not job.enabled:
+        return ""
+    if not job.status or job.status.lower() == RUNNING_STATUS:
+        return ""
+    if job.last_result in LEFT_ALONE:
+        return ""
+    code = job.last_result & 0xFFFFFFFF
+    return (
+        f"its last run ended (exit {job.last_result}, 0x{code:08X}) at "
+        f"{job.last_run:%Y-%m-%d %H:%M}"
+    )
+
+
+def dead_resident(schedule: Schedule, runner: Runner = run_command) -> str:
+    """`exited` for the registered tray; "" for one stood down, which is meant to be off."""
+    if schedule.name in harness_state.stood_down():
+        return ""
+    return exited(last_job(schedule.name, runner))
 
 
 def stale_sources(
@@ -342,7 +401,7 @@ def install(schedule: Schedule, runner: Runner = run_command) -> tuple[bool, str
     if not ok:
         return False, message
     scheduled = f"scheduled {schedule.name} at logon"
-    if not stale_resident(schedule, runner):
+    if not dead_resident(schedule, runner) and not stale_resident(schedule, runner):
         return True, scheduled
     restarted, note = restart(schedule, runner)
     return restarted, f"{scheduled}; {note}"
@@ -366,6 +425,14 @@ def run_check(schedule: Schedule, runner: Runner = run_command) -> tuple[int, st
     code, message = devkit_schtasks.run_check(schedule.name, task_document(schedule), runner)
     if code != devkit_schtasks.CHECK_CURRENT:
         return code, message
+    gone = dead_resident(schedule, runner)
+    if gone:
+        return (
+            devkit_schtasks.CHECK_STALE,
+            f"schedule: {schedule.name} is registered as this checkout would register it, "
+            f"but no tray is running: {gone}, and its only trigger is the next logon. "
+            f"Re-run with --yes to start it.",
+        )
     stale = stale_resident(schedule, runner)
     if not stale:
         return code, message

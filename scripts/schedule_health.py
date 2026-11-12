@@ -124,7 +124,10 @@ NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) |
 # `devkit-medium-tier` is the same by design: a pass works through every project origin
 # moved past, for up to `tier-pass.DEFAULT_PASS_MINUTES`, on a 15-minute cadence, and the
 # next pass reads every tip again (74329698 filed its 12:15 skip as a defect).
-OVERLAP_EXPECTED = frozenset({"devkit-ship", "devkit-medium-tier"})
+# `devkit-tray` is resident: `installers.py maintain` starts a tray that died
+# (`install-tray.py`, 4e6fe3ae), so the logon trigger can fire beside one already
+# running, and the second start it is refused is the one tray working.
+OVERLAP_EXPECTED = frozenset({"devkit-ship", "devkit-medium-tier", "devkit-tray"})
 
 # How many intervals a job may miss before it is worth a line. One is noise: a laptop
 # asleep at 04:00 misses a daily run and catches it the next night, which is the system
@@ -325,6 +328,9 @@ class Job:
     # Every trigger is an event (logon, boot), none a clock: no next run time ever, so a
     # first run not yet made is the event not yet happened, not a run missed.
     event_only: bool = False
+    # The scheduler's `Status` column as written (`Running`, `Ready`), or "" when the
+    # query did not carry it. Only a resident job's installer asks it (`install-tray.py`).
+    status: str = ""
 
     @property
     def interpreter(self) -> str:
@@ -432,6 +438,7 @@ def parse_tasks(stdout: str, prefix: str = PREFIX, also: frozenset[str] = frozen
             next_run=parse_time(row.get("Next Run Time") or ""),
             command=(row.get("Task To Run") or "").strip(),
             event_only=(row.get("Schedule Type") or "").strip() in EVENT_TRIGGERS,
+            status=(row.get("Status") or "").strip(),
         )
         seen = merged.get(name)
         merged[name] = job if seen is None else merge_triggers(seen, job)

@@ -10,7 +10,9 @@ exists because every other job in the repo is a pass that finishes:
   desktop to draw into;
 - **`--restart`** -- a pass picks up an edit on its next run, whereas the tray holds the
   `tray.py` it imported at logon until the session ends, so an edited icon is invisible
-  with nothing failing to say so.
+  with nothing failing to say so;
+- **a dead tray is started** -- the logon trigger is its only start, so `--check` reports
+  one that died mid-session and `--yes` starts it again.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import datetime as _dt
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -313,22 +316,34 @@ def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
 # days was registered perfectly the whole time, and this installer said so every morning.
 
 
-def csv_row(last_run: str, name: str = "\\" + installer.TASK_NAME) -> str:
+def csv_row(
+    last_run: str,
+    name: str = "\\" + installer.TASK_NAME,
+    status: str = "Running",
+    result: int = 0,
+    state: str = "Enabled",
+) -> str:
     """One `schtasks /FO CSV /V` task, with the columns `parse_tasks` reads."""
     columns = (
         "TaskName,Next Run Time,Status,Last Run Time,Last Result,Task To Run,Scheduled Task State"
     )
-    return f'{columns}\n"{name}","N/A","Running","{last_run}","0","pythonw.exe","Enabled"\n'
+    return f'{columns}\n"{name}","N/A","{status}","{last_run}","{result}","pythonw.exe","{state}"\n'
 
 
-def scheduler(document: str = "", last_run: str = "2026-09-17 15:19:33", xml_code: int = 0):
+def scheduler(
+    document: str = "",
+    last_run: str = "2026-09-17 15:19:33",
+    xml_code: int = 0,
+    status: str = "Running",
+    result: int = 0,
+):
     """A runner answering both questions `run_check` asks -- `/XML` with the registered
     document, `/FO CSV` with the row carrying `Last Run Time`."""
 
     def runner(argv):
         if "/XML" in argv:
             return completed(document, xml_code)
-        return completed(csv_row(last_run))
+        return completed(csv_row(last_run, status=status, result=result))
 
     return runner
 
@@ -373,6 +388,15 @@ def test_last_started_reads_the_scheduler_rather_than_the_process_table():
 def test_last_started_is_unknown_when_the_scheduler_will_not_answer():
     assert installer.last_started(installer.TASK_NAME, lambda argv: completed(returncode=1)) is None
     assert installer.last_started(installer.TASK_NAME, lambda argv: completed("")) is None
+
+
+def test_last_job_is_the_whole_row_for_the_one_task():
+    job = installer.last_job(
+        installer.TASK_NAME,
+        lambda argv: completed(csv_row("2026-11-12 12:18:18", status="Ready", result=7)),
+    )
+    assert (job.name, job.status, job.last_result) == (installer.TASK_NAME, "Ready", 7)
+    assert installer.last_job(installer.TASK_NAME, lambda argv: completed(returncode=1)) is None
 
 
 def test_a_module_edited_since_the_run_is_stale(resident):
@@ -481,6 +505,104 @@ def test_a_restart_that_failed_fails_the_install(resident, monkeypatch):
 
     ok, _ = installer.install(tray_schedule(resident), runner=runner)
     assert ok is False
+
+
+# --- a tray that is not running at all ----------------------------------------
+#
+# 4e6fe3ae: the tray started 11 s after a logon, into a restart that then failed, died
+# initialising with 0xC000026B, and stayed dead -- its only trigger is the next logon --
+# while `--check` reported "current".
+
+DIED_AT_LOGOFF = -1073741205  # 0xC000026B, as `schtasks` signs it
+
+
+def test_a_tray_that_died_is_reported_with_its_exit_code(resident):
+    schedule = tray_schedule(resident)
+    code, message = installer.run_check(
+        schedule,
+        runner=scheduler(installer.task_document(schedule), status="Ready", result=DIED_AT_LOGOFF),
+    )
+    assert code == 1
+    assert "no tray is running" in message and "0xC000026B" in message and "--yes" in message
+
+
+@pytest.mark.parametrize(
+    "status, result",
+    [
+        ("Running", 0),
+        ("Running", installer.schedule_health.SCHED_S_TASK_RUNNING),
+        # `Status` is localised: only the code may say a running tray is gone.
+        ("En cours d'exécution", installer.schedule_health.SCHED_S_TASK_RUNNING),
+        ("Ready", installer.schedule_health.SCHED_S_TASK_HAS_NOT_RUN),
+        # `schtasks /End` is the documented way to stop it; starting it again undoes that.
+        ("Ready", installer.SCHED_S_TASK_TERMINATED),
+        ("Ready", installer.schedule_health.SCHED_REFUSED_ALREADY_RUNNING),
+        ("", DIED_AT_LOGOFF),
+    ],
+)
+def test_a_tray_meant_to_be_as_it_is_is_left_alone(resident, status, result):
+    schedule = tray_schedule(resident)
+    runner = scheduler(installer.task_document(schedule), status=status, result=result)
+    assert installer.dead_resident(schedule, runner) == ""
+    assert installer.run_check(schedule, runner)[0] == 0
+
+
+def test_a_disabled_or_never_run_task_is_not_a_dead_tray():
+    job = installer.schedule_health.Job(
+        installer.TASK_NAME,
+        True,
+        DIED_AT_LOGOFF,
+        _dt.datetime(2026, 11, 12, 12, 18),
+        status="Ready",
+    )
+    assert installer.exited(job)
+    assert installer.exited(replace(job, enabled=False)) == ""
+    assert installer.exited(replace(job, last_run=None)) == ""
+    assert installer.exited(None) == ""
+
+
+def test_a_stood_down_tray_is_never_started(resident, monkeypatch):
+    monkeypatch.setattr(installer.harness_state, "stood_down", lambda: {installer.TASK_NAME})
+    runner = scheduler(status="Ready", result=DIED_AT_LOGOFF)
+    assert installer.dead_resident(tray_schedule(resident), runner) == ""
+
+
+def test_installing_starts_a_tray_that_died(resident, monkeypatch):
+    """`installers.py maintain` runs `--yes` on a red check, so this is what brings the
+    tray back within one maintain cadence rather than at the next logon."""
+    monkeypatch.setattr(
+        installer.devkit_schtasks, "register", lambda name, xml, run: (True, "registered")
+    )
+    verbs = []
+
+    def runner(argv):
+        verbs.append(argv[1])
+        if "/Query" in argv:
+            return completed(csv_row("2026-11-12 12:18:18", status="Ready", result=DIED_AT_LOGOFF))
+        return completed()
+
+    ok, message = installer.install(tray_schedule(resident), runner=runner)
+    assert ok is True and "restarted" in message
+    assert [verb for verb in verbs if verb in {"/End", "/Run"}] == ["/End", "/Run"]
+
+
+def test_the_scheduler_status_is_parsed_onto_the_job():
+    jobs = installer.schedule_health.parse_tasks(
+        csv_row("2026-11-12 12:18:18", status="Ready"), prefix=installer.TASK_NAME
+    )
+    assert jobs[0].status == "Ready"
+
+
+def test_the_tray_starting_twice_is_not_reported_as_overlap():
+    """The logon trigger firing beside a tray `maintain` already started is refused
+    with 0x800710E0, which is the one tray working, not runs piling up."""
+    job = installer.schedule_health.Job(
+        installer.TASK_NAME,
+        True,
+        installer.schedule_health.SCHED_REFUSED_ALREADY_RUNNING,
+        _dt.datetime(2026, 11, 12, 12, 18),
+    )
+    assert installer.schedule_health.problems([job], now=_dt.datetime(2026, 11, 12, 12, 30)) == []
 
 
 def test_every_module_the_tray_holds_is_watched_for_an_edit():

@@ -7,8 +7,9 @@ in the PR that needs it, and `after-merge-pass.py` does the rest on whichever PC
 there. It is a queue, not a change to merging, so it works for a gated project and a
 direct one alike. The file is the task:
 
-    when = "green"          # or merged, released, pr:<repo>#<n>, task:<name>, task:<repo>/<name>
-    on = "any"              # or every-machine, docker, or a hostname
+    when = "green"          # or merged, released, pr:<repo>#<n>, task:<name>, task:<repo>/<name>,
+                            # after:<ISO 8601 time with its UTC offset>
+    on = "any"             # or every-machine, docker, or a hostname
     run = "<command>"       # or agent = "<prompt>", or elevated = "<verb>": exactly one
 
 **A task is its path and the commit that added it.** That hash is its id (`task_id`), so
@@ -37,6 +38,14 @@ never came or no PC has docker becomes an agent task on whichever PC is awake (`
 most that often, but uses nothing up: the task still runs when its condition does
 (`noted`). A handed task whose PC has gone quiet that long is offered to another.
 
+**`after:` is the one clock condition, and it is a moment, not a window.** A task that
+must wait for a time -- a market's close, a quiet hour -- names the first moment it may
+run, `after:2026-11-12T16:05-05:00`, and waits once. Without it the only way to wait was
+to re-queue with `when = "merged"`, a session and a PR each time a merge fired it early
+(ibkr_trader, 39940185 and 7cc17daf). The offset is required: a bare clock time means a
+different moment on each PC that reads it. A time not yet come is a wait and never
+"late", since nothing is overdue before its own time (`_unmet`).
+
 **`green` is the `green` branch, wherever it exists.** The post-merge job keeps one in
 every project, gated or direct, and a commit is green once that branch has reached it.
 A project may not have the branch yet. There a gated project reads `green` as `merged`,
@@ -56,6 +65,7 @@ import sys
 import tomllib
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -119,6 +129,7 @@ SESSION_KEY = "after-merge:"
 
 PR_WHEN = re.compile(r"pr:(?P<repo>[\w.-]+(?:/[\w.-]+)?)#(?P<number>[1-9]\d*)$")
 TASK_WHEN = re.compile(r"task:(?:(?P<repo>[\w.-]+)/)?(?P<name>[\w.-]+)$")
+AFTER = "after:"
 HOSTNAME = re.compile(r"[A-Za-z0-9][\w.-]*$")
 TASK_NAME = re.compile(r"[A-Za-z0-9][\w.-]*$")
 HANDED_SUBJECT = re.compile(r"(?P<word>handed|offered) \S+ by (?P<host>\S+): attempt (?P<n>\d+)$")
@@ -281,11 +292,32 @@ def _table(text: str) -> dict[str, str]:
 
 
 def _check_when(when: str, name: str) -> None:
+    if when.startswith(AFTER):
+        not_before(when)
+        return
     named = TASK_WHEN.match(when)
     if when not in (GREEN, MERGED, RELEASED) and not PR_WHEN.match(when) and not named:
         raise _Malformed(f"when = {when!r} is not a condition this queue knows")
     if named and not named["repo"] and named["name"] == name:
         raise _Malformed("it waits on itself")
+
+
+def not_before(when: str) -> float:
+    """The epoch second an `after:` condition names. Raises `_Malformed` for a time that is
+    not ISO 8601 or carries no UTC offset."""
+    stamp = when.removeprefix(AFTER)
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError as why:
+        raise _Malformed(
+            f"when = {when!r} is not a time: write it as ISO 8601, after:2026-11-12T16:05-05:00"
+        ) from why
+    if moment.utcoffset() is None:
+        raise _Malformed(
+            f"when = {when!r} has no UTC offset, so each PC would read it in its own zone: "
+            f"add one, as in {AFTER}{stamp}-05:00 or {AFTER}{stamp}Z"
+        )
+    return moment.timestamp()
 
 
 def flow_of(devkit_toml: str) -> str:
@@ -330,11 +362,14 @@ def is_success(status: str) -> bool:
 # --- whether it is due ---------------------------------------------------------------------
 
 
-def met(task: Task, facts: Facts) -> bool:
-    """`task.when` holds now, as far as `facts` can say. Unknown is false: try next cycle."""
+def met(task: Task, facts: Facts, now: float) -> bool:
+    """`task.when` holds at `now`, as far as `facts` can say. Unknown is false: try next
+    cycle."""
     when = task.when
     if when == MERGED:
         return True
+    if when.startswith(AFTER):
+        return now >= not_before(when)
     if when == GREEN:
         return facts.green(task.commit)
     if when == RELEASED:
@@ -382,7 +417,7 @@ def judge(task: Task, marks: Marks, facts: Facts, since: float, now: float) -> V
         if now - held.at < UNCLAIMED_SECONDS:
             return Verdict(WAIT, f"handed to {held.host}")
     overdue = now - since >= UNCLAIMED_SECONDS
-    if not met(task, facts):
+    if not met(task, facts, now):
         return _unmet(task, marks, overdue, now)
     if takes(task, facts.host, facts.docker):
         return Verdict(TAKE)
@@ -392,9 +427,11 @@ def judge(task: Task, marks: Marks, facts: Facts, since: float, now: float) -> V
 
 
 def _unmet(task: Task, marks: Marks, overdue: bool, now: float) -> Verdict:
-    """A condition not yet true: a wait, with an agent sent to look when it is late."""
+    """A condition not yet true: a wait, with an agent sent to look when it is late. A
+    time not yet come is never late: there is nothing for an agent to find."""
     last = marks.rerouted.get(task.id)
-    if overdue and (last is None or now - last >= UNCLAIMED_SECONDS):
+    clock = task.when.startswith(AFTER)
+    if overdue and not clock and (last is None or now - last >= UNCLAIMED_SECONDS):
         return Verdict(NOTE, f"when = {task.when} has not come true")
     return Verdict(WAIT, f"when = {task.when}")
 
