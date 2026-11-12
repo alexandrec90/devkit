@@ -1663,6 +1663,29 @@ def test_release_and_plan_falls_back_to_the_harness_alone(monkeypatch, tmp_path)
     assert journal.crashed, "the plan's crash is the journal's"
 
 
+def test_the_release_reads_a_main_red_on_its_own_tag_alone_as_green(monkeypatch, tmp_path):
+    """c6c538d9 / devkit #763: v0.11.87's bump merged, its tag run failed, and main stayed
+    red on the newest-tag test alone. The release step held for a green main that only
+    the tag could make, so it never resumed; the plan still reads the red as red."""
+    monkeypatch.setattr(fix_pass.gate_evidence, "newest_release", lambda devkit_dir: "v9")
+    cut, seen = [], []
+    monkeypatch.setattr(fix_pass.fix_release, "cut_release", lambda *a: cut.append(a) or "")
+    monkeypatch.setattr(fix_pass.fix_release, "pending_adoptions", lambda *a: [])
+    monkeypatch.setattr(fix_pass, "decide", lambda *a: seen.append(a[1]) or ((), (), (), ()))
+    red = fix_plan.Failure(
+        fix_plan.BRANCH,
+        fix_cycle.DEVKIT,
+        0,
+        "main",
+        "u",
+        signature=(f"tests/test_new_project.py::{fix_plan.RELEASE_TEST}",),
+    )
+    ctx = _ctx(tmp_path, fix_cycle.DISPATCH)
+    fix_pass.release_and_plan(Path("ws"), ctx, fix_pass.Journal(tmp_path), [red], False, None)
+    assert cut[0][2] is True, "the release resumes at its tag"
+    assert seen == [False], "every other step still sees devkit's main as red"
+
+
 def test_a_plan_left_for_the_deadline_is_not_said_to_have_raised(monkeypatch, tmp_path):
     """The 23:00 pass of 2026-11-03 read "the plan step raised" in its record, beside a
     `left to the next pass` line naming the plan and no crash anywhere."""

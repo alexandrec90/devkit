@@ -279,7 +279,24 @@ def self_update(root: Path) -> tuple[bool, str]:
     if git(root, "merge", "--ff-only", "--quiet", target).returncode != 0:
         return False, f"{base} has diverged from {target}"
     after = git(root, "rev-parse", "HEAD").stdout.strip()
-    return True, "current" if before == after else f"updated {before[:9]}..{after[:9]}"
+    if before != after:
+        return True, f"updated {before[:9]}..{after[:9]}"
+    return True, "current" + trailing(root, base, target)
+
+
+def trailing(root: Path, base: str, target: str) -> str:
+    """What a checkout current with `green` still lacks of `origin/<base>`, or "".
+
+    "current" alone read as running main's code: on 2026-11-11 the record said it all
+    evening while the checkout sat a merged fix behind main, `green` held back by a release
+    whose tag had not landed, and the scheduled job that fix was for kept failing on the
+    code it replaced (c6c538d9)."""
+    if target == f"origin/{base}":
+        return ""
+    counted = git(root, "rev-list", "--count", f"HEAD..origin/{base}").stdout.strip()
+    if not counted.isdigit() or counted == "0":
+        return ""
+    return f" with {target}; {counted} commit(s) on origin/{base} wait for its gate"
 
 
 # --- 2 and 3. run and judge ---------------------------------------------------------------

@@ -441,7 +441,7 @@ def release_and_plan(
         fix_release.cut_release,
         workspace,
         newest,
-        green,
+        fix_release.release_verdict(green, failures),
         dispatching,
         ctx.now,
         default="",
