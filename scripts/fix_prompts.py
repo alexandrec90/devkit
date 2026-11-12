@@ -261,12 +261,43 @@ def _rerun(failure: Failure) -> str:
     return MEDIUM_RERUN if failure.workflow == MEDIUM_TIER else LOCAL_RERUN
 
 
+# What a scheduled tier's tests ran with that an agent shell lacks. Both tiers run under
+# `log-wrap.py --always`, whose `COLOR_ENV` reaches every child, and each runner adds its
+# own `RUN_ENV`; the shell has `PY_COLORS=0` instead (`project_settings.AGENT_ENV`). A
+# fixer told to run a red test "the same way" without these saw it pass: ruff's fix block
+# is coloured only under `FORCE_COLOR` (d789e104). Hyphenated scripts are not importable,
+# so these are spelled here and `tests/test_fix_prompts.py` holds them to the sources.
+WRAPPER_ENV = {
+    "FORCE_COLOR": "1",
+    "PY_COLORS": "1",
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONUNBUFFERED": "1",
+}
+MEDIUM_ENV = WRAPPER_ENV | {
+    "DEVKIT_MEDIUM_TIER": "1",
+    "PYTHONUTF8": "1",
+    "PYTEST_XDIST_AUTO_NUM_WORKERS": "2",
+}
+LOCAL_ENV = WRAPPER_ENV | {"DEVKIT_E2E": "1", "PYTHONUTF8": "1"}
+
+
+def env_said(env: dict[str, str]) -> str:
+    """The sentence telling a fixer the environment a tier ran in, as one `env` prefix."""
+    prefix = " ".join(f"{key}={value}" for key, value in env.items())
+    return (
+        " The environment of that run had variables your shell lacks, so start each run "
+        f"with env {prefix} in front of it: a test that reads coloured or buffered output "
+        "passes without them and fails there."
+    )
+
+
 # How a local end-to-end red is reproduced, said once wherever one is sent, the upstream
 # session included -- whose shared sentence otherwise sends it to a run URL there is none of.
 LOCAL_RERUN = (
     f" A Local E2E run happened on this machine, from the static checkout, as python "
     f"{E2E_CONTRACT}; run that same command in the worktree you fix it in, before changing "
-    "anything and again after, and say in the intent what it printed. devkit's takes the "
+    "anything and again after, and say in the intent what it printed."
+    f"{env_said(LOCAL_ENV)} devkit's takes the "
     "failing test ids as arguments: name them, since its whole tier holds this machine for "
     "over half an hour while the scheduled jobs run. The PR gate does not run these tests, "
     "so its green is no evidence about them; the scheduled local run re-tests once the fix "
@@ -279,7 +310,8 @@ MEDIUM_RERUN = (
     f"commit, as python {MEDIUM_CONTRACT} over its whole suite, or as the medium_tier command "
     "in the [delivery] table of .devkit.toml where that is set; run the failing tests the "
     "same way in the worktree you fix it in, before changing anything and again after, and "
-    "say in the intent what it printed. The PR gate runs on Linux, so its green is no "
+    f"say in the intent what it printed.{env_said(MEDIUM_ENV)} The PR gate runs on Linux, "
+    "so its green is no "
     "evidence about a failure on Windows; the scheduled tier re-tests once the fix merges."
 )
 

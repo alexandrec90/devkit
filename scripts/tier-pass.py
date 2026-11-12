@@ -108,6 +108,11 @@ RUN_MB = 2048
 WORKERS = 2
 WORKERS_ENV = "PYTEST_XDIST_AUTO_NUM_WORKERS"
 
+# What every run adds to the environment it inherits. A name, not an inline literal,
+# because a fixer's prompt has to tell it what to set to reproduce a red run
+# (`fix_prompts.MEDIUM_ENV`, which a test holds to this).
+RUN_ENV = {ENV_FLAG: "1", "PYTHONUTF8": "1", WORKERS_ENV: str(WORKERS)}
+
 # One project's ceiling. Ended with its whole process tree and recorded red, naming the
 # timeout. A suite past this is too slow for a tier that fires every 15 minutes.
 DEFAULT_TIMEOUT_MINUTES = 45
@@ -151,7 +156,7 @@ def run_tests(
     """`(argv, finished run)`. What cannot start judges nothing, and only a project's own
     `.devkit.toml` can have named a command that does not exist."""
     python = e2e_results.venv_interpreter(tree, sweep.console_python())
-    env = {**os.environ, ENV_FLAG: "1", "PYTHONUTF8": "1", WORKERS_ENV: str(WORKERS)}
+    env = {**os.environ, **RUN_ENV}
     try:
         argv = tier_command.argv_for(tree, command, python)
         return argv, runner(argv, timeout, cwd=str(tree), env=env)
