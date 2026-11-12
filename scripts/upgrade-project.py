@@ -85,6 +85,8 @@ from pathlib import Path
 from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import harness_events
 import policy_runtime
 from adoption_prs import (
     UPGRADE_SLUG,
@@ -281,20 +283,36 @@ def _same_path(left: Path, right: Path) -> bool:
         return False
 
 
-def pending_adoption(project: Path, name: str, tag: str, workspace: Path | None = None) -> str:
-    """`open_adoption_pr`, after closing what `tag` supersedes -- its PRs, and the boxes
-    of older adoptions that never got one.
+def pending_adoption(
+    project: Path,
+    name: str,
+    tag: str,
+    workspace: Path | None = None,
+    online: Callable[[], bool] | None = None,
+) -> str:
+    """Why `name` gets no box for `tag` this run, "" when it does: its adoption PR is
+    open (`open_adoption_pr`, asked after closing what `tag` supersedes -- its PRs, and
+    the boxes of older adoptions that never got one), or GitHub cannot be looked up
+    (`online`, by default `harness_events.resolves`).
 
     One call from `main` rather than two, because `main`'s complexity is at the ceiling
     the structure ratchet records for it and this decision is one the loop there
     already makes -- "is the adoption for this release in flight?" -- only asked after
     the older ones stop being.
+
+    Offline, `open_adoption_pr` fails open and reads as no PR: on 2026-11-12 a night
+    without DNS cut agent-terminal a second v0.11.88 box beside its open #11, and the
+    box's commit was refused by a branch policy that could not reach GitHub either
+    (2e881f69). Every step after the box needs the network, so none is cut without it.
     """
+    if not (online or harness_events.resolves)():
+        return f"GitHub cannot be looked up from this machine, so no box is cut for devkit {tag}"
     for closed in close_superseded(project, tag):
         print(f"upgrade: {name} -- closed {closed}, superseded by devkit {tag}")
     for box in discard_superseded_boxes(name, tag, workspace) if workspace else []:
         print(f"upgrade: {name} -- discarded {box}, superseded by devkit {tag}")
-    return open_adoption_pr(project, tag)
+    pending = open_adoption_pr(project, tag)
+    return f"devkit {tag} is already up for adoption in {pending}" if pending else ""
 
 
 # Every adoption branch, whatever release it adopted.
@@ -1277,7 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
         # merged yet. Skipping is right whatever is holding it up -- a red gate, a
         # review, a human -- because a second identical PR fixes none of them.
         elif pending := pending_adoption(root / name, name, tag, args.workspace):
-            print(f"upgrade: {name} -- devkit {tag} is already up for adoption in {pending}.")
+            print(f"upgrade: {name} -- {pending}.")
         else:
             todo.append(name)
 

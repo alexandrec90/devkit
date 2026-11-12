@@ -376,10 +376,16 @@ def judge_dead(
         return [f"{where} -- {state}; the after-merge queue offers it again"]
     if ctx.writes:
         fix_reports.note_on_stamp(tree.path, "dead", state)
-    if state in (fix_reports.INTERRUPTED, fix_reports.LOGGED_OUT, fix_reports.UNTRUSTED):
-        # The machine went down under it, nobody was logged in, or nobody trusted the
-        # checkout: no attempt spent, only a re-send, which finds a PR's tree as the
-        # session left it. The last is held until someone does (`fix_send._untrusted`).
+    if state in (
+        fix_reports.INTERRUPTED,
+        fix_reports.LOGGED_OUT,
+        fix_reports.UNTRUSTED,
+        fix_reports.OFFLINE,
+    ):
+        # The machine went down under it or lost its network, nobody was logged in, or
+        # nobody trusted the checkout: no attempt spent, only a re-send, which finds a
+        # PR's tree as the session left it. The last is held until someone does
+        # (`fix_send._untrusted`).
         if ctx.writes:
             fix_ledger.mark_interrupted(ctx.ledger_path, key, state)
         if state == fix_reports.LOGGED_OUT:
@@ -656,7 +662,8 @@ def collector_findings(
     """A finding per collector row (`collectors.tray_rows`) that is not OK, against the
     collector's own project, citing `collectors.py`'s log, which holds the health output.
     Bar a failing health verdict taken from code older than its group's fix
-    (`_verdict_predates_fix`), and bar a silent engine (`collectors.NOT_ANSWERING`).
+    (`_verdict_predates_fix`) or one failing on name lookups lately
+    (`_unresolved_lately`), and bar a silent engine (`collectors.NOT_ANSWERING`).
     `health` is the verdicts the rows were drawn from.
 
     A silent engine is the machine's, not a project's, and `collectors.py maintain` --
@@ -686,9 +693,18 @@ def collector_findings(
         )
         verdict = (health or {}).get(project, {})
         stale = _verdict_predates_fix(finding, items, verdict, ctx.now)
-        if not (state.startswith(collectors.HEALTH_FAILING) and stale):
+        held = stale or _unresolved_lately(verdict, ctx.now)
+        if not (state.startswith(collectors.HEALTH_FAILING) and held):
             found.append(finding)
     return found
+
+
+def _unresolved_lately(verdict: dict, now: _dt.datetime) -> bool:
+    """Whether a verdict has said a name could not be looked up for less than
+    `collectors.UNRESOLVED_GRACE` (`collectors.UNRESOLVED_SINCE`): a night offline, and
+    a job's wait for its own next run after it, not a project's defect."""
+    since = verdict.get(collectors.UNRESOLVED_SINCE)
+    return isinstance(since, (int, float)) and now.timestamp() - since < collectors.UNRESOLVED_GRACE
 
 
 # The row a wrapped job's own `log-wrap.py --always` files for a failed run

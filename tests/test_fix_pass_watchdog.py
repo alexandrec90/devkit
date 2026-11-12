@@ -288,7 +288,8 @@ def test_a_checkout_that_cannot_be_kept_current_is_filed(watched, monkeypatch):
 FETCH_DOWN = "could not fetch origin/main -- timed out after 120s; ended it and its children"
 
 
-def test_worth_filing_counts_only_fetches_and_only_in_a_row():
+def test_worth_filing_counts_only_fetches_and_only_in_a_row(monkeypatch):
+    monkeypatch.setattr(watchdog.harness_events, "resolves", lambda **_: True)
     state: dict = {}
     assert not watchdog.worth_filing(state, False, FETCH_DOWN)
     assert not watchdog.worth_filing(state, True, "current")
@@ -323,6 +324,26 @@ def test_a_fetch_that_fails_fire_after_fire_is_filed(watched, monkeypatch):
         assert watchdog.watch(watched["argv"], NOW) == 0
     [found] = findings(watched["devkit"])
     assert found.detail == f"pass-stale: {FETCH_DOWN}"
+
+
+FETCH_UNRESOLVED = (
+    "could not fetch origin/main -- fatal: unable to access "
+    "'https://github.com/o/devkit.git/': Could not resolve host: github.com"
+)
+
+
+def test_a_fetch_failing_fire_after_fire_on_a_machine_cut_off_is_not_filed(watched, monkeypatch):
+    """fc172488: six fires of a night without DNS filed a stale pass no session could act
+    on. Offline, a failed fetch neither counts nor files; back online, the count starts
+    from nothing."""
+    monkeypatch.setattr(watchdog, "self_update", lambda root: (False, FETCH_UNRESOLVED))
+    monkeypatch.setattr(watchdog.harness_events, "resolves", lambda **_: False)
+    for _ in range(watchdog.FETCH_FIRES + 1):
+        assert watchdog.watch(watched["argv"], NOW) == 0
+    assert findings(watched["devkit"]) == []
+    state: dict = {}
+    assert not watchdog.worth_filing(state, False, FETCH_UNRESOLVED, cut_off=lambda what: True)
+    assert watchdog.FETCH_STREAK not in state, "nothing counted"
 
 
 # --- repair -------------------------------------------------------------------------------

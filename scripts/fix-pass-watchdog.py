@@ -198,12 +198,20 @@ def fetch(root: Path, base: str) -> str:
     return said
 
 
-def worth_filing(state: dict, ok: bool, what: str) -> bool:
+def worth_filing(
+    state: dict, ok: bool, what: str, cut_off: Callable[[str], bool] | None = None
+) -> bool:
     """Whether this fire's self-update result is a finding: any failure but a fetch, and
-    a fetch that has now failed `FETCH_FIRES` fires running (`state` counts them)."""
+    a fetch that has now failed `FETCH_FIRES` fires running (`state` counts them).
+
+    A fetch that failed because this machine has no network (`cut_off`, by default
+    `harness_events.cut_off`) neither counts nor files: fc172488 was filed on 2026-11-12
+    after six fires of a night without DNS, which no session could act on."""
     if ok or not what.startswith(FETCH_FAILED):
         state.pop(FETCH_STREAK, None)
         return not ok
+    if (cut_off or harness_events.cut_off)(what):
+        return False
     state[FETCH_STREAK] = state.get(FETCH_STREAK, 0) + 1
     return state[FETCH_STREAK] >= FETCH_FIRES
 

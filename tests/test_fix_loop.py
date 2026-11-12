@@ -478,6 +478,27 @@ def test_a_session_refused_at_login_is_sent_again_and_filed_once_for_a_person(ct
     assert fix_ledger.sent_since(fix_ledger.read_ledger(ctx.ledger_path), "dependabot", sent) == 0
 
 
+def test_a_session_cut_off_from_the_api_is_sent_again_not_filed(ctx, monkeypatch):
+    """87308413, 9f3365ec, ea559e66, 1f71e4cf: four ledger fixers in a row on 2026-11-12
+    each replied "API Error: Can't reach the API server ... (ENOTFOUND)" and nothing else,
+    a night without DNS, and each was filed as a fixer that ended without an outcome."""
+    sent = NOW - _dt.timedelta(minutes=10)
+    fix_ledger.record(ctx.ledger_path, KEY, "n", sent)
+    path = tree(ctx, monkeypatch, sent=sent, transcript_age=_dt.timedelta(minutes=9))
+    log = fix_reports.transcript_dir(path) / "s.jsonl"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f'{{"type": "assistant", "timestamp": "{sent.isoformat()}", "error": '
+            f'"server_error", "apiError": "{fix_reports.API_UNREACHABLE}", '
+            f'"isApiErrorMessage": true}}\n'
+        )
+    closed, journal = close(ctx)
+    assert journal.findings == []
+    assert closed.lines == ["carameli agent/x-0919 -- cut off from the API; sent again"]
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.OFFLINE and fix_ledger.sends(entry) == 0
+
+
 def test_a_session_whose_login_was_refused_is_one_group_awaiting_a_person(ctx, monkeypatch):
     """2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40: on 2026-10-18 five fixers in two
     projects each replied "Login expired" and nothing else. Each was filed as a dead
@@ -1420,6 +1441,20 @@ def test_each_unhealthy_job_a_collector_names_is_its_own_group(ctx):
 def test_a_collector_findings_detail_survives_its_recurrences(ctx, detail, state):
     [found] = fix_loop.collector_findings(ctx, [("collector: x", fix_loop.collectors.FAIL, detail)])
     assert found.detail == f"x: {state}"
+
+
+def test_a_verdict_failing_on_name_lookups_is_held_for_a_grace(ctx):
+    """10e70909, 33ac7b6f, 25193b9f: ibkr_trader's and sports_betting's verdicts from a
+    night without DNS, filed though no session could act on them, and failing on until
+    each daily job's next run. Held for `UNRESOLVED_GRACE`; a container still unable to
+    resolve past it is filed."""
+    row = ("collector: ibkr_trader", fix_loop.collectors.WARN, _IBKR_HEALTH)
+    now = ctx.now.timestamp()
+    lately = {"ibkr_trader": {"ok": False, fix_loop.collectors.UNRESOLVED_SINCE: now - 3600}}
+    assert fix_loop.collector_findings(ctx, [row], lately) == []
+    long_ago = now - fix_loop.collectors.UNRESOLVED_GRACE - 1
+    lasting = {"ibkr_trader": {"ok": False, fix_loop.collectors.UNRESOLVED_SINCE: long_ago}}
+    assert len(fix_loop.collector_findings(ctx, [row], lasting)) == 1
 
 
 def test_a_silent_engine_is_left_to_the_collectors_job_that_files_it_once(ctx):

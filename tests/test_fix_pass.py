@@ -30,6 +30,7 @@ import ship_step
 
 fix_pass = load_script("scripts/fix-pass.py")
 MISSING_TOOLS = fix_pass.missing_tools  # the real preflight, before `tools_on_path` stubs it
+OFFLINE = fix_pass.offline  # the real probe, before `online` stubs it
 
 NOW = _dt.datetime(2026, 9, 19, 9, 0, tzinfo=_dt.UTC)
 VENDORED = ("scripts/hooks/tests/test_untested_symbols.py::t",)
@@ -45,6 +46,12 @@ CLOSED_SINCE = fix_pass.fix_send.closed_since
 def tools_on_path(monkeypatch):
     """Every CLI the preflight asks for is present unless a test says otherwise."""
     monkeypatch.setattr(fix_pass, "missing_tools", lambda: [])
+
+
+@pytest.fixture(autouse=True)
+def online(monkeypatch):
+    """GitHub resolves unless a test says otherwise: the suite never asks the real DNS."""
+    monkeypatch.setattr(fix_pass, "offline", lambda: False)
 
 
 @pytest.fixture(autouse=True)
@@ -2066,6 +2073,31 @@ def test_the_bootstrap_provides_every_cli_the_pass_requires():
     for tool in fix_pass.REQUIRED_TOOLS:
         wanted = "Test-Runs 'python3'" if tool == "python3" else f"Command = '{tool}'"
         assert wanted in script, tool
+
+
+def test_an_offline_pass_runs_nothing_and_files_nothing(world, monkeypatch, capsys):
+    """2026-11-12: a night without DNS filed eleven `regate-failed` rows and sent four
+    ledger fixers that died on their first reply. Offline, the pass now stops before its
+    preflight and records why, exiting clean so the watchdog files nothing either."""
+    monkeypatch.setattr(fix_pass, "offline", lambda: True)
+    monkeypatch.setattr(fix_pass, "missing_tools", lambda: pytest.fail("probed offline"))
+    monkeypatch.setattr(fix_pass, "run", lambda *a, **k: pytest.fail("the pass started"))
+    code = fix_pass.main(["--mode", "dispatch", "--workspace", str(world["workspace"])])
+    assert code == fix_pass.EXIT_OK
+    assert "offline -- github.com does not resolve" in capsys.readouterr().out
+    assert artifact(world).startswith("fix-pass: offline -- github.com does not resolve")
+
+
+def test_cannot_start_answers_none_on_a_network_with_every_cli(world):
+    assert fix_pass.cannot_start() is None
+
+
+def test_offline_asks_whether_github_resolves():
+    def refused(host, port):
+        raise OSError("getaddrinfo failed")
+
+    assert OFFLINE(lookup=refused) is True
+    assert OFFLINE(lookup=lambda host, port: [("addr",)]) is False
 
 
 def test_a_switched_off_pass_needs_no_cli(world, monkeypatch):

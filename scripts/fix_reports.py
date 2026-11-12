@@ -491,6 +491,25 @@ def login_refused(path: Path) -> bool:
     return False
 
 
+# What Claude Code files as a reply it could not get because the API was unreachable:
+# "API Error: Can't reach the API server -- check your internet or DNS (ENOTFOUND)".
+API_UNREACHABLE = "connection_failed"
+
+
+def api_unreachable(path: Path) -> bool:
+    """Whether a transcript's last reply is Claude Code failing to reach the API at all."""
+    for line in reversed(_tail(path) or []):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "assistant":
+            return bool(record.get("isApiErrorMessage")) and (
+                record.get("apiError") == API_UNREACHABLE
+            )
+    return False
+
+
 def newest_transcript(tree: Path, projects_root: Path | None = None) -> Path | None:
     dated = [
         (when, path)
@@ -599,7 +618,12 @@ LOGGED_OUT = "logged out"
 # Refused by its launcher because the checkout is untrusted (`launch_untrusted`): the
 # machine's setup again, not the session's, and a person's to take.
 UNTRUSTED = "refused as an untrusted workspace"
-DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED, LOGGED_OUT, UNTRUSTED)
+# Ended on a reply it could not get because the API was unreachable (`api_unreachable`):
+# the machine's network, not the session. On 2026-11-12 four ledger fixers in a row died
+# this way during a night without DNS, each filed as `fixer-no-outcome`, so like a
+# restart its send is taken back and nothing is filed.
+OFFLINE = "cut off from the API"
+DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED, LOGGED_OUT, UNTRUSTED, OFFLINE)
 
 
 def booted_at(now: _dt.datetime | None = None) -> _dt.datetime | None:
@@ -653,6 +677,7 @@ def session_state(
     `DONE` once it left an intent or a report and has no background task still out,
     `WORKING` while its transcript moves (or it is still inside `START_GRACE`), one of
     `DEAD` otherwise: `LOGGED_OUT` when its last reply was the login's refusal,
+    `OFFLINE` when it was the API being unreachable,
     `UNTRUSTED` when its launcher refused the checkout as untrusted, and
     `INTERRUPTED` when the machine started (`booted`, from `booted_at`) after the session
     was last heard from, with no wait. `""` for a tree with no
@@ -686,6 +711,8 @@ def _heard(
     # Judged at once rather than after `QUIET_AFTER`: the session is over on that reply.
     if login_refused(transcript):
         return LOGGED_OUT
+    if api_unreachable(transcript):
+        return OFFLINE
     if _restarted(touched, booted, now):
         return INTERRUPTED
     return NO_OUTCOME if now - touched > QUIET_AFTER else WORKING

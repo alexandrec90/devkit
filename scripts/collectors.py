@@ -79,7 +79,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import collector_build
+import harness_events
 import collector_handoff as handoff
 import collector_tasks
 import collectors_config as config
@@ -102,6 +104,16 @@ ARTIFACT = Path("logs/collectors.log")
 # `started_at` is when this job last started or redeployed it (`settling`).
 HEALTH = Path("logs/collectors.health.json")
 CODE_AT, HELD, STARTED_AT = "code_at", "held", "started_at"
+# When a project's health first said a name could not be looked up
+# (`harness_events.says_unresolved`), kept while it goes on saying so. A job fails that
+# way for as long as the machine is offline, and then until its own next run, which for
+# a daily job is up to a day later: on 2026-11-12 ibkr_trader's `ipo_calendar` and
+# sports_betting's providers were filed off verdicts of "Name or service not known" from
+# a night without DNS (10e70909, 33ac7b6f, 25193b9f), with nothing for a fixer to do.
+# `fix_loop.collector_findings` holds such a verdict for `UNRESOLVED_GRACE` from then;
+# past it, a container that still cannot resolve is worth a session.
+UNRESOLVED_SINCE = "unresolved_since"
+UNRESOLVED_GRACE = 26 * 60 * 60
 
 # Present while a `maintain` pass is acting on containers, `{started_at, until}`, and
 # removed when it ends. A start or redeploy builds for minutes and then leaves the
@@ -758,9 +770,18 @@ def load_health(path: Path) -> dict[str, dict]:
     )
 
 
-def check_health(target: Target, box: Container, docker: Docker, report: Report) -> dict:
+def check_health(
+    target: Target,
+    box: Container,
+    docker: Docker,
+    report: Report,
+    last: dict | None = None,
+    clock: float | None = None,
+) -> dict:
     """Run the project's own health command; the verdict is theirs, so it is not a failure
-    of this job -- the tray shows it amber rather than turning the job red."""
+    of this job -- the tray shows it amber rather than turning the job red. A failing one
+    that says a name could not be looked up carries `UNRESOLVED_SINCE`, from `last` (the
+    project's previous record) while it went on saying so, else `clock`."""
     code, out = docker.health(box, target.collector.health)
     name = target.collector.project
     if code == 0:
@@ -769,9 +790,14 @@ def check_health(target: Target, box: Container, docker: Docker, report: Report)
     summary = f"exit {code}: {first_line(out)}"
     report.say(f"{name}: {HEALTH_FAILING} ({summary})")
     report.lines.extend(f"    {line}" for line in out.splitlines()[:40])
-    verdict = {"ok": False, "summary": summary, "container": box.id}
+    verdict: dict = {"ok": False, "summary": summary, "container": box.id}
     if jobs := unhealthy_jobs(out):
         verdict["unhealthy"] = jobs
+    if harness_events.says_unresolved(out):
+        since = (last or {}).get(UNRESOLVED_SINCE)
+        verdict[UNRESOLVED_SINCE] = (
+            since if isinstance(since, (int, float)) else (clock or _clock())
+        )
     return verdict
 
 
@@ -949,7 +975,7 @@ def keep_running(
             "settle"
         )
         return {**code, STARTED_AT: started}
-    return {**check_health(target, box, docker, report), **code}
+    return {**check_health(target, box, docker, report, last, clock), **code}
 
 
 def last_start(recorded: object, engine: float | None) -> float | None:

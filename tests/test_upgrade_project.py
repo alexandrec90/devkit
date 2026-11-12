@@ -64,6 +64,12 @@ def no_open_adoption_pr(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def on_a_network(monkeypatch):
+    """GitHub resolves unless a test says otherwise: the suite never asks the real DNS."""
+    monkeypatch.setattr(up.harness_events, "resolves", lambda **_: True)
+
+
+@pytest.fixture(autouse=True)
 def no_policy_reinstall(monkeypatch):
     """No test reaches the real `install-git-policy.py`, whose `--yes` writes to this
     machine's `~/.devkit` and global git config. The rider's own decisions are pinned in
@@ -265,9 +271,32 @@ def test_the_pending_check_closes_the_superseded_ones_first(tmp_path, monkeypatc
     closed: list[tuple[Path, str]] = []
     monkeypatch.setattr(up, "close_superseded", lambda p, t: closed.append((p, t)) or ["#170"])
     monkeypatch.setattr(up, "open_adoption_pr", lambda _p, _t: "#171 u/171")
-    assert up.pending_adoption(tmp_path, "carameli", "v0.11.21") == "#171 u/171"
+    assert up.pending_adoption(tmp_path, "carameli", "v0.11.21") == (
+        "devkit v0.11.21 is already up for adoption in #171 u/171"
+    )
     assert closed == [(tmp_path, "v0.11.21")]
     assert "closed #170, superseded by devkit v0.11.21" in capsys.readouterr().out
+
+
+def test_no_box_is_cut_on_a_machine_that_cannot_look_github_up(tmp_path, monkeypatch, capsys):
+    """2e881f69: offline, `open_adoption_pr` failed open, so a night without DNS cut
+    agent-terminal a second v0.11.88 box beside its open #11, and the box's commit was
+    refused by a branch policy that could not reach GitHub either."""
+    monkeypatch.setattr(up, "close_superseded", lambda _p, _t: pytest.fail("asked GitHub"))
+    monkeypatch.setattr(up, "open_adoption_pr", lambda _p, _t: pytest.fail("asked GitHub"))
+    held = up.pending_adoption(tmp_path, "carameli", "v0.11.88", online=lambda: False)
+    assert (
+        held == "GitHub cannot be looked up from this machine, so no box is cut for devkit v0.11.88"
+    )
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    monkeypatch.setattr(up.harness_events, "resolves", lambda **_: False)
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.11.88")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(up, "source_at_tag", lambda *_a: pytest.fail("a box was cut"))
+    ws = workspace(tmp_path, "carameli")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert "carameli -- GitHub cannot be looked up" in capsys.readouterr().out
 
 
 def test_an_older_adoption_box_is_discarded_once_a_newer_release_is_adopted(
