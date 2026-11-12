@@ -48,10 +48,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 
+import canonical_handoff
 import devkit_ports
 import devkit_project
-import task_branch as tb
-import worktree_tiers
 from devkit_render import TemplateError, render
 from project_env import (
     lock_dependencies,
@@ -819,7 +818,7 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     canonical = devkit_project.CANONICAL_WORKSPACE
     # Asked before the write, so a hand edit already sitting there is never carried off
     # onto a branch under this project's name.
-    clean_before = not dry_run and not _dirty(canonical)
+    clean_before = not dry_run and not canonical_handoff.dirty(canonical)
     for path in (canonical, live):
         shown = path.name if path == canonical else f"../{path.name}"
         if dry_run:
@@ -841,26 +840,6 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     handed = hand_off_registration(plan.name, canonical, slot=slot) if clean_before else Handoff()
     plan.slot_on_branch = handed.slot
     print(handed.said or f"          commit devkit's {canonical.name} on a branch and ship it")
-
-
-def _git_in(checkout: Path, runner=subprocess.run):
-    def git(*args: str) -> subprocess.CompletedProcess[str]:
-        return runner(
-            ["git", "-C", str(checkout), *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-
-    return git
-
-
-def _dirty(path: Path, runner=subprocess.run) -> bool:
-    """Whether git reports `path` changed in its checkout; False where git cannot say."""
-    done = _git_in(path.parent, runner)("status", "--porcelain", "--", path.name)
-    return done.returncode == 0 and bool(done.stdout.strip())
 
 
 REGISTRATION_INTENT = """Register {name} in the workspace registry
@@ -942,38 +921,29 @@ def hand_off_registration(
     An empty `said` when there is nothing to hand off, and the caller says to commit by
     hand: a linked worktree or a task branch (the edit is already on a branch), a checkout
     git cannot read, or a cut that failed (said as a WARNING, with the file left as it was).
+    The cut itself is `canonical_handoff.hand_off`, which `plug-projects.py` shares.
     """
-    checkout = canonical.parent
-    git = _git_in(checkout, runner)
-    if not (checkout / ".git").is_dir() or not _dirty(canonical, runner):
-        return Handoff()
-    branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    if branch != tb.detect_default_branch(git, fallback="main"):
-        return Handoff()
-    heads = git("for-each-ref", "--format=%(refname:short)", "refs/heads").stdout.split()
-    task = tb.branch_name(tb.slugify(f"register-{name}"), set(heads))
-    tree = worktree_tiers.default_root(checkout) / task.partition("/")[2]
-    cut = git("worktree", "add", "--quiet", "--no-track", "-b", task, str(tree), "HEAD")
-    if cut.returncode != 0:
-        said = (cut.stderr or cut.stdout or "").strip().splitlines()
+    carried: list[bool] = []
+
+    def carry(tree: Path) -> str:
+        carried.append(_carry_slot(tree / devkit_ports.REGISTRY_NAME, name, slot))
+        return SLOT_INTENT.format(name=name, slot=slot) if carried[-1] else ""
+
+    intent = REGISTRATION_INTENT.format(name=name)
+    cut = canonical_handoff.hand_off(canonical, f"register-{name}", intent, runner, carry)
+    if cut.said:
         return Handoff(
-            f"  WARNING could not cut {task}: {said[-1] if said else cut.returncode}\n"
-            f"          commit devkit's {canonical.name} on a branch and ship it"
+            f"  WARNING {cut.said}\n          commit devkit's {canonical.name} on a branch and ship it"
         )
-    edited = canonical.read_text(encoding="utf-8")
-    (tree / canonical.name).write_text(edited, encoding="utf-8", newline="\n")
-    message = REGISTRATION_INTENT.format(name=name)
-    carried = _carry_slot(tree / devkit_ports.REGISTRY_NAME, name, slot)
-    if carried:
-        message += SLOT_INTENT.format(name=name, slot=slot)
-    intent = tree / "logs" / "ship-intent.md"
-    intent.parent.mkdir(parents=True, exist_ok=True)
-    intent.write_text(message, encoding="utf-8", newline="\n")
-    git("checkout", "--", canonical.name)
+    if cut.tree is None:
+        return Handoff()
+    went = any(carried)
     what = f"{canonical.name}'s registration" + (
-        f" and {devkit_ports.REGISTRY_NAME} slot {slot}" if carried else ""
+        f" and {devkit_ports.REGISTRY_NAME} slot {slot}" if went else ""
     )
-    return Handoff(f"  branch  {task}: {what}, for the fix pass to ship\n          {tree}", carried)
+    return Handoff(
+        f"  branch  {cut.branch}: {what}, for the fix pass to ship\n          {cut.tree}", went
+    )
 
 
 def _carry_slot(registry: Path, name: str, slot: object) -> bool:

@@ -1271,6 +1271,84 @@ def test_a_failing_check_from_another_workflow_is_its_own_evidence(monkeypatch, 
     assert Path(failure.evidence) == tmp_path / "ev" / "carameli-pr-412"
 
 
+# bb6fdcee: PR #760's run 43092636831 uploaded `test-failures` (38 KB), but `gh` answered
+# HTTP 502 for the download and for `--log-failed`, and its fixer was told "No artifact
+# came down from the run" with nothing but the red job's name to go on.
+ARTIFACTS = ("api", "repos/{owner}/{repo}/actions/runs/7/artifacts")
+UPLOADED = {"artifacts": [{"name": "test-failures", "expired": False}]}
+
+
+def test_a_failed_download_is_tried_again_before_it_counts(tmp_path):
+    tries: list[str] = []
+
+    def gh(*args):
+        if args[:2] == ("run", "download"):
+            tries.append("download")
+            if len(tries) == 2:
+                (Path(args[args.index("-D") + 1]) / "test-failures.log").write_text(
+                    SUMMARY, encoding="utf-8"
+                )
+            return subprocess.CompletedProcess(args, 0 if len(tries) == 2 else 1, "", "502")
+        return subprocess.CompletedProcess(args, 1, "", "no")
+
+    assert ev.run_evidence(gh, "7", tmp_path / "e") == ([SUMMARY], [])
+    assert tries == ["download", "download"]
+    assert not ev.unfetched(tmp_path / "e")
+
+
+def test_uploaded_artifacts_that_will_not_come_down_are_unfetched(tmp_path):
+    jobs = [{"name": "Tests", "conclusion": "failure", "steps": []}]
+    failed_log = ("run", "view", "7", "--log-failed")
+    gh = table({("run", "view", "7"): {"jobs": jobs}, failed_log: "", ARTIFACTS: UPLOADED})
+    assert ev.run_evidence(gh, "7", tmp_path / "e") == ([], jobs)
+    assert ev.unfetched(tmp_path / "e"), "the run has evidence this pass could not read"
+    assert ev.junit_report.read_artifacts(tmp_path / "e") == [], "the note is not evidence"
+
+
+def test_a_run_that_uploaded_nothing_or_only_expired_artifacts_is_not_unfetched(tmp_path):
+    for listed in ({"artifacts": []}, {"artifacts": [{"name": "x", "expired": True}]}):
+        ev.run_evidence(table({ARTIFACTS: listed}), "7", tmp_path / "e")
+        assert not ev.unfetched(tmp_path / "e"), listed
+    ev.run_evidence(table({}), "7", tmp_path / "e")
+    assert not ev.unfetched(tmp_path / "e"), "a listing gh could not give proves nothing missed"
+
+
+def test_a_pr_whose_evidence_would_not_come_down_waits_for_the_next_pass(tmp_path):
+    jobs = [{"name": "Tests", "conclusion": "failure", "steps": [], "databaseId": 3}]
+    runs = [{"databaseId": 7, "headSha": "sha1"}]
+    answers = {
+        ("run", "list"): runs,
+        ("run", "view", "7"): {"jobs": jobs},
+        ("run", "view", "7", "--log-failed"): "",
+        ARTIFACTS: UPLOADED,
+    }
+    held = _read_pr_with(tmp_path, answers)
+    assert held.unread and held.signature, "named by its job alone, and still held"
+    named = _read_pr_with(tmp_path, {**answers, ("run", "view", "7", "--log-failed"): SUMMARY})
+    assert not named.unread, "the failed log named the test, so the fixer is not blind"
+
+
+def test_only_unfetched_evidence_with_nothing_named_holds_the_failure(tmp_path):
+    dest = tmp_path / "e"
+    dest.mkdir()
+    gh = table({ARTIFACTS: UPLOADED})
+    assert ev.download(gh, "7", dest) is False
+    assert ev.held_unfetched(dest, []), "uploaded, not fetched, and nothing names a test"
+    assert not ev.held_unfetched(dest, [SUMMARY]), "the failed log named it: not blind"
+    assert ev.settle_unread(gh, ["7"], False, [], ("Tests",), dest) == (("Tests",), True)
+    assert ev.settle_unread(gh, ["7"], True, [], ("Tests",), dest)[1] is False, (
+        "a conflict is read from git, not from the run"
+    )
+    assert not ev.held_unfetched(tmp_path / "never-read", [])
+
+
+def _read_pr_with(tmp_path: Path, answers: dict) -> fix_plan.Failure:
+    gh = table(answers)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+        return ev.read_pr(tmp_path, ev.pr_failure("devkit", pr()), tmp_path / "ev")
+
+
 def test_no_failed_log_saves_nothing(tmp_path):
     ev.run_evidence(table({}), "7", tmp_path / "e")
     assert not (tmp_path / "e" / ev.FAILED_LOG).exists()

@@ -533,6 +533,37 @@ def test_a_subagent_waiting_on_the_call_claude_code_moved_is_not_polling():
     assert classes(rows) == ["poll"], "a top-level session gets the notice, so it can stop"
 
 
+# be233ab6, the thirteenth: what Claude Code answers a call made with `run_in_background`.
+BACKGROUNDED = (
+    "Command running in background with ID: bfv3i82di. Output is being written to: "
+    "C:\\T\\tasks\\bfv3i82di.output. You will be notified when it completes."
+)
+
+
+def test_a_subagent_waiting_on_a_run_it_backgrounded_itself_is_not_polling():
+    """A subagent backgrounded its own test run, then waited on the file with one `until`
+    loop. The notice it was promised cannot reach it before it returns, so that loop is
+    the same one wait a foreground call moved out at 180 s leaves, at the same cost."""
+    run = {
+        "type": "tool_use",
+        "id": "1",
+        "name": "PowerShell",
+        "input": {
+            "command": "python scripts/run-tests.py tests/test_x.py",
+            "run_in_background": True,
+        },
+    }
+    started = [{"type": "assistant", "message": {"content": [run]}}]
+    started.append(result(BACKGROUNDED, "1", error=False))
+    wait = 'until grep -q "exited with code" "C:/T/tasks/bfv3i82di.output"; do sleep 5; done'
+    rows = [*started, call(wait, "2"), result("3 passed", "2", error=False)]
+    assert subagent(rows) == []
+    assert classes(rows) == ["poll"], "a top-level session gets the notice, so it can stop"
+    assert subagent([*started, call("until grep -q x other.log; do sleep 5; done", "2")]) == [
+        "poll"
+    ], "only the file of a call of its own"
+
+
 def test_a_subagents_loop_on_anything_else_is_still_a_poll():
     """Only the call Claude Code moved: its other waits are the habit."""
     rows = [call("python -m pytest tests/test_x.py", "1"), result(MOVED, "1", error=False)]
@@ -598,6 +629,8 @@ def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
     # 2d4d52ac, the twelfth: Claude Code moves that foreground call out at 180 s, and the
     # one wait left is the one `MOVED_TO_BACKGROUND` excuses.
     assert "one `until` loop on the file named when Claude Code moves that call out" in flat
+    # be233ab6, the thirteenth: or a call it backgrounded itself, which `BACKGROUNDED` excuses.
+    assert "or when it backgrounded the call itself" in flat
 
 
 def test_a_module_the_tree_itself_holds_is_a_code_defect_not_the_environment(tmp_path):

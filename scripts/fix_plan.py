@@ -573,8 +573,9 @@ def skip_reason(failure: Failure, latest_tag: str, prefixes: tuple[str, ...]) ->
     """Why this failure gets no agent, or "" when it gets one. Four shapes, each said."""
     if failure.unread:
         return (
-            "unread: gh answered nothing for the red run's jobs this pass, which is not a "
-            "run that names nothing; the next pass reads it again rather than send one blind"
+            "unread: gh answered nothing for the red run's jobs, or would not hand over the "
+            "artifacts it uploaded, this pass, which is not a run that names nothing; the "
+            "next pass reads it again rather than send one blind"
         )
     on_branch = failure.kind in (PR, COMMIT)
     if on_branch and is_release(failure.head):
