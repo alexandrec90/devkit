@@ -506,8 +506,20 @@ def test_a_checkout_follows_green_and_not_the_tip(checkout):
     start = _git(checkout, "rev-parse", "HEAD")
     _publish_green(checkout, start)
     ok, what = watchdog.self_update(checkout)
-    assert (ok, what) == (True, "current")
+    # c6c538d9: a bare "current" read as running main's code while a fix waited behind green.
+    assert (ok, what) == (
+        True,
+        "current with origin/green; 1 commit(s) on origin/main wait for its gate",
+    )
     assert (checkout / "a.txt").read_text(encoding="utf-8") == "1\n", "main is ahead, unjudged"
+
+
+def test_a_checkout_current_with_green_at_mains_tip_is_plainly_current(checkout):
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    _publish_green(checkout, _git(checkout, "rev-parse", "origin/main"))
+    watchdog.self_update(checkout)
+    assert watchdog.self_update(checkout) == (True, "current")
+    assert watchdog.trailing(checkout, "main", "origin/main") == "", "main itself trails nothing"
 
 
 def test_a_checkout_moves_when_green_does(checkout):

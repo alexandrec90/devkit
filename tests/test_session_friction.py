@@ -542,7 +542,8 @@ BACKGROUNDED = (
 
 def test_a_subagent_waiting_on_a_run_it_backgrounded_itself_is_not_polling():
     """A subagent backgrounded its own test run, then waited on the file with one `until`
-    loop. The notice it was promised cannot reach it before it returns, so that loop is
+    loop. The notice it was promised arrives only between its calls, and with nothing else
+    to call it would return first, so that loop is
     the same one wait a foreground call moved out at 180 s leaves, at the same cost."""
     run = {
         "type": "tool_use",
@@ -624,13 +625,18 @@ def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
     # `until` loop anyway, since a subagent that ends its turn has returned -- the notice
     # the rule promised never reaches it. The rule names the one shape that works there.
     flat = " ".join(section.split())
-    assert "A subagent gets no notice before it returns" in flat
-    assert "in the foreground instead" in flat
+    # 977b93dc: "no notice before it returns" was false -- a working subagent got one
+    # between its own calls -- so the rule says when it arrives, and that only a subagent
+    # left with nothing but the wait takes the foreground.
+    assert "A subagent's notice arrives only between its calls" in flat
+    assert "left with only the wait, it runs the job in the foreground" in flat
     # 2d4d52ac, the twelfth: Claude Code moves that foreground call out at 180 s, and the
     # one wait left is the one `MOVED_TO_BACKGROUND` excuses.
     assert "one `until` loop on the file named when Claude Code moves that call out" in flat
     # be233ab6, the thirteenth: or a call it backgrounded itself, which `BACKGROUNDED` excuses.
-    assert "or when it backgrounded the call itself" in flat
+    assert "or it backgrounded it" in flat
+    # 977b93dc: Claude Code refuses a leading `sleep`, which cost that subagent three turns.
+    assert "never `sleep`" in flat
 
 
 def test_a_module_the_tree_itself_holds_is_a_code_defect_not_the_environment(tmp_path):
