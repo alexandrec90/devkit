@@ -422,11 +422,72 @@ def test_after_apply_notes_send_nobody_to_commit_after_a_clone_only_run():
     notes = plug_projects.after_apply_notes
     assert notes([Step(plug_projects.CLONE, "beta", clone=True)]) == []
     assert any(
-        "commit workspace.jsonc" in line for line in notes([Step(plug_projects.UNPLUG, "a")])
+        "ship workspace.jsonc from a worktree" in line
+        for line in notes([Step(plug_projects.UNPLUG, "a")])
     )
     plugged = notes([Step(plug_projects.PLUG, "a")])
-    assert any("commit workspace.jsonc" in line for line in plugged)
+    assert any("ship workspace.jsonc from a worktree" in line for line in plugged)
     assert any("ports.toml" in line for line in plugged)
+
+
+def test_a_handed_off_edit_sends_nobody_to_commit_it():
+    """a5ec492b: "commit workspace.jsonc on a task branch" was done in devkit's own
+    checkout, which the fix pass runs from, so the pass ran that branch."""
+    notes = plug_projects.after_apply_notes([Step(plug_projects.UNPLUG, "a")], handed=True)
+    assert not any("workspace.jsonc" in line for line in notes)
+    assert not any(
+        "task branch" in line
+        for line in plug_projects.after_apply_notes([Step(plug_projects.UNPLUG, "a")])
+    ), "the note left for a failed cut never says to branch in the checkout"
+
+
+def test_the_registry_change_names_every_flip_and_merges_once_green():
+    change = plug_projects.registry_change
+    assert change([Step(plug_projects.CLONE, "beta", clone=True)]) == ("", "")
+    slug, intent = change(
+        [Step(plug_projects.UNPLUG, "carameli"), Step(plug_projects.PLUG, "skinamp")]
+    )
+    assert slug == "plug-skinamp-unplug-carameli"
+    assert intent.startswith("Plug skinamp and unplug carameli in the workspace registry\n\n")
+    assert "plugged skinamp and unplugged carameli" in intent
+    assert intent.rstrip().endswith("\n\nAutomerge: yes"), "the pick was the decision"
+
+
+def test_an_unplug_leaves_the_static_checkout_on_main_and_clean(tmp_path):
+    """a5ec492b, end to end against a real checkout: the edit lands on a task branch in a
+    worktree with its intent, and the checkout the pass runs from is left as it was."""
+    path = tmp_path / "devkit"
+    path.mkdir()
+    canonical = path / "workspace.jsonc"
+    canonical.write_text(REGISTRY, encoding="utf-8", newline="\n")
+    for args in (
+        ("init", "--quiet", "-b", "main"),
+        ("config", "core.hooksPath", str(path / ".nohooks")),
+        ("config", "user.email", "t@e.st"),
+        ("config", "user.name", "t"),
+        ("add", "-A"),
+        ("commit", "--quiet", "-m", "init"),
+    ):
+        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+    steps = [Step(plug_projects.UNPLUG, "alpha")]
+    canonical.write_text('{"folders": [{"path": "beta"}]}', encoding="utf-8", newline="\n")
+
+    said = plug_projects.hand_off_registry(steps, canonical)
+
+    # What `fix-pass-watchdog.self_update` asks before it fast-forwards.
+    status = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == "" and canonical.read_text(encoding="utf-8") == REGISTRY
+    assert said.startswith("  branch  agent/unplug-alpha-")
+    (tree,) = (path / ".claude" / "worktrees").iterdir()
+    assert "alpha" not in devkit_project.known_projects(
+        (tree / "workspace.jsonc").read_text(encoding="utf-8")
+    )
+    intent = (tree / "logs" / "ship-intent.md").read_text(encoding="utf-8")
+    assert intent.startswith("Unplug alpha in the workspace registry\n")
 
 
 def test_toggling_is_its_own_inverse():

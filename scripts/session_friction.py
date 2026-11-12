@@ -119,6 +119,10 @@ SETTLE_MAX = 30  # seconds: longer than a run takes to attach is a wait, not a s
 # stop; a subagent that stops has returned, so the rule has it run the job in the
 # foreground, and this leaves it one loop on the file it was told to read (2d4d52ac).
 MOVED_TO_BACKGROUND = re.compile(r"\ACommand was moved to the background \(ID: (\w+)\)")
+# And a call it ran with `run_in_background` itself: the notice that answer promises
+# cannot reach a subagent either, so its one loop on that file is the same wait at the
+# same cost -- filed as the poll group's thirteenth recurrence (be233ab6).
+BACKGROUNDED = re.compile(r"\ACommand running in background with ID: (\w+)")
 # A pause between the *different* runs of one experiment re-reads nothing: `for S in
 # "set a" "set b"; do restart; run "$S"; sleep 20; done` paces three measurements, each
 # its own work, where a poll asks one question again. A session comparing a database's
@@ -1018,7 +1022,8 @@ class _Session:
     started: dict[str, str] = field(default_factory=dict)  # call id -> when it was made
     settled: bool = False  # it spent the one `SETTLE` a session is excused
     queued: bool = False  # it wrote a task into `QUEUE_DIR`, which is what a to-do owes
-    moved: set[str] = field(default_factory=set)  # task ids `MOVED_TO_BACKGROUND` named
+    # task ids `MOVED_TO_BACKGROUND` or `BACKGROUNDED` named: its own calls' output files
+    moved: set[str] = field(default_factory=set)
 
     def note(self, cls: str, what: str, event: Event) -> None:
         """Keep the first event of each `(cls, what)`; an empty `what` is no finding."""
@@ -1148,6 +1153,7 @@ class _Session:
         a missing environment: `| tail` hides pytest's exit code."""
         command = self.calls.get(event.call_id, "")
         self.moved.update(MOVED_TO_BACKGROUND.findall(event.text))
+        self.moved.update(BACKGROUNDED.findall(event.text))
         self._brief_wait(event)
         self._unclaim(event)
         # Once: the same dirty lock in every later `git status` is no new change.

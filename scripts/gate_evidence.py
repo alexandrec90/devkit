@@ -161,6 +161,75 @@ def run_attempt(gh: Gh, run_id: str, sig: tuple[str, ...]) -> int:
         return 0
 
 
+# Tries at `gh run download` before a failure counts: GitHub answers it HTTP 502 often
+# enough that one try sent a fixer out blind (bb6fdcee).
+DOWNLOAD_ATTEMPTS = 2
+# Written under a run's evidence directory when it uploaded artifacts `gh` would not hand
+# over; neither a `.log` nor an `.xml`, so `junit_report` never reads it as evidence.
+UNFETCHED = "unfetched.txt"
+
+
+def download(gh: Gh, run_id: str, dest: Path) -> bool:
+    """Whether the run's artifacts are under `dest`. False when the download failed.
+
+    A failed download is a run with nothing uploaded, or one `gh` could not fetch, and
+    only the second leaves evidence unread: PR #760's run 43092636831 uploaded
+    `test-failures`, `gh` answered HTTP 502 for it and for `--log-failed`, and the
+    fixer was told "No artifact came down from the run" with only a job's name to go on
+    (bb6fdcee). So a failure is tried again, then the run's listing decides: anything
+    uploaded and not expired writes `UNFETCHED`. A listing `gh` cannot give proves
+    nothing was missed no more than that something was, and holding on it would also
+    hold the runs that upload nothing because no step ever ran, so it holds nothing.
+    """
+    said = ""
+    for _ in range(DOWNLOAD_ATTEMPTS):
+        done = gh("run", "download", str(run_id), "-D", str(dest))
+        if getattr(done, "returncode", 1) == 0:
+            return True
+        said = str(getattr(done, "stderr", "") or getattr(done, "stdout", "") or "").strip()
+    listed = gh_json(gh("api", f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/artifacts"))
+    uploaded = listed.get("artifacts") if isinstance(listed, dict) else None
+    if not isinstance(uploaded, list) or not any(
+        isinstance(item, dict) and not item.get("expired") for item in uploaded
+    ):
+        return False  # nothing to fetch, or nothing known to be missed
+    (dest / UNFETCHED).write_text(
+        f"gh run download {run_id} failed {DOWNLOAD_ATTEMPTS} times: {said or 'no message'}\n",
+        encoding="utf-8",
+    )
+    return False
+
+
+def unfetched(where: Path) -> bool:
+    """Whether a run read under `where` uploaded artifacts `download` could not fetch."""
+    return where.is_dir() and any(where.rglob(UNFETCHED))
+
+
+def held_unfetched(where: Path, texts: list[str]) -> bool:
+    """Whether a failure read under `where` waits for the next pass: evidence was
+    uploaded and not fetched, and nothing that did come down names a failing test or
+    file. A failure named only by its job would send its fixer out blind."""
+    return unfetched(where) and not fix_plan.signature_from_logs(texts)
+
+
+def settle_unread(
+    gh: Gh,
+    run_ids: list[str],
+    conflicted: bool,
+    texts: list[str],
+    sig: tuple[str, ...],
+    where: Path,
+) -> tuple[tuple[str, ...], bool]:
+    """`(signature, unread)` once both ways a read comes back short are asked: evidence
+    uploaded and not fetched (`held_unfetched`), and runs whose evidence named nothing,
+    their jobs asked once more (`reread`). A conflict is read from git, not a run."""
+    unread = not conflicted and held_unfetched(where, texts)
+    if fix_plan.names_nothing(sig):
+        sig, again = reread(gh, run_ids, conflicted, texts)
+        unread = unread or again
+    return sig, unread
+
+
 def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]]:
     """`(artifact texts, jobs)`: the run's artifacts downloaded under `dest` and read by
     `junit_report`, and its jobs whenever those texts name nothing.
@@ -173,9 +242,9 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
     """
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
-    done = gh("run", "download", str(run_id), "-D", str(dest))
+    fetched = download(gh, run_id, dest)
     drop_empty(dest)
-    texts = junit_report.read_artifacts(dest) if getattr(done, "returncode", 1) == 0 else []
+    texts = junit_report.read_artifacts(dest) if fetched else []
     junit_report.write_readable(dest)  # what the prompt tells the fixer to read first
     jobs: list[dict] | None = None
     named = set(fix_plan.signature_from_logs(texts))
@@ -499,9 +568,7 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     lost = () if conflicted else lost
     sig = lost_signature(lost) if lost else fix_plan.signature(conflicted, texts, jobs)
     sig = billing_signature(gh, sig, jobs)
-    unread = False
-    if fix_plan.names_nothing(sig):
-        sig, unread = reread(gh, run_ids, conflicted, texts)
+    sig, unread = settle_unread(gh, run_ids, conflicted, texts, sig, where)
     return replace(
         failure,
         signature=sig,
@@ -583,8 +650,8 @@ def read_default_branch(
     if lost := runner_lost(gh, jobs):
         return False, replace(failure, signature=lost_signature(lost), lost_runs=(run_id,))
     unread = False
-    if run_id and fix_plan.names_nothing(sig):
-        sig, unread = reread(gh, [run_id], False, texts)
+    if run_id:
+        sig, unread = settle_unread(gh, [run_id], False, texts, sig, where)
     return False, replace(
         failure,
         signature=sig,
@@ -682,9 +749,7 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
     where = root / evidence_slot(failure)
     texts, jobs = run_evidence(gh, run_id, where)
     sig = fix_plan.signature(False, texts, jobs)
-    unread = False
-    if fix_plan.names_nothing(sig):
-        sig, unread = reread(gh, [run_id], False, texts)
+    sig, unread = settle_unread(gh, [run_id], False, texts, sig, where)
     return replace(
         failure,
         signature=sig,
