@@ -75,6 +75,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # skip by hand).
 ENV_FLAG = "DEVKIT_E2E"
 
+# What every run adds to the environment it inherits. A name, not an inline literal,
+# because a fixer's prompt has to tell it what to set to reproduce a red run
+# (`fix_prompts.LOCAL_ENV`, which a test holds to this).
+RUN_ENV = {ENV_FLAG: "1", "PYTHONUTF8": "1"}
+
 # The workspace setting that assigns each project's nightly run to one machine.
 SETTING = "devkit.localE2e"
 
@@ -176,7 +181,7 @@ def prepare(git: Git, base: str) -> tuple[str, str]:
 def run_contract(project_dir: Path, timeout: float, runner=sweep.run_bounded) -> object:
     """`scripts/e2e.py` run in `project_dir` under the project's own interpreter."""
     python = e2e_results.venv_interpreter(project_dir, sweep.console_python())
-    env = {**os.environ, ENV_FLAG: "1", "PYTHONUTF8": "1"}
+    env = {**os.environ, **RUN_ENV}
     argv = [python, str(project_dir / e2e_results.CONTRACT)]
     return runner(argv, timeout, cwd=str(project_dir), env=env)
 

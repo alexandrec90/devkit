@@ -229,6 +229,31 @@ def test_a_devkit_medium_red_folded_upstream_is_told_how_to_reproduce_it():
     assert text.count(fix_prompts.LOCAL_RERUN.strip()) == 1
 
 
+def test_the_environment_a_tier_ran_in_is_the_wrappers_and_its_runners():
+    """d789e104: a fixer told to run a red test "the same way" saw it pass, because the
+    tier's run had `log-wrap.py`'s `FORCE_COLOR` and its shell did not."""
+    wrapper = load_script("scripts/log-wrap.py").COLOR_ENV
+    assert fix_prompts.WRAPPER_ENV == wrapper
+    assert fix_prompts.MEDIUM_ENV == wrapper | load_script("scripts/tier-pass.py").RUN_ENV
+    assert fix_prompts.LOCAL_ENV == wrapper | load_script("scripts/e2e-pass.py").RUN_ENV
+
+
+def test_each_tiers_prompt_names_the_environment_to_reproduce_it_under():
+    medium = fix_prompts.local_prompt(local_red(workflow=fix_plan.MEDIUM_TIER), "b")
+    local = fix_prompts.local_prompt(local_red(), "b")
+    assert "env FORCE_COLOR=1 PY_COLORS=1 " in medium
+    assert "PYTEST_XDIST_AUTO_NUM_WORKERS=2 in front of it" in medium
+    assert "env FORCE_COLOR=1 PY_COLORS=1 " in local
+    assert "DEVKIT_E2E=1" in local and "DEVKIT_E2E=1" not in medium
+
+
+def test_the_environment_sentence_is_one_env_prefix():
+    said = fix_prompts.env_said({"A": "1", "B": "x"})
+    assert "with env A=1 B=x in front of it" in said
+    assert said.startswith(" ") and said.endswith(".")
+    assert not set("`'\"") & set(said), "the prompt crosses a wt command line"
+
+
 def test_a_devkit_local_red_folded_upstream_is_told_how_to_reproduce_it():
     """devkit's own local red is harness-shaped, so it reaches the upstream session,
     whose shared sentence otherwise points at a run URL a local run does not have."""
