@@ -1487,6 +1487,23 @@ def test_a_commit_that_worked_is_never_retried():
     assert len([step for step in git.calls if step[0] == "commit"]) == 1
 
 
+def test_the_pre_commit_store_is_healed_before_the_first_commit(capsys):
+    """data-lake and sports_betting failed at `git commit` on 2026-09-28: a clone an
+    elevated session made was unreadable to the unelevated run. The heal is what lets
+    pre-commit clone it again, so it has to come before the commit, and say so."""
+    order: list[str] = []
+    git = CommitGit(["M  a.py\n"], [0])
+
+    def heal():
+        order.append("heal" if not git.calls else "late")
+        return ["https://github.com/pre-commit/pre-commit-hooks@v6.0.0 (x)"]
+
+    up.commit_with_hook_retry(git, "Adopt devkit v0.7.0", heal=heal)
+
+    assert order == ["heal"]
+    assert "pre-commit-hooks@v6.0.0" in capsys.readouterr().out
+
+
 def test_the_rewrite_is_detected_by_the_status_code_not_the_path_list():
     """A fixer rewrites files that were *already staged*, so the set of changed paths
     is identical afterwards and only the porcelain code moves. Comparing the parsed

@@ -55,6 +55,7 @@ import fix_red
 import fix_send
 import gate_evidence
 import installers
+import precommit_store
 import ship_intent
 import worktree
 from _loader import load_by_path
@@ -394,6 +395,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fix-pass: {why}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {why}")
         return EXIT_USAGE
+    if mode != fix_cycle.OFF:
+        # Its ship step commits through pre-commit, unelevated when scheduled: a clone an
+        # elevated fixer left in the store fails that commit (`precommit_store`).
+        healed = precommit_store.say_healed(precommit_store.heal())
+        if healed:
+            print(f"fix-pass: {healed}")
     try:
         return run(workspace, mode, launch)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:

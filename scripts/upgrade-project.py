@@ -84,6 +84,7 @@ from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import policy_runtime
+import precommit_store
 from adoption_prs import (
     close_superseded,
     open_adoption_pr,
@@ -650,7 +651,9 @@ def pull_to_fixpoint(
     )
 
 
-def commit_with_hook_retry(git, message: str) -> tuple[subprocess.CompletedProcess[str], bool]:
+def commit_with_hook_retry(
+    git, message: str, heal: Callable[[], list[str]] = precommit_store.heal
+) -> tuple[subprocess.CompletedProcess[str], bool]:
     """`git commit`, re-staged and retried once when the commit hooks rewrote the tree.
 
     Half of pre-commit's hooks are *fixers*: they reformat, they mirror a directory,
@@ -666,7 +669,14 @@ def commit_with_hook_retry(git, message: str) -> tuple[subprocess.CompletedProce
     what separates a hook that fixed something from a gate that refused something: a
     lint error the formatter cannot fix leaves the tree exactly as it was, and
     committing over it again would just fail twice and say so twice.
+
+    `heal` runs first: the scheduled run is unelevated, and a pre-commit clone an
+    elevated session left in the store failed data-lake's and sports_betting's commits
+    before any hook ran (2026-09-28). `precommit_store` says why.
     """
+    healed = precommit_store.say_healed(heal())
+    if healed:
+        print(f"upgrade: {healed}")
     before = _status(git)
     first = git("commit", "-m", message)
     if first.returncode == 0 or _status(git) == before:

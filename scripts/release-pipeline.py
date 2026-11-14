@@ -81,6 +81,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_evidence
+import precommit_store
 import release
 import sweep
 import task_branch
@@ -971,6 +972,11 @@ def main(argv: list[str] | None = None) -> int:
         print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
         return 0
     print()
+    # The release commit runs pre-commit from an unelevated nightly job, and a clone an
+    # elevated session left in the store failed it before any hook ran (v0.11.26).
+    healed = precommit_store.say_healed(precommit_store.heal())
+    if healed:
+        print(f"release-pipeline: {healed}")
     return run_pipeline(args.devkit, version, args.adopt, args.workspace, projects)
 
 
