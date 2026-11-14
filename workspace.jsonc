@@ -82,6 +82,9 @@
 		},
 		{
 			"path": "tvshell"
+		},
+		{
+			"path": "radio"
 		}
 	],
 	"extensions": {
@@ -1832,7 +1835,8 @@
 								"homelab",
 								"agent-terminal",
 								"d2-trader",
-								"tvshell"
+								"tvshell",
+								"radio"
 							]
 						}
 					]
@@ -1878,7 +1882,8 @@
 								"homelab",
 								"agent-terminal",
 								"d2-trader",
-								"tvshell"
+								"tvshell",
+								"radio"
 							]
 						}
 					]
@@ -2023,7 +2028,8 @@
 					"homelab",
 					"agent-terminal",
 					"d2-trader",
-					"tvshell"
+					"tvshell",
+					"radio"
 				],
 				"default": "carameli"
 			},
@@ -2728,7 +2734,8 @@
 					"homelab",
 					"agent-terminal",
 					"d2-trader",
-					"tvshell"
+					"tvshell",
+					"radio"
 				],
 				"default": "carameli"
 			},
