@@ -102,3 +102,6 @@ homelab = 8
 agent-terminal = 9
 d2-trader = 10
 tvshell = 11
+# Generated on slot 12 -- its `.env.example` says so -- with the workspace registration
+# left in devkit's checkout rather than handed off, so only the hint carried the slot.
+radio = 12
