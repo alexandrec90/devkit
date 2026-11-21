@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,49 @@ def _regate_world(monkeypatch, code: int, err: str = "", answers: list | None = 
     monkeypatch.setattr(fix_red.sweep, "git_for", lambda _p: lambda *a: None)
     monkeypatch.setattr(fix_red.tb, "detect_default_branch", lambda _git, fallback="main": "master")
     return asked
+
+
+def _e2e_workspace(tmp_path: Path, hosts=None) -> Path:
+    settings = {} if hosts is None else {"devkit.localE2e": {"hosts": hosts}}
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text(json.dumps({"folders": [], "settings": settings}), encoding="utf-8")
+    return workspace
+
+
+def test_a_project_another_machine_tests_has_no_local_result_here(tmp_path):
+    """This machine's results from before the run moved are never replaced, and held six
+    projects for two weeks behind a re-test due nowhere (DESKTOP-ML5F3PJ, 2026-11-21)."""
+    workspace = _e2e_workspace(tmp_path, {"*": "desktop-a", "carameli": "desktop-b"})
+    assert fix_red.e2e_here(workspace, ["carameli", "devkit"], "desktop-b") == ["carameli"]
+    assert fix_red.e2e_here(workspace, ["carameli", "devkit"], "desktop-c") == []
+
+
+def test_with_no_assignment_or_no_workspace_every_project_is_read_here(tmp_path):
+    projects = ["carameli", "devkit"]
+    assert fix_red.e2e_here(_e2e_workspace(tmp_path), projects, "desktop-a") == projects
+    assert fix_red.e2e_here(tmp_path / "absent", projects, "desktop-a") == projects
+
+
+def test_collect_red_reads_only_this_machines_heavy_tier_and_every_medium_one(
+    monkeypatch, tmp_path
+):
+    workspace = _e2e_workspace(tmp_path, "desktop-a")
+    monkeypatch.setattr(fix_red.rc_config.harness_events, "host_name", lambda: "desktop-b")
+    monkeypatch.setattr(fix_red.menu, "scan", lambda *_a: [])
+    monkeypatch.setattr(fix_red.gate_evidence, "collect_default_branches", lambda *_a: {})
+    monkeypatch.setattr(fix_red.gate_evidence, "collect", lambda *_a: [])
+    asked: dict = {}
+
+    def collect(_workspace, projects, _git_for, tier=fix_red.e2e_results.E2E):
+        asked[tier.workflow] = list(projects)
+        return []
+
+    monkeypatch.setattr(fix_red.e2e_results, "collect", collect)
+    fix_red.collect_red(workspace, ["carameli"], [])
+    assert asked == {
+        fix_red.e2e_results.E2E.workflow: [],
+        fix_red.e2e_results.MEDIUM.workflow: ["carameli"],
+    }
 
 
 def test_regate_dispatches_the_gate_on_the_default_branch(monkeypatch, tmp_path):

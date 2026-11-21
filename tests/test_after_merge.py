@@ -63,6 +63,8 @@ def test_its_id_hashes_its_path_and_the_commit_that_added_it():
         "pr:alexandrec90/carameli#12",
         "task:rebuild-db",
         "task:carameli/rebuild-db",
+        "outside:09:30-16:00 UTC-05:00 mon-fri",
+        "inside:00:00-24:00 UTC",
     ],
 )
 def test_every_condition_the_contract_names_parses(when):
@@ -102,6 +104,9 @@ def test_each_action_is_its_own_kind(body, kind):
         ('elevated = "reboot-when-idle"', "did not happen"),
         ('elevated = "restart-docker-service"', "did not happen"),
         ('run = "x"\nwhen = "task:rebuild"', "waits on itself"),
+        ('run = "x"\nwhen = "outside:09:30-16:00 America/New_York"', "time-zone database"),
+        ('run = "x"\nwhen = "inside:16:00-09:30 UTC"', "spans midnight"),
+        ('run = "x"\nwhen = "outside:soon"', "not a window"),
         ('run = "x', "not TOML"),
     ],
 )
@@ -224,6 +229,40 @@ def test_a_time_not_yet_come_is_a_wait_however_long_ago_the_task_was_queued():
 
 def test_a_time_come_is_taken():
     assert am.judge(task(when=CLOSE), am.Marks(), facts(), NOW, CLOSE_AT).action == am.TAKE
+
+
+def test_a_moment_and_a_window_are_both_conditions_and_neither_is_the_other():
+    """`after:` is one moment and `inside:`/`outside:` a recurring window: each is read
+    by its own judge, so a window is never parsed as an ISO time."""
+    assert not parsed('run = "x"\nwhen = "outside:09:30-16:00 UTC-05:00 mon-fri"').malformed
+    assert not parsed(f'run = "x"\nwhen = "{CLOSE}"').malformed
+
+
+# NOW is Friday 08:00 UTC: 03:00 in New York's winter, before its market opens at 09:30.
+MARKET_CLOSED = "outside:09:30-16:00 UTC-05:00 mon-fri"
+TRADING = NOW + 7 * 3600  # Friday 10:00 there
+
+
+def test_a_window_condition_reads_the_clock_and_asks_nothing_else():
+    """The ibkr_trader case: a gateway restart that must wait out the trading day."""
+    asked = []
+    found = facts(done=lambda project, name: asked.append(name) or True)
+    assert am.met(task(when=MARKET_CLOSED), found, NOW)
+    assert not am.met(task(when=MARKET_CLOSED), found, TRADING)
+    assert am.met(task(when="inside:09:30-16:00 UTC-05:00 mon-fri"), found, TRADING)
+    assert asked == []
+
+
+def test_a_task_waiting_for_its_window_waits_in_the_queue_then_runs():
+    """Without a window the task could only be queued again as `merged`, a session and a
+    PR per attempt; with one it waits here, and the reason says the window's own clock."""
+    during = am.judge(task(when=MARKET_CLOSED), am.Marks(), facts(), TRADING, TRADING)
+    assert during.action == am.WAIT
+    assert MARKET_CLOSED in during.why and "Fri 10:00" in during.why
+    after = TRADING + 7 * 3600
+    assert am.judge(task(when=MARKET_CLOSED), am.Marks(), facts(), TRADING, after).action == (
+        am.TAKE
+    )
 
 
 # --- which machine ----------------------------------------------------------------------------

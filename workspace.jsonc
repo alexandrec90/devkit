@@ -79,6 +79,15 @@
 		},
 		{
 			"path": "d2-trader"
+		},
+		{
+			"path": "tvshell"
+		},
+		{
+			"path": "radio"
+		},
+		{
+			"path": "host-scripts"
 		}
 	],
 	"extensions": {
@@ -1828,7 +1837,10 @@
 								"photolab",
 								"homelab",
 								"agent-terminal",
-								"d2-trader"
+								"d2-trader",
+								"tvshell",
+								"radio",
+								"host-scripts"
 							]
 						}
 					]
@@ -1873,7 +1885,10 @@
 								"photolab",
 								"homelab",
 								"agent-terminal",
-								"d2-trader"
+								"d2-trader",
+								"tvshell",
+								"radio",
+								"host-scripts"
 							]
 						}
 					]
@@ -2017,7 +2032,10 @@
 					"photolab",
 					"homelab",
 					"agent-terminal",
-					"d2-trader"
+					"d2-trader",
+					"tvshell",
+					"radio",
+					"host-scripts"
 				],
 				"default": "carameli"
 			},
@@ -2721,7 +2739,10 @@
 					"photolab",
 					"homelab",
 					"agent-terminal",
-					"d2-trader"
+					"d2-trader",
+					"tvshell",
+					"radio",
+					"host-scripts"
 				],
 				"default": "carameli"
 			},

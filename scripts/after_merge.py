@@ -8,7 +8,8 @@ there. It is a queue, not a change to merging, so it works for a gated project a
 direct one alike. The file is the task:
 
     when = "green"          # or merged, released, pr:<repo>#<n>, task:<name>, task:<repo>/<name>,
-                            # after:<ISO 8601 time with its UTC offset>
+                            # after:<ISO 8601 time with its UTC offset>,
+                            # inside:/outside:<HH:MM>-<HH:MM> <zone> [<days>] (`queue_window`)
     on = "any"             # or every-machine, docker, or a hostname
     run = "<command>"       # or agent = "<prompt>", or elevated = "<verb>": exactly one
 
@@ -72,6 +73,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import elevated_request
 import harness_events
+import queue_window
 
 QUEUE_DIR = ".devkit-queue"
 # Hex digits of the hash that names a task.
@@ -295,6 +297,12 @@ def _check_when(when: str, name: str) -> None:
     if when.startswith(AFTER):
         not_before(when)
         return
+    if queue_window.is_window(when):
+        try:
+            queue_window.parse(when)
+        except ValueError as why:
+            raise _Malformed(str(why)) from why
+        return
     named = TASK_WHEN.match(when)
     if when not in (GREEN, MERGED, RELEASED) and not PR_WHEN.match(when) and not named:
         raise _Malformed(f"when = {when!r} is not a condition this queue knows")
@@ -370,6 +378,8 @@ def met(task: Task, facts: Facts, now: float) -> bool:
         return True
     if when.startswith(AFTER):
         return now >= not_before(when)
+    if queue_window.is_window(when):
+        return queue_window.holds(queue_window.parse(when), now)
     if when == GREEN:
         return facts.green(task.commit)
     if when == RELEASED:
@@ -430,9 +440,12 @@ def _unmet(task: Task, marks: Marks, overdue: bool, now: float) -> Verdict:
     """A condition not yet true: a wait, with an agent sent to look when it is late. A
     time not yet come is never late: there is nothing for an agent to find."""
     last = marks.rerouted.get(task.id)
-    clock = task.when.startswith(AFTER)
-    if overdue and not clock and (last is None or now - last >= UNCLAIMED_SECONDS):
+    moment = task.when.startswith(AFTER)
+    if overdue and not moment and (last is None or now - last >= UNCLAIMED_SECONDS):
         return Verdict(NOTE, f"when = {task.when} has not come true")
+    if queue_window.is_window(task.when):
+        clock = queue_window.local_time(queue_window.parse(task.when), now)
+        return Verdict(WAIT, f"when = {task.when}, and it is {clock} there")
     return Verdict(WAIT, f"when = {task.when}")
 
 
