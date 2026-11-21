@@ -589,10 +589,10 @@ opening the PR, reading the gate, updating a branch, merging an adoption: one co
 each, run here.
 
 1. **Ship every gated intent.** Run the tree's commit-stage fixers, commit with the message,
-   push with the push gate skipped, open the PR -- labelled `automerge` when the pass cut
-   the tree for a fixer or the person shipped with `/ship auto` (the intent ends
-   `Automerge: yes`), so those merge once green while any other person's PR waits for
-   them even after a fixer was sent to repair it (`ship_intent.labels_for`) -- record
+   push with the push gate skipped, open the PR -- labelled `automerge`, so it merges once
+   green whoever shipped it, unless it was shipped `/ship hold` (the intent carries
+   `Hold: yes`), which keeps it for a person through any resolver's ship
+   (`ship_intent.labels_for`) -- record
    the outcome in `logs/ship-state.json` beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
    touched; a refused commit is a failure like any other, with the pre-commit output as

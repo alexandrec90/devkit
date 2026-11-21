@@ -10,9 +10,9 @@ a diff can be read by anyone, and the message is the one changelog consumers get
 The fix pass (`scripts/fix-pass.py`) does the rest, here: run the commit-stage fixers
 through the tree's own `ship.py --fix`, commit with the message, push with the push gate
 skipped -- CI judges, and the pass reads its artifact -- open the PR, labelled
-`automerge` only when the fix pass cut the tree or the intent ends `Automerge: yes`
-(`labels_for`): a fixer's PR merges once green, as does one a person shipped with
-`/ship auto`, and any other waits for them.
+`automerge` (`labels_for`): every PR merges once green, a person's as much as a fixer's,
+unless it was shipped `/ship hold`. A held PR stays held through a resolver's ship
+(`held_pr`), in this flow as in the direct one.
 
 **A project in the direct flow** (`delivery.py`, `Intent.direct`) ships here too, from the
 ship task (`scripts/ship-pass.py`), by a shorter road: no fixers and no pre-commit
@@ -532,7 +532,7 @@ def _superseded(intent: Intent, base: str, runner: Runner, gh, when: str) -> Out
     next pass found the same conflict, counted that resolver as its one attempt at a
     problem with no failing id, and escalated it as `blind-evidence` (199602e6). A
     person's PR is theirs to close, so their resolution is committed and pushed instead:
-    the conflict clears and the empty PR waits for them, as `labels_for` has it wait.
+    the conflict clears, and the empty PR is theirs to merge or close.
     """
     why = f"every change in the tree is already on origin/{base}: no PR to open; set aside"
     number = open_pr_at_head(intent.tree, intent.branch, runner, gh)
@@ -587,23 +587,9 @@ def _empty(intent: Intent, when: str, why: str) -> Outcome:
     return Outcome(intent, EMPTY, why)
 
 
-# The trailer `/ship auto` ends an intent with: the person's own say-so that this PR
-# needs no review of theirs. The last line of the body, as a git trailer sits.
-AUTOMERGE_TRAILER = re.compile(r"automerge:\s*yes", re.I)
 # The line `/ship hold` adds to an intent: the person's say-so that this PR waits for them.
-# It matters in the direct flow, where every other PR merges unasked.
+# It is the only way a PR waits: in either flow, every other one merges unasked.
 HOLD_TRAILER = re.compile(r"hold:\s*yes", re.I)
-
-
-def asks_automerge(body: str) -> bool:
-    """Whether the intent's last line is the `/ship auto` trailer (`AUTOMERGE_TRAILER`).
-
-    The last line only, so a body that explains the trailer is not read as using it. It
-    stays in the commit and the PR body: the record of who decided the PR could merge
-    itself, where a reader of either would look for one.
-    """
-    lines = str(body).strip().splitlines()
-    return bool(lines) and AUTOMERGE_TRAILER.fullmatch(lines[-1].strip()) is not None
 
 
 def asks_hold(body: str) -> bool:
@@ -616,26 +602,21 @@ def asks_hold(body: str) -> bool:
     return any(HOLD_TRAILER.fullmatch(line.strip()) for line in str(body).splitlines())
 
 
-def labels_for(
-    tree: Path, asked: bool = False, direct: bool = False, held: bool = False
-) -> tuple[str, ...]:
+def labels_for(direct: bool = False, held: bool = False) -> tuple[str, ...]:
     """What the PR is labelled, which says how it merges and nothing about who owns it
-    (`pass_owned`): nothing when `held`, `merge-now` in the `direct` flow; otherwise
-    `automerge` for work the fix pass started or a person `asked` to merge unreviewed
-    (`asks_automerge`), nothing for any other.
+    (`pass_owned`): nothing when `held`, `merge-now` in the `direct` flow, `automerge`
+    otherwise.
 
     `automerge` is an authorization the vendored `dependabot-automerge.yml` honours on
-    any PR once its gate passes, so it goes only where the pass itself is the author:
-    `pass_cut`. A person's PR still waits for them -- and `ensure_pr` labelling a reused
-    PR too is why the mark is the tree's origin, not the dispatch stamp.
+    any PR once its gate passes. It used to go only to a tree the pass cut (`pass_cut`)
+    or an intent ending `Automerge: yes`, and a person's PR waited for them: on
+    2026-11-20 three were found green and open for a week, waiting on a review nobody
+    meant to give. So the green gate is the review for every PR, and `/ship hold` is
+    how a person keeps one back.
     """
     if held:
         return ()
-    if direct:
-        return (sweep.MERGE_NOW_LABEL,)
-    if asked or pass_cut(tree):
-        return (sweep.AUTOMERGE_LABEL,)
-    return ()
+    return (sweep.MERGE_NOW_LABEL,) if direct else (sweep.AUTOMERGE_LABEL,)
 
 
 def held_pr(branch: str, gh) -> bool:
@@ -659,9 +640,12 @@ def held_pr(branch: str, gh) -> bool:
 
 
 def intent_labels(intent: Intent, gh) -> tuple[str, ...]:
-    """`labels_for` this intent: what its body asks, and in the direct flow, its open PR."""
-    held = asks_hold(intent.body) or (intent.direct and held_pr(intent.branch, gh))
-    return labels_for(intent.tree, asks_automerge(intent.body), intent.direct, held)
+    """`labels_for` this intent: what its body asks, else what its open PR was shipped as.
+
+    The PR is asked in both flows now that both merge unasked: a resolver's intent says
+    nothing of a hold, so read off it alone, its ship would label a held PR to merge."""
+    held = asks_hold(intent.body) or held_pr(intent.branch, gh)
+    return labels_for(intent.direct, held)
 
 
 def still_refused(intent: Intent, state: dict, porcelain: str) -> Outcome | None:

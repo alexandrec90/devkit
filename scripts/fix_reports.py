@@ -45,8 +45,8 @@ STAMP_FILE = Path("logs") / "fix-dispatch.json"
 LAUNCH_FILE = Path("logs") / "fix-launch.json"
 BLOCKED_FILE = Path("logs") / "fix-blocked.md"
 FRICTION_FILE = Path("logs") / "friction.md"
-# The mark of a tree the fix pass cut for a fixer, which makes its PR merge itself once
-# green (`ship_intent.labels_for`). Only what the pass authored carries it.
+# The mark of a tree the fix pass cut for a fixer, which makes its PR the pass's own to
+# close (`ship_intent.pass_owned`). Only what the pass authored carries it.
 ORIGIN_FILE = Path("logs") / "fix-origin"
 CHECKOUT = Path(__file__).resolve().parents[1]
 # The message a refused intent was being shipped with, set aside by the pass at
