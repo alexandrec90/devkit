@@ -1570,6 +1570,47 @@ def test_the_desktop_tier_skips_a_dotnet_host_with_no_sdk(tmp_path, monkeypatch,
     assert spawned == []
 
 
+def test_the_desktop_tier_skips_a_host_without_the_sdk_global_json_pins(
+    tmp_path, monkeypatch, capsys
+):
+    """176a4fa4: a host listing an SDK, but none `global.json`'s pin rolls forward to,
+    built nothing but "A compatible .NET SDK was not found" -- a red suite, not a skip."""
+    root, tests, lint, spawned = _desktop_runners(
+        tmp_path, monkeypatch, windows=True, sdk="8.0.404 [x]\n9.0.100 [x]\n"
+    )
+    assert tests.run_desktop(root) == ""
+    assert "rolls forward to" in capsys.readouterr().out
+    assert lint.desktop_section(object(), [], False) == ""
+    assert "rolls forward to" in capsys.readouterr().out
+    assert spawned == []
+
+
+@pytest.mark.parametrize(
+    ("listed", "pinned", "ok"),
+    [
+        ("10.0.100 [x]\n", "10.0.100", True),
+        ("8.0.404 [x]\n10.0.203 [x]\n", "10.0.100", True),
+        ("10.0.100-preview.7.25380.108 [x]\n", "10.0.100", True),
+        ("9.0.300 [x]\n", "10.0.100", False),
+        ("10.0.099 [x]\n", "10.0.100", False),
+        ("11.0.100 [x]\n", "10.0.100", False),
+        ("9.0.300 [x]\n", "not-a-version", True),
+    ],
+)
+def test_an_sdk_is_listed_only_where_the_pin_rolls_forward_to_it(
+    tmp_path, monkeypatch, listed, pinned, ok
+):
+    root = generate(tmp_path, {"desktop": True})
+    for script in ("scripts/run-tests.py", "scripts/lint-all.py"):
+        runner = _rendered(root, script, monkeypatch)
+        assert runner.sdk_listed(listed, pinned) is ok, script
+        assert (
+            runner.pinned_sdk(root)
+            == json.loads((root / "global.json").read_text(encoding="utf-8"))["sdk"]["version"]
+        )
+        assert runner.pinned_sdk(tmp_path / "nowhere") == ""
+
+
 # The stand-in for a project's install command: a real venv, handed this interpreter's
 # site-packages through a `.pth` so the re-run has pytest without a network install.
 PROVISION_STUB = """\

@@ -657,6 +657,18 @@ def test_named_test_files_run_with_the_contract_tests_in_runs_of_their_own(
     assert "--only skips them" in capsys.readouterr().out
 
 
+def test_a_new_installer_or_a_workspace_edit_runs_the_installers_picker_test(tmp_path):
+    """83db1c30: adding `scripts/install-codex-context.py` and its `workspace.jsonc` entry
+    ran green bare and met the picker test, which reads both, first on the gate."""
+    hold_contracts(tmp_path)
+    picker = (
+        "tests/test_installers.py::test_the_scheduled_jobs_picker_offers_every_installer_on_disk"
+    )
+    for changed in ("scripts/install-codex-context.py", "workspace.jsonc"):
+        tests, _ = run_tests.tests_for([changed], tmp_path)
+        assert picker in run_tests.with_contracts(tests, tmp_path), changed
+
+
 def test_only_runs_just_the_named_tests(artifact, monkeypatch, tmp_path):
     hold_contracts(tmp_path)
     seen = stub_pytest(monkeypatch, 0)

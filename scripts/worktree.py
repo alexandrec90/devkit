@@ -80,6 +80,7 @@ import shutil
 import string
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
@@ -3688,13 +3689,25 @@ def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
     The `-v` is the box-only exception documented on `reap_plan`. `-p` is passed so the
     scope is the box's own project name and cannot fall back to the directory name or
     to a seeded `COMPOSE_PROJECT_NAME` from the source checkout's `.env`.
+
+    A box whose directory is already gone (a husk a teardown half-deleted, a tree removed
+    by hand) is downed from an empty folder: `-p` alone finds the project's containers,
+    and Windows refuses to start any process in a missing `cwd` -- 426e9182, a
+    `NotADirectoryError` that ended the whole scheduled reconcile mid-reap. Any other
+    refusal to start is this box's failure, not the pass's.
     """
     try:
-        completed = compose(path, project_name, ["down", "-v", "--remove-orphans"], 300)
+        with contextlib.ExitStack() as stack:
+            where = (
+                path if path.is_dir() else Path(stack.enter_context(tempfile.TemporaryDirectory()))
+            )
+            completed = compose(where, project_name, ["down", "-v", "--remove-orphans"], 300)
     except FileNotFoundError:
         return False, "docker is not on PATH — the stack was left running"
     except subprocess.TimeoutExpired:
         return False, "compose down timed out after 300s — the stack may still be running"
+    except OSError as exc:
+        return False, f"compose down could not start ({exc}) — the stack may still be running"
     if completed.returncode != 0:
         return False, (completed.stderr or completed.stdout or "").strip()
     return True, f"stack {project_name} torn down (containers, network, volumes)"

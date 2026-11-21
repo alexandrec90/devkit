@@ -160,6 +160,7 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
             "signed-in", retire_login, ctx, closed.signed_in, default=[]
         )
         closed.verified += journal.step("trusted", retire_trusted, ctx, default=[])
+        closed.verified += journal.step("unstalled", retire_unstalled, ctx, default=[])
         runner = ship_intent.run_quiet
         closed.stopped = journal.step(
             "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
@@ -524,7 +525,9 @@ def job_findings(
     `{task: project}`), each filed against the project claiming it. And a hand-made task
     no project claims (`project_tasks.unowned_on_machine`) is filed against devkit as
     `UNOWNED_KIND`, so a task nobody registered with a project is a finding rather than a
-    job no pass ever looks at."""
+    job no pass ever looks at. A fire skipped in the hour after the machine booted or
+    woke (`schedule_health.awake_local`, read off the machine as `stood_down` is) is its
+    catch-up, not a finding (`schedule_health.catching_up`)."""
     live = jobs is None
     if tasks is None:
         tasks = collectors.scheduled_tasks(ctx.devkit_dir) if live else {}
@@ -540,8 +543,9 @@ def job_findings(
     found: list[Finding] = []
     local_now = ctx.now.astimezone().replace(tzinfo=None)  # the scheduler speaks local time
     deliberate = schedule_health.stood_down()
+    awake = schedule_health.awake_local(ctx.now.timestamp())
     lines = schedule_health.problems(
-        jobs, local_now, deliberate, root=ctx.devkit_dir, artifacts=artifacts
+        jobs, local_now, deliberate, root=ctx.devkit_dir, artifacts=artifacts, awake=awake
     )
     for line in lines:
         name, head = line.split(":", 1)[0], line.split(" -- ", 1)[0]
@@ -1046,6 +1050,19 @@ def retire_trusted(ctx: Context) -> list[str]:
         triage.resolve([item.id], note, root=ctx.devkit_dir)
         lines.append(f"retired [{item.id}] -- {note}")
     return lines
+
+
+def retire_unstalled(ctx: Context) -> list[str]:
+    """Retire each open stall whose wait the last pass no longer made; lines for the
+    record (`fix_stall.ended`). A stall's wait ends when its cause is fixed, and nothing
+    else retires the row: six that a pass on the code before #787 filed went on to the
+    ledger sweep after the waits had gone."""
+    open_items = triage.open_items(triage.load(ctx.devkit_dir), (fix_findings.FINDING,))
+    gone = fix_stall.ended(fix_stall.read_history(ctx.history_path), open_items)
+    note = "the wait it names is gone: the fix pass no longer makes it"
+    if gone:
+        triage.resolve([item.id for item in gone], note, root=ctx.devkit_dir)
+    return [f"retired [{item.id}] -- {note}" for item in gone]
 
 
 # Between a person's step and the command that retires its group: the tray cuts there

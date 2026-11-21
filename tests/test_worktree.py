@@ -6153,7 +6153,7 @@ def test_compose_tail_is_never_the_thing_that_ends_a_wait(monkeypatch):
     assert worktree.compose_tail(Path("x"), "c--y") == ""
 
 
-def test_a_compose_down_on_a_wedged_engine_ends_at_its_bound(monkeypatch):
+def test_a_compose_down_on_a_wedged_engine_ends_at_its_bound(monkeypatch, tmp_path):
     """bd12e216: `subprocess.run(timeout=)` killed `docker.exe` and then read the pipes
     its compose plugin still held, so the reconcile's reap waited for the engine. The
     tree-ending runner's timeout is the bound, and the reap is told so."""
@@ -6164,10 +6164,38 @@ def test_a_compose_down_on_a_wedged_engine_ends_at_its_bound(monkeypatch):
         return _completed(worktree.sweep.TIMED_OUT, stderr="timed out after 300s")
 
     monkeypatch.setattr(worktree.sweep, "run_bounded", wedged)
-    ok, message = worktree.compose_down(Path("box"), "c--x")
+    ok, message = worktree.compose_down(tmp_path, "c--x")
     assert not ok and "timed out after 300s" in message
     argv = ["docker", "compose", "-p", "c--x", "down", "-v", "--remove-orphans"]
-    assert seen == [(argv, 300, "box")]
+    assert seen == [(argv, 300, str(tmp_path))]
+
+
+def test_a_compose_down_for_a_box_whose_directory_is_gone_runs_from_an_empty_one(
+    monkeypatch, tmp_path
+):
+    """426e9182: Windows refuses a process a missing `cwd` with `NotADirectoryError`, which
+    ended the scheduled reconcile mid-reap. `-p` alone names the project to down."""
+    seen = []
+
+    def run(argv, timeout, **kwargs):
+        cwd = Path(kwargs["cwd"])
+        seen.append((cwd.is_dir(), list(cwd.iterdir())))
+        return _completed(0)
+
+    monkeypatch.setattr(worktree.sweep, "run_bounded", run)
+    ok, _ = worktree.compose_down(tmp_path / "gone", "c--x")
+    assert ok and seen == [(True, [])]
+
+
+def test_a_compose_down_that_cannot_start_is_the_boxs_failure_not_the_reconciles(
+    monkeypatch, tmp_path
+):
+    def refused(argv, timeout, **kwargs):
+        raise NotADirectoryError(267, "The directory name is invalid")
+
+    monkeypatch.setattr(worktree.sweep, "run_bounded", refused)
+    ok, message = worktree.compose_down(tmp_path, "c--x")
+    assert not ok and "could not start" in message and "directory name is invalid" in message
 
 
 def test_compose_raises_the_timeout_the_runner_ended_on_and_passes_the_rest(monkeypatch):

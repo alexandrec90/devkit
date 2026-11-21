@@ -96,6 +96,9 @@ class FakeGit:
             )
         if "--get" in args:
             return subprocess.CompletedProcess(args, 0 if self.auth else 1, self.auth, "")
+        if "--unset-all" in args:
+            self.listed = [value for value in self.listed if value != args[-1]]
+            return subprocess.CompletedProcess(args, 0, "", "")
         if self.add_fails:
             return subprocess.CompletedProcess(args, 255, "", "error: could not lock config file")
         if "--add" in args:
@@ -173,11 +176,88 @@ def test_an_older_git_is_trusted_with_everything_in_the_passs_own_scope_only():
     status` and the scheduled pass exited 1. The global entry stays the narrow one."""
     environ: dict[str, str] = {}
     git = FakeGit([], said="git version 2.40.0.windows.1")
-    lines = git_trust.adopt(ROOT, write=True, environ=environ, git=git).splitlines()
+    lines = git_trust.adopt(
+        ROOT / "nowhere", write=True, environ=environ, git=git, probe=Probe({})
+    ).splitlines()
     assert environ["GIT_CONFIG_VALUE_0"] == git_trust.EVERYTHING
-    assert git.listed == ["C:/Users/alexa/vs-code/*"], "never `*` globally"
+    assert git.listed == ["C:/Users/alexa/vs-code/nowhere/*"], "never `*` globally"
     assert lines[-1].startswith("git-trust: this git predates safe.directory's `/*` form")
     assert git_trust.adopt(ROOT, write=False, environ={}, git=FakeGit([])) == ""
+
+
+class Probe:
+    """git refusing each tree in `foreign` over the directories it lists, in order, until
+    the `-c safe.directory=` scope holds each."""
+
+    def __init__(self, foreign: dict[str, list[str]]) -> None:
+        self.foreign = foreign
+
+    def __call__(self, *args: str) -> subprocess.CompletedProcess[str]:
+        trusted = {arg.split("=", 1)[1] for arg in args if arg.startswith("safe.directory=")}
+        tree = args[args.index("-C") + 1]
+        for value in self.foreign.get(tree, []):
+            if value not in trusted:
+                said = f"fatal: detected dubious ownership in repository at '{value}'\n"
+                return subprocess.CompletedProcess(args, 128, "", said)
+        return subprocess.CompletedProcess(args, 0, ".git\n", "")
+
+
+def test_refused_names_every_directory_git_refuses_a_tree_over():
+    tree = "C:/ws/devkit/.claude/worktrees/x"
+    probe = Probe({str(Path(tree)): [tree, "C:/ws/devkit"]})
+    assert git_trust.refused(Path(tree), probe) == [tree, "C:/ws/devkit"]
+    assert git_trust.refused(Path("C:/ws/mine"), probe) == [], "the user's own tree"
+
+
+def test_an_old_git_trusts_each_foreign_tree_by_its_own_path_and_drops_gone_ones(tmp_path):
+    """d2f2c4b0, 7a8de777, 46d64a5a: on git 2.40 the `/*` entry trusts nothing, so a fixer
+    in an elevated session's tree failed every bare git call and six of its tests."""
+    root = tmp_path / "ws"
+    mine = root / "devkit"
+    theirs = mine / ".claude" / "worktrees" / "fix-0928"
+    box = root / ".worktrees" / "carameli--x"
+    for tree in (mine, theirs, box):
+        (tree / ".git").mkdir(parents=True)
+    (root / "notes").mkdir()
+    assert git_trust.trees(root) == [box, mine, theirs]
+    gone = (root / "devkit" / ".claude" / "worktrees" / "old").as_posix()
+    git = FakeGit([gone, "D:/elsewhere", git_trust.pattern(root)])
+    probe = Probe({str(theirs): [theirs.as_posix()], str(box): [box.as_posix()]})
+    lines = git_trust.persist_exact(root, git, probe).splitlines()
+    assert git.listed == [
+        "D:/elsewhere",
+        git_trust.pattern(root),
+        box.as_posix(),
+        theirs.as_posix(),
+    ]
+    assert lines[0] == f"git-trust: dropped {gone} from git's global safe.directory: it is gone"
+    assert lines[1].startswith(f"git-trust: added {box.as_posix()} to git's global")
+    assert git_trust.persist_exact(root, git, probe) == "", "nothing twice"
+
+
+def test_a_pass_that_does_not_write_touches_no_global_entry_on_an_old_git(tmp_path):
+    git = FakeGit([], said="git version 2.40.0.windows.1")
+
+    def probe(*args):
+        raise AssertionError("no write, no probe")
+
+    git_trust.adopt(tmp_path, write=False, environ={}, git=git, probe=probe)
+    assert git.calls == []
+
+
+def test_the_probe_carries_none_of_the_passs_own_scope(monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(git_trust.subprocess, "run", run)
+    git_trust._bare_git("version")
+    assert not [key for key in seen if key.startswith("GIT_CONFIG_")]
 
 
 def test_git_reads_the_proactive_auth_the_env_carries(tmp_path):
