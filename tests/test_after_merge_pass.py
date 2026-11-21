@@ -126,6 +126,34 @@ def test_an_agent_task_starts_a_session_told_what_to_do(world):
     assert "Rebuild the index." in prompt and "/ship" in prompt
 
 
+def test_a_checkout_claude_code_does_not_trust_starts_no_session_and_awaits_a_person(
+    world, monkeypatch
+):
+    """2026-11-20/21: host-scripts' queue cut four trees in 13 hours, each refused at launch
+    as an untrusted workspace, and filed nothing but a record line."""
+    monkeypatch.setattr(after_merge_pass.fix_reports, "trusted", lambda _checkout: False)
+    task = world.queue('agent = "Rebuild the index."\nwhen = "merged"\n')
+    world.run()
+    world.run()
+    assert world.launches == [] and not world.done(task) and not world.claimed(task)
+    marker = f"{after_merge_pass.fix_loop.UNTRUSTED_KIND}: "
+    filed = [line for line in world.findings() if line.startswith(marker)]
+    assert len(filed) == 1 and triage.PERSON_STEP in filed[0]
+    monkeypatch.setattr(after_merge_pass.fix_reports, "trusted", lambda _checkout: True)
+    world.run()
+    assert len(world.launches) == 1, "trusted, the next cycle starts it"
+
+
+def test_a_session_that_died_untrusted_files_the_persons_step(world, monkeypatch):
+    world.queue('agent = "Rebuild the index."\nwhen = "merged"\n')
+    world.run()
+    monkeypatch.setattr(after_merge_pass.fix_reports, "trusted", lambda _checkout: False)
+    world.session = after_merge_pass.fix_reports.UNTRUSTED
+    world.run()
+    marker = f"{after_merge_pass.fix_loop.UNTRUSTED_KIND}: "
+    assert any(line.startswith(marker) for line in world.findings())
+
+
 def test_a_malformed_file_reaches_an_agent_instead_of_being_dropped(world):
     world.queue('run = "no closing quote\n', name="broken")
     world.run()
