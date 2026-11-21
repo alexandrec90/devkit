@@ -182,6 +182,62 @@ def test_a_task_condition_defaults_to_this_project_and_can_name_another():
     assert asked == [("carameli", "first"), ("devkit", "first")]
 
 
+# --- the clock condition -----------------------------------------------------------------------
+#
+# 39940185 / 7cc17daf: a task that had to wait for a market's close could only re-queue
+# itself with `when = "merged"`, a session and a PR each time a merge fired it early.
+
+CLOSE = "after:2026-11-12T16:05-05:00"
+CLOSE_AT = 1_794_517_500.0  # 2026-11-12 21:05 UTC
+
+
+def test_an_after_condition_parses_and_names_its_moment():
+    found = parsed(f'run = "x"\nwhen = "{CLOSE}"')
+    assert not found.malformed and found.when == CLOSE
+    assert am.not_before(CLOSE) == CLOSE_AT
+    assert am.not_before("after:2026-11-12T21:05:00Z") == CLOSE_AT
+
+
+@pytest.mark.parametrize(
+    "when, said",
+    [
+        ("after:2026-11-12T16:05", "no UTC offset"),
+        ("after:tomorrow", "is not a time"),
+        ("after:", "is not a time"),
+    ],
+)
+def test_an_after_condition_without_a_moment_every_pc_agrees_on_is_malformed(when, said):
+    found = parsed(f'run = "x"\nwhen = "{when}"')
+    assert found.kind == am.AGENT and said in found.malformed
+
+
+def test_an_after_condition_holds_from_its_moment_on():
+    clocked = task(when=CLOSE)
+    assert not am.met(clocked, facts(), CLOSE_AT - 1)
+    assert am.met(clocked, facts(), CLOSE_AT)
+    assert am.met(clocked, facts(), CLOSE_AT + DAYS)
+
+
+def test_a_time_not_yet_come_is_a_wait_however_long_ago_the_task_was_queued():
+    """Overdue is for a condition that should have come true; a clock's has not had its
+    chance, so sending an agent to look would find nothing."""
+    later = task(when="after:2028-01-01T00:00:00Z")
+    assert am.not_before(later.when) > NOW
+    verdict = am.judge(later, am.Marks(), facts(), NOW - 9 * DAYS, NOW)
+    assert verdict.action == am.WAIT and "after:" in verdict.why
+
+
+def test_a_time_come_is_taken():
+    assert am.judge(task(when=CLOSE), am.Marks(), facts(), NOW, CLOSE_AT).action == am.TAKE
+
+
+def test_a_moment_and_a_window_are_both_conditions_and_neither_is_the_other():
+    """`after:` is one moment and `inside:`/`outside:` a recurring window: each is read
+    by its own judge, so a window is never parsed as an ISO time."""
+    assert not parsed('run = "x"\nwhen = "outside:09:30-16:00 UTC-05:00 mon-fri"').malformed
+    assert not parsed(f'run = "x"\nwhen = "{CLOSE}"').malformed
+
+
 # NOW is Friday 08:00 UTC: 03:00 in New York's winter, before its market opens at 09:30.
 MARKET_CLOSED = "outside:09:30-16:00 UTC-05:00 mon-fri"
 TRADING = NOW + 7 * 3600  # Friday 10:00 there
