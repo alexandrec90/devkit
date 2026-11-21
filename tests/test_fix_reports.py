@@ -243,9 +243,12 @@ def _claude_config(tmp_path, projects) -> Path:
     return config
 
 
-def test_a_checkout_is_trusted_by_its_own_answer_or_a_parents(tmp_path):
-    """Claude Code keys its answers by directory, forward-slashed, and a parent's covers
-    what is under it: 'C:/Users/x/vs-code' accepted is every checkout beside devkit."""
+def test_a_checkout_is_trusted_by_its_own_answer_alone(tmp_path):
+    """Claude Code keys its answers by directory, forward-slashed. A session tree under a
+    checkout is covered by the checkout's own yes, and by nothing above it: with
+    'C:/Users/alexa/vs-code' accepted and no entry for host-scripts, Claude Code 2.1.330
+    refused four after-merge sessions there in 13 hours (2026-11-20/21), while this read
+    called host-scripts trusted -- so nothing filed the person's step."""
     root = tmp_path / "vs-code"
     accepted = {"hasTrustDialogAccepted": True}
     config = _claude_config(
@@ -253,18 +256,18 @@ def test_a_checkout_is_trusted_by_its_own_answer_or_a_parents(tmp_path):
         {
             root.as_posix(): accepted,
             (tmp_path / "other").as_posix(): {"hasTrustDialogAccepted": False},
-            (tmp_path / "own").as_posix(): accepted,
+            (root / "own").as_posix(): accepted,
         },
     )
-    assert fix_reports.trusted(root / "photolab", config)
-    assert fix_reports.trusted(tmp_path / "own", config)
-    assert not fix_reports.trusted(tmp_path / "other" / "photolab", config)
+    assert fix_reports.trusted(root / "own", config)
+    assert not fix_reports.trusted(root / "host-scripts", config)
+    assert not fix_reports.trusted(tmp_path / "other", config)
     assert not fix_reports.trusted(tmp_path / "elsewhere", config)
 
 
-def test_a_child_declined_under_a_trusted_parent_is_still_trusted(tmp_path):
-    """Its own entry is written `False` by default on any first visit, so only a `True`
-    anywhere up the path says anything; the listing here is this workstation's shape."""
+def test_a_checkout_declined_under_a_trusted_parent_is_not_trusted(tmp_path):
+    """Its own `False` is what any first visit writes, and the parent's yes does not
+    reach a session started under it; the listing here is this workstation's shape."""
     root = tmp_path / "vs-code"
     config = _claude_config(
         tmp_path,
@@ -273,7 +276,7 @@ def test_a_child_declined_under_a_trusted_parent_is_still_trusted(tmp_path):
             (root / "photolab").as_posix(): {"hasTrustDialogAccepted": False},
         },
     )
-    assert fix_reports.trusted(root / "photolab", config)
+    assert not fix_reports.trusted(root / "photolab", config)
 
 
 @pytest.mark.parametrize("text", ["not json", "[]", '{"projects": 3}'])

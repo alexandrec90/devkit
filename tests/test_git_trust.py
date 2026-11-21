@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from support import REPO_ROOT
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -74,11 +75,19 @@ class FakeGit:
     """Global config as a safe.directory list and a proactiveAuth value; each call
     recorded."""
 
-    def __init__(self, listed: list[str], auth: str = "", add_fails: bool = False) -> None:
-        self.listed, self.auth, self.add_fails = listed, auth, add_fails
+    def __init__(
+        self,
+        listed: list[str],
+        auth: str = "",
+        add_fails: bool = False,
+        said: str = "git version 2.47.1.windows.1",
+    ) -> None:
+        self.listed, self.auth, self.add_fails, self.said = listed, auth, add_fails, said
         self.calls: list[tuple[str, ...]] = []
 
     def __call__(self, *args: str) -> subprocess.CompletedProcess[str]:
+        if args == ("version",):
+            return subprocess.CompletedProcess(args, 0 if self.said else 1, self.said, "")
         self.calls.append(args)
         if "--get-all" in args:
             code = 0 if self.listed else 1
@@ -137,6 +146,40 @@ def test_adopt_writes_only_when_asked():
     assert environ["GIT_CONFIG_COUNT"] == "2"
 
 
+@pytest.mark.parametrize(
+    ("said", "leading"),
+    [
+        ("git version 2.46.0", True),
+        ("git version 2.47.1.windows.1", True),
+        ("git version 3.0.0", True),
+        ("git version 2.40.0.windows.1", False),
+        ("git version 2.45.2", False),
+        ("", False),
+        ("not git", False),
+    ],
+)
+def test_only_a_git_from_2_46_reads_the_leading_path_form(said, leading):
+    assert git_trust.reads_leading_path(FakeGit([], said=said)) is leading
+
+
+def test_version_reads_major_and_minor_or_none():
+    assert git_trust.version("git version 2.40.0.windows.1") == (2, 40)
+    assert git_trust.version("git: command not found") is None
+
+
+def test_an_older_git_is_trusted_with_everything_in_the_passs_own_scope_only():
+    """2026-11-20: this machine's git 2.40 read `C:/Users/alexa/vs-code/*` as matching
+    nothing, so the pass's ship of an elevated session's tree failed its first `git
+    status` and the scheduled pass exited 1. The global entry stays the narrow one."""
+    environ: dict[str, str] = {}
+    git = FakeGit([], said="git version 2.40.0.windows.1")
+    lines = git_trust.adopt(ROOT, write=True, environ=environ, git=git).splitlines()
+    assert environ["GIT_CONFIG_VALUE_0"] == git_trust.EVERYTHING
+    assert git.listed == ["C:/Users/alexa/vs-code/*"], "never `*` globally"
+    assert lines[-1].startswith("git-trust: this git predates safe.directory's `/*` form")
+    assert git_trust.adopt(ROOT, write=False, environ={}, git=FakeGit([])) == ""
+
+
 def test_git_reads_the_proactive_auth_the_env_carries(tmp_path):
     """The key is the one git reads, URL-scoped to GitHub: `git config --get-urlmatch`
     resolves it for a GitHub remote and for no other host."""
@@ -184,5 +227,8 @@ def test_git_honours_the_trusted_env_over_a_dubious_owner(tmp_path):
 
     refused = status(base)
     assert refused.returncode != 0 and "dubious ownership" in refused.stderr
-    assert status(git_trust.trusted_env(base, tmp_path / "ws")).returncode == 0
-    assert status(git_trust.trusted_env(base, tmp_path / "other")).returncode != 0
+    adopted = dict(base)
+    git_trust.adopt(tmp_path / "ws", write=False, environ=adopted)
+    assert status(adopted).returncode == 0, "whichever git this machine has"
+    if git_trust.reads_leading_path(git_trust._git):
+        assert status(git_trust.trusted_env(base, tmp_path / "other")).returncode != 0
