@@ -1922,6 +1922,7 @@
 							"options": [
 								"after-merge-schedule",
 								"agent-env",
+								"codex-context",
 								"collectors",
 								"docker-prune",
 								"docker-stop-idle",
