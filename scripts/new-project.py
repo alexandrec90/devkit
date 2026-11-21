@@ -819,6 +819,7 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     # Asked before the write, so a hand edit already sitting there is never carried off
     # onto a branch under this project's name.
     clean_before = not dry_run and not canonical_handoff.dirty(canonical)
+    registered: set[Path] = set()
     for path in (canonical, live):
         shown = path.name if path == canonical else f"../{path.name}"
         if dry_run:
@@ -833,13 +834,31 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
                 f"          add {', '.join(names)} to its folders list and project picker by hand"
             )
             continue
+        registered.add(path)
         print(f"  update  {shown} (folders + project picker)")
     if dry_run:
         return
     slot = plan.context.get("slot")
     handed = hand_off_registration(plan.name, canonical, slot=slot) if clean_before else Handoff()
     plan.slot_on_branch = handed.slot
-    print(handed.said or f"          commit devkit's {canonical.name} on a branch and ship it")
+    if handed.said and not handed.said.lstrip().startswith("WARNING"):
+        print(handed.said)
+        return
+    # Not handed off -- the checkout was already on a task branch, already dirty, or the
+    # cut failed -- so the registration stays where it was written, and the slot goes
+    # beside it. As a printed hint alone it was skipped twice: tvshell (#778) and radio
+    # (#779) each reached a PR with `workspace.jsonc` and no slot, red on
+    # `test_every_checkout_either_holds_a_slot_or_says_why_not`, and the live file's extra
+    # folder made every render refuse until the PR merged. Only with the folder entry,
+    # though: a slot for a checkout no picker names is a number spent on nothing.
+    registry = canonical.parent / devkit_ports.REGISTRY_NAME
+    beside = canonical in registered and _carry_slot(registry, plan.name, slot)
+    plan.slot_on_branch = beside
+    files = f"{canonical.name} and {registry.name}" if beside else canonical.name
+    if handed.said:
+        print(handed.said.replace(f"devkit's {canonical.name}", f"devkit's {files}"))
+    else:
+        print(f"          commit devkit's {files} on a branch and ship it")
 
 
 REGISTRATION_INTENT = """Register {name} in the workspace registry
