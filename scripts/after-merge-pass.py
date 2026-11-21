@@ -69,6 +69,7 @@ import agent_models
 import agent_worktrees as aw
 import devkit_project
 import fix_findings
+import fix_loop
 import fix_prompts
 import fix_reports
 import fix_send
@@ -341,9 +342,26 @@ def _held_here(task: Task, board: Board, cycle: Cycle) -> str:
     return ""
 
 
+def _untrusted(task: Task, board: Board, cycle: Cycle) -> str:
+    """Why no session may start in `board`'s checkout, or "".
+
+    Claude Code refuses a session in a checkout it was never told to trust. That is a
+    person's step, filed as the fix pass files it (`fix_loop.UNTRUSTED_KIND`), so its group
+    awaits them and `fix_loop.retire_trusted` retires it. Unread, the queue cut four
+    host-scripts trees in 13 hours, each refused at launch, and filed nothing.
+    """
+    if fix_reports.trusted(board.path):
+        return ""
+    detail = fix_loop.untrusted_detail(board.path)
+    cycle.journal.add(Finding(fix_loop.UNTRUSTED_KIND, task.project, detail))
+    return f"Claude Code does not trust {board.path.name}"
+
+
 def _hand_over(task: Task, board: Board, prompt: str, cycle: Cycle) -> tuple[str, str]:
     """A session at `prompt`: `(HANDED, "")`, or `("", why not)` with nothing written, so the
     next cycle tries again."""
+    if why := _untrusted(task, board, cycle):
+        return "", why
     session = Session(*cycle.seams.launch(task, board, prompt))
     if session.code != 0:
         words = session.said.strip().splitlines()
@@ -546,6 +564,8 @@ def _read_back(task: Task, board: Board, cycle: Cycle) -> None:
         _write_result(task, cycle.seams, status=outcome)
         _finish(task, board, outcome, cycle)
     elif outcome:
+        if outcome.endswith(fix_reports.UNTRUSTED):
+            _untrusted(task, board, cycle)
         _spent_attempt(task, held, board, outcome, cycle)
 
 

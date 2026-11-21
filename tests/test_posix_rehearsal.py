@@ -397,6 +397,21 @@ def test_a_pass_clears_the_artifact(tmp_path, monkeypatch, capsys):
     assert "passed" in capsys.readouterr().out
 
 
+def test_the_suite_s_output_is_written_and_read_as_utf_8(tmp_path, monkeypatch):
+    """2026-11-21: decoded in cp1252, byte 0x9d raised in the reader thread, the capture
+    came back empty, and the rehearsal reported FAILED with nothing in its artifact."""
+    monkeypatch.setattr(rehearsal, "ARTIFACT", tmp_path / "posix-rehearsal.log")
+    asked: dict = {}
+
+    def run(_argv, **kwargs):
+        asked.update(kwargs)
+        return _completed(0)
+
+    assert rehearsal.main([], runner=run) == 0
+    assert (asked["encoding"], asked["errors"]) == ("utf-8", "replace")
+    assert asked["env"]["PYTHONUTF8"] == "1"
+
+
 def test_the_rehearsal_runs_under_a_temp_root_of_its_own(tmp_path, monkeypatch):
     """97d20f01, reproduced 2026-09-26 from the PowerShell tool and the Bash tool alike:
     every test passed, then pytest's exit-time cleanup stat'ed the machine-wide

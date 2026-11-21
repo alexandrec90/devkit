@@ -52,6 +52,12 @@ ALL_PROJECTS = "all"
 # MagicDNS suffix mean what they mean to the ledger and to a collector handoff.
 ANY_PROJECT = "*"
 
+# The setting that assigns each project's nightly local end-to-end run to one machine
+# (`e2e-pass.py`). Here rather than there because the fix pass reads it too
+# (`fix_red.e2e_here`): a result this machine wrote for a project another one now tests
+# is never re-run here, so it is not this machine's to act on.
+LOCAL_E2E_SETTING = "devkit.localE2e"
+
 # `same-dir` is `remote-control`'s own default and is kept as this job's default
 # deliberately -- but it is a default, not a prohibition, and `"spawn": "worktree"` is a
 # reasonable thing for a machine to ask for: a phone has no VS Code tasks, so spawning
@@ -271,6 +277,19 @@ def selected(config: Config, known: Sequence[str]) -> tuple[list[str], list[str]
         else:
             serve.append(name)
     return serve, notes
+
+
+def setting_hosts(text: str, setting: str) -> Config:
+    """`setting`'s `hosts` off a workspace file, as a `Config` carrying only them. No
+    hosts for anything absent or broken, which reads as "every machine does its own"."""
+    try:
+        payload = devkit_jsonc.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return Config()
+    settings = payload.get("settings") if isinstance(payload, dict) else None
+    raw = settings.get(setting) if isinstance(settings, dict) else None
+    hosts = raw.get("hosts") if isinstance(raw, dict) else None
+    return Config(hosts=parse_hosts(hosts))
 
 
 def host_for(config: Config, project: str) -> str:
