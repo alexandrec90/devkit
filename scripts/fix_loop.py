@@ -59,6 +59,7 @@ import fix_verify
 import friction_pending
 import ship_intent
 import harness_triage as triage
+import project_tasks
 import schedule_health
 import session_friction
 import sweep
@@ -504,6 +505,8 @@ def job_findings(
     jobs: list[schedule_health.Job] | None = None,
     git=ship_intent.run_quiet,
     tasks: dict[str, str] | None = None,
+    owners: dict[str, str] | None = None,
+    unowned: list[str] | None = None,
 ) -> list[Finding]:
     """A finding per devkit job the scheduler says needs attention, bar one it is only
     remembering: a line whose group was resolved after the run it reports. The scheduler
@@ -515,10 +518,21 @@ def job_findings(
     failing host collector was red in the tray and absent here. Each is filed against
     its own project, which is its task's name -- and so is one this machine runs whose
     task the scheduler does not have, which the query can only omit
-    (`tray_state.collector_task_states` paints the same row red)."""
+    (`tray_state.collector_task_states` paints the same row red).
+
+    So are the tasks a project claims in its `.devkit.toml` (`project_tasks.declared`,
+    `{task: project}`), each filed against the project claiming it. And a hand-made task
+    no project claims (`project_tasks.unowned_on_machine`) is filed against devkit as
+    `UNOWNED_KIND`, so a task nobody registered with a project is a finding rather than a
+    job no pass ever looks at."""
+    live = jobs is None
     if tasks is None:
-        tasks = collectors.scheduled_tasks(ctx.devkit_dir) if jobs is None else {}
-    jobs = schedule_health.query(also=frozenset(tasks)) if jobs is None else jobs
+        tasks = collectors.scheduled_tasks(ctx.devkit_dir) if live else {}
+    if owners is None:
+        owners = project_tasks.declared(ctx.root, ctx.projects) if live else {}
+    # A collector's task is named after its project, so it owns itself.
+    owners = {**owners, **{name: name for name in tasks}}
+    jobs = schedule_health.query(also=frozenset(owners)) if live else jobs
     artifacts = {**schedule_health.ARTIFACTS, **tasks}
     by_name = {job.name: job for job in jobs}
     items = triage.load(ctx.devkit_dir)
@@ -533,13 +547,32 @@ def job_findings(
         job = by_name.get(name)
         finding = Finding(
             JOB_KIND,
-            name if name in tasks else fix_cycle.DEVKIT,
+            owners.get(name, fix_cycle.DEVKIT),
             _JOB_WHEN.sub("", head),
             command=line[:300],
         )
         if not _filed_elsewhere(ctx, line, job, finding, items, git):
             found.append(finding.at(_job_evidence(ctx, name, artifacts, job)))
-    return found + unscheduled(ctx, tasks, frozenset(by_name))
+    if unowned is None:
+        unowned = project_tasks.unowned_on_machine(owners) if live else []
+    return found + unscheduled(ctx, tasks, frozenset(by_name)) + unowned_findings(unowned)
+
+
+# A hand-made scheduled task no registered project claims (`project_tasks.unowned`).
+UNOWNED_KIND = "scheduled-job-unowned"
+UNOWNED = (
+    "no project claims this scheduled task -- claim it in the [schedule] tasks of the"
+    " .devkit.toml of the project whose code it runs, moving its script into one first"
+)
+
+
+def unowned_findings(names: list[str]) -> list[Finding]:
+    """One devkit finding per unowned task: giving it an owner is a change to a project's
+    manifest, which is the harness's to make, not any one project's."""
+    return [
+        Finding(UNOWNED_KIND, fix_cycle.DEVKIT, f"{name}: {UNOWNED}", command="project_tasks.py")
+        for name in names
+    ]
 
 
 def _job_evidence(
