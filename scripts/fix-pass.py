@@ -87,6 +87,7 @@ import fix_visibility
 import gate_evidence
 import git_trust
 import installers
+import precommit_store
 import ship_intent
 import ship_step
 import sweep
@@ -722,6 +723,18 @@ def run_alone(
         return run(workspace, mode, launch, deadline=deadline)
 
 
+def undo_elevated_leftovers(root: Path, write: bool) -> None:
+    """What an elevated session left that this unelevated pass is refused, undone before
+    any git call. Its trees are dubious ownership to git, and every push, read and
+    re-gate in them failed (5025d284, e1463857); git's global config is written only by a
+    pass that acts (`write`). Its pre-commit clones fail the ship step's commit
+    (`precommit_store`)."""
+    if trusted := git_trust.adopt(root, write=write):
+        print(trusted)
+    if healed := precommit_store.say_healed(precommit_store.heal()):
+        print(f"fix-pass: {healed}")
+
+
 def main(argv: list[str] | None = None) -> int:
     # From the start: the watchdog's stop counts the preflight and the lock wait too.
     deadline = send_deadline(time.monotonic())
@@ -742,11 +755,8 @@ def main(argv: list[str] | None = None) -> int:
     launch = agent_models.Launch.parse(agent, args.model, args.effort)
     if mode != fix_cycle.OFF and (code := cannot_start()) is not None:
         return code
-    # Before any git call: a tree an elevated session made is one git refuses this
-    # unelevated pass, and every push, read and re-gate in it failed (5025d284, e1463857).
-    writes = mode == fix_cycle.DISPATCH
-    if mode != fix_cycle.OFF and (trusted := git_trust.adopt(workspace.parent, write=writes)):
-        print(trusted)
+    if mode != fix_cycle.OFF:
+        undo_elevated_leftovers(workspace.parent, write=mode == fix_cycle.DISPATCH)
     try:
         return run_alone(workspace, mode, launch, deadline=deadline)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:

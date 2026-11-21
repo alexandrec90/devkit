@@ -1633,6 +1633,23 @@ def test_a_commit_that_worked_is_never_retried():
     assert len([step for step in git.calls if step[0] == "commit"]) == 1
 
 
+def test_the_pre_commit_store_is_healed_before_the_first_commit(capsys):
+    """data-lake and sports_betting failed at `git commit` on 2026-09-28: a clone an
+    elevated session made was unreadable to the unelevated run. The heal is what lets
+    pre-commit clone it again, so it has to come before the commit, and say so."""
+    order: list[str] = []
+    git = CommitGit(["M  a.py\n"], [0])
+
+    def heal():
+        order.append("heal" if not git.calls else "late")
+        return ["https://github.com/pre-commit/pre-commit-hooks@v6.0.0 (x)"]
+
+    up.commit_with_hook_retry(git, "Adopt devkit v0.7.0", heal=heal)
+
+    assert order == ["heal"]
+    assert "pre-commit-hooks@v6.0.0" in capsys.readouterr().out
+
+
 def test_a_hook_that_wrote_new_files_past_a_passing_commit_is_amended_in():
     """pre-commit fails a hook only for rewriting a tracked file, so `sync-codex`
     mirroring a new skill into `.agents/skills/` passed, and the adoption commit landed

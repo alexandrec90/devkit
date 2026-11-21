@@ -73,6 +73,15 @@ def git_trusted(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def store_healed(monkeypatch):
+    """Every `precommit_store.heal` the pass makes, counted and never run: the real one
+    edits pre-commit's database, which is this machine's, not the suite's."""
+    calls: list[int] = []
+    monkeypatch.setattr(fix_pass.precommit_store, "heal", lambda: calls.append(1) or [])
+    return calls
+
+
+@pytest.fixture(autouse=True)
 def current_tree(request, monkeypatch):
     """The pass's code is current unless a test says otherwise: `main` runs from this
     checkout, a linked tree in a fixer's session, which the real `stale_tree` fetches
@@ -468,6 +477,27 @@ def test_the_workspace_is_trusted_before_any_git_call_and_written_only_by_a_disp
         assert fix_pass.main(["--mode", mode, "--workspace", workspace]) == 0
     assert git_trusted == [(root, False), (root, True)]
     assert order == [0, 1, 2], "trusted before the pass runs"
+
+
+def test_undo_elevated_leftovers_trusts_the_tree_and_heals_the_store(
+    tmp_path, git_trusted, store_healed, monkeypatch, capsys
+):
+    """f8a7d7be: the ship step's commit failed on a pre-commit clone only an elevated
+    process could read. A pass that runs heals the store as it trusts the trees, and
+    says what it dropped."""
+    fix_pass.undo_elevated_leftovers(tmp_path, write=False)
+    assert git_trusted == [(tmp_path, False)]
+    assert store_healed == [1]
+    assert capsys.readouterr().out == "", "nothing dropped, nothing said"
+    monkeypatch.setattr(fix_pass.precommit_store, "heal", lambda: ["https://x/hooks@v1 (r)"])
+    fix_pass.undo_elevated_leftovers(tmp_path, write=True)
+    assert "hooks@v1" in capsys.readouterr().out
+
+
+def test_a_switched_off_pass_leaves_the_pre_commit_store_alone(world, store_healed):
+    workspace = str(world["workspace"])
+    assert fix_pass.main(["--mode", "off", "--workspace", workspace]) == 0
+    assert store_healed == []
 
 
 def test_plan_writes_the_whole_plan_and_sends_nothing(world):
