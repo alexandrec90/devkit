@@ -76,16 +76,19 @@ def lock_node_dependencies(app: Path, dry_run: bool) -> None:
     print(f"  write   {app.name}/package-lock.json")
 
 
-def provision_environment(root: Path, dry_run: bool) -> None:
+def provision_environment(root: Path, dry_run: bool, python: str = "") -> None:
     """Build the project's `.venv`, so the initial commit's pre-commit gate can run.
 
-    pre-commit is in the template's dev extra, hence `--all-extras`. A failure is not
-    fatal: `pre-commit` may still be on `PATH`, so it warns and lets the commit give
-    its own verdict.
+    pre-commit is in the template's dev extra, hence `--all-extras`. `python` is the
+    version `.devkit.toml` pins, passed as `--python` because a bare `uv sync` takes any
+    interpreter `requires-python` allows (fdfe3a1d: 3.14 for a 3.12 project). A failure
+    is not fatal: `pre-commit` may still be on `PATH`, so it warns and lets the commit
+    give its own verdict.
     """
     skip = ".venv -- uv is not installed; the first commit uses pre-commit on PATH"
     fail = "the first commit needs pre-commit on PATH instead"
-    if _uv_step(SYNC_COMMAND, root, dry_run, skip=skip, fail=fail):
+    command = [*SYNC_COMMAND, "--python", python] if python else SYNC_COMMAND
+    if _uv_step(command, root, dry_run, skip=skip, fail=fail):
         print("  write   .venv")
 
 

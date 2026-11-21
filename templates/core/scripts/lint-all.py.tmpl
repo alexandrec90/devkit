@@ -226,6 +226,26 @@ def desktop_targets(paths: list[str], tier: Any | None) -> list[str]:
     ]
 
 
+def dotnet_sdk_missing() -> str:
+    """Why this host cannot build the desktop app, or "" when it can.
+
+    A `dotnet` on PATH is only the host: with no SDK installed it answers every build with
+    "No .NET SDKs were found", which read as a lint finding on a PC that simply lacks one
+    (8448cfc1). So the SDK list is asked too, and an empty one is the same missing host.
+    """
+    if not shutil.which("dotnet"):
+        return "no dotnet on PATH"
+    try:
+        listed = subprocess.run(
+            ["dotnet", "--list-sdks"], capture_output=True, text=True, check=False, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"dotnet --list-sdks did not answer ({exc})"
+    if not (listed.stdout or "").strip():
+        return "dotnet on PATH lists no SDK"
+    return ""
+
+
 def desktop_section(tier: Any | None, changed: list[str], scoped: bool) -> str:
     """The desktop lint's artifact section, with its own log inlined on a failure.
 
@@ -242,8 +262,8 @@ def desktop_section(tier: Any | None, changed: list[str], scoped: bool) -> str:
     if not WINDOWS:
         print("  desktop: the desktop tier needs Windows — skipped")
         return ""
-    if not shutil.which("dotnet"):
-        print("  desktop: no dotnet on PATH — skipped (install the SDK global.json names)")
+    if missing := dotnet_sdk_missing():
+        print(f"  desktop: {missing} — skipped (install the SDK global.json names)")
         return ""
     section = run_tool(
         "desktop", [sys.executable, str(DESKTOP_DRIVER), "lint"], "python scripts/desktop.py lint"

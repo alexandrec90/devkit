@@ -150,11 +150,11 @@ checkout's ports and credentials.
 
 ## Tooling
 
-{{^shipped}}
+{{#docker}}
 > Everything in this section needs the local Docker Desktop daemon. If it isn't
 > running, make the code change and defer container/stack verification until it is
 > (or to CI). Run `docker ps` first — an `npipe`/daemon error means Desktop is stopped.
-{{/shipped}}
+{{/docker}}
 {{#desktop}}
 > The app's checks need Windows and the .NET SDK `global.json` names. Without either,
 > `scripts/lint-all.py` and `scripts/run-tests.py` skip the desktop tier with a note
@@ -199,12 +199,12 @@ terminal output — it scrolls away and buries the signal. Keep the terminal to 
 status line plus the artifact path; put everything needed to diagnose in the file.
 Write the artifact on failure too, not just success, and overwrite per run.
 
-{{^shipped}}
+{{#docker}}
 ### Docker subprocess calls
 
 - **`docker compose exec` must use `-T`** — without it a pseudo-TTY is allocated and
   the subprocess handle can outlive the command, leaving the caller hung.
-{{/shipped}}
+{{/docker}}
 
 ## Testing
 

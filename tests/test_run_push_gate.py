@@ -14,6 +14,7 @@ and a hardcoded list here cannot answer it: `tests/test_gate_parity.py` reads
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +43,15 @@ class FakeRunner:
         self.calls.append(list(argv))
         self.envs.append(None if env is None else dict(env))
         return completed(argv, self.exits.get(argv[1], 0))
+
+
+class WritesALog(FakeRunner):
+    """A wrapper that writes its artifact under `logs/` before it fails."""
+
+    def __call__(self, argv, *, cwd, check, env=None):
+        (Path(cwd) / "logs").mkdir(exist_ok=True)
+        (Path(cwd) / "logs" / "lint-failures.log").write_text("x\n", encoding="utf-8")
+        return super().__call__(argv, cwd=cwd, check=check, env=env)
 
 
 def project(root: Path, *files: str) -> Path:
@@ -233,7 +243,33 @@ def test_a_wrapper_step_still_points_at_the_artifacts_it_writes_itself(tmp_path,
     """`lint-all.py` and `run-tests.py` are project-owned, so their file names are not
     this gate's to promise."""
     root = project(tmp_path, "scripts/lint-all.py")
+    assert gate.run_gate(root, WritesALog({"scripts/lint-all.py": 2}), release_prepare="") == 2
+    assert "Fix it from the artifact under logs/," in capsys.readouterr().out
+
+
+def test_wrote_under_logs_counts_only_what_a_step_wrote_since_it_began(tmp_path):
+    assert not gate.wrote_under_logs(tmp_path, 0), "no logs/ at all"
+    old = tmp_path / "logs" / "nested" / "old.log"
+    old.parent.mkdir(parents=True)
+    old.write_text("x", encoding="utf-8")
+    os.utime(old, (100, 100))
+    assert not gate.wrote_under_logs(tmp_path, 200)
+    assert gate.wrote_under_logs(tmp_path, 100), "nested, and at the start itself"
+
+
+def test_a_wrapper_that_wrote_nothing_sends_the_reader_to_the_output(tmp_path, capsys):
+    """ee0a5d2a: `run-tests.py` crashed before its artifact, and the refusal still sent the
+    session to "the artifact under logs/", which did not exist."""
+    root = project(tmp_path, "scripts/lint-all.py")
+    stale = root / "logs" / "old.log"
+    stale.parent.mkdir()
+    stale.write_text("an earlier run's\n", encoding="utf-8")
+    os.utime(stale, (0, 0))
     assert gate.run_gate(root, FakeRunner({"scripts/lint-all.py": 2}), release_prepare="") == 2
+    assert "Fix it from the output above (the step wrote nothing under logs/)" in (
+        capsys.readouterr().out
+    )
+    assert gate.run_gate(root, WritesALog({"scripts/lint-all.py": 2}), release_prepare="") == 2
     assert "Fix it from the artifact under logs/," in capsys.readouterr().out
 
 

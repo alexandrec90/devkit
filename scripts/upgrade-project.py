@@ -1247,7 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     root = args.workspace.parent
-    tag, tags, refusal = devkit_releases(args.devkit)
+    tag, tags, refusal = devkit_releases(args.devkit, fetch=unattended_apply(args))
     if refusal:
         return stopped(*refusal)
 
@@ -1359,8 +1359,38 @@ def latest_tag(devkit: Path) -> str | None:
     return tags[0] if tags else None
 
 
-def devkit_releases(devkit: Path) -> tuple[str, list[str], tuple[int, str] | None]:
+def fetch_tags(devkit: Path) -> str:
+    """Fetch origin's tags into `devkit`: "" when it worked, else the line saying why not.
+
+    The unattended run's tag set was whatever the checkout last fetched. On 2026-10-09
+    v0.11.55 was tagged at 02:05 and the 15:02 run still read v0.11.53 as newest, so it
+    refused a project already on v0.11.55 and exited 1 asking a person to "Fetch devkit's
+    tags" (0ac47914). Never raised: a failed fetch leaves the set this run read before."""
+    done = subprocess.run(
+        ["git", "-C", str(devkit), "fetch", "--quiet", "--tags", "origin"],
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=sweep.NO_WINDOW,
+    )
+    if done.returncode == 0:
+        return ""
+    said = " ".join((done.stderr or done.stdout or "").split()) or f"git exit {done.returncode}"
+    return f"upgrade: could not fetch devkit's tags, reading the ones here: {said}"
+
+
+def unattended_apply(args: argparse.Namespace) -> bool:
+    """The scheduled `--all --yes` pass. Only it fetches devkit's tags (`fetch_tags`): a
+    person's run reads the checkout they are looking at."""
+    return bool(args.every and not args.dry_run)
+
+
+def devkit_releases(
+    devkit: Path, fetch: bool = False
+) -> tuple[str, list[str], tuple[int, str] | None]:
     """The release this run adopts, the whole tag set, and a refusal for `stopped`.
+
+    With `fetch`, origin's tags are fetched first and a failed fetch is said, not raised.
 
     The set is for the projects *ahead* of this checkout; `upgrade_one` cannot read it,
     since it only has the box. Exit 2 when git cannot read the tags -- nothing is known
@@ -1369,6 +1399,8 @@ def devkit_releases(devkit: Path) -> tuple[str, list[str], tuple[int, str] | Non
     first read already stops a checkout git refuses, so the set may degrade to [],
     which `unreleased_adoption` reads as "cannot tell" rather than "ahead".
     """
+    if fetch and (said := fetch_tags(devkit)):
+        print(said, file=sys.stderr)
     try:
         tag = latest_tag(devkit)
     except RuntimeError as exc:
