@@ -1,0 +1,25 @@
+# `[schedule] tasks` (`harness_config.ScheduleConfig`) only passes a project's own
+# repo-contract test once that project has pulled the devkit release that names it, so
+# the claims this change was made for wait for that release.
+when = "released"
+on = "desktop-ml5f3pj"
+agent = """
+Two projects must claim the Windows scheduled tasks they own, in their `.devkit.toml`,
+now that devkit's release carries `[schedule] tasks` (`scripts/project_tasks.py`):
+
+| Project | `[schedule] tasks` |
+| --- | --- |
+| data-lake | `["SeaweedFS data-lake pool"]` -- its installer is `scripts/storage-node.py` |
+| host-scripts | `["D2R Disconnect Guard", "D2R Net Logger", "Hardware Health Check"]` -- `windows/` |
+
+For each, in a fresh tree of that project: if its `DEVKIT_VERSION` predates this
+release, run `python scripts/sync-devkit.py --pull` first (devkit's
+`devkit-upgrade-projects` job may already have opened that adoption PR; if one is open,
+wait for it by queueing a fresh task with this same text, rather than pulling twice).
+Add the table, run that project's `scripts/hooks/tests/test_repo_contract.py`, and ship.
+
+Finished is `python scripts/project_tasks.py` in devkit listing all four tasks under
+their projects and no `UNOWNED:` line for any of them. A host-scripts task still running
+`C:\\Users\\alexa\\Scripts` is the other queued task's (host-scripts'
+`.devkit-queue/repoint-scheduled-tasks-1120.toml`), not this one's.
+"""

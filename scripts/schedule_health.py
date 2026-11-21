@@ -609,6 +609,12 @@ def job_problem(
 
 def query(prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]:
     """Ask the scheduler. [] on any failure, including not being Windows at all."""
+    stdout = scheduler_csv()
+    return [] if stdout is None else parse_tasks(stdout, prefix, also)
+
+
+def scheduler_csv() -> str | None:
+    """`schtasks /Query /FO CSV /V`'s output; None on any failure, or off Windows."""
     try:
         result = subprocess.run(
             ["schtasks", "/Query", "/FO", "CSV", "/V"],
@@ -619,10 +625,8 @@ def query(prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]
             creationflags=NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
-        return []
-    if result.returncode != 0:
-        return []
-    return parse_tasks(result.stdout, prefix, also)
+        return None
+    return result.stdout if result.returncode == 0 else None
 
 
 def report(prefix: str = PREFIX, now: _dt.datetime | None = None) -> list[str]:

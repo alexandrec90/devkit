@@ -968,6 +968,23 @@ or an elevated verb. `devkit-after-merge` reads every project's queue off
 `scripts/after-merge-pass.py status` says what is due and what this machine would do.
 The format is the ship skill's last section; the decisions are `scripts/after_merge.py`.
 
+#### A project's own scheduled tasks
+
+A task that is neither devkit's nor a collector's is claimed by the project whose code it
+runs, in that project's `.devkit.toml`:
+
+```toml
+[schedule]
+tasks = ["SeaweedFS data-lake pool"]
+```
+
+The fix pass judges every claimed task with devkit's own jobs and files a failure against
+the claiming project, so that project's fixer gets it. A hand-made task in the scheduler's
+root folder that no project claims is filed too, as `scheduled-job-unowned` against devkit,
+so a new task cannot go unwatched just because nobody registered it.
+`python scripts/project_tasks.py` prints every claimed task, its project, and what is
+unowned on this machine.
+
 #### The one installer you run by hand
 
 Nobody remembers to run ten installers, and for a while nothing could even say which

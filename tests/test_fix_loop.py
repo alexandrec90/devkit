@@ -34,6 +34,8 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(fix_loop.session_friction, "harvest", lambda *a, **k: [])
     # The machine's own Task Scheduler, which `close` would otherwise read and file.
     monkeypatch.setattr(fix_loop.schedule_health, "query", lambda *a, **k: [])
+    # Nor any hand-made task of the machine's that no project claims.
+    monkeypatch.setattr(fix_loop.project_tasks, "unowned_on_machine", lambda *a, **k: [])
     # Nor has it any task asked about by name.
     monkeypatch.setattr(
         fix_loop.collector_tasks,
@@ -970,6 +972,58 @@ def test_a_failing_scheduled_job_is_filed_whatever_wraps_it(ctx):
     assert found.evidence == "", "no reconcile.log was written, so none is cited"
     healthy = _job("devkit-worktree-reconcile", 0, ran)
     assert fix_loop.job_findings(ctx, [healthy]) == []
+
+
+def test_a_task_a_project_claims_is_filed_against_that_project(ctx):
+    """`SeaweedFS data-lake pool` was disabled for three weeks and no pass filed it: it was
+    not a `devkit-` job, nor a collector's, so nothing asked the scheduler about it."""
+    ran = NOW - _dt.timedelta(minutes=5)
+    seaweed = _job("SeaweedFS data-lake pool", 267014, ran)
+    owners = {"SeaweedFS data-lake pool": "data-lake"}
+    [found] = fix_loop.job_findings(ctx, [seaweed], owners=owners)
+    assert (found.kind, found.project) == (fix_loop.JOB_KIND, "data-lake")
+    assert found.detail.startswith("SeaweedFS data-lake pool: ")
+
+
+def test_a_live_pass_asks_the_scheduler_about_every_claimed_task(ctx, monkeypatch):
+    asked: list[frozenset[str]] = []
+    monkeypatch.setattr(
+        fix_loop.schedule_health,
+        "query",
+        lambda *a, also=frozenset(), **k: asked.append(also) or [],
+    )
+    monkeypatch.setattr(
+        fix_loop.collectors, "scheduled_tasks", lambda *a, **k: {"scraper": "x.log"}
+    )
+    monkeypatch.setattr(
+        fix_loop.project_tasks, "declared", lambda root, projects: {"Pool": "data-lake"}
+    )
+    fix_loop.job_findings(ctx)
+    assert asked == [frozenset({"Pool", "scraper"})]
+
+
+def test_a_hand_made_task_no_project_claims_is_a_devkit_finding(ctx, monkeypatch):
+    [found] = fix_loop.job_findings(ctx, [], unowned=["D2R Net Logger"])
+    assert (found.kind, found.project) == (fix_loop.UNOWNED_KIND, "devkit")
+    assert found.detail == f"D2R Net Logger: {fix_loop.UNOWNED}", "stable across recurrences"
+    seen: list[set[str]] = []
+    monkeypatch.setattr(
+        fix_loop.project_tasks,
+        "unowned_on_machine",
+        lambda claimed: seen.append(set(claimed)) or [],
+    )
+    monkeypatch.setattr(fix_loop.project_tasks, "declared", lambda root, projects: {"Pool": "x"})
+    assert fix_loop.job_findings(ctx) == []
+    assert seen == [{"Pool"}], "a claimed task is never asked about as unowned"
+
+
+def test_unowned_findings_files_one_devkit_finding_per_task():
+    found = fix_loop.unowned_findings(["A", "B"])
+    assert [(f.kind, f.project, f.detail) for f in found] == [
+        (fix_loop.UNOWNED_KIND, "devkit", f"A: {fix_loop.UNOWNED}"),
+        (fix_loop.UNOWNED_KIND, "devkit", f"B: {fix_loop.UNOWNED}"),
+    ]
+    assert fix_loop.unowned_findings([]) == []
 
 
 def test_a_job_failure_names_the_failing_runs_kept_copy_as_its_evidence(ctx):
