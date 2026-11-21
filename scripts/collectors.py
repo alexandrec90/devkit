@@ -399,6 +399,18 @@ def first_line(text: str, limit: int = 100) -> str:
     return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
+# A line of `compose up`'s output that says why it failed. A build's output opens with
+# BuildKit's progress (`#1 [internal] load local bake definitions`, 777a28c5) and ends on
+# the error, so the first line named nothing and every build failure filed as one group.
+ERROR_LINE = re.compile(r"\berror\b|failed to solve|\bdenied\b|not found", re.I)
+
+
+def start_failure(text: str) -> str:
+    """What a failed start says about why: its last error line, else its first line."""
+    errors = [line.strip() for line in text.splitlines() if ERROR_LINE.search(line)]
+    return first_line(errors[-1]) if errors else first_line(text)
+
+
 TIMED_OUT = collector_tasks.TIMED_OUT
 
 
@@ -951,7 +963,9 @@ def keep_running(
     if box is None or not box.running:
         ok, out = docker.up(target.checkout, service)
         if not ok:
-            report.fail(f"{name}: could not start `{service}` -- {first_line(out) or 'no output'}")
+            report.fail(
+                f"{name}: could not start `{service}` -- {start_failure(out) or 'no output'}"
+            )
             report.lines.extend(f"    {line}" for line in out.splitlines()[-20:])
             return None
         # No health check until it has settled: every job in it has yet to run, and a
@@ -1411,7 +1425,26 @@ def acting(path: Path, chosen: Sequence[Target]) -> Iterator[None]:
     try:
         yield
     finally:
-        path.unlink(missing_ok=True)
+        remove_marker(path)
+
+
+# 7d71791d: Windows refuses to delete a file another process has open (WinError 32), and
+# a fire reading the marker holds it for a moment. Asked again this often, this far apart.
+MARKER_TRIES = 5
+MARKER_PAUSE = 0.2
+
+
+def remove_marker(path: Path) -> None:
+    """Remove `acting`'s marker. One still held after `MARKER_TRIES` is left: it names its
+    own `until`, so `in_pass` stops honouring it then, and raising here would only turn a
+    pass that had done its work red."""
+    for attempt in range(MARKER_TRIES):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt + 1 < MARKER_TRIES:
+                _time.sleep(MARKER_PAUSE)
 
 
 def in_pass(path: Path, clock: float) -> bool:

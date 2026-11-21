@@ -1749,8 +1749,9 @@ def gh_for(path: Path) -> Git:
 # fetch, never asked again because these words were missing here. GitHub also fails with
 # no status at all: GraphQL's catch-all, and the ref store's own fatal on a push --
 # 9c48bdc9 and 9cde3743, two carameli ships filed as defects, each through on the next pass.
+# A 408 is the one 4xx that is GitHub timing out, not refusing: 78016688, data-lake's fetch.
 _TRANSIENT = re.compile(
-    r"\bHTTP 5\d\d\b|internal server error|bad gateway|service unavailable"
+    r"\bHTTP 5\d\d\b|\bHTTP 408\b|internal server error|bad gateway|service unavailable"
     r"|timeout|timed out|error connecting|connection (?:was )?reset|could not resolve host"
     r"|failed to receive handshake|SSL/TLS connection failed"
     r"|empty reply from server|recv failure"

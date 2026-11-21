@@ -589,10 +589,10 @@ opening the PR, reading the gate, updating a branch, merging an adoption: one co
 each, run here.
 
 1. **Ship every gated intent.** Run the tree's commit-stage fixers, commit with the message,
-   push with the push gate skipped, open the PR -- labelled `automerge` when the pass cut
-   the tree for a fixer or the person shipped with `/ship auto` (the intent ends
-   `Automerge: yes`), so those merge once green while any other person's PR waits for
-   them even after a fixer was sent to repair it (`ship_intent.labels_for`) -- record
+   push with the push gate skipped, open the PR -- labelled `automerge`, so it merges once
+   green whoever shipped it, unless it was shipped `/ship hold` (the intent carries
+   `Hold: yes`), which keeps it for a person through any resolver's ship
+   (`ship_intent.labels_for`) -- record
    the outcome in `logs/ship-state.json` beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
    touched; a refused commit is a failure like any other, with the pre-commit output as
@@ -967,6 +967,23 @@ or an elevated verb. `devkit-after-merge` reads every project's queue off
 (`scripts/job_claims.py`), and a failure goes to an agent rather than to a log.
 `scripts/after-merge-pass.py status` says what is due and what this machine would do.
 The format is the ship skill's last section; the decisions are `scripts/after_merge.py`.
+
+#### A project's own scheduled tasks
+
+A task that is neither devkit's nor a collector's is claimed by the project whose code it
+runs, in that project's `.devkit.toml`:
+
+```toml
+[schedule]
+tasks = ["SeaweedFS data-lake pool"]
+```
+
+The fix pass judges every claimed task with devkit's own jobs and files a failure against
+the claiming project, so that project's fixer gets it. A hand-made task in the scheduler's
+root folder that no project claims is filed too, as `scheduled-job-unowned` against devkit,
+so a new task cannot go unwatched just because nobody registered it.
+`python scripts/project_tasks.py` prints every claimed task, its project, and what is
+unowned on this machine.
 
 #### The one installer you run by hand
 
@@ -1900,6 +1917,8 @@ policy and no bridge at all, with this paragraph still claiming otherwise and no
 anywhere red. `scripts/codex_context.py` is the check that would have said so:
 `workspace-status.py` reports a missing fallback setting or a lost bridge beside the
 other workstation prerequisites, and stays silent on a machine with no `CODEX_HOME`.
+`scripts/install-codex-context.py` writes whichever is missing, never an operator's own
+value, and `installers.py` runs it on every maintenance pass.
 
 `sync-codex-context.py` mirrors only `.claude/skills/` to `.agents/skills/` and invokes
 `sync-codex-hooks.py` to regenerate `.codex/hooks.json` from the `settings.json` hooks

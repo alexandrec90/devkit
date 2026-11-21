@@ -56,7 +56,13 @@ class Runner:
 
 
 def gh_ok(*_a):
-    return lambda *args: subprocess.CompletedProcess(["gh", *args], 0, "https://x/pull/7", "")
+    """Every call succeeds; a `pr list` finds no open PR yet, as on a first ship."""
+
+    def gh(*args):
+        out = "[]" if args[:2] == ("pr", "list") else "https://x/pull/7"
+        return subprocess.CompletedProcess(["gh", *args], 0, out, "")
+
+    return gh
 
 
 # --- the pass's deadline ------------------------------------------------------------
@@ -444,9 +450,8 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
         one.branch,
         "main",
     )
-    # A person's tree carries no fix-pass origin mark, so its PR waits for them: the
-    # vendored auto-merge workflow lands any labelled PR once the gate passes.
-    assert plan.pr_labels == ()
+    # A person's tree, unheld: the vendored auto-merge workflow lands it once green.
+    assert plan.pr_labels == (ship_intent.sweep.AUTOMERGE_LABEL,)
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.SHIPPED
     assert state["intent"] == one.digest and state["sha"] == "abc123"
@@ -502,33 +507,26 @@ def test_a_fixer_sent_back_at_its_own_branch_keeps_the_label(tmp_path, monkeypat
     assert shipped_labels(tmp_path, monkeypatch, True, 2) == (ship_intent.sweep.AUTOMERGE_LABEL,)
 
 
-def test_a_fixer_sent_at_a_feature_sessions_branch_leaves_it_unlabelled(tmp_path, monkeypatch):
-    """Fixing the gate on a feature PR does not make the feature routine: the person
-    who asked for it still merges it, however many dispatches were stamped there."""
-    assert shipped_labels(tmp_path / "once", monkeypatch, False, 1) == ()
-    assert shipped_labels(tmp_path / "twice", monkeypatch, False, 2) == ()
+def test_a_persons_pr_merges_itself_once_green_too(tmp_path, monkeypatch):
+    """2026-11-20: radio #1, sports_betting #94 and skinamp #14 sat green and open for a
+    week, unlabelled because a person rather than the pass had shipped them, waiting on a
+    review nobody meant to give. With or without fixers sent at the branch."""
+    label = (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert shipped_labels(tmp_path / "none", monkeypatch, False, 0) == label
+    assert shipped_labels(tmp_path / "once", monkeypatch, False, 1) == label
+    assert shipped_labels(tmp_path / "twice", monkeypatch, False, 2) == label
 
 
-def test_a_person_who_shipped_with_auto_gets_the_label_and_keeps_the_trailer(tmp_path, monkeypatch):
-    """`/ship auto` ends the body with the trailer: the person said the PR needs no
-    review of theirs, and the PR body keeps the record of who said so."""
+def test_the_old_auto_trailer_is_inert_text(tmp_path, monkeypatch):
+    """An intent still ending `Automerge: yes` ships as any other, the line kept in the
+    body; only `Hold: yes` changes what the PR is labelled."""
     one = intent(tmp_path, body="Trivial rename.\n\nAutomerge: yes")
     plans = capture_plans(monkeypatch)
     assert ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
     assert plans[0].pr_labels == (ship_intent.sweep.AUTOMERGE_LABEL,)
     assert plans[0].pr_body.endswith("Automerge: yes")
-
-
-def test_only_the_trailer_as_the_last_line_asks_for_automerge(tmp_path):
-    """A body that explains the trailer, or says no, is not one that uses it."""
-    asks = ship_intent.asks_automerge
-    assert asks("Because.\n\nAutomerge: yes\n") and asks("Because.\n\n  automerge:YES  ")
-    assert not asks("Teach `/ship` the trailer:\n\nAutomerge: yes\n\nso a person can skip review.")
-    assert not asks("Because.\n\nAutomerge: no")
-    assert not asks("Because. Automerge: yes")
-    assert not asks("")
-    assert ship_intent.labels_for(tmp_path) == ()
-    assert ship_intent.labels_for(tmp_path, asked=True) == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert ship_intent.labels_for() == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert ship_intent.labels_for(held=True) == ()
 
 
 # --- the direct flow ----------------------------------------------------------------
@@ -621,8 +619,8 @@ def test_a_held_direct_intent_gets_no_merge_label_at_all(tmp_path, monkeypatch):
 def test_a_held_intent_overrides_the_fixers_label_in_a_gated_project_too(tmp_path):
     (tmp_path / ship_intent.fix_reports.ORIGIN_FILE).parent.mkdir()
     (tmp_path / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
-    assert ship_intent.labels_for(tmp_path) == (ship_intent.sweep.AUTOMERGE_LABEL,)
-    assert ship_intent.labels_for(tmp_path, held=True) == ()
+    assert ship_intent.labels_for() == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert ship_intent.labels_for(held=True) == ()
 
 
 def test_a_hold_is_a_whole_line_anywhere_in_the_body(tmp_path):
@@ -640,10 +638,6 @@ def test_a_prose_mention_of_a_hold_is_not_one():
     assert not asks("Because. Hold: yes")
     assert not asks("The `Hold: yes` line keeps a PR back.")
     assert not asks("")
-
-
-def test_automerge_keeps_its_last_line_rule():
-    assert not ship_intent.asks_automerge("Because.\n\nAutomerge: yes\n\nCloses #4")
 
 
 def test_a_resolvers_ship_keeps_a_merge_now_prs_label(tmp_path, monkeypatch):
@@ -676,16 +670,18 @@ def test_a_resolvers_ship_leaves_a_held_pr_held(tmp_path, monkeypatch):
     assert plans[0].pr_labels == ()
 
 
-def test_an_intents_labels_ask_its_pr_only_in_the_direct_flow(tmp_path):
+def test_an_intents_labels_ask_its_pr_in_either_flow(tmp_path):
+    """Both flows merge what nobody held, so a gated resolver's ship must read the hold
+    off the PR too, or it would label a held PR `automerge`."""
     asked = []
 
     def gh(*args):
         asked.append(args)
         return subprocess.CompletedProcess(args, 0, '[{"body": "x\\n\\nHold: yes"}]', "")
 
-    assert ship_intent.intent_labels(intent(tmp_path), gh) == () and asked == []
+    assert ship_intent.intent_labels(intent(tmp_path), gh) == ()
     assert ship_intent.intent_labels(direct(tmp_path), gh) == ()
-    assert asked, "a resolver's own intent says nothing of the hold"
+    assert len(asked) == 2, "a resolver's own intent says nothing of the hold"
 
 
 @pytest.mark.parametrize(("code", "out"), [(1, ""), (0, "not json"), (0, "{}"), (0, "[3]")])
@@ -725,20 +721,12 @@ def test_a_pr_github_says_is_not_held_is_not_held():
     )
 
 
-def test_a_gated_ship_asks_github_nothing_new(tmp_path, monkeypatch):
-    """Inert for a gated project: `held_pr` is the direct flow's alone."""
-    capture_plans(monkeypatch)
-    asked = []
-
-    def gh_for(_tree):
-        def gh(*args):
-            asked.append(args)
-            return subprocess.CompletedProcess(args, 0, "", "")
-
-        return gh
-
-    ship_intent.ship_one(intent(tmp_path), "py", "main", Runner(), gh_for, NOW)
-    assert not [a for a in asked if a[:2] == ("pr", "list") and "body" in a]
+def test_a_gated_resolvers_ship_leaves_a_held_pr_held(tmp_path, monkeypatch):
+    plans = capture_plans(monkeypatch)
+    one = intent(tmp_path, body="Resolved the conflict.")
+    gh_for = gh_with_open_body("Wants a look.\n\nHold: yes")
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_for, NOW).stage == "shipped"
+    assert plans[0].pr_labels == ()
 
 
 def test_a_persons_direct_flow_pr_is_never_pass_owned(tmp_path, monkeypatch):
@@ -746,7 +734,7 @@ def test_a_persons_direct_flow_pr_is_never_pass_owned(tmp_path, monkeypatch):
     the direct flow carries `merge-now`, and pass ownership decides whether the pass may
     close it; read off the labels, every such PR would read as the pass's own."""
     one = direct(tmp_path)
-    assert ship_intent.labels_for(one.tree, direct=True) == (ship_intent.sweep.MERGE_NOW_LABEL,)
+    assert ship_intent.labels_for(direct=True) == (ship_intent.sweep.MERGE_NOW_LABEL,)
     assert not ship_intent.pass_cut(one.tree)
     assert ship_intent.pass_owned(one) is False
     (one.tree / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
@@ -1340,6 +1328,18 @@ def test_the_fork_counts_merge_head_only_while_a_merge_is_in_progress(tmp_path):
 
     ship_intent.lands_nothing(tmp_path, "main", not_merging)
     assert ["git", "merge-base", "origin/main", "HEAD"] in [c[0] for c in plain.calls]
+
+
+def test_merge_tree_is_handed_a_commit_never_a_bare_tree(tmp_path, monkeypatch):
+    """0cd24454: git 2.40 refuses a tree there ("expected commit type"), so nine tests
+    failed on one workstation while CI's newer git passed them."""
+    monkeypatch.setattr(ship_intent, "_held_tree", lambda tree, runner: "tree-sha")
+    run = Runner({"git commit-tree": (0, "commit-sha\n", ""), "git merge-base": (0, "fork\n", "")})
+    ship_intent.lands_nothing(tmp_path, "main", run)
+    argv = [c[0] for c in run.calls]
+    assert ["git", "commit-tree", "tree-sha", "-p", "fork", "-m", "probe"] in argv
+    [merge] = [a for a in argv if a[:2] == ["git", "merge-tree"]]
+    assert merge[-1] == "commit-sha"
 
 
 def test_a_stored_retired_branch_refusal_is_tried_again(tmp_path):
@@ -2249,10 +2249,9 @@ def test_a_refusal_nothing_has_changed_since_is_not_run_again(tmp_path):
     )
 
 
-def test_a_pr_from_a_tree_the_pass_cut_merges_itself_and_a_persons_waits(tmp_path, monkeypatch):
-    """Fixer PRs merge once green; only a person's PR waits for a person. The mark is the
-    tree's origin, not the dispatch stamp: a fixer sent to repair a person's PR stamps
-    that person's tree, and `ensure_pr` labels a reused PR too."""
+def test_a_pr_from_a_tree_the_pass_cut_merges_itself_and_so_does_a_persons(tmp_path, monkeypatch):
+    """Every unheld PR merges once green, whoever's tree it came from: the mark of the
+    tree's origin now decides only who may close it (`pass_owned`), not how it merges."""
     plans = capture_plans(monkeypatch)
     fixer = intent(tmp_path / "fixer")
 
@@ -2261,5 +2260,6 @@ def test_a_pr_from_a_tree_the_pass_cut_merges_itself_and_a_persons_waits(tmp_pat
     person = intent(tmp_path / "person")
     ship_intent.fix_reports.stamp(person.tree, "pr:devkit:404:a:d:dispatch", "n", NOW)
     ship_intent.ship_one(person, "py", "main", Runner(), gh_ok, NOW)
-    assert [p.pr_labels for p in plans] == [(ship_intent.sweep.AUTOMERGE_LABEL,), ()]
-    assert ship_intent.labels_for(person.tree) == ()
+    label = (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert [p.pr_labels for p in plans] == [label, label]
+    assert ship_intent.pass_cut(fixer.tree) and not ship_intent.pass_cut(person.tree)

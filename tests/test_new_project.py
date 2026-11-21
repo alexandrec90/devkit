@@ -9,6 +9,7 @@ repo.
 """
 
 import dataclasses
+import importlib.util
 import itertools
 import json
 import os
@@ -202,6 +203,72 @@ def test_the_generated_memory_names_the_helper_only_with_a_frontend(tmp_path):
     assert "worktreePort" not in (generate(tmp_path / "b", {}) / "CLAUDE.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_the_generated_memory_speaks_of_docker_only_with_docker(tmp_path):
+    """36f8aba8: `--preset bare` rendered "needs the local Docker Desktop daemon" and a
+    "Docker subprocess calls" section into tvshell, which has no stack."""
+    bare = (generate(tmp_path / "a", {}) / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "Docker Desktop" not in bare and "docker compose exec" not in bare
+    stack = (generate(tmp_path / "b", {"docker": True}) / "CLAUDE.md").read_text(encoding="utf-8")
+    assert "Docker Desktop" in stack and "docker compose exec" in stack
+
+
+def test_the_generated_todo_asks_for_a_dotenv_only_when_one_carries_something(tmp_path):
+    """1a740305: a bare project, with no ports or credentials, was told "nothing works
+    without" `.env`."""
+    bare = (generate(tmp_path / "a", {}) / "TODO.md").read_text(encoding="utf-8")
+    assert "nothing works without it" not in bare
+    stack = (generate(tmp_path / "b", {"docker": True}) / "TODO.md").read_text(encoding="utf-8")
+    assert "Fill in `.env` from `.env.example`" in stack
+
+
+def test_a_python_project_is_generated_with_its_local_tier(tmp_path):
+    """04b8fcee: tvshell was generated with no `scripts/e2e.py`, which
+    `.claude/rules/local-e2e.md` says every project owes, so the night read it red."""
+    root = generate(tmp_path / "a", {})
+    assert (root / "scripts" / "e2e.py").is_file()
+    local = (root / "tests" / "test_local_tier.py").read_text(encoding="utf-8")
+    assert "@pytest.mark.local" in local
+    pytest_options = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "pytest"
+    ]["ini_options"]
+    assert '-m "not local"' in pytest_options["addopts"]
+    assert any(m.startswith("local:") for m in pytest_options["markers"])
+
+
+@pytest.mark.parametrize("shape", ["desktop", "electron"])
+def test_a_shipped_app_gets_no_python_local_tier(tmp_path, shape):
+    """Its Python suite is empty, so a Python tier would only ever say nothing ran."""
+    root = generate(tmp_path / "a", {shape: True})
+    assert not (root / "scripts" / "e2e.py").exists()
+    assert not (root / "tests" / "test_local_tier.py").exists()
+
+
+def test_the_generated_e2e_script_keeps_the_local_e2e_contract(tmp_path, monkeypatch):
+    # No `__pycache__` beside a template (see test_what_running_a_template_leaves...).
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    # Under its own name: `load_script` would hand back devkit's `scripts/e2e.py` when
+    # another test module loaded that first, since both are `e2e`.
+    path = TEMPLATES / "core" / "scripts" / "e2e.py"
+    spec = importlib.util.spec_from_file_location("template_e2e", path)
+    assert spec is not None and spec.loader is not None
+    e2e = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "template_e2e", e2e)  # before exec: @dataclass reads it
+    spec.loader.exec_module(e2e)
+    passed, failed, skipped = (
+        e2e.Case("tests/test_a.py::test_x", e2e.PASSED),
+        e2e.Case("tests/test_a.py::test_y", e2e.FAILED, "boom\nmore"),
+        e2e.Case("tests/test_a.py::test_z", e2e.SKIPPED, "no gpu"),
+    )
+    assert e2e.verdict(0, [passed], strict=True) == (0, [])
+    assert e2e.verdict(1, [failed], strict=False) == (1, ["FAILED tests/test_a.py::test_y - boom"])
+    assert e2e.verdict(0, [], strict=False)[0] != 0, "a run that executed nothing is red"
+    assert e2e.verdict(0, [passed, skipped], strict=True)[0] != 0, "a scheduled skip is red"
+    assert e2e.verdict(0, [passed, skipped], strict=False)[0] == 0
+    assert e2e.pytest_id("tests.test_a.TestB", "test_c") == "tests/test_a.py::TestB::test_c"
+    argv = e2e.pytest_argv(tmp_path / "r.xml")
+    assert argv[:3] == ["uv", "run", "--frozen"] and argv[argv.index("-m", 6) + 1] == "local"
 
 
 def test_alembic_implies_postgres_via_the_cli(tmp_path):
@@ -1494,14 +1561,17 @@ def test_the_generated_diagnostic_scripts_actually_run_and_pass(tmp_path, featur
         assert result.returncode == 0, f"{script} failed in a fresh project:\n{detail}"
 
 
-def _desktop_runners(tmp_path, monkeypatch, *, windows: bool):
-    """A desktop project's two runners on a host with `dotnet`, and what they spawned."""
+def _desktop_runners(tmp_path, monkeypatch, *, windows: bool, sdk: str = "10.0.100 [x]\n"):
+    """A desktop project's two runners on a host with `dotnet`, and what they spawned.
+    `sdk` is what `dotnet --list-sdks` prints."""
     root = generate(tmp_path, {"desktop": True})
     tests = _rendered(root, "scripts/run-tests.py", monkeypatch)
     lint = _rendered(root, "scripts/lint-all.py", monkeypatch)
     spawned: list[str] = []
 
     def spawn(command, **_kwargs):
+        if command[:2] == ["dotnet", "--list-sdks"]:
+            return subprocess.CompletedProcess(command, 0, sdk, "")
         spawned.append(command[-1])
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -1512,7 +1582,7 @@ def _desktop_runners(tmp_path, monkeypatch, *, windows: bool):
     for runner in (tests, lint):
         monkeypatch.setattr(runner, "WINDOWS", windows)
         monkeypatch.setattr(runner.shutil, "which", lambda _name: "/usr/bin/dotnet")
-    monkeypatch.setattr(tests.subprocess, "run", spawn)
+        monkeypatch.setattr(runner.subprocess, "run", spawn)
     monkeypatch.setattr(lint, "run_tool", tool)
     return root, tests, lint, spawned
 
@@ -1540,6 +1610,18 @@ def test_the_desktop_tier_runs_on_windows(tmp_path, monkeypatch):
     assert tests.run_desktop(root) == ""
     assert lint.desktop_section(object(), [], False) == ""
     assert spawned == ["test", "desktop"]
+
+
+def test_the_desktop_tier_skips_a_dotnet_host_with_no_sdk(tmp_path, monkeypatch, capsys):
+    """8448cfc1: this PC carries the `dotnet` host and no SDK, so every build said "No .NET
+    SDKs were found" and a fresh desktop project's own runners went red."""
+    root, tests, lint, spawned = _desktop_runners(tmp_path, monkeypatch, windows=True, sdk="")
+
+    assert tests.run_desktop(root) == ""
+    assert "lists no SDK" in capsys.readouterr().out
+    assert lint.desktop_section(object(), [], False) == ""
+    assert "lists no SDK" in capsys.readouterr().out
+    assert spawned == []
 
 
 # The stand-in for a project's install command: a real venv, handed this interpreter's

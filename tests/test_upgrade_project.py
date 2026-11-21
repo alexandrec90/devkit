@@ -10,6 +10,7 @@ What replaced them asserts the property that makes it true: every write is aimed
 box, and nothing is aimed at the checkout.
 """
 
+import argparse
 import contextlib
 import datetime as _dt
 import json
@@ -587,6 +588,41 @@ def test_an_unreadable_devkit_is_exit_2_with_gits_words(tmp_path):
     tag, tags, refusal = up.devkit_releases(tmp_path / "no-such-directory")
     assert (tag, tags) == ("", [])
     assert refusal and refusal[0] == 2 and "fatal:" in refusal[1]
+
+
+def test_the_unattended_run_fetches_devkits_tags_before_reading_them(tmp_path):
+    """0ac47914: v0.11.55 was tagged upstream at 02:05 and the 15:02 run still read
+    v0.11.53 as the newest, then refused a project on v0.11.55 telling a person to
+    "Fetch devkit's tags" -- a step the run can take itself."""
+    upstream, devkit = tmp_path / "upstream", tmp_path / "devkit"
+    subprocess.run(["git", "init", "-q", str(upstream)], check=True)
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C"]
+    subprocess.run([*git, str(upstream), "commit", "-q", "--allow-empty", "-m", "a"], check=True)
+    subprocess.run([*git, str(upstream), "tag", "v0.1.0"], check=True)
+    subprocess.run(["git", "clone", "-q", str(upstream), str(devkit)], check=True)
+    subprocess.run([*git, str(upstream), "commit", "-q", "--allow-empty", "-m", "b"], check=True)
+    subprocess.run([*git, str(upstream), "tag", "v0.1.1"], check=True)
+    assert up.release_tags(devkit) == ["v0.1.0"]
+    assert up.fetch_tags(devkit) == ""
+    assert up.release_tags(devkit) == ["v0.1.1", "v0.1.0"]
+
+
+@pytest.mark.parametrize(("argv", "fetched"), [(["--all", "--yes"], True), (["--all"], False)])
+def test_only_the_applying_unattended_run_fetches(tmp_path, monkeypatch, argv, fetched):
+    seen = []
+    monkeypatch.setattr(up, "fetch_tags", lambda devkit: seen.append(devkit) or "")
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: None)
+    ws = workspace(tmp_path, "carameli")
+    up.main([*argv, "--workspace", str(ws), "--devkit", str(tmp_path)])
+    assert bool(seen) is fetched
+    namespace = argparse.Namespace(every=True, dry_run="--yes" not in argv)
+    assert up.unattended_apply(namespace) is fetched
+
+
+def test_a_tag_fetch_that_fails_is_said_and_never_raised(tmp_path):
+    """The run then reads the tags it has: a stale set is what it read before this."""
+    said = up.fetch_tags(tmp_path / "no-such-directory")
+    assert said.startswith("upgrade: could not fetch devkit's tags")
 
 
 def test_a_devkit_with_no_tags_is_exit_1(monkeypatch):
@@ -1595,6 +1631,23 @@ def test_a_commit_that_worked_is_never_retried():
     result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert (result.returncode, retried) == (0, False)
     assert len([step for step in git.calls if step[0] == "commit"]) == 1
+
+
+def test_the_pre_commit_store_is_healed_before_the_first_commit(capsys):
+    """data-lake and sports_betting failed at `git commit` on 2026-09-28: a clone an
+    elevated session made was unreadable to the unelevated run. The heal is what lets
+    pre-commit clone it again, so it has to come before the commit, and say so."""
+    order: list[str] = []
+    git = CommitGit(["M  a.py\n"], [0])
+
+    def heal():
+        order.append("heal" if not git.calls else "late")
+        return ["https://github.com/pre-commit/pre-commit-hooks@v6.0.0 (x)"]
+
+    up.commit_with_hook_retry(git, "Adopt devkit v0.7.0", heal=heal)
+
+    assert order == ["heal"]
+    assert "pre-commit-hooks@v6.0.0" in capsys.readouterr().out
 
 
 def test_a_hook_that_wrote_new_files_past_a_passing_commit_is_amended_in():

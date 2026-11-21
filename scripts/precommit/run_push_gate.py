@@ -60,6 +60,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -396,9 +397,23 @@ def clear_artifact(root: Path, step: Step) -> None:
             (root / step.artifact).unlink(missing_ok=True)
 
 
-def read_from(root: Path, step: Step) -> str:
-    """Where a refusal sends the reader for `step`: only ever a file that is really there."""
+def wrote_under_logs(root: Path, since: float) -> bool:
+    """Whether any file under `root/logs/` was written at or after `since`."""
+    with contextlib.suppress(OSError):
+        return any(p.is_file() and p.stat().st_mtime >= since for p in (root / "logs").rglob("*"))
+    return False
+
+
+def read_from(root: Path, step: Step, since: float | None = None) -> str:
+    """Where a refusal sends the reader for `step`: only ever a file that is really there.
+
+    A wrapper names its own artifact, so for one this says only "under logs/" -- and,
+    given the step's start as `since`, not even that when the step wrote nothing there: a
+    `run-tests.py` that crashed before its artifact sent a session to look for a
+    `logs/test-failures.log` that never existed (ee0a5d2a)."""
     if not step.artifact:
+        if since is not None and not wrote_under_logs(root, since):
+            return "the output above (the step wrote nothing under logs/)"
         return "the artifact under logs/"
     if (root / step.artifact).is_file():
         return step.artifact
@@ -436,6 +451,8 @@ def run_gate(
             continue
         print(f"push-gate: {step.name}: {' '.join(command[1:])}", flush=True)
         clear_artifact(root, step)
+        # A second back, for a filesystem whose mtimes are coarser than the clock.
+        started = time.time() - 1
         # The one bare pytest here gets a temp root of its own, as `run-tests.py` gives
         # its suite: under the machine-wide one, another session's run holding its
         # `pytest-current` link failed a green suite at pytest's exit (97d20f01).
@@ -446,7 +463,7 @@ def run_gate(
         if result.returncode:
             print(
                 f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from "
-                f"{read_from(root, step)}, or push anyway with SKIP={HOOK_ID}."
+                f"{read_from(root, step, started)}, or push anyway with SKIP={HOOK_ID}."
             )
             return int(result.returncode)
     print("push-gate: clean")

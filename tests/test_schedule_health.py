@@ -472,6 +472,21 @@ def test_a_failing_query_reports_nothing(monkeypatch):
     assert health.report() == []
 
 
+def test_scheduler_csv_is_the_querys_stdout_or_none(monkeypatch):
+    """The raw half `project_tasks` reads the `Author` column from."""
+    done = __import__("subprocess").CompletedProcess
+    monkeypatch.setattr(health.subprocess, "run", lambda *_a, **_kw: done([], 0, "csv", ""))
+    assert health.scheduler_csv() == "csv"
+    monkeypatch.setattr(health.subprocess, "run", lambda *_a, **_kw: done([], 1, "x", "no"))
+    assert health.scheduler_csv() is None
+
+    def missing(*_a, **_kw):
+        raise FileNotFoundError("schtasks")
+
+    monkeypatch.setattr(health.subprocess, "run", missing)
+    assert health.scheduler_csv() is None
+
+
 # --- Windows' sentinels for "never ran" -----------------------------------------
 # Caught by running the check against the real scheduler rather than by unit tests: a
 # task registered minutes earlier, due to fire that night, was reported as
@@ -513,6 +528,25 @@ def test_a_running_task_is_not_a_failure():
     code makes every check that lands mid-run report a failure."""
     running = job(last_result=health.SCHED_S_TASK_RUNNING)
     assert health.problems([running], NOW) == []
+
+
+def test_a_resident_job_stopped_from_outside_is_not_a_failure():
+    """23f4ee82: `devkit-tray` runs from logon until something ends it, so a stop, a
+    sign-out or a reinstall's `/End` leaves `SCHED_S_TASK_TERMINATED` (267014), and it
+    was filed as "last run failed (exit 267014)"."""
+    tray = job(
+        name="devkit-tray",
+        last_result=health.SCHED_S_TASK_TERMINATED,
+        next_run=None,
+        event_only=True,
+    )
+    assert health.problems([tray], NOW) == []
+
+
+def test_a_clocked_job_ended_from_outside_is_still_reported():
+    """A clocked job is ended that way by its own time limit: a hung run, so a failure."""
+    ended = job(last_result=health.SCHED_S_TASK_TERMINATED)
+    assert "failed (exit 267014)" in health.problems([ended], NOW)[0]
 
 
 def test_a_real_failure_is_still_reported():

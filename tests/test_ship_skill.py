@@ -36,21 +36,19 @@ def test_an_unattended_session_can_invoke_ship():
     assert _frontmatter()["name"] == "ship"
 
 
-def test_ship_auto_writes_the_trailer_the_pass_labels_automerge():
-    """`/ship auto` reaches the skill as `$ARGUMENTS`, and the line it says to write is
-    the one `ship_intent.asks_automerge` reads; a drift on either side is a PR that
-    quietly waits for the review the person said to skip."""
+def test_ship_says_every_pr_merges_itself_and_writes_no_automerge_trailer():
+    """Automerge is the default, so no line asks for it: a skill still telling a session
+    to write `Automerge: yes` would teach it a trailer nothing reads."""
     text = SKILL.read_text(encoding="utf-8")
     assert "$ARGUMENTS" in text
-    assert "auto" in _frontmatter()["argument-hint"]
-    assert "`Automerge: yes`" in text
-    assert ship_intent.asks_automerge("Because.\n\nAutomerge: yes")
-    assert "never add the line on your own judgement" in " ".join(text.split())
+    assert "Automerge: yes" not in text
+    assert not hasattr(ship_intent, "asks_automerge")
+    assert ship_intent.labels_for() == (ship_intent.sweep.AUTOMERGE_LABEL,)
 
 
 def test_ship_hold_writes_the_trailer_that_keeps_the_merge_label_off():
-    """The direct flow merges what nobody held, so a drift here is a PR that merges past
-    the person who said to wait."""
+    """Both flows merge what nobody held, so a drift here is a PR that merges past the
+    person who said to wait."""
     text = " ".join(SKILL.read_text(encoding="utf-8").split())
     assert "hold" in _frontmatter()["argument-hint"]
     assert "`Hold: yes`" in text

@@ -45,8 +45,8 @@ STAMP_FILE = Path("logs") / "fix-dispatch.json"
 LAUNCH_FILE = Path("logs") / "fix-launch.json"
 BLOCKED_FILE = Path("logs") / "fix-blocked.md"
 FRICTION_FILE = Path("logs") / "friction.md"
-# The mark of a tree the fix pass cut for a fixer, which makes its PR merge itself once
-# green (`ship_intent.labels_for`). Only what the pass authored carries it.
+# The mark of a tree the fix pass cut for a fixer, which makes its PR the pass's own to
+# close (`ship_intent.pass_owned`). Only what the pass authored carries it.
 ORIGIN_FILE = Path("logs") / "fix-origin"
 CHECKOUT = Path(__file__).resolve().parents[1]
 # The message a refused intent was being shipped with, set aside by the pass at
@@ -247,10 +247,12 @@ CLAUDE_CONFIG = Path.home() / ".claude.json"
 
 
 def trusted(checkout: Path, config: Path | None = None) -> bool:
-    """Whether Claude Code holds a yes to its trust prompt for `checkout` or a parent.
+    """Whether Claude Code holds a yes to its trust prompt for `checkout` itself.
 
-    A parent's yes covers what is under it, and an entry's own `False` is only what any
-    first visit writes, so only a yes says anything. A file that cannot say is not a yes:
+    Its own yes covers the session trees cut under it; a parent's does not. This read
+    once took 'C:/Users/alexa/vs-code' accepted as covering every checkout beside devkit,
+    and Claude Code 2.1.330 refused four sessions in host-scripts, which had no entry of
+    its own, while the pass called it trusted. A file that cannot say is not a yes:
     the hold this feeds (`fix_send._untrusted`) lasts while a refusal is open, and the
     person's documented step of resolving that group still ends it."""
     try:
@@ -265,7 +267,7 @@ def trusted(checkout: Path, config: Path | None = None) -> bool:
         for key, entry in projects.items()
         if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
     }
-    return checkout in accepted or not accepted.isdisjoint(checkout.parents)
+    return checkout in accepted
 
 
 def launch_untrusted(tree: Path) -> bool:

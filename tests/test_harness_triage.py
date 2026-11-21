@@ -785,6 +785,18 @@ def test_a_group_whose_newest_row_names_a_persons_step_awaits_that_person():
     assert triage.person_step(bare) == "start it"
 
 
+def test_an_agent_reports_person_step_is_read_off_its_message():
+    """c480340e: an agent report says its step in `message=`, which the triage log prints
+    as `detail`, and the group was sent a fixer that could not upgrade git."""
+    row = _line(
+        "agent-report",
+        message=f"git 2.40 predates the /* form -- {triage.PERSON_STEP} upgrade Git for Windows",
+    )
+    items = triage.open_items(triage.read_items(row))
+    assert triage.person_step(items[0]) == "upgrade Git for Windows"
+    assert triage.awaiting_person(items) == {items[0].signature: "upgrade Git for Windows"}
+
+
 def test_a_group_reports_its_count_and_every_id(tmp_path):
     a = _line("agent-report", stamp=_STAMPS[0], message="same")
     b = _line("agent-report", stamp=_STAMPS[1], message="same")

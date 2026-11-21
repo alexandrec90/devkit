@@ -5,7 +5,9 @@ because guessing them wrong is worse than leaving them blank.
 
 ## Setup
 
+{{#docker}}
 - [ ] Fill in `.env` from `.env.example` (it is gitignored; nothing works without it)
+{{/docker}}
 - [ ] Confirm `python scripts/sync-devkit.py --list` shows a stamped `DEVKIT_VERSION`
 - [ ] Set `DEVKIT_DIR` in CI so the drift check actually gates — a
       `--check` that prints "nothing to do (skipping)" is checking nothing
@@ -16,7 +18,8 @@ because guessing them wrong is worse than leaving them blank.
       local-dev placeholder and is fine to keep local, but never reuse it remotely)
 {{/postgres}}
 {{#archive}}
-- [ ] Create the **private** object-storage bucket and fill the `ARCHIVE_S3_*` vars
+- [ ] Create the **private** object-storage bucket and fill the `ARCHIVE_S3_*` vars in
+      `.env`, copied from `.env.example` (it is gitignored)
 - [ ] Write `.claude/rules/data-lake.md`'s "what must never be sent" list before
       the first byte ships, not after an incident
 {{/archive}}

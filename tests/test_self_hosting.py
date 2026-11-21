@@ -335,6 +335,34 @@ def test_the_setup_action_is_not_vendored():
     )
 
 
+_LOCAL_USES = re.compile(r"^\s*-?\s*uses:\s*\./([^\s\"'#]+)", re.MULTILINE)
+
+
+def test_a_vendored_workflow_uses_no_action_a_consumer_may_lack():
+    """A vendored workflow arrives byte-identical in every project; a local action it
+    names arrives only if it is vendored too.
+
+    `dependabot-automerge.yml`'s `tidy` job called `./.github/actions/setup-python-env`,
+    which is a one-shot template, so a project generated before it existed (data-lake,
+    ibkr_trader) failed the vendored `test_every_local_action_a_workflow_uses_actually_exists`
+    on the first pull. That check runs in the consumer; this one stops the cause here.
+    """
+    sync_devkit = load_script("scripts/sync-devkit.py")
+    manifest = set(sync_devkit.MANIFEST)
+    workflows = [p for p in manifest if p.startswith(".github/workflows/")]
+    assert workflows, "no vendored workflow found: the scan would be vacuous"
+    unvendored = [
+        f"{wf}: uses ./{ref}"
+        for wf in sorted(workflows)
+        for ref in _LOCAL_USES.findall((REPO_ROOT / wf).read_text(encoding="utf-8"))
+        if not {f"{ref}/action.yml", f"{ref}/action.yaml", ref} & manifest
+    ]
+    assert not unvendored, (
+        "a vendored workflow names a local action that is not vendored, so a consumer "
+        "without its own copy fails the job at startup:\n  " + "\n  ".join(unvendored)
+    )
+
+
 # `vendored` near the composite action is allowed only as a denial; anything else is
 # the v0.7.0 claim outliving the commit that stopped making it true. `un-vendored` and
 # `vendoring` are the history, which stays sayable.

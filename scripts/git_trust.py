@@ -21,6 +21,15 @@ reaches everything the other does:
   git's variables from its steps (`run_push_gate.gate_env`) and a fixer's session
   inherits nothing from the pass, so only the global config reaches those.
 
+**The `/*` form is new in git 2.46** (`LEADING_PATH`); an older git matches it against
+nothing, so on this machine's 2.40 neither half trusted anything, and on 2026-11-20 the
+pass's ship of an elevated `claude --worktree` tree failed on its first `git status`,
+exiting the scheduled pass 1. On such a git the command scope carries `*` instead: that
+reaches only the pass's own process tree, which acts on nothing outside the workspace.
+The global entry stays the narrow one -- `*` there would trust every repository on the
+machine for every process, which is the operator's to choose -- so on an old git a push
+gate or a fixer in such a tree is still refused until git is upgraded.
+
 The same two halves carry `http.https://github.com/.proactiveAuth`, for a second refusal
 that was read as one tree's problem. GitHub answers *anonymous* requests from a blocked
 address with 403, not 401, and git only asks its credential helper after a 401, so on
@@ -33,6 +42,7 @@ the first request; scoped to GitHub's URL, it touches no other remote.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
@@ -41,6 +51,9 @@ KEY = "safe.directory"
 AUTH_SETTING = "http.https://github.com/.proactiveAuth"
 AUTH = "basic"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# The first git whose `safe.directory` reads `<dir>/*` as a leading path.
+LEADING_PATH = (2, 46)
+EVERYTHING = "*"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -52,18 +65,34 @@ def pattern(root: Path) -> str:
 
 def covered(values: list[str], root: Path) -> bool:
     """`values`, a `safe.directory` list, already trusts `root`'s tree."""
-    return "*" in values or pattern(root) in values
+    return EVERYTHING in values or pattern(root) in values
 
 
-def trusted_env(environ: Mapping[str, str], root: Path) -> dict[str, str]:
+def version(said: str) -> tuple[int, int] | None:
+    """`(major, minor)` off `git version`'s line, or None when it names none."""
+    found = re.search(r"git version (\d+)\.(\d+)", said)
+    return (int(found[1]), int(found[2])) if found else None
+
+
+def reads_leading_path(git: Runner) -> bool:
+    """Whether this git honours `pattern`'s `/*` form. A git that cannot say is taken as
+    one that does not, since `EVERYTHING` in the command scope works on every version."""
+    done = git("version")
+    found = version(done.stdout or "") if done.returncode == 0 else None
+    return found is not None and found >= LEADING_PATH
+
+
+def trusted_env(environ: Mapping[str, str], root: Path, value: str | None = None) -> dict[str, str]:
     """`environ` plus a command-scope `safe.directory` for `root`'s tree and GitHub's
-    `proactiveAuth`.
+    `proactiveAuth`. `value` is the entry, `pattern(root)` unless the caller's git cannot
+    read that (`reads_leading_path`), when `adopt` passes `EVERYTHING`.
 
     Appended after any entries already there, and not twice; a `proactiveAuth` already
     set, to any value, is the operator's and is kept. A `GIT_CONFIG_COUNT` that is not a
     count is left alone: git already refuses every command under it, and a guess at what
     it meant would only move the refusal.
     """
+    value = value or pattern(root)
     env = dict(environ)
     try:
         count = int(env.get("GIT_CONFIG_COUNT", "0"))
@@ -74,8 +103,9 @@ def trusted_env(environ: Mapping[str, str], root: Path) -> dict[str, str]:
         for i in range(count)
     ]
     wanted = []
-    if not covered([value for key, value in scoped if key == KEY], root):
-        wanted.append((KEY, pattern(root)))
+    trusted = [entry for key, entry in scoped if key == KEY]
+    if EVERYTHING not in trusted and value not in trusted:
+        wanted.append((KEY, value))
     if not any(key.lower() == AUTH_SETTING.lower() for key, _ in scoped):
         wanted.append((AUTH_SETTING, AUTH))
     for key, value in wanted:
@@ -127,6 +157,16 @@ def adopt(
     environ: MutableMapping[str, str] = os.environ,
     git: Runner = _git,
 ) -> str:
-    """Trust `root`'s tree in this process, and globally too when `write`: `persist`'s lines."""
-    environ.update(trusted_env(environ, root))
-    return persist(root, git) if write else ""
+    """Trust `root`'s tree in this process, and globally too when `write`: `persist`'s lines,
+    and one saying so when this git cannot read the global entry `persist` writes."""
+    leading = reads_leading_path(git)
+    environ.update(trusted_env(environ, root, None if leading else EVERYTHING))
+    lines = persist(root, git) if write else ""
+    if leading:
+        return lines
+    old = (
+        f"git-trust: this git predates {KEY}'s `/*` form ({'.'.join(map(str, LEADING_PATH))}),"
+        f" so this pass trusts {EVERYTHING} in its own scope and the global {pattern(root)}"
+        " trusts nothing until git is upgraded"
+    )
+    return "\n".join(line for line in (lines, old) if line)

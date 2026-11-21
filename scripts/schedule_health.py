@@ -100,6 +100,11 @@ NEVER_RUN_DATE = _dt.date(1999, 11, 30)
 # was reported as "last run failed (exit 267011)".
 SCHED_S_TASK_HAS_NOT_RUN = 267011  # 0x00041303
 SCHED_S_TASK_RUNNING = 267009  # 0x00041301
+# How a run ended from outside reads: `/End`, a sign-out, the time limit. For a resident
+# job -- every trigger an event, running until something stops it, as `devkit-tray`
+# does -- that is how every run ends, so it is no failure there (23f4ee82). A clocked
+# job is ended that way by its own time limit, which is a hung run and stays one.
+SCHED_S_TASK_TERMINATED = 267014  # 0x00041306
 
 # `0x800710E0` -- documented as "the operator or administrator has refused the request",
 # and what Task Scheduler reports when `MultipleInstancesPolicy` is `IgnoreNew` and a
@@ -124,7 +129,10 @@ NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) |
 # `devkit-medium-tier` is the same by design: a pass works through every project origin
 # moved past, for up to `tier-pass.DEFAULT_PASS_MINUTES`, on a 15-minute cadence, and the
 # next pass reads every tip again (74329698 filed its 12:15 skip as a defect).
-OVERLAP_EXPECTED = frozenset({"devkit-ship", "devkit-medium-tier"})
+# `devkit-tray` is resident: `installers.py maintain` starts a tray that died
+# (`install-tray.py`, 4e6fe3ae), so the logon trigger can fire beside one already
+# running, and the second start it is refused is the one tray working.
+OVERLAP_EXPECTED = frozenset({"devkit-ship", "devkit-medium-tier", "devkit-tray"})
 
 # How many intervals a job may miss before it is worth a line. One is noise: a laptop
 # asleep at 04:00 misses a daily run and catches it the next night, which is the system
@@ -325,6 +333,9 @@ class Job:
     # Every trigger is an event (logon, boot), none a clock: no next run time ever, so a
     # first run not yet made is the event not yet happened, not a run missed.
     event_only: bool = False
+    # The scheduler's `Status` column as written (`Running`, `Ready`), or "" when the
+    # query did not carry it. Only a resident job's installer asks it (`install-tray.py`).
+    status: str = ""
 
     @property
     def interpreter(self) -> str:
@@ -432,6 +443,7 @@ def parse_tasks(stdout: str, prefix: str = PREFIX, also: frozenset[str] = frozen
             next_run=parse_time(row.get("Next Run Time") or ""),
             command=(row.get("Task To Run") or "").strip(),
             event_only=(row.get("Schedule Type") or "").strip() in EVENT_TRIGGERS,
+            status=(row.get("Status") or "").strip(),
         )
         seen = merged.get(name)
         merged[name] = job if seen is None else merge_triggers(seen, job)
@@ -570,7 +582,8 @@ def job_problem(
             f"its runs are overlapping"
             f"{artifact_hint(job.name, artifacts, root=root, since=job.last_run)}"
         )
-    if job.last_result not in NOT_A_FAILURE:
+    resident_stop = job.event_only and job.last_result == SCHED_S_TASK_TERMINATED
+    if job.last_result not in NOT_A_FAILURE and not resident_stop:
         return (
             f"{job.name}: last run failed (exit {job.last_result}) at "
             f"{job.last_run:%Y-%m-%d %H:%M}"
@@ -596,6 +609,12 @@ def job_problem(
 
 def query(prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]:
     """Ask the scheduler. [] on any failure, including not being Windows at all."""
+    stdout = scheduler_csv()
+    return [] if stdout is None else parse_tasks(stdout, prefix, also)
+
+
+def scheduler_csv() -> str | None:
+    """`schtasks /Query /FO CSV /V`'s output; None on any failure, or off Windows."""
     try:
         result = subprocess.run(
             ["schtasks", "/Query", "/FO", "CSV", "/V"],
@@ -606,10 +625,8 @@ def query(prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]
             creationflags=NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
-        return []
-    if result.returncode != 0:
-        return []
-    return parse_tasks(result.stdout, prefix, also)
+        return None
+    return result.stdout if result.returncode == 0 else None
 
 
 def report(prefix: str = PREFIX, now: _dt.datetime | None = None) -> list[str]:

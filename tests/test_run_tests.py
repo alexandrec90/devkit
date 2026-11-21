@@ -604,6 +604,26 @@ def test_run_pytest_is_empty_on_a_pass_and_the_artifact_text_on_a_failure(artifa
     assert "FAILED tests/test_b.py::test_b_thing" in text
 
 
+@pytest.mark.parametrize("runner", ["devkit", "template"])
+def test_run_pytest_reads_utf8_output_whatever_the_locale(artifact, monkeypatch, runner):
+    """0f982488: decoded in cp1252, one `0x9d` byte raised in subprocess's reader thread,
+    `stdout` came back None, and `None + str` crashed the push gate with no artifact. The
+    template's copy carried the same lines into every generated project."""
+    module = run_tests if runner == "devkit" else template_runner(monkeypatch)
+    # Pinned on the arguments: under `PYTHONUTF8=1`, as this run may be, the locale never
+    # decides, so a real child would pass with or without the fix.
+    asked = {}
+
+    def lost_stdout(cmd, **kwargs):
+        asked.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 1, None, "FAILED tests/test_a.py::t\n")
+
+    monkeypatch.setattr(module.subprocess, "run", lost_stdout)
+    text = module.run_pytest(["py", "-m", "pytest", "tests/test_a.py"])
+    assert asked.get("encoding") == "utf-8" and asked.get("errors") == "replace"
+    assert "FAILED tests/test_a.py::t" in text, "a lost stream is empty, not a crash"
+
+
 def test_explicit_targets_stay_one_run_with_their_options(artifact, monkeypatch):
     seen = stub_pytest(monkeypatch, 0)
     run_tests.main(["tests/test_a.py", "scripts/hooks/tests/test_b.py", "-k", "reap"])

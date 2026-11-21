@@ -82,6 +82,12 @@
 		},
 		{
 			"path": "tvshell"
+		},
+		{
+			"path": "radio"
+		},
+		{
+			"path": "host-scripts"
 		}
 	],
 	"extensions": {
@@ -1832,7 +1838,9 @@
 								"homelab",
 								"agent-terminal",
 								"d2-trader",
-								"tvshell"
+								"tvshell",
+								"radio",
+								"host-scripts"
 							]
 						}
 					]
@@ -1878,7 +1886,9 @@
 								"homelab",
 								"agent-terminal",
 								"d2-trader",
-								"tvshell"
+								"tvshell",
+								"radio",
+								"host-scripts"
 							]
 						}
 					]
@@ -1912,6 +1922,7 @@
 							"options": [
 								"after-merge-schedule",
 								"agent-env",
+								"codex-context",
 								"collectors",
 								"docker-prune",
 								"docker-stop-idle",
@@ -2023,7 +2034,9 @@
 					"homelab",
 					"agent-terminal",
 					"d2-trader",
-					"tvshell"
+					"tvshell",
+					"radio",
+					"host-scripts"
 				],
 				"default": "carameli"
 			},
@@ -2728,7 +2741,9 @@
 					"homelab",
 					"agent-terminal",
 					"d2-trader",
-					"tvshell"
+					"tvshell",
+					"radio",
+					"host-scripts"
 				],
 				"default": "carameli"
 			},

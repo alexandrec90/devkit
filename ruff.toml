@@ -50,6 +50,11 @@ select = ["E", "F", "B", "ASYNC", "S", "RUF"]
 # Still on: E402, E711/E712/E713/E714 (comparison bugs), E721, E722 (bare except),
 # E902, E999. Those catch real defects.
 ignore = ["E101", "E401", "E501", "E701", "E702", "E703", "E731", "E741", "E742", "E743"]
+# RUF100 (unused noqa) reports, never deletes. `ruff format` moves a trailing
+# `# noqa: S603 - <reason>` onto a wrapped call's closing paren, where it no longer
+# covers the finding, and RUF100's fix then deleted the comment and its reason, leaving
+# S603 live (13d68a2b). Reported, the stale noqa sits beside the finding it was for.
+unfixable = ["RUF100"]
 
 [lint.per-file-ignores]
 # CLI / diagnostic tooling: these scripts orchestrate trusted

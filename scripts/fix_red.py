@@ -32,6 +32,7 @@ import fix_findings
 import fix_loop
 import fix_plan
 import gate_evidence
+import rc_config
 import sweep
 import task_branch as tb
 
@@ -67,11 +68,33 @@ def collect_red(
     # After the branches: their read fetched origin, which the local runs' tips are read
     # against. The tests no hosted runner can run, red on this machine (`e2e_results`),
     # and the project's own tests, red on this machine through the day (`tier-pass.py`).
-    failures += e2e_results.collect(workspace, projects, sweep.git_for)
+    failures += e2e_results.collect(workspace, e2e_here(workspace, projects), sweep.git_for)
     failures += e2e_results.collect(workspace, projects, sweep.git_for, tier=e2e_results.MEDIUM)
     green, _ = branches.get(fix_cycle.DEVKIT, (None, None))
     unread = [name for name, (verdict, _) in branches.items() if verdict is None]
     return failures, green, unread
+
+
+def e2e_here(workspace: Path, projects: list[str], host: str = "") -> list[str]:
+    """The projects whose nightly local result is this machine's to act on: the ones
+    `devkit.localE2e` assigns it, as `e2e-pass.py` reads the same setting at fire time.
+
+    A result this machine wrote before the run moved to another PC is never replaced:
+    its pass now skips that project. Read anyway, it held six projects for two weeks
+    behind "the next scheduled local run re-tests the tip", a run due nowhere, while the
+    assigned PC's own pass acts on its fresh results. The medium tier has no
+    assignment, so every machine reads its own; so does this tier with no `hosts`, or no
+    workspace file to read them from.
+    """
+    try:
+        text = workspace.read_text(encoding="utf-8")
+    except OSError:
+        return list(projects)
+    config = rc_config.setting_hosts(text, rc_config.LOCAL_E2E_SETTING)
+    here, _ = rc_config.assigned_here(
+        config, projects, host or rc_config.harness_events.host_name(), verb="tested"
+    )
+    return here
 
 
 def billing(

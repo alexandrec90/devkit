@@ -509,8 +509,12 @@ def run_pytest(cmd: list[str]) -> str:
     print(f"run-tests: {' '.join(cmd[2:])}")
     with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as basetemp:
         run = with_basetemp(cmd, basetemp)
-        result = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True)
-    raw = result.stdout + result.stderr
+        # UTF-8 whatever the locale, and a stream a reader thread lost is empty: in
+        # cp1252 one `0x9d` byte left `stdout` None and crashed the push gate (0f982488).
+        result = subprocess.run(
+            run, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
+    raw = (result.stdout or "") + (result.stderr or "")
     if result.returncode in (0, PYTEST_NO_TESTS_COLLECTED):
         return ""
     body = cap_failure_blocks(filter_output(raw))

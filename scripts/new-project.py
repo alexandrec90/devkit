@@ -106,10 +106,13 @@ PRESETS: dict[str, tuple[str, ...]] = {
 }
 
 # Core templates a feature replaces. A shipped app's tests are in its own language, so the
-# Python smoke test -- which imports a package those shapes do not have -- stays behind.
+# Python smoke test -- which imports a package those shapes do not have -- stays behind,
+# and so does the Python local tier (`scripts/e2e.py` and its first test): a shape with
+# no Python tests would run it into "no local test executed" every night.
+PYTHON_ONLY = ("tests/test_smoke.py.tmpl", "tests/test_local_tier.py", "scripts/e2e.py")
 REPLACED_BY: dict[str, tuple[str, ...]] = {
-    "desktop": ("tests/test_smoke.py.tmpl",),
-    "electron": ("tests/test_smoke.py.tmpl",),
+    "desktop": PYTHON_ONLY,
+    "electron": PYTHON_ONLY,
 }
 
 # A template path segment spelled `__<name>__` takes that context value, so a C# project
@@ -123,7 +126,7 @@ PATH_PLACEHOLDER = re.compile(r"__([a-z][a-z0-9_]*?)__")
 # users who cannot hit the fast path. So it must track the newest tag, and
 # `test_fallback_devkit_ref_tracks_the_newest_tag` fails at release time if a tag
 # lands without it being bumped. Bump it in the same commit as the tag.
-FALLBACK_DEVKIT_REF = "v0.11.90"
+FALLBACK_DEVKIT_REF = "v0.11.92"
 
 
 class GeneratorError(RuntimeError):
@@ -1242,7 +1245,7 @@ def main(argv: list[str] | None = None) -> int:
         lock_dependencies(the_plan.root, args.dry_run)
         if the_plan.context["electron"]:
             lock_node_dependencies(the_plan.root / "frontend", args.dry_run)
-        provision_environment(the_plan.root, args.dry_run)
+        provision_environment(the_plan.root, args.dry_run, args.python_version)
         git_init(the_plan, args.dry_run)
         register_in_workspace(the_plan, args.dry_run)
         create_remote(the_plan, args.dry_run)
