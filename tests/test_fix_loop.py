@@ -1017,6 +1017,15 @@ def test_a_hand_made_task_no_project_claims_is_a_devkit_finding(ctx, monkeypatch
     assert seen == [{"Pool"}], "a claimed task is never asked about as unowned"
 
 
+def test_unowned_findings_files_one_devkit_finding_per_task():
+    found = fix_loop.unowned_findings(["A", "B"])
+    assert [(f.kind, f.project, f.detail) for f in found] == [
+        (fix_loop.UNOWNED_KIND, "devkit", f"A: {fix_loop.UNOWNED}"),
+        (fix_loop.UNOWNED_KIND, "devkit", f"B: {fix_loop.UNOWNED}"),
+    ]
+    assert fix_loop.unowned_findings([]) == []
+
+
 def test_a_job_failure_names_the_failing_runs_kept_copy_as_its_evidence(ctx):
     """3a8c74a3 named `reconcile.log`, which the next clean pass rewrote before any
     sweep read it; the run's `.failed.log` copy is what survives."""

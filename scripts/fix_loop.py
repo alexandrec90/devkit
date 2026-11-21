@@ -532,7 +532,8 @@ def job_findings(
         owners = project_tasks.declared(ctx.root, ctx.projects) if live else {}
     # A collector's task is named after its project, so it owns itself.
     owners = {**owners, **{name: name for name in tasks}}
-    jobs = schedule_health.query(also=frozenset(owners)) if live else jobs
+    if jobs is None:
+        jobs = schedule_health.query(also=frozenset(owners))
     artifacts = {**schedule_health.ARTIFACTS, **tasks}
     by_name = {job.name: job for job in jobs}
     items = triage.load(ctx.devkit_dir)

@@ -472,6 +472,21 @@ def test_a_failing_query_reports_nothing(monkeypatch):
     assert health.report() == []
 
 
+def test_scheduler_csv_is_the_querys_stdout_or_none(monkeypatch):
+    """The raw half `project_tasks` reads the `Author` column from."""
+    done = __import__("subprocess").CompletedProcess
+    monkeypatch.setattr(health.subprocess, "run", lambda *_a, **_kw: done([], 0, "csv", ""))
+    assert health.scheduler_csv() == "csv"
+    monkeypatch.setattr(health.subprocess, "run", lambda *_a, **_kw: done([], 1, "x", "no"))
+    assert health.scheduler_csv() is None
+
+    def missing(*_a, **_kw):
+        raise FileNotFoundError("schtasks")
+
+    monkeypatch.setattr(health.subprocess, "run", missing)
+    assert health.scheduler_csv() is None
+
+
 # --- Windows' sentinels for "never ran" -----------------------------------------
 # Caught by running the check against the real scheduler rather than by unit tests: a
 # task registered minutes earlier, due to fire that night, was reported as
