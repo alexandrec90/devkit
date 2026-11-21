@@ -240,6 +240,18 @@ def test_parse_hosts_is_the_one_reading_every_hosts_knob_shares():
     assert elsewhere == ["devkit: tested by desktop-a, not here (desktop-b)"]
 
 
+def test_setting_hosts_reads_any_settings_hosts_and_nothing_else():
+    """The one reading `e2e-pass.py` and the fix pass share for `devkit.localE2e`."""
+    text = json.dumps({"settings": {rc_config.LOCAL_E2E_SETTING: {"hosts": "PC-A"}}})
+    assert rc_config.setting_hosts(text, rc_config.LOCAL_E2E_SETTING).hosts == (("*", "pc-a"),)
+    assert rc_config.setting_hosts(text, rc_config.RC_SETTING).hosts == ()
+
+
+@pytest.mark.parametrize("text", ["{", "[]", '{"settings": []}', '{"settings": {"s": "pc"}}'])
+def test_setting_hosts_of_a_broken_or_absent_setting_assigns_nobody(text):
+    assert rc_config.setting_hosts(text, "s").hosts == ()
+
+
 def test_a_project_named_in_hosts_overrides_the_default_machine():
     config = rc_config.parse_config(
         workspace_text({"projects": "all", "hosts": {"*": "desktop-a", "carameli": "desktop-b"}})

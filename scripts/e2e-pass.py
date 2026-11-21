@@ -52,7 +52,6 @@ from __future__ import annotations
 import argparse
 import ctypes
 import datetime as _dt
-import json
 import os
 import sys
 import time
@@ -61,7 +60,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import devkit_jsonc
 import devkit_project
 import e2e_results
 import rc_config
@@ -81,7 +79,7 @@ ENV_FLAG = "DEVKIT_E2E"
 RUN_ENV = {ENV_FLAG: "1", "PYTHONUTF8": "1"}
 
 # The workspace setting that assigns each project's nightly run to one machine.
-SETTING = "devkit.localE2e"
+SETTING = rc_config.LOCAL_E2E_SETTING
 
 DEFAULT_IDLE_MINUTES = 10
 DEFAULT_UNTIL = "06:30"
@@ -263,14 +261,7 @@ def registered(workspace: Path) -> list[str]:
 def assignment(text: str) -> rc_config.Config:
     """`SETTING`'s `hosts` off a workspace file; no hosts for anything absent or broken,
     which reads as "every machine tests its own"."""
-    try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return rc_config.Config()
-    settings = payload.get("settings") if isinstance(payload, dict) else None
-    raw = settings.get(SETTING) if isinstance(settings, dict) else None
-    hosts = raw.get("hosts") if isinstance(raw, dict) else None
-    return rc_config.Config(hosts=rc_config.parse_hosts(hosts))
+    return rc_config.setting_hosts(text, SETTING)
 
 
 def tested_here(workspace: Path, names: list[str], host: str) -> list[str]:

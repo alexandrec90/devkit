@@ -161,12 +161,14 @@ def command(python: str = sys.executable) -> list[str]:
 
 
 def environment(base: dict[str, str] | None = None) -> dict[str, str]:
-    """`base` with `tests/` prepended to PYTHONPATH, preserving anything already there.
+    """`base` with `tests/` prepended to PYTHONPATH, preserving anything already there,
+    and the suite writing UTF-8, which is how `main` reads it.
 
     Prepended rather than assigned: a caller may be running under a PYTHONPATH of its
     own (uv does), and dropping it would break the interpreter this then spawns.
     """
     env = dict(os.environ if base is None else base)
+    env["PYTHONUTF8"] = "1"
     tests = str(REPO_ROOT / "tests")
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{tests}{os.pathsep}{existing}" if existing else tests
@@ -211,7 +213,11 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
             _run_tests_module().with_basetemp(cmd, basetemp),
             cwd=REPO_ROOT,
             capture_output=True,
-            text=True,
+            # Not the locale's code page: on 2026-11-21 one UTF-8 byte in the suite's
+            # output killed cp1252's reader thread, the capture came back empty, and a
+            # run that may well have passed was reported FAILED with an empty artifact.
+            encoding="utf-8",
+            errors="replace",
             env=environment(),
         )
     raw = (result.stdout or "") + (result.stderr or "")
