@@ -71,6 +71,10 @@ PINNED = {
     "scripts/hooks/structure_check.py": "TOOLING_DIRS",
     "scripts/hooks/untested_symbols.py": "TOOLING_DIRS",
     "scripts/sync-codex-hooks.py": "BOXES_DIR_NAME",
+    # Installed alone into `~/.devkit/git-hooks` (`install_policy_layout.RUNTIME_FILES`)
+    # with no `worktree_tiers` beside it; `tests/test_worktree_env.py` holds its whole
+    # copy of the shapes equal to `ALL_TIERS`, not just this name.
+    "scripts/worktree_env.py": "AGENT_TIERS",
 }
 
 

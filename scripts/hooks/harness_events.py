@@ -30,7 +30,9 @@ Where the ledger lives decides who can write to it, and there are two callers:
 
 That checkout holds **one shard per machine** rather than one file: `record` appends to
 `harness-events-<host>.log` and the read half unions every `harness-events*.log` beside
-it. `HOST_ENV` above carries why, and why the host is not part of a defect's identity.
+it. `HOST_ENV` below carries why, and why the host is not part of a defect's identity.
+A machine that shares its ledger with another names the shared directory in
+`POOL_POINTER`, and its shard lives there instead.
 
 Event names and their fields belong to the writers; this module only owns the format.
 `record` never raises -- it is called from hooks on paths where they are already
@@ -74,6 +76,20 @@ LEDGER_GLOB = f"{LEDGER_STEM}*.log"
 # readable forever -- the ledger is append-only, and that history is most of it.
 LEDGER = LEDGER_DIR / f"{LEDGER_STEM}.log"
 
+# The pooled directory's address, one line naming an absolute path, and the transport
+# the shards were designed for without anything to point at it. Sharding made a pooled
+# directory conflict-free, but the only directory the shards could live in was the
+# checkout's whole `logs/`, which no machine can share: it also holds every job's own
+# per-machine artifact. So a second machine ran for a while with its defects on a ledger
+# nothing here read, and the fix pass took that for an empty backlog.
+#
+# A file in `logs/` rather than an environment variable, because every writer is not
+# started the same way -- a scheduled job, a hook under either agent runtime, a CLI --
+# and an address only some of them see splits one machine's rows across two places. It
+# also cannot leak out of a test: a test's ledger root is a scratch directory with no
+# pointer in it. `scripts/ledger-pool.py` writes it and moves the shard across.
+POOL_POINTER = LEDGER_DIR / "ledger-pool"
+
 # The repo this copy is vendored into -- devkit itself, when nobody vendored it. Read by
 # `ledger_path` on the branch where `$DEVKIT_DIR` says nothing.
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -100,6 +116,16 @@ VALUE_LIMIT = 300
 # (`report-harness-defect.py`); two under a worktree already pass the flat cap, and a
 # path cut short names nothing at all.
 FIELD_LIMITS = {"message": 4000, "detail": 2000, "evidence": 2000}
+
+# `command` keeps the flat cap but loses its *middle*, not its end. Its head is an
+# interpreter and absolute paths, its tail the arguments that say which invocation it
+# was -- and how much of the cap the paths eat depends on how deep the checkout is. Cut
+# from the end, `sweep.py ... --branch --slug lint-autofix --yes` filed from a long
+# `.claude/worktrees/<name>` lost every argument that told its step apart (10b3cce0).
+# A value at or under the cap is untouched, so a writer that pre-cuts to the cap
+# (`session_friction`) still reads back exactly what it wrote.
+TAIL_KEPT = frozenset({"command"})
+ELISION = " ... "
 
 
 # The line every *block* message ends with: how to report the block itself as wrong.
@@ -253,17 +279,31 @@ def limit_for(key: str) -> int:
     return FIELD_LIMITS.get(key, VALUE_LIMIT)
 
 
-def clean(value: object, limit: int = VALUE_LIMIT) -> str:
+def clean(value: object, limit: int = VALUE_LIMIT, *, keep_tail: bool = False) -> str:
     """One field value, made safe for the line format: whitespace collapsed (tabs and
-    newlines are the field and record separators), truncated, never empty."""
+    newlines are the field and record separators), truncated, never empty.
+
+    `keep_tail` truncates from the middle, joining both ends with `ELISION`. See
+    `TAIL_KEPT`."""
     text = " ".join(str(value).split()) or "-"
-    return text[:limit]
+    if len(text) <= limit or not keep_tail or limit <= len(ELISION):
+        return text[:limit]
+    head = (limit - len(ELISION)) // 2
+    tail = limit - len(ELISION) - head
+    return text[:head] + ELISION + text[-tail:]
 
 
 def event_line(stamp: str, event: str, fields: tuple[tuple[str, object], ...]) -> str:
     """One ledger record. Pure, so the format is testable."""
     pairs = (("event", event), *fields)
-    return stamp + "\t" + "\t".join(f"{key}={clean(value, limit_for(key))}" for key, value in pairs)
+    return (
+        stamp
+        + "\t"
+        + "\t".join(
+            f"{key}={clean(value, limit_for(key), keep_tail=key in TAIL_KEPT)}"
+            for key, value in pairs
+        )
+    )
 
 
 def _main_checkout(root: Path) -> Path:
@@ -328,10 +368,39 @@ def ledger_root(root: Path | None = None) -> Path | None:
     return base
 
 
+def pool_named(base: Path) -> Path | None:
+    """The pooled directory `base`'s pointer names, reachable or not; None when unset.
+
+    A relative or blank address is no address: it would resolve against whatever
+    directory the writer happened to start in.
+    """
+    try:
+        named = (base / POOL_POINTER).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    path = Path(named) if named else None
+    return path if path is not None and path.is_absolute() else None
+
+
+def pool_dir(base: Path) -> Path | None:
+    """The pooled directory when it is set and reachable; None otherwise.
+
+    Unreachable -- a synced folder not mounted yet, a share that is offline -- degrades
+    to the checkout's own `logs/` rather than losing the row, for `record`'s reason.
+    """
+    named = pool_named(base)
+    try:
+        return named if named is not None and named.is_dir() else None
+    except OSError:
+        return None
+
+
 def ledger_path(root: Path | None = None) -> Path | None:
     """The shard this machine appends to, or None when it has no ledger at all."""
     base = ledger_root(root)
-    return None if base is None else base / LEDGER_DIR / ledger_name()
+    if base is None:
+        return None
+    return (pool_dir(base) or base / LEDGER_DIR) / ledger_name()
 
 
 def ledger_paths(root: Path | None = None) -> list[Path]:
@@ -339,18 +408,21 @@ def ledger_paths(root: Path | None = None) -> list[Path]:
 
     The write target is always in the list even before it exists, so a caller can report
     "nothing open" against a real path rather than against nothing. Everything else in
-    the list is whatever is present: the legacy unsharded file, and any other machine's
-    shard that a sync has dropped in beside it.
+    the list is whatever is present: the legacy unsharded file, any other machine's shard
+    in the pooled directory, and whatever the checkout's own `logs/` still holds -- the
+    history from before the pool, and rows written while it was unreachable.
 
     Never raises, for `record`'s reasons -- an unreadable `logs/` degrades to this
     machine's own shard rather than taking a hook down with it.
     """
     target = ledger_path(root)
-    if target is None:
+    base = ledger_root(root)
+    if target is None or base is None:
         return []
     found = {target}
-    with contextlib.suppress(OSError):
-        found.update(p for p in target.parent.glob(LEDGER_GLOB) if p.is_file())
+    for where in {target.parent, base / LEDGER_DIR}:
+        with contextlib.suppress(OSError):
+            found.update(p for p in where.glob(LEDGER_GLOB) if p.is_file())
     return sorted(found)
 
 
@@ -385,3 +457,75 @@ def record(
     except Exception:
         return None
     return path
+
+
+# --- a machine cut off is not a defect --------------------------------------------------
+#
+# What a failure says when the name it needed could not be looked up: git, curl, gh,
+# Python's socket and httpx, Node, Rust's reqwest. Name resolution only, deliberately:
+# that is what `resolves` can confirm, and a refused or reset connection is as often a
+# service's own outage as this machine's, which is worth a session.
+UNRESOLVED_SAYS = (
+    "could not resolve host",
+    "could not resolve hostname",
+    "enotfound",
+    "eai_again",
+    "getaddrinfo failed",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "no such host is known",
+    "nodename nor servname",
+    "failed to lookup address",
+    "dns error",
+    # gh's own words for the same: "error connecting to api.github.com" followed by
+    # "check your internet connection or https://githubstatus.com".
+    "check your internet connection",
+)
+# The name `resolves` looks up: every job the ledger hears from fetches from it.
+PROBE_HOST = "github.com"
+# `getaddrinfo` takes no timeout, and a resolver that answers nothing holds it for the
+# system's own; the lookup runs on a thread this long, and one still waiting is a no.
+PROBE_SECONDS = 5.0
+
+
+def says_unresolved(text: str) -> bool:
+    """Whether `text` reports a name that could not be looked up (`UNRESOLVED_SAYS`)."""
+    lowered = text.lower()
+    return any(said in lowered for said in UNRESOLVED_SAYS)
+
+
+def resolves(host: str = PROBE_HOST, lookup=None, seconds: float = PROBE_SECONDS) -> bool:
+    """Whether this machine can look `host` up now, within `seconds`.
+
+    `lookup` is `socket.getaddrinfo` unless a test hands one in. A lookup error
+    (`socket.gaierror` is an `OSError`; a name IDNA cannot encode a `UnicodeError`) is a
+    no."""
+    import socket
+    import threading
+
+    look = lookup or socket.getaddrinfo
+    answered: list[bool] = []
+
+    def ask() -> None:
+        try:
+            answered.append(bool(look(host, 443)))
+        except (OSError, UnicodeError):
+            answered.append(False)
+
+    worker = threading.Thread(target=ask, name="harness-events-probe", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    return bool(answered and answered[0])
+
+
+def cut_off(text: str, lookup=None) -> bool:
+    """Whether a failure saying `text` is this machine having no network, not a defect:
+    it names a lookup that failed, and `PROBE_HOST` does not resolve now either.
+
+    Both halves, so neither alone files nothing. On 2026-11-12 a night without DNS filed
+    32 `Worktree Reconcile` failures, the same job's earlier outages had been retired as
+    "not a defect: offline" seven times, and each fixer sent at it died on the API it
+    could not reach. A lookup failing while github.com resolves is a bad host or a
+    container's own DNS, which stays a finding, and a job that fails for a different
+    reason while offline is filed by its next run on a network."""
+    return says_unresolved(text) and not resolves(lookup=lookup)

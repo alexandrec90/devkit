@@ -6,6 +6,7 @@ schedule fails silently every night with nothing red anywhere.
 """
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -321,3 +322,10 @@ def test_build_parser_accepts_every_verb_and_the_apply_flag_with_them():
     assert parser.parse_args(["--uninstall", "--yes"]).uninstall is True
     assert parser.parse_args(["--check"]).check is True
     parser.parse_args([])
+
+
+def test_the_runner_captures_output_and_leaves_a_failure_to_the_caller():
+    """`install` and `run_check` branch on `returncode`; a raise would turn a task that
+    is merely not registered yet into a traceback."""
+    result = sched.run_command([sys.executable, "-c", "print('out'); raise SystemExit(3)"])
+    assert (result.returncode, result.stdout.strip()) == (3, "out")

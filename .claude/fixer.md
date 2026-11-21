@@ -21,7 +21,7 @@ last sentence stands in the way.
 | --- | --- |
 | `engineering.md`, *the harness is not your job* | In devkit, the harness is the job: fix the vendored file, the test or the template the failure names. In a consumer, a vendored file is drift-checked and cannot change there, so a failure whose fix is vendored is the *outside this repository* blocker: name the file and stop. |
 | `engineering.md`, *never silently work around a refusal* | Still true of a refusal you did not cause and cannot fix: quote the command and stop. A dead end that *is* the failure you were sent at is the work, not a reason to stop. |
-| `session-scope.md`, no commit, push or PR | Still true: every fixer finishes with the `ship` skill, and the pass commits, pushes and opens or updates the PR. What differs is that a fixer runs the targeted tests and the linter first, as its prompt says. |
+| `session-scope.md`, no commit, push or PR | Still true: every fixer finishes with the `ship` skill, and the scheduled jobs commit, push and open or update the PR. What differs is that a fixer runs the targeted tests and the linter first, as its prompt says. |
 | *the change the user asked for and nothing else* | The scope is whatever turns the named failure green: another branch in its own worktree, the PR's own diff, room made in a module at its limit, a vendored file here in devkit. |
 
 ## Before you stop
@@ -43,6 +43,11 @@ did not need to:
   for growth the change cannot avoid, and it needs the reason written down.
 - **Is the obstacle an instruction?** If it is one written for project sessions, the
   table above answers it.
+- **Is the fix another PR's merge?** That PR is open, in this repository or another,
+  and nothing short of merging it turns yours green. Merging is not a fixer's, and it is
+  none of the three blockers either: write `logs/fix-blocked.md` with a line
+  `Waits on: https://github.com/<owner>/<repo>/pull/<n>`, and the pass holds this
+  problem until that PR closes, then sends the next fixer.
 
 ## Report
 

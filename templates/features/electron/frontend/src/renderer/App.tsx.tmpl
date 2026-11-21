@@ -1,0 +1,32 @@
+import { useEffect, useState } from 'react'
+import { describeUpdate, type UpdateState } from '../shared/updates'
+import type { Bridge } from '../preload'
+
+declare global {
+  interface Window {
+    app: Bridge
+  }
+}
+
+export function App() {
+  const [version, setVersion] = useState('')
+  const [update, setUpdate] = useState<UpdateState>({ kind: 'idle' })
+
+  useEffect(() => {
+    void window.app.version().then(setVersion)
+    return window.app.onUpdate(setUpdate)
+  }, [])
+
+  return (
+    <main style={styles}>
+      <h1>{{ display_name }}</h1>
+      <p data-testid="version">Version {version}</p>
+      <p>{describeUpdate(update)}</p>
+      {update.kind === 'ready' && (
+        <button onClick={() => void window.app.restartToUpdate()}>Restart to update</button>
+      )}
+    </main>
+  )
+}
+
+const styles = { fontFamily: 'system-ui, sans-serif', padding: 24 }

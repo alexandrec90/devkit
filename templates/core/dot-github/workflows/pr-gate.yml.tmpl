@@ -23,8 +23,12 @@ permissions:
 # gates on `workflow_run.conclusion == 'success'`, which a cancelled run never
 # reports, so every bot PR would sit unmerged behind a run that was cancelled rather
 # than failed.
+#
+# A {{ default_branch }} run is keyed on its commit. GitHub keeps one pending run per
+# group, so with the ref as the key a burst of merges kept only the newest, and the
+# commits between never got the verdict that says which of them broke the branch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -86,9 +90,13 @@ jobs:
     name: Tests
     runs-on: ubuntu-latest
 {{#postgres}}
+    # Google's mirror of the Docker Official Images, not Docker Hub or ECR Public: a
+    # hosted runner pulls anonymously on a shared IP, and both answer `toomanyrequests`
+    # once strangers spend its quota, failing the job before a test runs (social-scraper,
+    # 2026-10-09 and 2026-10-18). tests/test_workflow_images.py in devkit.
     services:
       db:
-        image: postgres:18
+        image: mirror.gcr.io/library/postgres:18
         env:
           POSTGRES_USER: {{ db_user }}
           POSTGRES_PASSWORD: {{ db_password }} # pragma: allowlist secret
@@ -102,7 +110,7 @@ jobs:
           --health-retries 5
 {{#redis}}
       redis:
-        image: redis:7
+        image: mirror.gcr.io/library/redis:7
         ports:
           - 6379:6379
         options: >-
@@ -135,11 +143,15 @@ jobs:
         run: uv run python -m alembic upgrade head
 {{/alembic}}
       - name: Application suite
+        id: application-suite
         run: uv run python scripts/run-tests.py
       - name: Harness hook tests
         # Separate from the application suite: pytest's testpaths excludes these,
         # and they are stdlib-only by contract. The JUnit report is their failure
         # artifact: without it a red vendored suite uploads nothing the fix pass can read.
+        # They run after a red application suite too, so one gate cycle names both
+        # tiers' failures.
+        if: success() || steps.application-suite.outcome == 'failure'
         run: uv run python -m pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml
       - name: Upload test artifact
         if: failure()
@@ -149,6 +161,91 @@ jobs:
           path: |
             logs/test-failures.log
             logs/junit-hooks.xml
+{{#desktop}}
+
+  desktop:
+    name: Desktop build and tests
+    # Windows, because WPF runs only there. The Linux jobs above skip the desktop tier
+    # with a note, whatever `dotnet` their image carries; this job is where it is gated.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      # `scripts/desktop.py` is stdlib-only, vendored from devkit, so no project
+      # environment is built for it.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "{{ python_version }}"
+      - name: Format and build
+        id: desktop-lint
+        # `--check`: CI fails on a format change rather than making one.
+        run: python scripts/desktop.py lint --check
+      - name: Tests
+        # After a red build too, so one gate cycle names both.
+        if: success() || steps.desktop-lint.outcome == 'failure'
+        run: python scripts/desktop.py test
+      - name: Upload desktop artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-failures
+          path: |
+            logs/desktop-lint.log
+            logs/desktop-test.log
+      - name: Upload what the app drew
+        # On a pass too: the screenshot is how a UI change gets looked at.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-ui
+          if-no-files-found: ignore
+          path: logs/ui/
+{{/desktop}}
+{{#electron}}
+
+  electron:
+    name: Electron build and UI tests
+    # Windows, because that is what `release.yml` ships, and a hosted Windows runner has
+    # the desktop session Electron needs with nothing to set up. `test:e2e:packaged`
+    # drives the packed app rather than the source: a file `electron-builder.yml` leaves
+    # out passes every other check here and fails only on a user's machine.
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        id: typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        id: unit-tests
+        # After a red typecheck too, so one gate cycle names every failure.
+        if: success() || steps.typecheck.outcome == 'failure'
+        run: npm run test:run
+      - name: Drive the packaged app
+        if: success() || steps.typecheck.outcome == 'failure' || steps.unit-tests.outcome == 'failure'
+        run: npm run test:e2e:packaged
+      - name: Upload what the app drew
+        # On a pass too: the screenshot is how a UI change gets looked at.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: electron-ui
+          if-no-files-found: ignore
+          path: |
+            logs/ui/
+            logs/e2e-results.json
+            logs/e2e-artifacts/
+{{/electron}}
 
   devkit-drift:
     name: Vendored harness drift

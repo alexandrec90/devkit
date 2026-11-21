@@ -8,24 +8,32 @@ would otherwise surface only when a human ran `docker compose up` in a brand-new
 repo.
 """
 
-import argparse
+import dataclasses
 import itertools
 import json
 import os
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import pytest
 from support import (
     REPO_ROOT,
     TEMPLATES,
+    checks_a_red_check_skips,
+    devkit_jsonc,
     devkit_ports,
     devkit_project,
+    generate,
     gh_steps_without_repo_context,
     harness_config,
     load_script,
+    make_args,
+    registry,
     vendor_manifest,
 )
 
@@ -49,33 +57,6 @@ def _hoisted_task_labels() -> frozenset[str]:
 
 
 HOISTED_TASK_LABELS = _hoisted_task_labels()
-
-
-def make_args(**overrides):
-    """The argparse namespace `plan()` expects, with the CLI's own defaults."""
-    base = {
-        "name": "demo_project",
-        "description": "A demo.",
-        "display_name": "",
-        "parent": "",
-        "github_owner": "alexandrec90",
-        "python_version": "3.12",
-        "default_branch": "main",
-        "devkit_ref": "v0.1.0",
-        "db_url_scheme": "postgresql+psycopg",
-        "src_layout": False,
-        "preset": None,
-        "remote": True,
-        "register": True,
-        "dry_run": True,
-        **{f: False for f in new_project.FEATURES},
-    }
-    base.update(overrides)
-    return argparse.Namespace(**base)
-
-
-def registry():
-    return devkit_ports.load(REPO_ROOT)
 
 
 # --------------------------------------------------------------------------
@@ -119,6 +100,24 @@ def test_dot_and_tmpl_conventions_apply_to_every_path_segment(source, expected):
     # `dot-` exists because a literal `.gitignore` inside templates/ would take
     # effect on devkit's own repo and make git ignore the templates themselves.
     assert Path(new_project._destination_name(Path(source))).as_posix() == expected
+
+
+def test_what_running_a_template_leaves_beside_it_is_not_shipped(tmp_path, monkeypatch):
+    """0929-8 loaded `run-tests.py.tmpl` in a test; the `__pycache__` it wrote under
+    `templates/core/scripts/` rode into the next generated project, and a text-file check
+    there failed on the `.pyc`. The session deleted it by hand; the walk kept copying."""
+    core = tmp_path / "core"
+    for rel in (
+        "scripts/run-tests.py.tmpl",
+        "scripts/__pycache__/run-tests.py.cpython-312.pyc",
+        "stray.pyc",
+        ".pytest_cache/v/x",
+    ):
+        (core / rel).parent.mkdir(parents=True, exist_ok=True)
+        (core / rel).write_text("x", encoding="utf-8")
+    monkeypatch.setattr(new_project, "TEMPLATES", tmp_path)
+    shipped = [dest.as_posix() for _, dest in new_project.iter_template_files({})]
+    assert shipped == ["scripts/run-tests.py"]
 
 
 def test_no_template_ships_a_literal_dotfile():
@@ -238,6 +237,361 @@ def test_explicit_flags_add_to_a_preset_rather_than_replacing_it(tmp_path):
     assert the_plan.context["redis"] is True  # from the explicit flag
 
 
+# --- the desktop shape ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("skinamp", "Skinamp"),
+        ("sports-betting", "SportsBetting"),
+        ("demo_project", "DemoProject"),
+        ("my-app2", "MyApp2"),
+        ("3d-tool", "App3dTool"),
+    ],
+)
+def test_the_csharp_name_is_a_valid_identifier(name, expected):
+    assert new_project.pascal_case(name) == expected
+
+
+def test_the_updater_brings_the_desktop_shape_with_it():
+    args = make_args(updater=True)
+    new_project.resolve_features(args)
+    assert args.desktop is True
+
+
+@pytest.mark.parametrize("stack", ["postgres", "docker", "frontend", "redis", "archive"])
+def test_a_desktop_project_cannot_carry_a_compose_stack(stack):
+    """skinamp's mistake, refused: an installer on a stranger's PC has no Postgres."""
+    args = make_args(desktop=True, **{stack: True})
+    with pytest.raises(new_project.GeneratorError, match="desktop"):
+        new_project.resolve_features(args)
+
+
+def test_the_refusal_reaches_the_cli_as_an_exit_code(tmp_path, capsys):
+    argv = ["demo_project", "--preset", "desktop", "--with-postgres", "--parent", str(tmp_path)]
+    assert new_project.main([*argv, "--no-remote"]) == 1
+    assert "compose stack" in capsys.readouterr().err
+
+
+def test_a_path_placeholder_takes_its_context_value_and_leaves_dunders_alone():
+    context = {"desktop_name": "Skinamp"}
+    path = Path("src/__desktop_name__/__desktop_name__.csproj")
+    assert new_project.substitute_path(path, context) == Path("src/Skinamp/Skinamp.csproj")
+    assert new_project.substitute_path(Path("pkg/__init__.py"), context) == Path("pkg/__init__.py")
+
+
+def test_a_desktop_project_is_a_csharp_solution_with_no_python_package(tmp_path):
+    root = generate(tmp_path, {"desktop": True, "updater": True})
+    for rel in (
+        "DemoProject.slnx",
+        "global.json",
+        "Directory.Build.props",
+        ".editorconfig",
+        "src/DemoProject/DemoProject.csproj",
+        "src/DemoProject/Program.cs",
+        "src/DemoProject/app.manifest",
+        "tests/DemoProject.Tests/DemoProject.Tests.csproj",
+        "tests/DemoProject.Tests/MainWindowTests.cs",
+        ".github/workflows/release.yml",
+    ):
+        assert (root / rel).is_file(), rel
+    assert not (root / "demo_project").exists(), "a second, Python 'app' beside the C# one"
+    assert not (root / "tests" / "test_smoke.py").exists(), "it imports a package not made"
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["uv"]["package"] is False
+    assert "build-system" not in pyproject
+    # No package of its own, so the pull links the checkout's `.venv` into worktrees,
+    # and the template already ignores the link (a `dir/` pattern never matches one).
+    settings = json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["worktree"]["symlinkDirectories"] == [".venv"]
+    assert "/.venv" in (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+
+def test_a_desktop_projects_manifest_names_files_that_exist(tmp_path):
+    root = generate(tmp_path, {"desktop": True})
+    desktop = harness_config.load(root).desktop
+    assert desktop.enabled is True
+    assert (root / desktop.solution).is_file() and (root / desktop.project).is_file()
+    assert desktop.pack_id == "DemoProject"
+    assert harness_config.load(root).app_dir == "src/DemoProject/"
+
+
+def test_the_updater_is_the_only_difference_between_the_desktop_presets(tmp_path):
+    full = generate(tmp_path / "full", {"desktop": True, "updater": True})
+    static = generate(tmp_path / "static", {"desktop": True})
+    project = "src/DemoProject/DemoProject.csproj"
+    assert 'Include="Velopack"' in (full / project).read_text(encoding="utf-8")
+    assert "Velopack" not in (static / project).read_text(encoding="utf-8")
+    assert "VelopackApp.Build().Run();" in (full / "src/DemoProject/Program.cs").read_text(
+        encoding="utf-8"
+    )
+    assert (full / "src/DemoProject/Updates/Updater.cs").is_file()
+    assert not (static / "src/DemoProject/Updates").exists()
+    # Both still ship an installer: the release workflow does not depend on the updater.
+    assert (static / ".github/workflows/release.yml").is_file()
+
+
+def test_the_update_feed_is_the_projects_own_repository(tmp_path):
+    root = generate(tmp_path, {"desktop": True, "updater": True})
+    feed = (root / "src/DemoProject/Updates/UpdateFeed.cs").read_text(encoding="utf-8")
+    assert '"https://github.com/alexandrec90/demo_project"' in feed
+
+
+def test_the_desktop_driver_arrives_through_the_gated_tier_only_where_it_is_on(tmp_path):
+    desktop = generate(tmp_path / "desk", {"desktop": True})
+    bare = generate(tmp_path / "bare", {})
+    assert (desktop / "scripts" / "desktop.py").is_file()
+    assert (desktop / "scripts" / "hooks" / "tests" / "test_desktop.py").is_file()
+    assert not (bare / "scripts" / "desktop.py").exists()
+
+
+@pytest.mark.parametrize("updater", [False, True], ids=["static", "updater"])
+def test_every_generated_csharp_xml_file_is_well_formed(tmp_path, updater):
+    """Nothing in the build parses `app.manifest`: the compiler embeds it as bytes.
+
+    A `--` in one of its comments, which XML forbids, built with zero warnings and passed
+    every test, and Windows then refused to start the executable at all ("side-by-side
+    configuration is incorrect"): no desktop project this template generated could run.
+    """
+    root = generate(tmp_path, {"desktop": True, "updater": updater})
+    suffixes = {".manifest", ".xaml", ".csproj", ".props", ".slnx"}
+    found = [p for p in root.rglob("*") if p.suffix in suffixes and ".venv" not in p.parts]
+    assert {".manifest", ".xaml", ".csproj", ".props", ".slnx"} <= {p.suffix for p in found}
+    for path in found:
+        ElementTree.parse(path)  # noqa: S314 - the template this suite just rendered
+
+
+@pytest.mark.parametrize(
+    ("features", "gated"),
+    [
+        pytest.param({"desktop": True}, "scripts/desktop.py", id="desktop"),
+        pytest.param({"electron": True}, "frontend/src/worktreePort.ts", id="electron"),
+    ],
+)
+def test_the_generator_itself_delivers_the_gated_tier(tmp_path, features, gated):
+    """A real pull, because `generate` copies the gated files and so cannot see this.
+
+    The gate reads the consumer's `harness_config.py`, which the first pull is what
+    delivers, so a one-pull generator left every gated file behind: skinamp's whole shape
+    arrived with no `scripts/desktop.py`, for its PR gate and `release.yml` to die on.
+    """
+    args = make_args(parent=str(tmp_path), **features)
+    new_project.resolve_features(args)
+    the_plan = new_project.plan(args, registry())
+    the_plan.root.mkdir(parents=True)
+    new_project.render_tree(the_plan, dry_run=False)
+    new_project.vendor_harness(the_plan, dry_run=False)
+    assert (the_plan.root / gated).is_file()
+
+
+def test_the_gate_builds_the_desktop_app_on_windows(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"desktop": True})
+    gate = yaml.safe_load((root / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8"))
+    job = gate["jobs"]["desktop"]
+    assert job["runs-on"] == "windows-latest"
+    runs = [step.get("run", "") for step in job["steps"]]
+    assert "python scripts/desktop.py lint --check" in runs
+    assert "python scripts/desktop.py test" in runs
+    bare = generate(tmp_path / "bare", {})
+    bare_gate = (bare / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
+    assert "desktop" not in yaml.safe_load(bare_gate)["jobs"]
+
+
+def test_only_a_desktop_project_is_told_how_to_ship(tmp_path, capsys):
+    desktop = new_project.plan(make_args(parent=str(tmp_path), desktop=True), registry())
+    new_project.desktop_hint(desktop)
+    out = capsys.readouterr().out
+    assert "git tag v0.1.0" in out and "VPK_SIGN_PARAMS" in out
+    bare = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    new_project.desktop_hint(bare)
+    assert capsys.readouterr().out == ""
+    new_project.next_steps(desktop)
+    assert "VPK_SIGN_PARAMS" in capsys.readouterr().out, "`main` ends on it"
+
+
+def test_a_release_is_a_tag_and_the_tag_never_reaches_the_shell_as_code(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"desktop": True})
+    release = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    # PyYAML reads the bare key `on` as True.
+    assert release[True]["push"]["tags"] == ["v*"]
+    assert release["permissions"] == {"contents": "write"}
+    step = next(s for s in release["jobs"]["release"]["steps"] if s.get("name") == "Release")
+    assert "${{" not in step["run"], "an expression in `run` is spliced in as script"
+    assert step["env"]["RELEASE_TAG"] == "${{ github.ref_name }}"
+
+
+# --- the desktop-web shape -----------------------------------------------------
+
+
+@pytest.mark.parametrize("other", ["desktop", "updater"])
+def test_an_electron_project_is_not_also_the_csharp_one(other):
+    """Each owns the source tree, the installer and `release.yml`."""
+    args = make_args(electron=True, **{other: True})
+    with pytest.raises(new_project.GeneratorError, match="pick one"):
+        new_project.resolve_features(args)
+
+
+@pytest.mark.parametrize("stack", ["postgres", "docker", "frontend", "redis", "archive"])
+def test_an_electron_project_cannot_carry_a_compose_stack(stack):
+    args = make_args(electron=True, **{stack: True})
+    with pytest.raises(new_project.GeneratorError, match="compose stack"):
+        new_project.resolve_features(args)
+
+
+@pytest.mark.parametrize(
+    ("owner", "package", "expected"),
+    [
+        ("alexandrec90", "demo_project", "io.github.alexandrec90.demo-project"),
+        ("MixedCase", "tool", "io.github.mixedcase.tool"),
+    ],
+)
+def test_the_electron_app_id_is_a_valid_bundle_identifier(owner, package, expected):
+    assert new_project.electron_app_id(owner, package) == expected
+
+
+def test_an_electron_project_is_a_frontend_with_no_python_package(tmp_path):
+    root = generate(tmp_path, {"electron": True})
+    for rel in (
+        "frontend/package.json",
+        "frontend/.nvmrc",
+        "frontend/electron-builder.yml",
+        "frontend/playwright.config.ts",
+        "frontend/e2e/app.spec.ts",
+        "frontend/src/main/index.ts",
+        "frontend/src/preload/index.ts",
+        "frontend/src/renderer/App.tsx",
+        "frontend/src/renderer/index.html",
+        ".github/workflows/release.yml",
+    ):
+        assert (root / rel).is_file(), rel
+    assert not (root / "demo_project").exists(), "a second, Python 'app' beside the TypeScript one"
+    assert not (root / "tests" / "test_smoke.py").exists(), "it imports a package not made"
+    assert not (root / "docker-compose.yml").exists()
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["uv"]["package"] is False
+    assert "build-system" not in pyproject
+    ignored = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert {"/.venv", "/frontend/node_modules", "frontend/release/"} <= set(ignored)
+
+
+def test_the_electron_app_is_the_frontend_tier_and_not_the_desktop_one(tmp_path):
+    """What points `run-tests.py` and `lint-all.py` at it, and vendors `worktreePort`,
+    which `electron.vite.config.ts` imports."""
+    root = generate(tmp_path, {"electron": True})
+    config = harness_config.load(root)
+    assert config.frontend.enabled is True
+    assert config.desktop.enabled is False
+    assert config.app_dir == config.frontend.src == "frontend/src/"
+    manifest = json.loads((root / "frontend/package.json").read_text(encoding="utf-8"))
+    assert {config.frontend.test_cmd[1], config.frontend.typecheck_cmd[1]} <= set(
+        manifest["scripts"]
+    )
+    assert (root / "frontend/src/worktreePort.ts").is_file()
+
+
+def test_the_electron_app_runs_as_commonjs(tmp_path):
+    """A sandboxed preload cannot be an ES module, and `"type": "module"` makes one."""
+    root = generate(tmp_path, {"electron": True})
+    manifest = json.loads((root / "frontend/package.json").read_text(encoding="utf-8"))
+    assert "type" not in manifest
+    main = (root / "frontend/src/main/index.ts").read_text(encoding="utf-8")
+    assert "sandbox: true" in main and "'../preload/index.js'" in main
+
+
+def test_the_gate_drives_the_packaged_electron_app_on_windows(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"electron": True})
+    gate = yaml.safe_load((root / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8"))
+    job = gate["jobs"]["electron"]
+    assert job["runs-on"] == "windows-latest"
+    runs = [step.get("run", "") for step in job["steps"]]
+    assert {"npm ci", "npm run typecheck", "npm run test:run"} <= set(runs)
+    assert "npm run test:e2e:packaged" in runs, "the source passing says nothing of the installer"
+    upload = next(s for s in job["steps"] if s.get("name") == "Upload what the app drew")
+    assert upload["if"] == "always()", "the screenshot is wanted on a pass too"
+    assert "desktop" not in gate["jobs"]
+    bare = yaml.safe_load(
+        (generate(tmp_path / "bare", {}) / ".github/workflows/pr-gate.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "electron" not in bare["jobs"]
+
+
+def test_an_electron_release_never_splices_the_tag_into_the_shell(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"electron": True})
+    release = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    assert release[True]["push"]["tags"] == ["v*"]
+    assert release["permissions"] == {"contents": "write"}
+    steps = release["jobs"]["release"]["steps"]
+    assert all("${{" not in step.get("run", "") for step in steps)
+    stamp = next(s for s in steps if s.get("name") == "Stamp the version from the tag")
+    assert stamp["env"]["RELEASE_TAG"] == "${{ github.ref_name }}"
+
+
+def test_the_installer_publishes_to_the_projects_own_repository(tmp_path):
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"electron": True})
+    builder = yaml.safe_load((root / "frontend/electron-builder.yml").read_text(encoding="utf-8"))
+    assert builder["appId"] == "io.github.alexandrec90.demo-project"
+    assert builder["publish"]["owner"] == "alexandrec90"
+    assert builder["publish"]["repo"] == "demo_project"
+
+
+def test_an_electron_project_is_told_how_to_ship(tmp_path, capsys):
+    the_plan = new_project.plan(make_args(parent=str(tmp_path), electron=True), registry())
+    new_project.desktop_hint(the_plan)
+    out = capsys.readouterr().out
+    assert "git tag v0.1.0" in out and "CSC_LINK" in out and "VPK_SIGN_PARAMS" not in out
+
+
+@pytest.mark.parametrize(
+    ("features", "pulls"),
+    [
+        pytest.param({}, 1, id="bare"),
+        pytest.param({"desktop": True}, 2, id="desktop"),
+        pytest.param({"electron": True}, 2, id="electron"),
+    ],
+)
+def test_only_a_shape_with_a_gate_on_pays_for_a_second_pull(tmp_path, monkeypatch, features, pulls):
+    the_plan = new_project.plan(make_args(parent=str(tmp_path), **features), registry())
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        new_project, "run", lambda cmd, cwd, dry_run, check=True: ran.append(list(cmd)) or 0
+    )
+    new_project.vendor_harness(the_plan, dry_run=True)
+    assert sum("--pull" in cmd for cmd in ran) == pulls
+
+
+def test_only_an_electron_project_locks_npm(tmp_path, monkeypatch):
+    locked: list[Path] = []
+    monkeypatch.setattr(new_project, "lock_node_dependencies", lambda app, dry: locked.append(app))
+    argv = ["--parent", str(tmp_path), "--no-remote"]
+    assert new_project.main(["plain", "--preset", "bare", *argv]) == 0
+    assert locked == []
+    assert new_project.main(["shipped", "--preset", "desktop-web", *argv]) == 0
+    assert locked == [tmp_path.resolve() / "shipped" / "frontend"]
+
+
+def test_every_preset_is_generated_by_the_gate():
+    """The loop named five of them, RELEASING.md said every one, and the two desktop bugs
+    the loop could have shown went unseen until someone launched a generated app."""
+    gate = (REPO_ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
+    loop = re.search(r"for preset in ([^;]+);", gate)
+    assert loop and set(loop[1].split()) == set(new_project.PRESETS)
+
+
+def test_every_preset_is_offered_by_the_task_picker():
+    text = (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
+    inputs = devkit_jsonc.loads(text)["tasks"]["inputs"]
+    picker = next(entry for entry in inputs if entry["id"] == "newProjectPreset")
+    assert {option["value"] for option in picker["options"]} == set(new_project.PRESETS)
+
+
 def test_a_plan_is_the_decisions_and_writes_nothing(tmp_path):
     """`Plan` is the boundary between deciding and writing: every field the writers
     read is on it, and building one touches the disk not at all."""
@@ -247,6 +601,22 @@ def test_a_plan_is_the_decisions_and_writes_nothing(tmp_path):
     assert not the_plan.root.exists()
     assert the_plan.files and all(len(entry) == 3 for entry in the_plan.files)
     assert isinstance(the_plan.remote, bool) and isinstance(the_plan.register, bool)
+
+
+def test_the_remote_is_created_public_so_its_gate_runs_free(tmp_path, monkeypatch):
+    """productivity-tracker and social-scraper were created `--private`, spent the free
+    plan's monthly Actions minutes, and GitHub refused every job after (2026-11-01)."""
+    the_plan = dataclasses.replace(
+        new_project.plan(make_args(parent=str(tmp_path)), registry()), remote=True
+    )
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        new_project, "run", lambda cmd, cwd, dry_run, check=True: ran.append(list(cmd)) or 0
+    )
+    new_project.create_remote(the_plan, dry_run=False)
+    [cmd] = ran
+    assert cmd[:3] == ["gh", "repo", "create"] and "--public" in cmd
+    assert "--private" not in cmd and "--internal" not in cmd
 
 
 def test_git_init_seeds_the_default_branch_and_the_first_commit(tmp_path, monkeypatch):
@@ -330,26 +700,14 @@ FEATURE_MATRIX = [
     pytest.param({"postgres": True, "archive": True}, id="data"),
     pytest.param({"frontend": True, "postgres": True, "app_service": True}, id="fullstack"),
     pytest.param(
-        {f: True for f in new_project.FEATURES},
+        {f: True for f in new_project.STACK_FEATURES},
         id="everything",
     ),
+    # The desktop shape excludes the stack, so it is the matrix's other end.
+    pytest.param({"desktop": True, "updater": True}, id="desktop"),
+    pytest.param({"desktop": True}, id="desktop-static"),
+    pytest.param({"electron": True}, id="desktop-web"),
 ]
-
-
-def generate(tmp_path: Path, features: dict) -> Path:
-    """Render the tree for one feature set into tmp_path and return the root."""
-    args = make_args(parent=str(tmp_path), **features)
-    if args.alembic:
-        args.postgres = True
-    if args.app_service or args.postgres or args.redis or args.frontend:
-        args.docker = True
-    the_plan = new_project.plan(args, registry())
-    the_plan.root.mkdir(parents=True, exist_ok=True)
-    new_project.render_tree(the_plan, dry_run=False)
-    new_project.write_package(the_plan, dry_run=False)
-    # Both tiers, because a real project is both. See `support.vendor_manifest`.
-    vendor_manifest(the_plan.root)
-    return the_plan.root
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
@@ -357,6 +715,19 @@ def test_every_feature_combination_renders(tmp_path, features):
     root = generate(tmp_path, features)
     assert (root / "CLAUDE.md").exists()
     assert (root / ".devkit.toml").exists()
+
+
+def test_the_postgres_volume_is_mounted_where_the_pinned_image_keeps_its_cluster(tmp_path):
+    """c89aef2b: `postgres:18` keeps its cluster in a versioned directory below
+    `/var/lib/postgresql` and refuses to start with a volume on the old `.../data` path,
+    so every generated project's `docker compose up -d --wait db` came up unhealthy."""
+    compose = (generate(tmp_path, {"postgres": True}) / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    image = re.search(r"image: postgres:(\d+)", compose)
+    assert image and int(image[1]) >= 18
+    mounts = re.findall(r"- pgdata:(\S+)", compose)
+    assert mounts == ["/var/lib/postgresql"]
 
 
 def test_a_generated_project_cannot_stage_a_root_agents_md(tmp_path):
@@ -517,8 +888,9 @@ def test_generated_harness_manifest_is_readable_by_harness_config(tmp_path, feat
     # The frontend tier ships off even when the feature is on: the feature wires the
     # compose service but scaffolds no frontend/ tree, and an enabled tier whose
     # `src` prefix matches nothing is inert without ever saying so. The paths are
-    # still rendered, ready for the project to flip once it has a frontend.
-    assert config.frontend.enabled is False
+    # still rendered, ready for the project to flip once it has a frontend. The Electron
+    # shape does render that tree, so its tier arrives on.
+    assert config.frontend.enabled is bool(features.get("electron"))
     if features.get("frontend"):
         assert config.frontend.src == "frontend/src/"
         assert config.frontend.test_cmd == ("run", "test:run")
@@ -666,7 +1038,17 @@ def test_the_generator_writes_no_per_project_workspace_file(tmp_path):
     assert not list(tmp_path.glob("**/*.code-workspace"))
 
 
-def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch):
+@pytest.fixture
+def canonical_copy(tmp_path, monkeypatch) -> Path:
+    """devkit's `workspace.jsonc`, copied aside so registering cannot edit the real one."""
+    copy = tmp_path / "canonical" / "workspace.jsonc"
+    copy.parent.mkdir()
+    copy.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", copy)
+    return copy
+
+
+def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch, canonical_copy):
     """The project is already written by then; a broken registry is fixable by hand."""
     args = make_args(parent=str(tmp_path))
     the_plan = new_project.plan(args, registry())
@@ -675,6 +1057,253 @@ def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", broken)
     new_project.register_in_workspace(the_plan, dry_run=False)
     assert "WARNING" in capsys.readouterr().out
+
+
+def test_registration_lands_in_the_canonical_copy_too(
+    tmp_path, capsys, monkeypatch, canonical_copy
+):
+    """The live file is rendered from `workspace.jsonc`, so registering only there is drift.
+
+    It was (8a1c0927): a freshly generated project left `--check-workspace` saying
+    `folder in the workspace but not in devkit` until someone adopted it by hand.
+    """
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical_copy.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+    assert the_plan.name not in devkit_project.known_projects(canonical_copy.read_text("utf-8"))
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    for path in (canonical_copy, live):
+        assert the_plan.name in devkit_project.known_projects(path.read_text(encoding="utf-8"))
+    assert (
+        devkit_project.workspace_drift(
+            devkit_jsonc.loads(live.read_text(encoding="utf-8")),
+            devkit_jsonc.loads(canonical_copy.read_text(encoding="utf-8")),
+        )
+        == []
+    )
+    out = capsys.readouterr().out
+    assert "WARNING" not in out
+    assert f"commit devkit's {canonical_copy.name}" in out
+
+
+def _devkit_checkout(path: Path, *, ports: bool = False) -> Path:
+    """A static checkout on `main` holding devkit's `workspace.jsonc` (and, with `ports`,
+    its `ports.toml`), committed. Its own `core.hooksPath` points nowhere, since this
+    machine installs a global branch policy as a hooks path and a fixture repo must not be
+    judged by it."""
+    path.mkdir(parents=True)
+    canonical = path / "workspace.jsonc"
+    canonical.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    if ports:
+        shipped = (REPO_ROOT / devkit_ports.REGISTRY_NAME).read_text(encoding="utf-8")
+        (path / devkit_ports.REGISTRY_NAME).write_text(shipped, encoding="utf-8", newline="\n")
+    for args in (
+        ("init", "--quiet", "-b", "main"),
+        ("config", "core.hooksPath", str(path / ".nohooks")),
+        ("config", "user.email", "t@e.st"),
+        ("config", "user.name", "t"),
+        ("add", "-A"),
+        ("commit", "--quiet", "-m", "init"),
+    ):
+        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+    return canonical
+
+
+def _git_out(path: Path, *args: str) -> str:
+    done = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True)
+    return done.stdout.strip()
+
+
+def test_registration_leaves_the_static_checkout_clean(tmp_path, capsys, monkeypatch):
+    """851308ef: skinamp's registration was left uncommitted in devkit's static checkout,
+    the one the fix pass runs from, and its watchdog refuses to fast-forward a dirty one --
+    so the pass ran stale code. The edit goes onto a task branch with an intent instead."""
+    canonical = _devkit_checkout(tmp_path / "devkit")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    checkout = canonical.parent
+    # What `fix-pass-watchdog.self_update` asks before it fast-forwards.
+    assert _git_out(checkout, "status", "--porcelain", "--untracked-files=no") == ""
+    assert the_plan.name not in devkit_project.known_projects(canonical.read_text("utf-8"))
+    assert the_plan.name in devkit_project.known_projects(live.read_text(encoding="utf-8"))
+    (tree,) = (checkout / ".claude" / "worktrees").iterdir()
+    branch = _git_out(tree, "rev-parse", "--abbrev-ref", "HEAD")
+    assert branch.startswith(f"agent/register-{the_plan.name.replace('_', '-')}-")
+    assert _git_out(tree, "status", "--porcelain", "--untracked-files=no") == "M workspace.jsonc"
+    edited = (tree / "workspace.jsonc").read_text(encoding="utf-8")
+    assert the_plan.name in devkit_project.known_projects(edited)
+    intent = (tree / "logs" / "ship-intent.md").read_text(encoding="utf-8")
+    assert intent.startswith(f"Register {the_plan.name} in the workspace registry\n\n")
+    assert "Automerge" not in intent, "a registry change waits for its reviewer"
+    out = capsys.readouterr().out
+    assert f"branch  {branch}" in out and "commit devkit's" not in out
+
+
+def test_the_registration_branch_carries_the_slot_too(tmp_path, capsys, monkeypatch):
+    """PR #701's gate: skinamp's registration branch put it in the `project` picker with no
+    `ports.toml` slot, and `test_every_checkout_either_holds_a_slot_or_says_why_not` failed
+    on it, because the slot was only ever a hint printed after the run."""
+    canonical = _devkit_checkout(tmp_path / "devkit", ports=True)
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+    new_project.next_steps(the_plan)
+
+    checkout = canonical.parent
+    assert _git_out(checkout, "status", "--porcelain", "--untracked-files=no") == ""
+    assert the_plan.name not in devkit_ports.load(checkout).slots
+    (tree,) = (checkout / ".claude" / "worktrees").iterdir()
+    slot = the_plan.context["slot"]
+    assert devkit_ports.load(tree).slot_of(the_plan.name) == slot
+    changed = _git_out(tree, "diff", "--name-only").splitlines()
+    assert sorted(changed) == ["ports.toml", "workspace.jsonc"]
+    intent = (tree / "logs" / "ship-intent.md").read_text(encoding="utf-8")
+    assert f"`{the_plan.name} = {slot}`" in intent
+    out = capsys.readouterr().out
+    assert f"ports.toml slot {slot}" in out
+    assert "Next: register the slot" not in out, "the branch already carries it"
+
+
+def test_a_registration_branch_without_a_registry_still_leaves_the_slot_hint(
+    tmp_path, capsys, monkeypatch
+):
+    canonical = _devkit_checkout(tmp_path / "devkit")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+    new_project.next_steps(the_plan)
+
+    assert not the_plan.slot_on_branch
+    out = capsys.readouterr().out
+    assert (
+        f"Next: register the slot in devkit's ports.toml [slots] table:\n  {the_plan.name}" in out
+    )
+
+
+SLOTS_TOML = """[services]
+db = 5432
+
+[slots]
+# a comment the edit keeps
+carameli = 0
+ibkr_trader = 1
+
+"""
+
+
+def test_register_slot_appends_to_the_slots_table():
+    edited = new_project.register_slot(SLOTS_TOML, "fresh-one", 2)
+    assert edited is not None
+    assert edited.endswith("carameli = 0\nibkr_trader = 1\nfresh-one = 2\n\n")
+    assert tomllib.loads(edited)["slots"] == {"carameli": 0, "ibkr_trader": 1, "fresh-one": 2}
+
+
+def test_register_slot_lands_inside_its_table_when_another_follows():
+    text = SLOTS_TOML + "[shared]\notel_http = 4318\n"
+    edited = new_project.register_slot(text, "fresh", 2)
+    assert edited is not None
+    data = tomllib.loads(edited)
+    assert data["slots"]["fresh"] == 2 and data["shared"] == {"otel_http": 4318}
+
+
+def test_register_slot_on_a_file_with_no_final_newline():
+    edited = new_project.register_slot(SLOTS_TOML.rstrip("\n"), "fresh", 2)
+    assert edited is not None and edited.endswith("ibkr_trader = 1\nfresh = 2\n")
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "slot", "why"),
+    [
+        (SLOTS_TOML, "carameli", 5, "the checkout already holds a slot"),
+        (SLOTS_TOML, "fresh", 1, "slot 1 is taken"),
+        (SLOTS_TOML, "fresh", 99, "past the slot ceiling"),
+        ("[services]\ndb = 5432\n", "fresh", 2, "no [slots] table"),
+        ("[slots\n", "fresh", 2, "not TOML"),
+    ],
+)
+def test_register_slot_refuses_rather_than_guess(text, name, slot, why):
+    assert new_project.register_slot(text, name, slot) is None, why
+
+
+def test_a_hand_edit_already_in_the_canonical_copy_is_never_carried_off(
+    tmp_path, capsys, monkeypatch
+):
+    canonical = _devkit_checkout(tmp_path / "devkit")
+    canonical.write_text(canonical.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    assert not (canonical.parent / ".claude").exists()
+    assert the_plan.name in devkit_project.known_projects(canonical.read_text("utf-8"))
+    assert "commit devkit's workspace.jsonc on a branch" in capsys.readouterr().out
+
+
+def test_a_canonical_copy_on_a_task_branch_is_left_on_it(tmp_path):
+    canonical = _devkit_checkout(tmp_path / "devkit")
+    subprocess.run(
+        ["git", "-C", str(canonical.parent), "checkout", "--quiet", "-b", "agent/x-1101"],
+        check=True,
+    )
+    canonical.write_text(canonical.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert new_project.hand_off_registration("skinamp", canonical) == new_project.Handoff()
+    assert _git_out(canonical.parent, "status", "--porcelain") == "M workspace.jsonc"
+
+
+def test_an_unwritable_canonical_copy_still_registers_the_live_file(tmp_path, capsys, monkeypatch):
+    """Each copy is best-effort on its own: one failing must not skip the other."""
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", tmp_path / "nowhere" / "ws.jsonc")
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    assert the_plan.name in devkit_project.known_projects(live.read_text(encoding="utf-8"))
+    assert "WARNING could not register in ws.jsonc" in capsys.readouterr().out
+
+
+def test_a_dry_run_names_both_copies_and_writes_neither(
+    tmp_path, capsys, monkeypatch, canonical_copy
+):
+    args = make_args(parent=str(tmp_path))
+    the_plan = new_project.plan(args, registry())
+    live = tmp_path / "live.code-workspace"
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+    before = canonical_copy.read_text(encoding="utf-8")
+
+    new_project.register_in_workspace(the_plan, dry_run=True)
+
+    out = capsys.readouterr().out
+    assert f"update  {canonical_copy.name}" in out
+    assert f"update  ../{live.name}" in out
+    assert canonical_copy.read_text(encoding="utf-8") == before
+    assert not live.exists()
 
 
 def _recording_register(monkeypatch) -> list[list[str]]:
@@ -713,7 +1342,7 @@ def test_no_register_never_opens_the_workspace_file(tmp_path, capsys, monkeypatc
     assert "WARNING" not in out
 
 
-def test_registration_is_still_the_default(tmp_path, monkeypatch):
+def test_registration_is_still_the_default(tmp_path, monkeypatch, canonical_copy):
     """The flag is opt-out: a real project must stay visible to `sweep.py`."""
     args = make_args(parent=str(tmp_path))
     the_plan = new_project.plan(args, registry())
@@ -724,10 +1353,43 @@ def test_registration_is_still_the_default(tmp_path, monkeypatch):
 
     new_project.register_in_workspace(the_plan, dry_run=False)
 
-    assert calls == [[the_plan.name]]
+    # Once for devkit's canonical copy, once for the live file.
+    assert calls == [[the_plan.name], [the_plan.name]]
 
 
-def test_the_no_register_flag_is_reachable_from_the_cli(tmp_path, capsys, monkeypatch):
+def test_the_default_parent_is_the_directory_the_workspace_registers_from(tmp_path, monkeypatch):
+    """8448080a / b42a921e: the default was `~/Desktop/vs_code` while the workspace sat in
+    `~/vs-code`, so productivity-tracker was generated in one and registered by bare name
+    in the other. Every reader of the registry then resolved a folder that did not
+    exist: `rc-servers.py maintain` failed every fire on `[WinError 267] The directory
+    name is invalid`, and the fix pass's collect step raised the same error."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", workspace)
+    the_plan = new_project.plan(make_args(parent=""), registry())
+    assert the_plan.root == (tmp_path / "ws").resolve() / the_plan.name
+
+
+def test_a_project_outside_the_workspace_directory_is_not_registered(tmp_path, capsys, monkeypatch):
+    """The registry names a folder relative to its own directory, so registering a
+    project generated anywhere else writes an entry that points at nothing."""
+    the_plan = new_project.plan(make_args(parent=str(tmp_path / "elsewhere")), registry())
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", workspace)
+    calls = _recording_register(monkeypatch)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert str(the_plan.root) in out
+
+
+def test_the_no_register_flag_is_reachable_from_the_cli(
+    tmp_path, capsys, monkeypatch, canonical_copy
+):
     """RELEASING.md's acceptance test passes it; a renamed dest breaks that silently."""
     monkeypatch.setattr(
         devkit_project, "DEFAULT_WORKSPACE", tmp_path / "nowhere" / "ws.code-workspace"
@@ -739,6 +1401,19 @@ def test_the_no_register_flag_is_reachable_from_the_cli(tmp_path, capsys, monkey
 
     assert new_project.main([*argv, "--no-remote"]) == 0
     assert "--no-register" not in capsys.readouterr().out
+
+
+def test_the_generator_names_the_trust_step_the_fix_pass_needs(tmp_path, capsys):
+    """10a9810d, 18e737b9: productivity-tracker's first fixer was refused as an untrusted
+    workspace, two hours after it was generated. The person running the generator is the
+    one who can accept the prompt, so the generator names the checkout to accept it in."""
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    step = f"run `claude` in {the_plan.root} once and accept the trust prompt"
+    new_project.trust_hint(the_plan)
+    assert step in capsys.readouterr().out
+    new_project.next_steps(the_plan)
+    out = capsys.readouterr().out
+    assert "ports.toml [slots]" in out and step in out, "what `main` ends on"
 
 
 @pytest.mark.parametrize("features", FEATURE_MATRIX)
@@ -763,6 +1438,149 @@ def test_the_generated_diagnostic_scripts_actually_run_and_pass(tmp_path, featur
         }[script]
         detail = artifact.read_text(encoding="utf-8") if artifact.exists() else result.stdout
         assert result.returncode == 0, f"{script} failed in a fresh project:\n{detail}"
+
+
+def _desktop_runners(tmp_path, monkeypatch, *, windows: bool):
+    """A desktop project's two runners on a host with `dotnet`, and what they spawned."""
+    root = generate(tmp_path, {"desktop": True})
+    tests = _rendered(root, "scripts/run-tests.py", monkeypatch)
+    lint = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    spawned: list[str] = []
+
+    def spawn(command, **_kwargs):
+        spawned.append(command[-1])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def tool(name, _cmd, _hint):
+        spawned.append(name)
+        return ""
+
+    for runner in (tests, lint):
+        monkeypatch.setattr(runner, "WINDOWS", windows)
+        monkeypatch.setattr(runner.shutil, "which", lambda _name: "/usr/bin/dotnet")
+    monkeypatch.setattr(tests.subprocess, "run", spawn)
+    monkeypatch.setattr(lint, "run_tool", tool)
+    return root, tests, lint, spawned
+
+
+def test_the_desktop_tier_skips_a_host_that_is_not_windows_even_with_dotnet(
+    tmp_path, monkeypatch, capsys
+):
+    """PR 709: `ubuntu-latest` ships `dotnet`, so a skip keyed on the tool never fired.
+
+    The solution built, and `dotnet test` then died on the `Microsoft.WindowsDesktop.App`
+    runtime no Linux has, which would have reddened every desktop project's first PR.
+    """
+    root, tests, lint, spawned = _desktop_runners(tmp_path, monkeypatch, windows=False)
+
+    assert tests.run_desktop(root) == ""
+    assert "needs Windows" in capsys.readouterr().out
+    assert lint.desktop_section(object(), [], False) == ""
+    assert "needs Windows" in capsys.readouterr().out
+    assert spawned == []
+
+
+def test_the_desktop_tier_runs_on_windows(tmp_path, monkeypatch):
+    root, tests, lint, spawned = _desktop_runners(tmp_path, monkeypatch, windows=True)
+
+    assert tests.run_desktop(root) == ""
+    assert lint.desktop_section(object(), [], False) == ""
+    assert spawned == ["test", "desktop"]
+
+
+# The stand-in for a project's install command: a real venv, handed this interpreter's
+# site-packages through a `.pth` so the re-run has pytest without a network install.
+PROVISION_STUB = """\
+import sysconfig
+import venv
+from pathlib import Path
+
+venv.create(".venv", with_pip=False)
+purelib = sysconfig.get_path("purelib", "venv", vars={{"base": ".venv", "platbase": ".venv"}})
+Path(purelib, "borrowed.pth").write_text({borrowed!r}, encoding="utf-8")
+"""
+
+
+def test_a_tree_with_no_venv_provisions_one_and_runs_its_tests_there(tmp_path):
+    """A fresh `claude --worktree` tree: no `.venv`, and an interpreter with no pytest.
+
+    Before `toolchain.rerun_in_venv` that was `No module named pytest` in every
+    session in such a tree, each one provisioning by hand and filing the same friction.
+    The caller is a bare venv, because the runner spawns pytest under `sys.executable`
+    and an interpreter flag such as `-S` would not reach that child; the project's own
+    `install_command` is what builds the tree's venv, as it would be for real.
+    """
+    import subprocess
+    import sysconfig
+    import venv
+
+    root = generate(tmp_path, {})
+    venv.create(tmp_path / "bare", with_pip=False)
+    bare = tmp_path / "bare" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    stub = tmp_path / "provision_stub.py"
+    stub.write_text(PROVISION_STUB.format(borrowed=sysconfig.get_paths()["purelib"]), "utf-8")
+    manifest = root / ".devkit.toml"
+    text = manifest.read_text(encoding="utf-8")
+    # `python` is the interpreter running the runner -- the bare one -- which is all the
+    # stub needs; a relative POSIX path keeps the command free of shell syntax.
+    command = f"install_command = 'python {Path(os.path.relpath(stub, root)).as_posix()}'\n"
+    manifest.write_text(text.replace("[python]\n", f"[python]\n{command}", 1), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("CI", "PYTHONPATH", "PRE_COMMIT")}
+    env.pop("DEVKIT_TOOLCHAIN_RERUN", None)
+
+    def run_tests() -> subprocess.CompletedProcess[str]:
+        argv = [str(bare), "scripts/run-tests.py"]
+        return subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True)
+
+    first = run_tests()
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "provisioning it:" in first.stderr
+    assert "re-running under" in first.stderr
+    assert (root / ".venv" / "pyvenv.cfg").is_file()
+    assert "run-tests: passed" in first.stdout, "the re-run's status line reaches the caller"
+
+    second = run_tests()
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "provisioning it:" not in second.stderr, "a provisioned tree is not reinstalled"
+    assert "re-running under" in second.stderr
+
+
+def _rendered(root: Path, script: str, monkeypatch):
+    """Load a generated runner in-process, with `sys.path` restored afterwards."""
+    import importlib.util
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    spec = importlib.util.spec_from_file_location(f"rendered_{Path(script).stem}", root / script)
+    assert spec is not None and spec.loader is not None, f"cannot load {script}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("script", "module"), [("scripts/run-tests.py", "pytest"), ("scripts/lint-all.py", "ruff")]
+)
+def test_both_runners_hand_their_run_to_the_vendored_toolchain(
+    tmp_path, monkeypatch, script, module
+):
+    """The re-run is the vendored module's decision; the runner passes itself and its
+    arguments and returns what comes back. A vendored copy that predates the function
+    -- a project that took the template refresh before its `--pull` -- carries on."""
+    import types
+
+    root = generate(tmp_path, {})
+    runner = _rendered(root, script, monkeypatch)
+    seen = []
+    fake = types.SimpleNamespace(rerun_in_venv=lambda *a: seen.append(a) or 3)
+    monkeypatch.setitem(sys.modules, "toolchain", fake)
+
+    assert runner.main(["--changed"]) == 3
+    [(where, wanted, path, argv)] = seen
+    assert (where, wanted, argv) == (runner.REPO_ROOT, module, ["--changed"])
+    assert path == (root / script).resolve()
+
+    monkeypatch.setitem(sys.modules, "toolchain", types.SimpleNamespace())
+    assert runner.rerun_in_tree_venv(module, []) is None
 
 
 def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
@@ -795,10 +1613,313 @@ def test_a_linter_that_is_not_installed_is_skipped_not_reported(tmp_path):
     coloured = [sys.executable, "-c", "print('\\x1b[91mE1\\x1b[0m a.py'); raise SystemExit(1)"]
     section = lint_all.run_tool("ruff", coloured, "hint")
     assert "\x1b" not in section and "E1 a.py" in section
+    # ruff writes UTF-8 whatever the code page, which `text=True` read as cp1252 on
+    # Windows: the multiplication sign in its `1 x F841` reached the artifact as two letters.
+    utf8 = "import sys; sys.stdout.buffer.write('1 \\u00d7 F841'.encode()); raise SystemExit(1)"
+    section = lint_all.run_tool("ruff", [sys.executable, "-c", utf8], "hint")
+    assert "1 \N{MULTIPLICATION SIGN} F841" in section, section
     # A linter that never answers is killed at the bound and reported, never waited on.
     hung = [sys.executable, "-c", "import time; time.sleep(120)"]
     section = lint_all.run_tool("mypy", hung, "hint", timeout=2)
     assert section.startswith("# mypy\n") and "killed after 2s" in section
+
+
+def test_a_generated_lint_run_that_skipped_a_required_linter_is_not_clean(
+    tmp_path, monkeypatch, capsys
+):
+    """db3e57f7: roguelike's runner, under an interpreter with neither ruff nor mypy,
+    skipped both and printed `lint-all: clean`. A skipped optional tool stays a note."""
+    import types
+
+    root = generate(tmp_path, {})
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    absent = [sys.executable, "-m", "definitely_not_an_installed_linter", "."]
+
+    assert lint_all.run_tool("dotenv-linter", ["definitely-not-a-linter-binary"], "hint") == ""
+    assert lint_all._finish("") == 0
+    assert "lint-all: clean" in capsys.readouterr().out
+
+    assert lint_all.run_tool("mypy", absent, "hint") == ""
+    assert lint_all._finish("") == 1
+    out = capsys.readouterr().out
+    assert "NOT CLEAN" in out and "mypy" in out and ".venv" in out and "clean (" not in out
+
+    # `main` starts each run from an empty list, so one run's skip never fails the next.
+    monkeypatch.setitem(sys.modules, "toolchain", types.SimpleNamespace())
+    monkeypatch.setattr(lint_all, "explicit_paths", lambda paths: [])
+    assert lint_all.main(["--paths", "README.md"]) == 0
+    assert lint_all._SKIPPED == []
+
+
+def test_generated_lint_runner_fails_a_changed_run_when_git_refuses_the_tree(tmp_path, monkeypatch):
+    """9feac8aa, in the template: `_git` returned `[]` on any non-zero exit, so a git
+    refusal (dubious ownership) read as a clean tree and `--changed` said "nothing to
+    do" over a modified file. It must fail, and say why in the artifact."""
+    import importlib.util
+
+    root = generate(tmp_path, {})
+    (root / "logs").mkdir(exist_ok=True)
+    spec = importlib.util.spec_from_file_location(
+        "refused_lint_all", root / "scripts" / "lint-all.py"
+    )
+    generated = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generated)
+    refused = subprocess.CompletedProcess(
+        [], 128, stdout="", stderr="fatal: detected dubious ownership"
+    )
+    monkeypatch.setattr(generated.subprocess, "run", lambda *a, **k: refused)
+
+    assert generated.main(["--changed"]) == 1
+    artifact = (root / "logs" / "lint-errors.log").read_text(encoding="utf-8")
+    assert "# git\n" in artifact and "dubious ownership" in artifact
+
+
+def _two_conftest_roots(root: Path) -> list[str]:
+    """Two test trees whose `conftest.py` each export a name the other lacks."""
+    files = {
+        "tests/conftest.py": "def alpha() -> int:\n    return 1\n",
+        "tests/test_a.py": "from conftest import alpha\n\n\ndef test_a() -> None:\n    alpha()\n",
+        "tools/tests/conftest.py": "def beta() -> int:\n    return 2\n",
+        "tools/tests/test_b.py": "from conftest import beta\n\n\ndef test_b() -> None:\n    beta()\n",
+    }
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    return ["tests/test_a.py", "tools/tests/test_b.py"]
+
+
+def test_generated_lint_runner_runs_mypy_once_per_conftest_root(tmp_path, monkeypatch):
+    """cbb1017b: a `--changed` run handed mypy `tests/` and `scripts/hooks/tests/` files
+    in one invocation, so the hook tests' `from conftest import load_module` resolved to
+    `tests/conftest.py`. Each root gets its own run; vendored files get none, since
+    `[tool.mypy] exclude` does not reach a file named on the command line."""
+    root = generate(tmp_path, {})
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    _two_conftest_roots(root)
+    (root / "scripts" / "loose.py").write_text("X = 1\n", encoding="utf-8")
+
+    assert lint_all.conftest_root("tests/test_a.py") == "tests"
+    assert lint_all.conftest_root("tests/conftest.py") == "tests"
+    assert lint_all.conftest_root("tools/tests/test_b.py") == "tools/tests"
+    assert lint_all.conftest_root("scripts/loose.py") == ""
+    assert lint_all.vendored("scripts/hooks/tests/test_ship.py")
+    assert lint_all.vendored("scripts/sync-devkit.py")
+    assert not lint_all.vendored("scripts/hooksmith.py")
+
+    targets = [
+        "tests/test_a.py",
+        "scripts/hooks/tests/test_ship.py",
+        "tools/tests/test_b.py",
+        "scripts/loose.py",
+    ]
+    assert lint_all.mypy_batches(targets) == [
+        ["tests/test_a.py", "scripts/loose.py"],
+        ["tools/tests/test_b.py"],
+    ], "one batch per root, a rootless file in the first, the vendored test in none"
+    assert lint_all.mypy_batches(["scripts/loose.py"]) == [["scripts/loose.py"]]
+    assert lint_all.mypy_batches(["scripts/hooks/stop.py"]) == []
+    assert lint_all.mypy_batches([]) == []
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(lint_all, "run_tool", lambda name, cmd, _hint: ran.append(cmd) or "")
+    passed = subprocess.CompletedProcess([], 0)
+    monkeypatch.setattr(lint_all.subprocess, "run", lambda *a, **k: passed)
+    lint_all._python_passes(["scripts/hooks/stop.py"], scoped=True)
+    assert [cmd[2] for cmd in ran] == ["ruff"], "a vendored-only diff runs no mypy at all"
+
+
+def test_a_generated_changed_run_spanning_two_conftest_roots_is_clean(tmp_path, monkeypatch):
+    """cbb1017b, against a real mypy: the merged invocation the runner used to make
+    fails, and the runner's own pass over the same files does not."""
+    root = generate(tmp_path, {})
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    targets = _two_conftest_roots(root)
+
+    merged = subprocess.run(
+        [sys.executable, "-m", "mypy", *targets],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    assert merged.returncode != 0 and "attr-defined" in merged.stdout, merged.stdout
+
+    assert lint_all._python_passes(targets, scoped=True) == ""
+    # With the vendored files out of its runs, nothing puts `scripts/hooks/` on mypy's
+    # path, so the runner's own `toolchain` import must not need it: an edit to
+    # `scripts/lint-all.py` was reported `import-not-found` on that line.
+    assert (root / "scripts" / "hooks" / "toolchain.py").is_file()
+    assert lint_all._python_passes(["scripts/lint-all.py"], scoped=True) == ""
+    # The same for the other runner: skinamp's `--changed` run after an adopt reported
+    # `scripts\run-tests.py:463: ... module named "toolchain"  [import-not-found]`.
+    assert lint_all._python_passes(["scripts/run-tests.py"], scoped=True) == ""
+
+
+def test_a_generated_lint_run_leaves_every_manifest_path_alone(tmp_path, monkeypatch):
+    """skinamp: a `--changed` run after an adopt type-checked `scripts/ship.py` and
+    `scripts/log-wrap.py` -- vendored, but outside the directories `NO_FIX_SCOPE` names
+    -- and reported `import-not-found` findings no edit there may fix. Vendored is what
+    the MANIFEST says, read through the vendored `structure_check`, so a script added
+    to it upstream is never a finding here; and no pass rewrites one, or `--check` fails."""
+    root = generate(tmp_path, {})
+    (root / "DEVKIT_VERSION").write_text("0" * 40 + "\n", encoding="utf-8")
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    for rel in ("scripts/ship.py", "scripts/log-wrap.py"):
+        assert (root / rel).is_file(), f"{rel} is no longer vendored: pick another"
+        assert lint_all.vendored(rel)
+    assert not lint_all.vendored("scripts/run-tests.py")
+    assert not lint_all.vendored("scripts/lint-all.py")
+    assert lint_all.mypy_batches(["scripts/ship.py", "scripts/log-wrap.py"]) == []
+
+    ran: list[list[str]] = []
+
+    def run(cmd, **_kw):
+        ran.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(lint_all, "run_tool", lambda name, cmd, _hint: "")
+    monkeypatch.setattr(lint_all.subprocess, "run", run)
+    lint_all._python_passes(["scripts/ship.py", "scripts/run-tests.py"], scoped=True)
+    assert ran, "the fixers ran for the project's own file"
+    for cmd in ran:
+        assert "scripts/ship.py" not in cmd and "scripts/run-tests.py" in cmd, cmd
+
+    ran.clear()
+    lint_all._python_passes(["scripts/ship.py"], scoped=True)
+    assert ran == [], "a vendored-only diff rewrites nothing"
+
+
+def test_a_generated_lint_run_without_the_vendored_reader_falls_back(tmp_path, monkeypatch):
+    """A project that took the template refresh before its `--pull` may hold no
+    `structure_check.vendored_paths`: the hard-coded `NO_FIX_SCOPE` still holds."""
+    root = generate(tmp_path, {})
+    (root / "DEVKIT_VERSION").write_text("0" * 40 + "\n", encoding="utf-8")
+    (root / "scripts" / "hooks" / "structure_check.py").unlink()
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    assert lint_all.vendored("scripts/hooks/stop.py")
+    assert not lint_all.vendored("scripts/ship.py")
+
+
+def _frontend_project(tmp_path: Path, typecheck: str, node_modules: bool = True):
+    """A generated project whose `.devkit.toml` turns the frontend tier on at its root,
+    as roguelike's does, with `typecheck` as the Python the "npm" stand-in runs."""
+    import importlib.util
+
+    root = generate(tmp_path, {})
+    (root / "logs").mkdir(exist_ok=True)
+    (root / "src").mkdir()
+    (root / "src" / "a.ts").write_text("export const a = 1;\n", encoding="utf-8")
+    if node_modules:
+        (root / "node_modules").mkdir()
+    manifest = root / ".devkit.toml"
+    off = "[frontend]\nenabled = false\n"
+    text = manifest.read_text(encoding="utf-8")
+    assert off in text, "the generated manifest no longer turns the tier off this way"
+    tier = '[frontend]\nenabled = true\ndir = "."\nsrc = "src/"\n'
+    tier += f"typecheck_cmd = {json.dumps(['-c', typecheck])}\n"
+    manifest.write_text(text.replace(off, tier), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(
+        "frontend_lint_all", root / "scripts" / "lint-all.py"
+    )
+    assert spec is not None and spec.loader is not None
+    generated = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generated)
+    return root, generated
+
+
+def test_generated_lint_runner_scans_what_the_commit_will_scan(tmp_path, monkeypatch, capsys):
+    """05000136: every generated project's commit runs `detect-secrets`, and its lint
+    runner did not -- devkit's own copy gained the pass (08654413) and the template said
+    "no detect-secrets pass to skip". So homelab's and photolab's sessions ran clean,
+    and `ship.py` then refused `tests\\test_envfile.py` at `fixers`, a dispatch later. A
+    Markdown or env file a Python-only pass would skip is the case that matters."""
+    root = generate(tmp_path, {})
+    lint_all = _rendered(root, "scripts/lint-all.py", monkeypatch)
+    (root / "logs").mkdir(exist_ok=True)
+    (root / "notes.md").write_text("x\n", encoding="utf-8")
+    assert "detect-secrets" in lint_all.REQUIRED_TOOLS
+
+    assert lint_all.secrets_targets(["a.md", "b.py"], skip=False) == ["a.md", "b.py"]
+    assert lint_all.secrets_targets(["a.md"], skip=True) == [], "--no-secrets"
+    assert lint_all.secrets_targets([], skip=False) == []
+    assert lint_all.secrets_section([]) == ""
+
+    ran: list[tuple[str, list[str]]] = []
+
+    def tool(name, cmd, _hint):
+        ran.append((name, cmd))
+        return "# detect-secrets\nnotes.md\n" if name == "detect-secrets" else ""
+
+    monkeypatch.setattr(lint_all, "run_tool", tool)
+    assert lint_all.main(["--paths", "notes.md"]) == 1, "only a Markdown file, and it scanned"
+    assert "FAILED" in capsys.readouterr().out
+    scan = next(cmd for name, cmd in ran if name == "detect-secrets")
+    assert scan[1:] == ["-m", "pre_commit", "run", "detect-secrets", "--files", "notes.md"]
+
+    ran.clear()
+    assert lint_all.main(["--paths", "notes.md", "--no-secrets"]) == 0
+    assert not any(name == "detect-secrets" for name, _ in ran)
+
+
+def test_generated_lint_runner_typechecks_a_typescript_only_change(tmp_path, monkeypatch):
+    """2ed077d6: in roguelike, a TypeScript-only `--changed` printed "no changed files
+    this run lints; nothing to do", so the fixer's lint step checked nothing. With the
+    `[frontend]` tier on, a `.ts` change runs the tier's typecheck and its finding fails
+    the run and lands in the artifact."""
+    root, generated = _frontend_project(
+        tmp_path, "print('src/a.ts: error TS2322'); raise SystemExit(2)"
+    )
+    monkeypatch.setattr(generated.shutil, "which", lambda name: sys.executable)
+
+    assert generated.main(["--paths", "src/a.ts", "--no-secrets"]) == 1
+    artifact = (root / "logs" / "lint-errors.log").read_text(encoding="utf-8")
+    assert "# typecheck\n" in artifact and "error TS2322" in artifact
+
+
+def test_generated_lint_runner_skips_a_typecheck_with_no_node_modules(
+    tmp_path, monkeypatch, capsys
+):
+    """An unprovisioned frontend is a missing tool: a note, never an artifact finding."""
+    root, generated = _frontend_project(tmp_path, "raise SystemExit(2)", node_modules=False)
+    monkeypatch.setattr(generated.shutil, "which", lambda name: sys.executable)
+
+    assert generated.main(["--paths", "src/a.ts", "--no-secrets"]) == 0
+    assert "no node_modules" in capsys.readouterr().out
+    assert (root / "logs" / "lint-errors.log").read_text(encoding="utf-8") == ""
+
+
+def test_generated_lint_runner_names_the_files_it_has_no_linter_for(tmp_path, capsys):
+    """ "nothing to do" alone reads the same as a diff the run never saw; naming the
+    files is what lets an agent tell the two apart without spending a turn."""
+    root, generated = _frontend_project(tmp_path, "raise SystemExit(2)")
+    (root / "notes.md").write_text("x\n", encoding="utf-8")
+
+    assert generated.main(["--paths", "notes.md", "--no-secrets"]) == 0
+    out = capsys.readouterr().out
+    assert "notes.md" in out and "nothing to do" in out
+
+
+def test_generated_frontend_targets_follow_the_tiers_directory():
+    """Script and config files under `[frontend] dir`, and nothing with the tier off."""
+    import importlib.machinery
+    import importlib.util
+    from types import SimpleNamespace
+
+    source = str(TEMPLATES / "core" / "scripts" / "lint-all.py.tmpl")
+    loader = importlib.machinery.SourceFileLoader("targets_lint_all", source)
+    spec = importlib.util.spec_from_loader("targets_lint_all", loader)
+    template = importlib.util.module_from_spec(spec)
+    loader.exec_module(template)
+    paths = ["src/a.ts", "frontend/b.tsx", "frontend/package.json", "README.md", "x.py"]
+
+    assert template.frontend_targets(paths, None) == []
+    at_root = SimpleNamespace(dir=".")
+    assert template.frontend_targets(paths, at_root) == [
+        "src/a.ts",
+        "frontend/b.tsx",
+        "frontend/package.json",
+    ]
+    nested = SimpleNamespace(dir="frontend/")
+    assert template.frontend_targets(paths, nested) == ["frontend/b.tsx", "frontend/package.json"]
 
 
 def test_generated_lint_runner_covers_the_env_file_and_pre_commit_covers_the_workflows(
@@ -911,29 +2032,6 @@ def test_a_generated_project_satisfies_the_vendored_ci_contract(tmp_path):
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_generated_python_is_already_ruff_format_clean(tmp_path):
-    """A new project's first `pre-commit run` must not rewrite its own files.
-
-    devkit excludes `templates/` from its own format check (that Python is content, linted
-    by the ruff.toml that ships beside it), which is right — and it meant
-    `lint-all.py.tmpl` sat unformatted for the 100-column config it ships with. Nothing
-    noticed until a generated project gained a `ruff-format` pre-commit hook, which
-    reformatted the file on arrival: a brand-new repo, a failing hook, a dirty tree.
-    """
-    import subprocess
-
-    root = generate(tmp_path, {})
-    result = subprocess.run(
-        [sys.executable, "-m", "ruff", "format", "--check", "."],
-        cwd=root,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 1 and "No module named" in result.stderr:
-        pytest.skip("ruff not importable")
-    assert result.returncode == 0, f"generated files are not format-clean:\n{result.stdout}"
 
 
 def test_generated_codex_skills_are_excluded_from_explicit_ruff_checks(tmp_path):
@@ -1121,7 +2219,7 @@ def test_mypy_scope_excludes_the_vendored_harness(tmp_path):
 
 
 def test_no_template_references_a_requirements_file_it_never_generates(tmp_path):
-    root = generate(tmp_path, dict.fromkeys(new_project.FEATURES, True))
+    root = generate(tmp_path, dict.fromkeys(new_project.STACK_FEATURES, True))
     produced = {p.name for p in root.rglob("*")}
     assert not any(n.startswith("requirements") for n in produced)
     # Nothing may *instruct* the user to use one either -- that was the actual bug.
@@ -1282,6 +2380,18 @@ def test_generated_gate_uploads_what_a_red_vendored_suite_wrote(tmp_path):
     assert any("logs/junit-hooks.xml" in str(s["with"]["path"]) for s in uploads)
 
 
+def test_generated_gate_runs_the_hook_tests_when_the_application_suite_is_red(tmp_path):
+    """devkit f07541c7: a red first test step skipped the second, so the fixer's
+    evidence named one tier's failures and the other's surfaced a gate cycle later.
+    The hook tests run whenever the application suite ran, pass or fail, in the
+    nightly as in the PR gate."""
+    yaml = pytest.importorskip("yaml")
+    workflows = generate(tmp_path, {}) / ".github" / "workflows"
+    for name in ("pr-gate.yml", "nightly.yml"):
+        parsed = yaml.safe_load((workflows / name).read_text(encoding="utf-8"))
+        assert not checks_a_red_check_skips(parsed), name
+
+
 def test_generated_gate_is_least_privilege_and_re_runnable(tmp_path):
     """A gate with no `permissions:` inherits whatever the repo default is.
 
@@ -1301,24 +2411,33 @@ def test_generated_gate_is_least_privilege_and_re_runnable(tmp_path):
 DEPENDABOT_ECOSYSTEMS = [
     pytest.param({}, {"uv", "github-actions"}, id="bare"),
     pytest.param({"docker": True}, {"uv", "github-actions", "docker"}, id="docker"),
-    pytest.param(
-        {"frontend": True},
-        {"uv", "github-actions", "docker", "npm"},
-        id="frontend",
-    ),
+    pytest.param({"frontend": True}, {"uv", "github-actions", "docker"}, id="frontend"),
+    # `uv` stays: the harness and scripts are Python, locked in `uv.lock`.
+    pytest.param({"desktop": True}, {"uv", "github-actions", "nuget"}, id="desktop"),
+    pytest.param({"electron": True}, {"uv", "github-actions", "npm"}, id="electron"),
 ]
+# What Dependabot fetches for each ecosystem under the entry's `directory`, as a glob:
+# a solution is named after the project. dependabot-core's nuget discovery enters a
+# repository through a `.sln`, `.slnx` or `.proj`, so the root `.slnx` is that manifest.
+DEPENDABOT_MANIFESTS = {
+    "uv": "pyproject.toml",
+    "github-actions": ".github/workflows",
+    "docker": "Dockerfile",
+    "npm": "package.json",
+    "nuget": "*.slnx",
+}
 
 
 @pytest.mark.parametrize("features,expected", DEPENDABOT_ECOSYSTEMS)
 def test_generated_dependabot_covers_exactly_the_manifests_the_project_has(
     tmp_path, features, expected
 ):
-    """An ecosystem entry with no manifest behind it is a permanent Dependabot error.
+    """An entry with no manifest behind it fails its scheduled job outright.
 
-    It never surfaces in CI — it sits in the repo's Dependabot insights, where nobody
-    is looking — so the only place it can be caught is here. `npm` is the deliberate
-    exception and carries its reason in the template: the frontend feature declares
-    the tier before anything scaffolds `frontend/package.json`.
+    0b725cd8: the frontend feature rendered an active `npm` entry for a tree the generator
+    never ships, and photolab's job died on "Error during file fetching; aborting:
+    /frontend/package.json not found". It reports only through Dependabot, not the PR
+    gate, so this is the one place a generated project can be held to it.
     """
     yaml = pytest.importorskip("yaml")
     root = generate(tmp_path, features)
@@ -1327,6 +2446,35 @@ def test_generated_dependabot_covers_exactly_the_manifests_the_project_has(
     parsed = yaml.safe_load(config.read_text(encoding="utf-8"))
     assert parsed["version"] == 2
     assert {u["package-ecosystem"] for u in parsed["updates"]} == expected
+    for update in parsed["updates"]:
+        manifest = DEPENDABOT_MANIFESTS[update["package-ecosystem"]]
+        assert any((root / update["directory"].lstrip("/")).glob(manifest)), update
+
+
+def test_the_frontend_npm_entry_is_one_uncomment_away_from_active(tmp_path):
+    """The entry stays in the file, off, so the toolchain groups are there the day a
+    frontend is scaffolded. This parses what removing the `# ` yields: a block that had
+    drifted out of valid YAML would otherwise be found by that day's first update job."""
+    yaml = pytest.importorskip("yaml")
+    root = generate(tmp_path, {"frontend": True})
+    lines = (root / ".github" / "dependabot.yml").read_text(encoding="utf-8").splitlines()
+    start = lines.index("  # - package-ecosystem: npm")
+    block = list(itertools.takewhile(lambda line: line.startswith("  # "), lines[start:]))
+
+    (entry,) = yaml.safe_load("\n".join(["updates:", *(f"  {b[4:]}" for b in block)]))["updates"]
+
+    assert entry["package-ecosystem"] == "npm"
+    assert entry["directory"] == "/frontend"
+    assert entry["assignees"] and entry["groups"]
+    # Dependabot takes the first group that matches, so the catch-all has to stay last.
+    assert list(entry["groups"])[-1] == "minor-and-patch"
+
+
+def test_a_frontend_project_is_told_to_turn_npm_on_when_it_turns_the_tier_on(tmp_path):
+    """Flipping `[frontend] enabled` is the one step every scaffold takes, so that note
+    is where a project hears about the entry that nothing activates for it."""
+    root = generate(tmp_path, {"frontend": True})
+    assert ".github/dependabot.yml" in (root / ".devkit.toml").read_text(encoding="utf-8")
 
 
 def test_generated_dependabot_never_lets_the_python_runtime_move_by_bot(tmp_path):
@@ -1387,7 +2535,8 @@ def test_generated_automerge_carries_no_project_specific_value(tmp_path):
     assert b"trunk" not in theirs, "the project's default branch leaked into a vendored file"
     # `branches:` absent entirely, rather than present and set to something neutral —
     # any value here is a name that differs per repo.
-    assert _workflow_triggers(yaml.safe_load(theirs.decode("utf-8")))["pull_request"] is None
+    trigger = _workflow_triggers(yaml.safe_load(theirs.decode("utf-8")))["pull_request"]
+    assert "branches" not in trigger
 
 
 def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
@@ -1402,10 +2551,11 @@ def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
     path = root / ".github" / "workflows" / "dependabot-automerge.yml"
     parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert parsed["permissions"] == {
-        # `actions: read` is the retry sweep's: it asks the runs API whether `PR Gate`
-        # succeeded on a PR's current head SHA, which the event-driven job is handed by
-        # its trigger and a scheduled pass has to go and find.
-        "actions": "read",
+        # `actions: write` is for dispatching `PR Gate` on what a merge landed, since a
+        # merge with this token raises no `push`. Its read half is the retry sweep's: it
+        # asks the runs API whether `PR Gate` succeeded on a PR's current head SHA, which
+        # the event-driven job is handed by its trigger and a scheduled pass must go find.
+        "actions": "write",
         # `checks: read` is the sweep's other half, for the evidence the runs API does
         # not hold -- whether anything *else* wired onto the PR is unfinished or red.
         # Exact-dict on purpose: a generated project that is handed a scope short is a
@@ -1418,7 +2568,9 @@ def test_generated_automerge_can_create_the_labels_it_applies(tmp_path):
         "pull-requests": "write",
     }
     body = path.read_text(encoding="utf-8")
-    for label in ("automerge", "needs-manual-merge"):
+    applied = set(re.findall(r"--add-label\s+\"?([\w-]+)", body))
+    assert applied, "the classify job applies no label"
+    for label in applied:
         assert f"gh label create {label}" in body, f"{label} is applied but never created"
 
 
@@ -1480,19 +2632,28 @@ def test_generated_automerge_retries_on_a_schedule(tmp_path):
     assert parsed["concurrency"]["cancel-in-progress"] is False
 
 
-def test_generated_automerge_holds_runtime_majors_for_review(tmp_path):
-    """The classifier's whole point: only dev-scoped majors may merge unattended.
+def test_generated_automerge_labels_every_dependabot_pr_and_only_those(tmp_path):
+    """Every Dependabot PR is labelled `automerge`, majors and runtime deps included.
 
-    Written as one jq expression, so the risk of an edit widening it silently is
-    real. `length > 0` matters as much as the rest — `all` over an empty list is
-    true, so an empty metadata payload would otherwise classify as auto-mergeable.
+    The projects are agent-written, so no person holds a judgement on a major bump that
+    the gate does not already express; the `needs-manual-merge` hold (retired
+    2026-11-02) only stranded green PRs -- ibkr_trader #150, `actions/setup-node` 6 to
+    7, sat open with every check passing until it was merged by hand.
+
+    Unconditional labelling makes the job's `if:` the whole authorization: the label is
+    what the merge job trusts, so a classify job that ran for any other author would
+    hand its PR a merge nobody approved.
     """
+    yaml = pytest.importorskip("yaml")
     root = generate(tmp_path, {})
-    body = (root / ".github" / "workflows" / "dependabot-automerge.yml").read_text(encoding="utf-8")
-    classify = body.split("  classify:", 1)[1].split("  merge:", 1)[0]
-    assert "length > 0 and all(.[];" in classify
-    assert '.dependencyType == "direct:development"' in classify
-    assert '"needs-manual-merge"' in classify
+    path = root / ".github" / "workflows" / "dependabot-automerge.yml"
+    job = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]["classify"]
+    condition = " ".join(job["if"].split())
+    assert "github.actor == 'dependabot[bot]'" in condition
+    assert " || " not in condition, "the actor guard can be bypassed by another clause"
+    script = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "needs-manual-merge" not in script, "a hold label is back on Dependabot PRs"
+    assert re.search(r'--add-label "?automerge"?\s*$', script, re.M), script
 
 
 def test_lock_step_is_skipped_gracefully_without_uv(tmp_path, monkeypatch):
@@ -1558,7 +2719,7 @@ def test_a_dry_run_warns_about_missing_commit_tooling_and_finishes(tmp_path, cap
 def test_compose_publishes_every_port_through_a_variable(tmp_path):
     # The whole reason parallel worktrees work. A literal host port here is the bug
     # that makes two checkouts un-runnable at the same time.
-    root = generate(tmp_path, {f: True for f in new_project.FEATURES})
+    root = generate(tmp_path, {f: True for f in new_project.STACK_FEATURES})
     compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
     published = re.findall(r'^\s+- "([^"]+)"', compose, flags=re.MULTILINE)
     assert published, "no published ports found — the assertion is not testing anything"
@@ -1635,10 +2796,24 @@ def _version(tag: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in match.groups()) if match else None
 
 
-def _nothing_to_compare(constant: str, tag: str | None) -> str:
+def _in_history(tag: str, repo: Path) -> bool:
+    """`tag` is an ancestor of HEAD in `repo`; True when git cannot say, so the
+    comparison is made as it always was."""
+    done = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", tag, "HEAD"],
+        cwd=repo if repo.is_dir() else None,
+        capture_output=True,
+        check=False,
+    )
+    return done.returncode != 1 if repo.is_dir() else True
+
+
+def _nothing_to_compare(
+    constant: str, tag: str | None, repo: Path = REPO_ROOT, base: str = ""
+) -> str:
     """Why this comparison cannot be made, or "" when it can.
 
-    Two reasons. A checkout with no tags has nothing to compare against at all.
+    Four reasons. A checkout with no tags has nothing to compare against at all.
 
     The second is the local push gate looking at a release in flight, and it takes two
     conditions -- the second being why the first cannot be used to silence the test.
@@ -1654,16 +2829,136 @@ def _nothing_to_compare(constant: str, tag: str | None) -> str:
     the newest tag and still fails with the variable set.
 
     CI never sets it, so the release PR stays red and `gate_verdict` makes the call.
+
+    A tag outside HEAD's history was cut after this branch was, and its bump arrives
+    with main: a fixer's targeted run went red on v0.11.37, minutes old (2026-10-01).
+
+    The third is the release commit itself, once merged. Its gate runs before the tag can
+    exist, so every release left its commit red for good, and nothing that reads the
+    default branch's verdict could tell that from a real failure. A release PR's gate
+    runs on GitHub's merge commit instead, whose subject is not this one, so it stays
+    red and `gate_verdict` keeps judging it.
+
+    The fourth is a branch whose untagged constant came with its base: the release commit
+    is in `base` (`origin/` + the PR's base ref, else `main`) and HEAD is not. A tag phase
+    that fails leaves that state on main, and then every PR is red for a tag none of them
+    can push -- on 2026-11-11 the one PR that fixed the failure included (#760). Main
+    itself is not excused once past its release commit, so the missing tag stays red
+    there, where `release-pipeline.py` resumes the tag phase. A release PR's bump is not
+    in its base yet, so it stays red too.
     """
     if tag is None:
         return "no tags to compare against"
+    if not _in_history(tag, repo):
+        return f"{tag} is not in this branch's history: merging main brings its bump"
+    bumped, released = _version(constant), _version(tag)
+    ahead = bumped is not None and released is not None and bumped > released
+    if ahead and _is_release_commit(constant, repo):
+        return f"HEAD is the release commit for {constant}, whose tag comes after it"
+    base = base or f"origin/{os.environ.get('GITHUB_BASE_REF') or 'main'}"
+    if ahead and _bump_came_with(base, constant, repo):
+        return f"{constant}'s release commit came with {base}, which owes its tag; this branch does not"
     gate = load_script("scripts/precommit/run_push_gate.py")
     if not os.environ.get(gate.RELEASE_PREPARE_ENV):
         return ""
-    bumped, released = _version(constant), _version(tag)
-    if bumped is not None and released is not None and bumped > released:
+    if ahead:
         return f"release prepare in flight: {constant} is not tagged yet"
     return ""
+
+
+def _is_release_commit(constant: str, repo: Path) -> bool:
+    """HEAD is the squashed release PR for `constant`: `Release v1.2.3 (#742)`."""
+    done = subprocess.run(
+        ["git", "log", "-1", "--format=%s"],
+        cwd=repo if repo.is_dir() else None,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode != 0:
+        return False
+    return _release_subject(constant).fullmatch(done.stdout.strip()) is not None
+
+
+def _release_subject(constant: str) -> re.Pattern[str]:
+    return re.compile(rf"Release {re.escape(constant)}( \(#\d+\))?")
+
+
+def _bump_came_with(base: str, constant: str, repo: Path) -> bool:
+    """`base` holds the release commit for `constant` and HEAD is not in `base`.
+
+    False whenever git cannot say -- no such ref, no repo -- so the comparison is made.
+    """
+    cwd = repo if repo.is_dir() else None
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+
+    subjects = git("log", "--format=%s", base)
+    if subjects.returncode != 0:
+        return False
+    pattern = _release_subject(constant)
+    if not any(pattern.fullmatch(line.strip()) for line in subjects.stdout.splitlines()):
+        return False
+    return git("merge-base", "--is-ancestor", "HEAD", base).returncode == 1
+
+
+def _repo_with_head(path: Path, subject: str) -> Path:
+    identity = ("-c", "user.name=t", "-c", "user.email=t@example.invalid")
+    empty = ("commit", "--allow-empty", "--quiet", "--no-verify", "-m", subject)
+    for args in (("init", "--quiet"), (*identity, *empty), ("tag", "v0.1.0")):
+        subprocess.run(["git", *args], cwd=path, check=True, capture_output=True)
+    return path
+
+
+def test_the_merged_release_commit_is_not_red_for_a_tag_it_comes_before(tmp_path):
+    """Its gate runs before the tag can exist, so every release left its commit red, and
+    nothing reading the default branch could tell that from a real failure."""
+    repo = _repo_with_head(tmp_path, "Release v0.1.1 (#742)")
+    assert "release commit" in _nothing_to_compare("v0.1.1", "v0.1.0", repo)
+
+
+def test_a_release_pr_stays_red_on_its_merge_commit(tmp_path):
+    """`gate_verdict` judges that red, and needs it to exist."""
+    repo = _repo_with_head(tmp_path, "Merge abc into def")
+    assert _nothing_to_compare("v0.1.1", "v0.1.0", repo) == ""
+
+
+def test_a_stale_constant_on_a_release_commit_is_still_caught(tmp_path):
+    """The subject excuses a constant ahead of the tag, never one behind it."""
+    repo = _repo_with_head(tmp_path, "Release v0.0.9 (#742)")
+    assert _nothing_to_compare("v0.0.9", "v0.1.0", repo) == ""
+
+
+def test_a_branch_is_not_red_for_an_untagged_release_it_merged_from_main(tmp_path, monkeypatch):
+    """PR #760, 2026-11-11: v0.11.87's release PR merged, its tag phase failed on a race
+    this very PR fixes, and the PR's gate went red here on a constant main had bumped.
+    The tag could only come once the fix merged, and the fix could only merge once the
+    tag existed. The missing tag is main's to answer for, and main still does."""
+    gate = load_script("scripts/precommit/run_push_gate.py")
+    monkeypatch.delenv(gate.RELEASE_PREPARE_ENV, raising=False)
+    repo, git = _repo_with_tags(tmp_path, ["v1.0.0"])
+    git("checkout", "-q", "-b", "release/v1.1.0")
+    git("commit", "-q", "--allow-empty", "-m", "Release v1.1.0")
+    git("commit", "-q", "--allow-empty", "-m", "Merge abc into def")  # GitHub's merge commit
+    assert _nothing_to_compare("v1.1.0", "v1.0.0", repo, "main") == "", (
+        "a release PR's own bump is not in its base yet: it stays red for gate_verdict"
+    )
+    git("checkout", "-q", "main")
+    git("commit", "-q", "--allow-empty", "-m", "Release v1.1.0 (#9)")
+    git("checkout", "-q", "-b", "agent/fix")
+    git("commit", "-q", "--allow-empty", "-m", "Fix the race")
+    why = _nothing_to_compare("v1.1.0", "v1.0.0", repo, "main")
+    assert "came with main" in why
+    assert _nothing_to_compare("v0.9.0", "v1.0.0", repo, "main") == "", "a stale constant"
+    assert _nothing_to_compare("v1.1.0", "v1.0.0", repo, "origin/main") == "", (
+        "a base git cannot resolve: compare, as before"
+    )
+    git("checkout", "-q", "main")
+    git("commit", "-q", "--allow-empty", "-m", "Something else (#10)")
+    assert _nothing_to_compare("v1.1.0", "v1.0.0", repo, "main") == "", (
+        "main itself, past its release commit, stays red until the tag exists"
+    )
 
 
 def test_latest_devkit_tag_is_none_outside_a_git_repo(tmp_path):
@@ -1712,6 +3007,27 @@ def test_the_newest_tag_is_found_from_a_checkout_parked_behind_it(tmp_path):
     repo, git = _repo_with_tags(tmp_path, ["v1.0.0", "v1.1.0"])
     git("checkout", "-q", "v1.0.0")  # detached, one release behind
     assert new_project.latest_devkit_tag(repo) == "v1.1.0"
+
+
+def test_a_release_tagged_after_the_branch_was_cut_is_not_this_branchs_to_bump(
+    tmp_path, monkeypatch
+):
+    """Supervision 2026-10-01: v0.11.37 was tagged minutes after a fixer's branch was cut
+    from main, and the fixer's targeted run went red here on a constant its branch could
+    not have bumped -- merging main brings the bump. The PR gate tests the merge with
+    main, so a stale constant *on* main still fails there."""
+    gate = load_script("scripts/precommit/run_push_gate.py")
+    monkeypatch.delenv(gate.RELEASE_PREPARE_ENV, raising=False)
+    repo, git = _repo_with_tags(tmp_path, ["v1.0.0", "v1.1.0"])
+    git("checkout", "-q", "-b", "agent/fix", "v1.0.0")  # cut before v1.1.0
+    why = _nothing_to_compare("v1.0.0", "v1.1.0", repo)
+    assert "not in this branch's history" in why
+    git("checkout", "-q", "main")
+    assert _nothing_to_compare("v1.0.0", "v1.1.0", repo) == "", "a stale constant on main"
+    assert _nothing_to_compare("v1.1.0", "v1.1.0", repo) == ""
+    assert _nothing_to_compare("v1.0.0", "v1.1.0", tmp_path / "no-repo") == "", (
+        "git cannot say: compare, as before"
+    )
 
 
 def test_tags_are_ordered_by_version_and_not_lexically(tmp_path):
@@ -1815,6 +3131,84 @@ def test_harness_comparison_reports_no_differences_against_a_clean_tree(tmp_path
     assert new_project.harness_files_matching_ref("v1.0.0", repo) == [
         "scripts/hooks/harness_config.py"
     ]
+
+
+def _pinned_plan(root: Path, parent: Path) -> SimpleNamespace:
+    return SimpleNamespace(root=parent / "fresh", context={"devkit_ref": "v1.0.0"})
+
+
+def _tree_past_its_pin(tmp_path, monkeypatch) -> Path:
+    """A devkit whose vendored file changed after its tag, and a workspace beside it."""
+    repo = _seed_fake_devkit(
+        tmp_path,
+        ("scripts/hooks/harness_config.py",),
+        {"scripts/hooks/harness_config.py": "x = 1\n"},
+    )
+    (repo / "scripts" / "hooks" / "harness_config.py").write_text("x = 2\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(new_project, "DEVKIT_ROOT", repo)
+    monkeypatch.setattr(
+        new_project.devkit_project, "DEFAULT_WORKSPACE", workspace / "all.code-workspace"
+    )
+    return repo
+
+
+def test_lands_in_the_workspace_is_being_beside_the_live_file(tmp_path, monkeypatch):
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    home = (tmp_path / "workspace").resolve()
+    assert new_project.lands_in_the_workspace(_pinned_plan(repo, home))
+    assert not new_project.lands_in_the_workspace(_pinned_plan(repo, tmp_path / "gen"))
+
+
+def test_a_project_for_the_workspace_vendors_the_tag_it_pins(tmp_path, monkeypatch):
+    """ebe2fa33: this tree past the tag, the project died in `git_init` on its own drift
+    hook, with no registration and no remote behind it."""
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    plan = _pinned_plan(repo, (tmp_path / "workspace").resolve())
+    with new_project.harness_source(plan, dry_run=False) as source:
+        assert source != repo
+        vendored = (source / "scripts" / "hooks" / "harness_config.py").read_text("utf-8")
+        assert vendored.replace("\r\n", "\n") == "x = 1\n", "the tag's bytes, not this tree's"
+    assert not source.exists(), "the clone is thrown away"
+
+
+def test_a_rehearsal_vendors_this_tree(tmp_path, monkeypatch):
+    """The generated-project gate renders under a temporary parent to test this tree."""
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    with new_project.harness_source(_pinned_plan(repo, tmp_path / "elsewhere"), False) as source:
+        assert source == repo
+
+
+def test_a_dry_run_clones_nothing(tmp_path, monkeypatch):
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    plan = _pinned_plan(repo, (tmp_path / "workspace").resolve())
+    with new_project.harness_source(plan, dry_run=True) as source:
+        assert source == repo
+
+
+def test_a_tree_at_its_pin_needs_no_clone(tmp_path, monkeypatch):
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    (repo / "scripts" / "hooks" / "harness_config.py").write_text("x = 1\n", encoding="utf-8")
+    plan = _pinned_plan(repo, (tmp_path / "workspace").resolve())
+    with new_project.harness_source(plan, dry_run=False) as source:
+        assert source == repo
+
+
+def test_a_pin_that_cannot_be_cloned_falls_back_to_this_tree(tmp_path, monkeypatch, capsys):
+    repo = _tree_past_its_pin(tmp_path, monkeypatch)
+    real = subprocess.run
+
+    def refused(argv, **kwargs):
+        if "clone" in argv:
+            return subprocess.CompletedProcess(argv, 128, "", "fatal: no")
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(new_project.subprocess, "run", refused)
+    plan = _pinned_plan(repo, (tmp_path / "workspace").resolve())
+    with new_project.harness_source(plan, dry_run=False) as source:
+        assert source == repo
+    assert "could not clone v1.0.0" in capsys.readouterr().out
 
 
 def test_harness_comparison_flags_a_manifest_file_absent_at_the_ref(tmp_path):

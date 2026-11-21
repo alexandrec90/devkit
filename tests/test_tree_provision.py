@@ -28,6 +28,20 @@ def test_provisioning_runs_the_one_verb_with_yes_and_reports_a_failure(tmp_path,
     assert tree_provision.argv(tmp_path)[-1] == "--yes"
 
 
+def test_what_runs_is_said_before_it_starts(tmp_path, capsys):
+    """1be306c4: the output is captured, so a cold `uv sync` was minutes of silence and
+    a slow provision read like a hung one."""
+    seen = []
+
+    def runner(argv, **_kwargs):
+        seen.append(capsys.readouterr().out)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    tree_provision.provision(tmp_path, runner)
+    assert f"provisioning {tmp_path}" in seen[0]
+    assert "provision" in seen[0] and "--yes" in seen[0]
+
+
 def test_the_childs_output_is_read_as_utf8_and_a_failure_is_left_as_the_trees_friction(
     tmp_path,
 ):
@@ -50,6 +64,20 @@ def test_the_childs_output_is_read_as_utf8_and_a_failure_is_left_as_the_trees_fr
     assert (tmp_path / "logs" / "friction.md").read_text(encoding="utf-8").count("- ") == 2
 
 
+def test_a_tree_whose_own_dependencies_do_not_resolve_is_not_the_harness_s_friction(tmp_path):
+    """e155cd23: `worktree.py provision` said only npm's last line, and the friction line
+    it left went on the devkit ledger though carameli's own manifest was the cause and
+    the PR's gate failed on it too. The step now says the ERESOLVE line, which keeps it
+    off the friction file."""
+
+    def runner(argv, **_given):
+        said = "FAILED provision: .devkit.toml install_command failed: npm error code ERESOLVE"
+        return subprocess.CompletedProcess(argv, 1, said, "")
+
+    assert tree_provision.provision(tmp_path, runner) is False
+    assert not (tmp_path / "logs" / "friction.md").exists()
+
+
 def test_a_background_session_is_opened_only_in_a_provisioned_tree(monkeypatch, tmp_path):
     """`agent_tabs.launch_background` is the one place the pass opens a session, so it
     provisions first -- with the same runner, before the session's own spawn."""
@@ -64,3 +92,33 @@ def test_a_background_session_is_opened_only_in_a_provisioned_tree(monkeypatch, 
     launch = agent_tabs.agent_models.Launch("claude-bg")
     assert agent_tabs.launch_background(launch, tmp_path, "fix it", False, runner) == 0
     assert spawned[0] == tree_provision.argv(tmp_path) and spawned[1][-1] == "fix it"
+
+
+def test_the_hooks_venv_mark_does_not_vouch_for_node_modules(tmp_path):
+    """A roguelike tree carried the hook's mark and no `node_modules`, and vitest could not
+    run in it: the mark proves the `.venv`, and the frontend tier is checked on its own."""
+    assert tree_provision.needs_provision(tmp_path) is True  # no mark: nothing installed
+    mark = tmp_path / tree_provision.worktree_env.PROVISIONED
+    mark.parent.mkdir(parents=True)
+    mark.write_text("", encoding="utf-8")
+    assert tree_provision.needs_provision(tmp_path) is False  # no frontend tier to install
+
+    manifest = tmp_path / ".devkit.toml"
+    manifest.write_text('[frontend]\nenabled = true\ndir = "web"\n', encoding="utf-8")
+    assert tree_provision.needs_provision(tmp_path) is True
+    (tmp_path / "web" / "node_modules").mkdir(parents=True)
+    (tmp_path / "web" / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    assert tree_provision.needs_provision(tmp_path) is False
+
+
+def test_an_empty_node_modules_is_not_an_install(tmp_path):
+    """fcf111b9: a `claude --worktree` tree's `node_modules` linked to its checkout's,
+    which existed and was empty, so `npm run dev` found no `vite`. The check used to be
+    `is_dir`, which passed it."""
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "."\n', encoding="utf-8"
+    )
+    (tmp_path / "node_modules").mkdir()
+    assert tree_provision.frontend_missing(tmp_path) is True
+    (tmp_path / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    assert tree_provision.frontend_missing(tmp_path) is False

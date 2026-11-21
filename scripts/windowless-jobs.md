@@ -115,3 +115,25 @@ Two consequences, both now enforced rather than written down:
   `schedule_health.virtualenv_interpreter` compares each registered task's `Task To Run`
   against `pyvenv.cfg` and reports it in the `workspace-status.py` pass. All three rounds of this bug were
   found by a human watching windows flash; that is the loop this replaces.
+
+## A spawn handed over as a value is still a spawn
+
+The fourth round, 2026-09-28: `devkit-upgrade-projects` opened a Windows Terminal window
+per project it wired, from `uv lock`. Every check above finds a spawn by its **call**,
+`subprocess.run(...)`; `temproot_wiring.wire` never makes one. It takes
+`runner=subprocess.run` as a default and calls `runner(...)`, so the module scanned as
+spawning nothing. Thirteen other defaults in the same reach had the shape.
+
+Flagging the call through the runner is not the fix: `ship_intent.run_quiet`, the runner
+the fix pass injects, sets `creationflags` itself and would receive it twice. The
+**default** is what is held — `sweep.run_windowless` (and the standalone twins in
+`worktree_env` and `harness_state`, which cannot afford to import `sweep`), which ORs
+`NO_WINDOW` into whatever the caller passed — and
+`test_no_module_a_job_reaches_hands_out_a_raw_spawn` refuses a raw `subprocess` spawn named
+as a value anywhere in the reach.
+
+It was pinned down by firing each registered task with `Start-ScheduledTask` under a
+watcher that logs every new visible top-level window with its process ancestry — a
+console allocated to a console-less child shows up as `ConsoleWindowClass`, or, with
+Windows Terminal as the default terminal, as a `PseudoConsoleWindow` owned by the child
+itself. That is the reproduction to reach for before reading source again.

@@ -55,6 +55,7 @@ from ._core import (
     DEFAULT_PROJECT_HOOKS,
     DEFAULT_REMOTE,
     FAIL_CLOSED_KEY,
+    FRAMEWORK_SKIP_ENV_VAR,
     NO_WINDOW,
     PROJECT_HOOKS_KEY,
     PROTECTED_BRANCH_KEY,
@@ -86,13 +87,14 @@ from .branch import (
     release_tag_decision,
 )
 from .dispatch import main, run_hook
-from .framework import framework_env
+from .framework import framework_env, framework_skipped
 
 __all__ = [
     "ALWAYS_PROTECTED",
     "DEFAULT_PROJECT_HOOKS",
     "DEFAULT_REMOTE",
     "FAIL_CLOSED_KEY",
+    "FRAMEWORK_SKIP_ENV_VAR",
     "NO_WINDOW",
     "PROJECT_HOOKS_KEY",
     "PROTECTED_BRANCH_KEY",
@@ -116,6 +118,7 @@ __all__ = [
     "evaluate_pre_push",
     "framework",
     "framework_env",
+    "framework_skipped",
     "github_repo",
     "inheritable_streams",
     "main",

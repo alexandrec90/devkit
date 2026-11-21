@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT, load_script
+from support import ELEVATED_EXEMPTION, REPO_ROOT, load_script
 
 schedule_health = load_script("scripts/schedule_health.py")
 
@@ -94,6 +94,11 @@ def test_a_job_names_the_artifact_it_leaves(name, module):
         f"`log-wrap.py --always` (see install-docker-prune.py) or point ARTIFACT at the "
         f"log its runner already writes."
     )
+    if name in ELEVATED_EXEMPTION:
+        # It writes nowhere but its admin-only folder, so `logs/` is the one place it
+        # cannot be; still a file a reader can open.
+        assert artifact.startswith("C:/ProgramData/devkit/"), f"{name}: {artifact}"
+        return
     assert artifact.startswith("logs/"), f"{name}: {artifact} is not under logs/"
 
 
@@ -340,12 +345,25 @@ UNATTENDED: dict[str, str] = {
     "scripts/installers.py": "devkit-installers runs it daily and at logon; it spawns every installer",
     "scripts/fix-pass-watchdog.py": "devkit-fix-pass runs it every half hour; it spawns the pass",
     "scripts/fix-pass.py": "the watchdog spawns it every half hour, behind the workspace switch",
+    "scripts/ship-pass.py": "devkit-ship runs it every 2 minutes; it spawns through ship_intent",
     "scripts/ship_intent.py": "the fixers, commit and push the pass makes per intent, and the runner it hands fix-prs.py",
     "scripts/fix-prs.py": "the worktree cut and the session the pass opens; spawns only through the runner it is handed",
     "scripts/gate_evidence.py": "the gh the pass reads every gate through",
     "scripts/broken_pr_menu.py": "the gh the pass scans every checkout through",
     "scripts/fix_release.py": "the release pipeline the pass starts detached when main owes a tag",
-    "scripts/log-wrap.py": "the wrapper four of those jobs are launched through",
+    "scripts/git_trust.py": "the git config --global safe.directory a dispatching pass adds",
+    "scripts/log-wrap.py": "the wrapper every job but the tray is launched through",
+    "scripts/e2e-pass.py": "devkit-local-e2e runs it nightly; it spawns each project's e2e.py",
+    "scripts/after-merge-pass.py": "devkit-after-merge runs it every 5 min; it spawns queued commands",
+    "scripts/e2e.py": "the pass spawns devkit's own; it spawns pytest over the local tier",
+    "scripts/tier-pass.py": "devkit-medium-tier runs it every 15 minutes; it spawns each suite",
+    "scripts/disposable_tree.py": "the git worktree add and remove that pass makes per run",
+    "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
+    "scripts/collector_tasks.py": "the schtasks that pass makes, and each scheduled collector's fire",
+    "scripts/collector_handoff.py": "the project's handoff command that pass asks and imports through",
+    "scripts/docker_memory.py": "collectors.py imports it; its _spawn serves the by-hand report",
+    "scripts/elevated_worker.py": "devkit-elevated runs the installed copy every 5 minutes",
+    "scripts/elevated_request.py": "the schtasks query the fix pass asks after the worker with",
     # reached from `workspace-status.py --notify`, which is the one script that imports
     # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.
     "scripts/notify.py": "the Windows PowerShell the status pass raises its toast through",
@@ -355,6 +373,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/policy_runtime.py": "upgrade-project.py runs its policy-reinstall rider once per pass",
     "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
     "scripts/worktree_env.py": "worktree.py keeps its provisioned mark; upgrade-project.py its skip var",
+    "scripts/harness_state.py": "the git skip-worktree the tray and installers reach through the switch record",
     # `_core` and not the package: the split left `run_command` -- and `NO_WINDOW` with
     # it -- in exactly one module, and `branch`, `framework` and `dispatch` reach git
     # only through the injected runner. Naming the one file that spawns is the point of
@@ -378,8 +397,15 @@ DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/tray_state.py": "scripts/schedule_health.py",
     "scripts/fix-pass.py": "scripts/ship_intent.py",
     "scripts/fix-prs.py": "scripts/ship_intent.py",
+    "scripts/ship-pass.py": "scripts/ship_intent.py",
     "scripts/gate_evidence.py": "scripts/sweep.py",
     "scripts/broken_pr_menu.py": "scripts/sweep.py",
+    "scripts/session_trees.py": "scripts/sweep.py",
+    "scripts/e2e-pass.py": "scripts/sweep.py",
+    "scripts/e2e.py": "scripts/sweep.py",
+    "scripts/after-merge-pass.py": "scripts/sweep.py",
+    "scripts/tier-pass.py": "scripts/sweep.py",
+    "scripts/disposable_tree.py": "scripts/sweep.py",
 }
 
 SPAWN_ATTRS = frozenset({"run", "Popen", "call", "check_call", "check_output"})
@@ -1008,6 +1034,108 @@ def test_a_stream_call_is_guarded_only_by_an_if_that_tests_the_stream():
     assert unguarded_stream_calls("import sys\nprint('x', file=sys.stderr)\n") == []
 
 
+# --- a spawn handed over as a value is a spawn ---------------------------------
+#
+# Every scan above finds a spawn by its *call*, `subprocess.run(...)`. The window came
+# back on 2026-09-28 through one that is never called by that name: `temproot_wiring.wire`
+# takes `runner=subprocess.run` and calls `runner([uv, "lock"], ...)`, so the module read
+# as spawning nothing, and `upgrade-project.py` opened a Windows Terminal window per
+# project it wired. Caught by a human again, then reproduced by firing the task under a
+# window watcher. Thirteen other defaults in the same reach had the same shape.
+#
+# A call-site flag cannot fix it either -- `ship_intent.run_quiet`, the runner the fix
+# pass injects, sets `creationflags` itself and would get it twice. So the default is
+# what is held: a job's reach never holds a raw spawn as a value, only
+# `sweep.run_windowless` (or the standalone twin in `worktree_env` or `harness_state`),
+# which ORs the flag in.
+
+
+def spawn_references(source: str) -> list[int]:
+    """Lines naming `subprocess.<spawn>` as a value rather than calling it, or as a type."""
+    tree = ast.parse(source)
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    typed = {id(part) for annotation in _annotations(tree) for part in ast.walk(annotation)}
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in SPAWN_ATTRS
+        and _is_subprocess(node.value)
+        and id(node) not in called
+        and id(node) not in typed
+    ]
+
+
+def _annotations(tree: ast.AST) -> list[ast.expr]:
+    """Every annotation in `tree`: a parameter's, a return's, an annotated assignment's."""
+    found: list[ast.expr | None] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.arg):
+            found.append(node.annotation)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            found.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            found.append(node.annotation)
+    return [annotation for annotation in found if annotation is not None]
+
+
+def test_a_spawn_passed_by_reference_is_found():
+    assert spawn_references(
+        "import subprocess\ndef f(runner=subprocess.run):\n    runner([])\n"
+    ) == [2]
+    assert spawn_references("import subprocess\nsubprocess.run([], creationflags=1)\n") == []
+    assert spawn_references("import subprocess\nr = subprocess.Popen\n") == [2]
+
+
+def test_a_spawn_named_as_a_type_is_not_handed_out():
+    """`ship_intent._end_tree(process: subprocess.Popen)` read as a raw spawn: a type
+    annotation names the class, and nothing can call it through the annotation."""
+    source = (
+        "import subprocess\n"
+        "def f(p: subprocess.Popen, r=subprocess.run) -> subprocess.Popen:\n"
+        "    q: subprocess.Popen = p\n"
+    )
+    assert spawn_references(source) == [2]
+    # The default beside an annotation is still a value; a string annotation is no node.
+    source = (
+        "import subprocess\n"
+        "async def f(p: subprocess.Popen, q: 'x' = None) -> subprocess.Popen:\n"
+        "    return p\n"
+        "def g(runner: subprocess.Popen = subprocess.Popen): ...\n"
+    )
+    assert spawn_references(source) == [4]
+
+
+def test_no_module_a_job_reaches_hands_out_a_raw_spawn():
+    for rel in sorted(import_closure() | set(UNATTENDED)):
+        lines = spawn_references((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        assert not lines, (
+            f"{rel} holds subprocess's spawn as a value at {lines} -- a runner default, "
+            f"most likely -- and a scheduled job reaches it, so whatever calls it opens a "
+            f"console window under pythonw.exe. Default to sweep.run_windowless instead."
+        )
+
+
+@pytest.mark.parametrize(
+    "module_path", ["scripts/sweep.py", "scripts/worktree_env.py", "scripts/harness_state.py"]
+)
+def test_the_windowless_runner_forces_the_flag_and_keeps_the_callers(module_path, monkeypatch):
+    module = load_script(module_path)
+    seen: dict = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs, args=args)
+        return "done"
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "NO_WINDOW", 0x08000000)
+    assert module.run_windowless(["git"], cwd="x") == "done"
+    assert seen == {"args": (["git"],), "cwd": "x", "creationflags": 0x08000000}
+    # A runner handed an explicit flag -- `box_teardown` passes its own -- keeps it.
+    module.run_windowless(["git"], creationflags=0x200)
+    assert seen["creationflags"] == 0x08000200
+
+
 def test_the_import_exemptions_are_not_stale():
     """A module that stopped being imported, or stopped spawning, keeps an exemption
     that reads as a decision someone made about today's code."""
@@ -1049,6 +1177,27 @@ def test_every_branch_delivery_job_has_an_installer_here():
     switch = load_script("scripts/harness-switch.py")
     covered = {module.TASK_NAME for _name, module in branch_delivery_installers()}
     assert covered == set(switch.BRANCH_DELIVERY_JOBS)
+
+
+def test_the_elevated_worker_writes_the_file_its_installer_advertises():
+    """Under `HOME`, the folder the worker may write in; slashed, as `ARTIFACTS` is."""
+    installer = load_script("scripts/install-elevated-worker.py")
+    runner = load_script("scripts/elevated_worker.py")
+    assert installer.ARTIFACT == "/".join([*runner.HOME.split("\\"), runner.LOG_NAME])
+
+
+def test_the_collectors_pass_writes_the_file_its_installer_advertises():
+    """Same shape as the rc pass: a line per collector, which only the runner can render."""
+    installer = load_script("scripts/install-collectors.py")
+    runner = load_script("scripts/collectors.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
+def test_the_scheduled_collectors_pass_never_loses_the_mode_that_makes_it_act():
+    """`collectors.py` defaults to read-only `status`; without `maintain` the task would
+    fire every 15 minutes and start nothing."""
+    installer = load_script("scripts/install-collectors.py")
+    assert " maintain" in installer.collectors_arguments(installer.collectors_script())
 
 
 def test_the_installers_pass_writes_the_file_its_installer_advertises():

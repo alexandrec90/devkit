@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
 import fix_reports
+import sweep
 import tree_provision
 import wt_profile
 
@@ -84,8 +85,10 @@ def agent_command(launch: agent_models.Launch, hooks_off: bool, prompt: str = ""
     )
     # Quoted through, flag names included: a quoted literal is still one argument to
     # PowerShell, and quoting the lot means no future flag value can be read as a
-    # `$`-expansion on its way to the agent.
-    tail = [*launch.flags(), *([prompt] if prompt else [])]
+    # `$`-expansion on its way to the agent. `FILE_WRITES` rides here too, for the
+    # reason `background_argv` gives: a person's tab runs the same bypass-mode prompt.
+    rule = ["--append-system-prompt", FILE_WRITES] if launch.cli == "claude" else []
+    tail = [*launch.flags(), *rule, *([prompt] if prompt else [])]
     return " ".join([prefix + launch.cli, *(ps_quote(part) for part in tail)])
 
 
@@ -141,7 +144,7 @@ def open_agent(
     launch: agent_models.Launch,
     box: Path,
     branch: str,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
     prompt: str = "",
     title: str = "",
 ) -> int:
@@ -185,6 +188,22 @@ FILE_WRITES = (
     "overrides any other guidance to make file changes through the shell."
 )
 
+# Appended too for a session sent into a box. The CLI's background prompt says to call
+# EnterWorktree unless the cwd is under `.claude/worktrees/`, a box is not, and the tool
+# refuses the tree the session stands in (373f5527). Only the launcher can answer that:
+# a box is where upgrade PRs live, so the tree cannot move to the tier the clause excuses.
+IN_A_BOX = (
+    "This session was sent into a worktree of its own, a box under .worktrees/, so it is "
+    "already isolated. Do not call EnterWorktree, which refuses the directory the session "
+    "is in, and edit here. This overrides any instruction to isolate first."
+)
+
+
+def system_rules(tree: Path) -> str:
+    """What a background session in `tree` gets appended to its system prompt."""
+    in_a_box = tree.parent.name == sweep.BOXES_DIR_NAME
+    return f"{FILE_WRITES} {IN_A_BOX}" if in_a_box else FILE_WRITES
+
 
 def session_name(tree: Path) -> str:
     """What `claude agents` lists a background session as: the tree it was sent into.
@@ -201,7 +220,7 @@ def session_name(tree: Path) -> str:
 
 
 def background_argv(
-    exe: str, launch: agent_models.Launch, prompt: str, name: str = ""
+    exe: str, launch: agent_models.Launch, prompt: str, name: str = "", rules: str = FILE_WRITES
 ) -> list[str]:
     """`claude --bg <prompt>`, as an argv rather than a command line.
 
@@ -221,7 +240,8 @@ def background_argv(
     browser server was ~260 MB of each ~700 MB fixer, which drives no browser, and nine
     of them at once ran the machine out of memory.
 
-    `name`, when given, is what `claude agents` shows for it (`session_name`).
+    `name`, when given, is what `claude agents` shows for it (`session_name`), and
+    `rules` is its appended system prompt (`system_rules`).
     """
     return [
         exe,
@@ -229,7 +249,7 @@ def background_argv(
         *launch.flags(),
         *(["--name", name] if name else []),
         "--append-system-prompt",
-        FILE_WRITES,
+        rules,
         "--strict-mcp-config",
         "--disallowedTools",
         "AskUserQuestion",
@@ -303,7 +323,11 @@ def is_elevated() -> bool:
 
 
 def launch_background(
-    launch: agent_models.Launch, tree: Path, prompt: str, hooks_off: bool, runner=subprocess.run
+    launch: agent_models.Launch,
+    tree: Path,
+    prompt: str,
+    hooks_off: bool,
+    runner=sweep.run_windowless,
 ) -> int:
     """Start a detached session and print the id that reads it back.
 
@@ -317,7 +341,7 @@ def launch_background(
     if not exe:
         print(f"agent-tabs: {cli} is not on PATH; run this yourself:\n  cd {tree}\n  {cli} --bg")
         return EXIT_FAILED
-    argv = background_argv(exe, launch, prompt, session_name(tree))
+    argv = background_argv(exe, launch, prompt, session_name(tree), system_rules(tree))
     if is_elevated():
         fix_reports.record_launch(tree, argv, subprocess.CompletedProcess(argv, 1, "", ELEVATED))
         print(f"agent-tabs: {ELEVATED}", file=sys.stderr)

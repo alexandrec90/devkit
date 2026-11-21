@@ -141,6 +141,10 @@ MANIFEST: tuple[str, ...] = (
     # worktree with no `.venv` is told before its commit-time gate refuses the commit.
     "scripts/hooks/toolchain.py",
     "scripts/hooks/tests/test_toolchain.py",
+    # The leases that stop a run moving a tier's shared path-source sibling under another
+    # run on another pin; `toolchain` takes one per run, devkit's `worktree_env` per cut.
+    "scripts/hooks/sibling_pins.py",
+    "scripts/hooks/tests/test_sibling_pins.py",
     # The vendoring tool itself, so a project can drift-check / pull / push, and the
     # path lists it reads -- this file. Cut out of the tool because every entry here
     # was a raise of its `file_lines` baseline; the tool cannot run without it, so a
@@ -163,6 +167,14 @@ MANIFEST: tuple[str, ...] = (
     ".claude/rules/authoring.md",
     # What a coding session leaves to the fix pass: commit, push, PR, the full suite.
     ".claude/rules/session-scope.md",
+    # Where a test only this workstation can run goes, and the `scripts/e2e.py` contract
+    # devkit's nightly `devkit-local-e2e` job runs in every checkout. Path-scoped to test
+    # files, so it costs the always-loaded tier nothing.
+    ".claude/rules/local-e2e.md",
+    # What a script a VS Code task runs starts as. Path-scoped to `scripts/` for the same
+    # reason: `engineering.md` has no room for it (`hot-budget.py`), and a template's
+    # `CLAUDE.md` reaches only a project generated after the fix.
+    ".claude/rules/task-scripts.md",
     # The policy's reference half, and a fixer session's own instructions. Vendored as
     # pointer targets: the rules above cite both. Both sit *outside* `.claude/rules/`,
     # where every `.md` is loaded into every session -- which neither may be.
@@ -171,6 +183,10 @@ MANIFEST: tuple[str, ...] = (
     # The one portable task workflow. Its script detects the remote default branch
     # and owns the mechanical checks; the skill supplies the semantic commit/PR text.
     ".claude/skills/ship/SKILL.md",
+    # The unattended run: decide instead of asking, log each call, finish through `/ship`.
+    # Vendored rather than per-user because the operator works across machines, and a
+    # skill under `~/.claude/` is one more copy per machine that nothing drift-checks.
+    ".claude/skills/go-nuts/SKILL.md",
     # Codex reads CLAUDE.md through its project-document fallback. The remaining
     # compatibility layer mirrors repository skills and, when a project opts into
     # `.codex/`, translates Claude hook wiring.
@@ -257,6 +273,12 @@ MANIFEST: tuple[str, ...] = (
     # and the repos where that goes unnoticed longest are the existing ones.
     "scripts/merge-dependabot-prs.py",
     "scripts/hooks/tests/test_merge_dependabot_prs.py",
+    # What `dependabot-automerge.yml` runs after a merge and after a gate, vendored with
+    # it for the same reason: that file is byte-identical and cannot carry either inline.
+    "scripts/green-ref.py",
+    "scripts/hooks/tests/test_green_ref.py",
+    "scripts/tidy-main.py",
+    "scripts/hooks/tests/test_tidy_main.py",
     # The rest of the CI surface -- `dependabot.yml`, the gate, the nightly -- cannot
     # be vendored for the reason above, and `templates/` cannot keep them honest
     # either: a one-shot copy has no way to notice that a project never received a
@@ -322,6 +344,9 @@ RETIRED_PATHS: tuple[str, ...] = (
 # for most consumers and absent from every MANIFEST entry.
 FRONTEND_GATE = "frontend"
 DEFAULT_FRONTEND_SRC = "frontend/src/"
+# The `[desktop]` tier's gate. Its entries are named from the repo root on both sides,
+# so the prefix is empty and `source_map` never needs a translation for them.
+DESKTOP_GATE = "desktop"
 # A LITERAL dict, keys spelled as strings: `structure_check.vendored_paths` reads this
 # off the source with `ast.literal_eval` in every consumer, and a `Name` key would make
 # the whole literal unreadable there -- silently, as an empty exemption.
@@ -330,4 +355,8 @@ GATED_MANIFEST: dict[str, tuple[str, ...]] = {
     # contract (`tests/test_worktree_port.py`), so it drops into any Vite project, and
     # held equal to `scripts/hooks/worktree_tiers.py` by the same test.
     "frontend": ("worktreePort.ts", "worktreePort.test.ts"),
+    # How a desktop app is linted, tested, packed and published -- the one copy of that
+    # recipe every desktop project shares, so a fix to the release reaches all of them on
+    # their next `--pull` rather than staying in whichever template rendered them.
+    "desktop": ("scripts/desktop.py", "scripts/hooks/tests/test_desktop.py"),
 }

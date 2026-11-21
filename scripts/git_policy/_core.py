@@ -81,6 +81,12 @@ RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 # *scriptable* without also disabling the project's own pre-commit gate, which is what
 # `--no-verify` does.
 SKIP_ENV_VAR = "DEVKIT_SKIP_BRANCH_POLICY"
+# The other half of that bargain: the project's pre-commit framework waived, the policy
+# kept. The ship task's direct flow commits with no formatter, and still needs the
+# refusal of a retired branch name, which is what moves its commit off one
+# (`ship_intent._commit_carrying`). `--no-verify` would drop both. It says nothing about
+# `.githooks/<hook>`, which still runs.
+FRAMEWORK_SKIP_ENV_VAR = "DEVKIT_SKIP_PRE_COMMIT_FRAMEWORK"
 # Values that read as "off" to a human must not switch the policy off. Anything else
 # that is set turns it off. The asymmetry is deliberate: `DEVKIT_SKIP_BRANCH_POLICY=0`
 # means "enforce" to everyone who writes it, and honouring it as "skip" would disable

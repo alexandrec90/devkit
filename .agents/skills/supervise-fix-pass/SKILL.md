@@ -10,11 +10,15 @@ argument-hint: 'Optional: how many iterations (default 3), or "plan" to rehearse
 > Depends on `gh` being authenticated and `claude` on PATH: the pass dispatches real
 > sessions and pushes real branches. Run it from a shell that is **not elevated**:
 > `agent_tabs.launch_background` refuses to launch from one, because a background service
-> started elevated is unreachable to the scheduled pass until it exits.
+> started elevated is unreachable to the scheduled pass until it exits. The pass hands an
+> elevated dispatch to the scheduled task instead, which runs `main`'s code, not this
+> tree's, so `fix-pass-supervise.py` refuses one outright. From an elevated session,
+> start it through `runas /trustlevel:0x20000`, which gives the child an unelevated token.
 
 Devkit-only, like `/triage-harness`. The fix pass (`scripts/fix-pass.py`) holds one
 contract: **every observation ends green, in flight, or filed** on the harness-defect
-ledger -- nothing ends at a person, and no friction or wasted agent turn goes unrecorded.
+ledger -- nothing ends at a person but a step no fixer can take (`harness_triage.
+PERSON_STEP`), and no friction or wasted agent turn goes unrecorded.
 This skill is how that contract is checked against the real machine, and how the pass is
 repaired when it breaks it. You are the harness's own supervisor: **every defect you find
 is yours to fix in this worktree, now**, with a regression test. Filing is only for what
@@ -52,6 +56,16 @@ Start it in the background and wait for its completion notice -- expect hours, s
 each iteration waits for its sessions. **Do not poll it, tail it or sleep on it**: each
 check you make while it runs is a turn spent on a verdict the report gives in one read.
 
+Claude Code stops an idle session's background command when the machine runs low on
+memory, and says so in the completion notice. The report is written after every
+iteration, so audit what finished; do not restart the run unasked -- memory is still
+short -- and say in the reply which iteration it stopped in.
+
+Merge `origin/main` into this tree first if it has moved since the rehearsal: a pass
+run from a tree lacking origin's `scripts/` changes dispatches nothing
+(`fix_send.dispatch_mode`), so the script refuses to start one, and stops the run if
+origin moves under it.
+
 It runs from this worktree, so your fixes are live on the next iteration -- and the
 sessions it sends cut their branches from `main`, which has none of them yet. Until this
 branch merges, expect them to report that `main`'s tools disagree with the evidence the
@@ -69,6 +83,13 @@ The script exits 1 when any iteration broke the contract. For every `VIOLATION`:
 1. **Reproduce it from the report** -- the record line, the transcript path, the finding.
 2. **Fix the cause in devkit** -- the pass, a prompt, a detector, a vendored script --
    with a test that fails without the fix. A violation is a pass defect by definition.
+   When it retires a ledger group, resolve the group the moment the fix and its test
+   are written: `python scripts/harness_triage.py --resolve-like <id> --note "<what fixed
+   it>" --pr <this tree's branch>`. The pass sends nothing at a group resolved onto an
+   unmerged branch; left open, it sends the next devkit fixer at work this tree already
+   holds, and that fixer spends its turns reading your diff (2523011c). The other
+   direction holds too: a group marked `IN HAND` is one the pass already sent a live
+   session at, so leave it to that session (a6c2b36e).
 3. Only when the fix needs something outside the repository (a credential, admin
    rights, a paid service), file it: `python scripts/hooks/report-harness-defect.py`,
    with each file that shows it as `--evidence <path>#L<lines>` rather than inside
@@ -129,13 +150,18 @@ Memory is the one limit the machine sets regardless: `fix_send` holds a session 
 free memory cannot take (`held for memory` in the record), and the next pass sends it.
 A background fixer loads no MCP server for the same reason. Holds on every iteration
 mean something else is eating the memory -- find it (`claude agents` for finished
-sessions still alive, `docker stats` for stacks) rather than lowering the floor.
+sessions still alive, `python scripts/docker_memory.py` for stacks) rather than lowering
+the floor. Not a bare `docker stats`: it hangs once the VM is at its `.wslconfig` cap, the
+case you are asking about, where that script still reads the VM's size from Windows.
 
 ## 5. Your own turns
 
 This session is held to the same contract. Any turn *you* lost to the harness -- a
 refusal, a missing tool, a wrong instruction in this file -- goes in
-`logs/friction.md` before you ship, and a wrong instruction here is fixed here.
+`logs/friction.md` before you ship, and a wrong instruction here is fixed here. The next
+pass files each line as an open group, so one you have already fixed is resolved onto
+this branch the moment it is filed (`--resolve-like <id> --pr <this tree's branch>`):
+left open, it sent a ledger fixer cut from `main` at a fix only this tree held (13c2a2bc).
 
 **Decide, as a fixer must.** A finding that comes back as a choice -- a stuck session's
 question, a design fork in a project -- is yours to settle: the option you would

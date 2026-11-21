@@ -64,6 +64,12 @@ def no_open_adoption_pr(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def on_a_network(monkeypatch):
+    """GitHub resolves unless a test says otherwise: the suite never asks the real DNS."""
+    monkeypatch.setattr(up.harness_events, "resolves", lambda **_: True)
+
+
+@pytest.fixture(autouse=True)
 def no_policy_reinstall(monkeypatch):
     """No test reaches the real `install-git-policy.py`, whose `--yes` writes to this
     machine's `~/.devkit` and global git config. The rider's own decisions are pinned in
@@ -265,9 +271,79 @@ def test_the_pending_check_closes_the_superseded_ones_first(tmp_path, monkeypatc
     closed: list[tuple[Path, str]] = []
     monkeypatch.setattr(up, "close_superseded", lambda p, t: closed.append((p, t)) or ["#170"])
     monkeypatch.setattr(up, "open_adoption_pr", lambda _p, _t: "#171 u/171")
-    assert up.pending_adoption(tmp_path, "carameli", "v0.11.21") == "#171 u/171"
+    assert up.pending_adoption(tmp_path, "carameli", "v0.11.21") == (
+        "devkit v0.11.21 is already up for adoption in #171 u/171"
+    )
     assert closed == [(tmp_path, "v0.11.21")]
     assert "closed #170, superseded by devkit v0.11.21" in capsys.readouterr().out
+
+
+def test_no_box_is_cut_on_a_machine_that_cannot_look_github_up(tmp_path, monkeypatch, capsys):
+    """2e881f69: offline, `open_adoption_pr` failed open, so a night without DNS cut
+    agent-terminal a second v0.11.88 box beside its open #11, and the box's commit was
+    refused by a branch policy that could not reach GitHub either."""
+    monkeypatch.setattr(up, "close_superseded", lambda _p, _t: pytest.fail("asked GitHub"))
+    monkeypatch.setattr(up, "open_adoption_pr", lambda _p, _t: pytest.fail("asked GitHub"))
+    held = up.pending_adoption(tmp_path, "carameli", "v0.11.88", online=lambda: False)
+    assert (
+        held == "GitHub cannot be looked up from this machine, so no box is cut for devkit v0.11.88"
+    )
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
+    monkeypatch.setattr(up.harness_events, "resolves", lambda **_: False)
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.11.88")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(up, "source_at_tag", lambda *_a: pytest.fail("a box was cut"))
+    ws = workspace(tmp_path, "carameli")
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
+    assert "carameli -- GitHub cannot be looked up" in capsys.readouterr().out
+
+
+def test_an_older_adoption_box_is_discarded_once_a_newer_release_is_adopted(
+    tmp_path, monkeypatch, capsys
+):
+    """v0.11.27 and v0.11.28 adoptions failed before opening a PR and left a box each in
+    three consumers, 20-28 uncommitted files apiece. `close_superseded` only closes PRs,
+    and reconcile rightly holds a box whose work exists nowhere else -- so reconcile
+    reported all six every 15 minutes, after v0.11.31 had long replaced them."""
+    Box = up.worktree.Box
+    leases = {
+        "carameli--old": Box(
+            "carameli--old", "carameli", "agent/auto/devkit-upgrade-v0-11-28-0927", 9
+        ),
+        "carameli--now": Box(
+            "carameli--now", "carameli", "agent/auto/devkit-upgrade-v0-11-31-0927", 10
+        ),
+        "roguelike--old": Box(
+            "roguelike--old", "roguelike", "agent/auto/devkit-upgrade-v0-11-28-0927", 11
+        ),
+        "carameli--task": Box("carameli--task", "carameli", "agent/voicemail-0927", 12),
+        "carameli--held": Box(
+            "carameli--held", "carameli", "agent/auto/devkit-upgrade-v0-11-27-0926", 13
+        ),
+    }
+    monkeypatch.setattr(up.worktree, "read_leases", lambda _root: leases)
+    planned: list[tuple[str, bool]] = []
+
+    def plan(name, _workspace, force=False, **_kw):
+        planned.append((name, force))
+        refusal = "3 commit(s) not on origin" if name == "carameli--held" else ""
+        return up.worktree.ReapPlan(box=name, refusal=refusal)
+
+    applied: list[str] = []
+    monkeypatch.setattr(up.worktree, "plan_reap", plan)
+    monkeypatch.setattr(
+        up.worktree, "apply_reap", lambda p, _w: applied.append(p.box) or (True, [])
+    )
+    monkeypatch.setattr(up, "close_superseded", lambda _p, _t: [])
+    monkeypatch.setattr(up, "open_adoption_pr", lambda _p, _t: "")
+    workspace = tmp_path / "ws.code-workspace"
+    up.pending_adoption(tmp_path / "carameli", "carameli", "v0.11.31", workspace)
+    assert sorted(planned) == [("carameli--held", True), ("carameli--old", True)]
+    assert applied == ["carameli--old"], "a refused plan is never applied"
+    monkeypatch.setattr(up.worktree, "read_leases", lambda _root: {})
+    assert up.discard_superseded_boxes("carameli", "v0.11.31", workspace) == []
+    assert "discarded carameli--old, superseded by devkit v0.11.31" in capsys.readouterr().out
 
 
 def test_the_commit_names_the_release():
@@ -627,6 +703,40 @@ def test_the_temp_root_plugin_is_wired_in_the_box_before_the_commit(tmp_path, mo
     assert wired == [run.box]
 
 
+def test_a_quiet_addopts_is_dropped_in_the_box_before_the_commit(tmp_path, monkeypatch):
+    """8bbdd581: three consumers still carried the template's old `-q` in `addopts`, so
+    an agent's own `-q` made `-qq` and the run printed no "N passed" line. The template
+    is a one-shot copy, so the adoption box is what drops it."""
+    run = BoxRun(tmp_path, monkeypatch)
+    seen: list[Path] = []
+
+    def unquiet(box):
+        seen.append(box)
+        assert ("add", "-A") not in run.git.calls, "dropped after staging: the commit lacks it"
+        return up.temproot_wiring.UNQUIETED
+
+    monkeypatch.setattr(up.temproot_wiring, "unquiet", unquiet)
+    assert run.run(tmp_path).code == 0
+    assert seen == [run.box]
+
+
+def test_an_untouched_template_is_refreshed_in_the_box_before_the_commit(tmp_path, monkeypatch):
+    """114da279: a template is a one-shot copy, so three consumers still ran the whole
+    suite bare weeks after the template stopped. The refresh runs in the box, from the
+    devkit worktree at the tag, before anything is staged."""
+    run = BoxRun(tmp_path, monkeypatch)
+    seen: list[tuple[Path, Path]] = []
+
+    def refresh(box, source):
+        seen.append((box, source))
+        assert ("add", "-A") not in run.git.calls, "refreshed after staging"
+        return []
+
+    monkeypatch.setattr(up.template_refresh, "refresh", refresh)
+    assert run.run(tmp_path).code == 0
+    assert seen == [(run.box, tmp_path / "src")]
+
+
 def test_the_upgrade_pr_is_labelled_automerge(tmp_path, monkeypatch):
     """An upgrade PR is a vendored copy of an already-released tag, so a green gate
     is the whole review; the label is what lets `reconcile --merge` and the vendored
@@ -736,7 +846,7 @@ class RecordingGit:
         self.fail_on = fail_on
         self.calls: list[tuple[str, ...]] = []
 
-    def __call__(self, *args: str):
+    def __call__(self, *args: str, env=None):
         self.calls.append(args)
         failed = bool(self.fail_on) and self.fail_on in " ".join(args)
         return subprocess.CompletedProcess(
@@ -1463,7 +1573,7 @@ class CommitGit:
 def test_a_hook_that_rewrote_the_tree_gets_one_more_commit():
     """`sync-codex` remirrored `.claude/skills/` and failed a commit that had nothing
     wrong with it. Staging the result and committing again is the whole convention."""
-    git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
+    git = CommitGit(["M  a.py\n", "MM a.py\n", ""], [1, 0])
     result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert (result.returncode, retried) == (0, True)
     assert git.calls.count(("add", "-A")) == 1
@@ -1481,7 +1591,7 @@ def test_a_gate_that_refused_is_not_committed_over():
 
 
 def test_a_commit_that_worked_is_never_retried():
-    git = CommitGit(["M  a.py\n"], [0])
+    git = CommitGit(["M  a.py\n", ""], [0])
     result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert (result.returncode, retried) == (0, False)
     assert len([step for step in git.calls if step[0] == "commit"]) == 1
@@ -1504,15 +1614,156 @@ def test_the_pre_commit_store_is_healed_before_the_first_commit(capsys):
     assert "pre-commit-hooks@v6.0.0" in capsys.readouterr().out
 
 
+def test_a_hook_that_wrote_new_files_past_a_passing_commit_is_amended_in():
+    """pre-commit fails a hook only for rewriting a tracked file, so `sync-codex`
+    mirroring a new skill into `.agents/skills/` passed, and the adoption commit landed
+    without the mirror its own `codex-sync` gate then demanded (38836107)."""
+    git = CommitGit(
+        ["A  .claude/skills/go-nuts/SKILL.md\n", "?? .agents/skills/go-nuts/\n", ""], [0, 0]
+    )
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (0, True)
+    commits = [step for step in git.calls if step[0] in ("add", "commit")]
+    assert commits == [
+        ("commit", "-m", "Adopt devkit v0.7.0"),
+        ("add", "-A"),
+        ("commit", "--amend", "--no-edit"),
+    ]
+
+
+def test_an_amend_the_hooks_refuse_is_reported_as_the_failure():
+    git = CommitGit(["A  a.py\n", "?? b.py\n"], [0, 1])
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (1, True)
+
+
+def test_a_retried_commit_that_left_new_files_is_amended_too():
+    git = CommitGit(["M  a.py\n", "MM a.py\n", "?? b.py\n", ""], [1, 0, 0])
+    result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
+    assert (result.returncode, retried) == (0, True)
+    assert git.calls[-1] == ("commit", "--amend", "--no-edit")
+
+
 def test_the_rewrite_is_detected_by_the_status_code_not_the_path_list():
     """A fixer rewrites files that were *already staged*, so the set of changed paths
     is identical afterwards and only the porcelain code moves. Comparing the parsed
     paths reports "nothing changed" for the one event this exists to detect."""
     git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
     assert up.changed_paths(git) == up.changed_paths(git)  # same path, both readings
-    git = CommitGit(["M  a.py\n", "MM a.py\n"], [1, 0])
+    git = CommitGit(["M  a.py\n", "MM a.py\n", ""], [1, 0])
     _result, retried = up.commit_with_hook_retry(git, "Adopt devkit v0.7.0")
     assert retried
+
+
+# --- a push the transport lost is pushed again --------------------------------
+
+
+class PushGit:
+    """A git whose `push` answers each attempt from `answers`, in order."""
+
+    def __init__(self, answers: list[tuple[int, str]]):
+        self.answers = iter(answers)
+        self.calls: list[tuple[str, ...]] = []
+        self.skipped: list[list[str]] = []
+
+    def __call__(self, *args: str, env=None):
+        self.calls.append(args)
+        self.skipped.append((env or {}).get("SKIP", "").split(","))
+        code, err = next(self.answers)
+        return subprocess.CompletedProcess(["git", *args], code, "", err)
+
+
+A1EDC2F7 = (
+    "fatal: unable to access 'https://github.com/alexandrec90/social-scraper.git/': "
+    "The requested URL returned error: 403"
+)
+
+
+def test_a_push_the_transport_lost_is_pushed_again():
+    """a1edc2f7: the v0.11.35 adoption lost roguelike and social-scraper to a 403 a minute
+    after carameli's push went through, and both answered again within minutes. The
+    release job failed, and no pass retries an adoption once the tag exists."""
+    git, slept = PushGit([(128, A1EDC2F7), (0, "")]), []
+    pushed = up.push_with_retry(git, "agent/auto/x", sleep=slept.append)
+    assert pushed.returncode == 0
+    assert git.calls == [("push", "-u", "origin", "agent/auto/x")] * 2
+    assert slept == [up.PUSH_WAITS[0]]
+
+
+def test_a_push_the_transport_keeps_losing_fails_with_gits_own_words():
+    git, slept = PushGit([(128, A1EDC2F7)] * (len(up.PUSH_WAITS) + 1)), []
+    pushed = up.push_with_retry(git, "b", sleep=slept.append)
+    assert pushed.returncode == 128 and "403" in pushed.stderr
+    assert slept == list(up.PUSH_WAITS)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        " ! [rejected]        b -> b (non-fast-forward)",
+        "error: failed to push some refs to 'origin'",
+        " ! [remote rejected] b -> b (protected branch hook declined)",
+    ],
+)
+def test_a_push_the_remote_or_a_hook_refused_is_not_retried(refusal):
+    """A judgment, not a lost connection: pushing it again gets the same answer."""
+    git, slept = PushGit([(1, refusal)]), []
+    assert up.push_with_retry(git, "b", sleep=slept.append).returncode == 1
+    assert len(git.calls) == 1 and slept == []
+
+
+def test_every_adoption_push_skips_the_local_gate():
+    """1720b7f4: v0.11.76's adoption stopped at `git push` in two consumers. The pre-push
+    gate ran the whole suite in a box with no stack, which productivity-tracker's
+    Postgres tests cannot pass, and homelab's went red on a run nothing reproduced. CI
+    judges the PR, so the push skips the gate as every other unattended push does, and
+    a retry after a lost connection must not bring it back."""
+    git = PushGit([(128, A1EDC2F7), (0, "")])
+    assert up.push_with_retry(git, "b", sleep=lambda _s: None).returncode == 0
+    assert len(git.skipped) == 2
+    assert all(up.release.SKIP_PUSH_GATE in skipped for skipped in git.skipped)
+
+
+def test_an_adoption_push_keeps_a_skip_the_caller_set(monkeypatch):
+    """`SKIP` is pre-commit's list, so a hook the operator skipped stays skipped."""
+    monkeypatch.setenv("SKIP", "ruff")
+    git = PushGit([(0, "")])
+    up.push_with_retry(git, "b", sleep=lambda _s: None)
+    assert git.skipped == [["ruff", up.release.SKIP_PUSH_GATE]]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "said"),
+    [
+        ("the hook's reason\n", "error: refused\n", "the hook's reason\nerror: refused"),
+        ("", "error: refused\n", "error: refused"),
+        ("the hook's reason\n", "", "the hook's reason"),
+        (None, None, ""),
+        ("  \n", "\n", ""),
+    ],
+)
+def test_said_by_keeps_both_streams_with_gits_error_last(stdout, stderr, said):
+    done = subprocess.CompletedProcess(["git"], 1, stdout, stderr)
+    assert up.said_by(done) == said
+
+
+def test_a_refused_push_reports_what_the_hook_printed(tmp_path, monkeypatch):
+    """1720b7f4 again: git puts a pre-push hook's output on stdout and only its own
+    `error: failed to push some refs` on stderr, so `stderr or stdout` kept the one line
+    that says nothing, and homelab's reason was gone when the box's next run passed."""
+    run = BoxRun(tmp_path, monkeypatch)
+    hook = "run-tests: FAILED -- details in logs/test-failures.log"
+    refused = "error: failed to push some refs to 'origin'"
+
+    def git(*args, env=None):
+        said = (hook, refused) if args[0] == "push" else ("", "")
+        return subprocess.CompletedProcess(["git", *args], int(args[0] == "push"), *said)
+
+    monkeypatch.setattr(up.sweep, "git_for", lambda _p: git)
+    outcome = run.run(tmp_path)
+    assert outcome.code == 2
+    assert hook in outcome.detail and refused in outcome.detail
+    assert outcome.detail.rstrip().endswith(refused), "log-wrap reads the cause off the end"
 
 
 # --- the failure artifact ----------------------------------------------------
@@ -1686,11 +1937,22 @@ def test_the_gap_is_reported_once_for_the_run_before_any_box(tmp_path, capsys, m
         (tmp_path / name).mkdir()
         (tmp_path / name / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli", "ibkr_trader")
-    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
     assert capsys.readouterr().err.count("enforce-capped-bash.py") == 1
 
 
-def test_the_undelivered_release_reaches_the_artifact_and_the_exit_code(
+def _owed_release_run(tmp_path, monkeypatch, *selection: str) -> int:
+    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
+    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
+    monkeypatch.setattr(up, "unreleased_vendored_changes", lambda *_a: ["scripts/hooks/hook.py"])
+    stamps_on_main(monkeypatch)
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
+    ws = workspace(tmp_path, "carameli")
+    return up.main([*selection, "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)])
+
+
+def test_the_undelivered_release_reaches_the_artifact_and_a_named_runs_exit_code(
     tmp_path, capsys, monkeypatch
 ):
     """The gap this script exists to report was the one thing it reported *only* to
@@ -1699,19 +1961,32 @@ def test_the_undelivered_release_reaches_the_artifact_and_the_exit_code(
     the fix you merged" was an exit code of 0 beside a log saying the run was clean.
 
     Reverting either half fails here: drop the outcome and the artifact is empty, drop
-    the exit code and `schedule_health` never surfaces the log at session start."""
-    monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
-    monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
-    monkeypatch.setattr(up, "unreleased_vendored_changes", lambda *_a: ["scripts/hooks/hook.py"])
-    stamps_on_main(monkeypatch)
-    (tmp_path / "carameli").mkdir()
-    (tmp_path / "carameli" / "DEVKIT_VERSION").write_text("9d95e44\n", encoding="utf-8")
-    ws = workspace(tmp_path, "carameli")
-
-    assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
+    the exit code and the person who named a checkout is not told to cut a release."""
+    assert _owed_release_run(tmp_path, monkeypatch, "carameli") == 1
     written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
     assert "scripts/hooks/hook.py" in written
     assert up.RELEASE_TASK in written
+
+
+def test_the_unattended_pass_records_the_owed_release_but_does_not_fail_on_it(
+    tmp_path, capsys, monkeypatch
+):
+    """The regression (ledger 619cf2dd): the 03:00 `--all` run exited 1 on the owed
+    release ninety seconds before the fix pass, which cuts it, opened the release PR --
+    and the ledger sent a fixer at a release already cut. The artifact keeps the line."""
+    assert _owed_release_run(tmp_path, monkeypatch, "--all") == 0
+    written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
+    assert "scripts/hooks/hook.py" in written
+    assert up.owes_only_a_release(written)
+
+
+def test_the_run_code_spares_only_the_owed_release_and_only_unattended():
+    owed = up.Outcome(up.RELEASE_SCOPED, 1, "cut a release")
+    assert up.run_code([owed], unattended=True) == 0
+    assert up.run_code([owed], unattended=False) == 1
+    assert up.run_code([owed, up.Outcome("carameli", 2, "x")], unattended=True) == 2
+    assert up.run_code([up.Outcome(up.RUN_SCOPED, 2, "x")], unattended=True) == 2
+    assert up.run_code([], unattended=True) == 0
 
 
 def test_a_run_level_outcome_is_not_offered_as_a_retry_target():
@@ -1735,3 +2010,25 @@ def test_a_run_level_outcome_is_not_offered_as_a_retry_target():
     )
     assert "# retry: python scripts/upgrade-project.py carameli --yes" in mixed
     assert up.RELEASE_SCOPED not in mixed.split("# unresolved:")[0]
+
+
+def test_the_unresolved_header_is_read_back_name_by_name():
+    body = up.artifact_body(
+        "v0.7.0",
+        False,
+        [up.Outcome(up.RELEASE_SCOPED, 1, "cut a release"), up.Outcome("carameli", 2, "x")],
+    )
+    assert up.unresolved_names(body) == [up.RELEASE_SCOPED, "carameli"]
+    assert up.unresolved_names("") == []
+
+
+def test_only_an_artifact_holding_nothing_but_the_owed_release_owes_only_a_release():
+    owed = up.Outcome(up.RELEASE_SCOPED, 1, "cut a release")
+    assert up.owes_only_a_release(up.artifact_body("v0.7.0", False, [owed]))
+    assert not up.owes_only_a_release(
+        up.artifact_body("v0.7.0", False, [owed, up.Outcome("carameli", 1, "x")])
+    )
+    assert not up.owes_only_a_release(
+        up.artifact_body("v0.7.0", False, [up.Outcome(up.RUN_SCOPED, 1, "x")])
+    )
+    assert not up.owes_only_a_release("")

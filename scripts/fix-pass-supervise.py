@@ -41,14 +41,18 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agent_tabs
 import bg_sessions
 import devkit_project
 import fix_findings
 import fix_reports
+import fix_send
+import fix_stall
 import harness_triage as triage
 import session_friction
 import session_transcripts as st
 import worktree
+import worktree_tiers as wt  # on the path `worktree` put `scripts/hooks/` on
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WATCHDOG = REPO_ROOT / "scripts" / "fix-pass-watchdog.py"
@@ -60,6 +64,7 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 EXIT_CLEAN = 0
 EXIT_VIOLATED = 1
+EXIT_REFUSED = 2
 
 # How long an iteration waits for the sessions it dispatched, and the least it waits
 # before the next one: a gate needs minutes to report on what the last one shipped.
@@ -77,14 +82,15 @@ BRAKE_TOKENS = 1_000_000
 
 # A person named as the next step, in any wording the pass has ever used.
 PERSON = re.compile(r"needs a human|read the record|waits? for (?:a person|you)\b|by hand", re.I)
-# Why a decision may wait: each names what it waits on, which something tracks.
+# Why a decision may wait: each names what it waits on, which something tracks. Every
+# wait the stall check calls owned is one (the Dependabot cap drifted out of a second
+# copy of that list, 2026-10-11), plus the holds that check files once they last a day.
 TRACKED_WAITS = (
-    "already dispatched",
-    "escalated",
-    "backing off",
-    "held until the devkit session",
+    *fix_stall.TRACKED,
     "a session is working in",
     "held for memory",  # fix_send.HELD_FOR_MEMORY
+    "held for time",  # fix_send.HELD_FOR_TIME: the next pass, with a fresh deadline
+    "pending devkit #",  # fix_send.named_by: the PR it names lifts it, merged or closed
 )
 # Record lines that are a failure, and the finding kind that must be open for each.
 FAILURE_KINDS = (
@@ -147,6 +153,35 @@ def check_record(record: str, exit_code: int | None, open_kinds: set[tuple[str, 
     return found
 
 
+def check_ran(record: str, mode: str) -> list[str]:
+    """The record must be a pass in `mode`, run here. Handed to the scheduled task from
+    an elevated shell, the pass left the rehearsal's `mode=plan` record in place, and
+    three iterations read it back as clean dispatches. A crash or a refusal is
+    `check_record`'s to report."""
+    first = record.splitlines()[0].strip() if record.strip() else "no record"
+    if first == f"fix-pass: mode={mode}" or first.startswith(
+        ("fix-pass: CRASHED", "fix-pass: FAILED")
+    ):
+        return []
+    return [f"the pass did not run in {mode} mode here: {first}"]
+
+
+def stale_dispatch(mode: str, root: Path) -> str:
+    """Why a dispatch from `root` would run as a plan, or "".
+
+    `fix_send.dispatch_mode` turns a dispatch from a linked tree that lacks origin's
+    `scripts/` changes into a plan, and says so only on stderr, which the watchdog keeps.
+    Supervision 2026-11-08: origin's default branch moved seven `scripts/` commits after
+    the rehearsal, and three iterations ran as plans whose record said only `mode=plan`.
+    """
+    if mode != "dispatch" or not (lag := fix_send.stale_tree(root)):
+        return ""
+    return (
+        f"this tree lacks origin's scripts/ changes {lag}, so the pass would run every "
+        "dispatch as a plan -- merge the default branch into this tree, then run again"
+    )
+
+
 def _tracked(line: str) -> bool:
     why = line.split(" -- ", 1)[-1].strip().lower()
     return why.startswith(TRACKED_WAITS)
@@ -198,15 +233,25 @@ def check_progress(iterations: list[Iteration]) -> list[str]:
 # --- the sessions -------------------------------------------------------------------------
 
 
-def measure(transcript: Path | None) -> tuple[int, int, list[str], int]:
-    """`(tool calls, failed calls, friction the detectors see, output tokens)`."""
+def measure(transcript: Path | None, tree: str = "") -> tuple[int, int, list[str], int]:
+    """`(tool calls, failed calls, friction the detectors see, output tokens)`, read as
+    the ledger's harvest reads it for a session in `tree` (`session_friction.judged`): a
+    bare run of a targeted runner is not a whole suite. A supervisor that judged it
+    otherwise reported violations the pass had rightly not filed. The workspace is the
+    parent of the tree's checkout."""
     if transcript is None or not transcript.is_file():
         return 0, 0, [], 0
-    chunk = st.read_new(transcript, 0, 0)
+    chunk = st.read_new(transcript, 0)
     events = st.events(transcript, chunk.rows)
     calls = sum(1 for e in events if e.kind == "call")
     failed = sum(1 for e in events if e.kind == "result" and e.error)
-    friction = [f"{cls}: {what}" for cls, what, _ in session_friction.detect(events)]
+    checkout = wt.owning_checkout(tree) if tree else None
+    rows = (
+        session_friction.judged(events, tree, checkout.parent)
+        if checkout
+        else session_friction.outside_the_tree(session_friction.detect(events), tree)
+    )
+    friction = [f"{cls}: {what}" for cls, what, _ in rows]
     return calls, failed, friction, output_tokens(row for _, row in chunk.rows)
 
 
@@ -245,14 +290,15 @@ def dispatched_since(
 
 
 def settle(
-    trees: list[fix_reports.Tree],
+    find: Callable[[], list[fix_reports.Tree]],
     until: _dt.datetime,
     clock: Callable[[], _dt.datetime],
     sleep: Callable[[float], None] = time.sleep,
     out: Path | None = None,
     busy: Callable[[], frozenset[str]] = frozenset,
 ) -> list[Session]:
-    """Wait until no tree's session is still working, or `until`; what each ended as.
+    """Wait until no tree `find` names has a session still working, or `until`; what
+    each ended as.
 
     Only `WORKING` holds the wait: a session this cannot see (`""`, a Codex tab) would
     otherwise hold every iteration for the whole `SETTLE`. Each session's transcript is
@@ -262,8 +308,15 @@ def settle(
     `busy` (`bg_sessions.working` in a real run) holds a tree whose session left its
     intent and kept going: one sweep worked 70 calls past it, and the transcript audited
     was the half rendered at the intent.
+
+    `find` is read on every poll, and what it names joins the wait: the scheduled pass
+    fires every half hour whatever runs here, and on 2026-10-02 it sent a fixer at
+    sports_betting #53 two minutes into an iteration's wait -- listed once, as the pass
+    returned, the trees here never held it, and no iteration audited it.
     """
+    trees: list[fix_reports.Tree] = []
     while True:
+        trees = _joined(trees, find())
         now = clock()
         states = {t.path: fix_reports.session_state(t.path, now) for t in trees}
         live = busy() if trees else frozenset()
@@ -277,7 +330,7 @@ def settle(
     for tree in trees:
         state, transcript = states[tree.path]
         path = Path(transcript) if transcript else None
-        calls, failed, friction, tokens = measure(path)
+        calls, failed, friction, tokens = measure(path, str(tree.path))
         what = str(tree.stamp.get("what", ""))
         sessions.append(
             Session(
@@ -294,6 +347,14 @@ def settle(
             )
         )
     return sessions
+
+
+def _joined(trees: list[fix_reports.Tree], found: list[fix_reports.Tree]) -> list[fix_reports.Tree]:
+    """`trees` with each of `found` added once, by path; a tree stamped again is the
+    newer dispatch, so its stamp replaces the one held."""
+    by_path = {t.path: t for t in trees}
+    by_path.update((t.path, t) for t in found)
+    return list(by_path.values())
 
 
 def live_dirs() -> frozenset[str]:
@@ -338,8 +399,15 @@ def open_kinds(devkit_dir: Path) -> set[tuple[str, str]]:
 
 
 def iterate(
-    workspace: Path, number: int, mode: str, clock: Callable[[], _dt.datetime]
+    workspace: Path,
+    number: int,
+    mode: str,
+    clock: Callable[[], _dt.datetime],
+    since: _dt.datetime | None = None,
 ) -> Iteration:
+    """One pass and the sessions stamped since `since` -- the end of the last
+    iteration's wait, so a session another pass sent between two iterations is in the
+    next one's audit rather than in neither -- or since this pass started."""
     root = workspace.parent
     devkit_dir = root / "devkit"
     before = {i.id for i in triage.open_items(triage.load(devkit_dir))}
@@ -350,12 +418,20 @@ def iterate(
     iteration = Iteration(number, started.isoformat(timespec="seconds"), code, record)
     iteration.filed = [f"{i.event} {i.project}: {i.detail}" for i in items if i.id not in before]
     iteration.backlog = len(items)
-    iteration.violations = check_record(record, code, open_kinds(devkit_dir))
+    iteration.violations = check_ran(record, mode) + check_record(
+        record, code, open_kinds(devkit_dir)
+    )
     if mode == "dispatch":
         projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
-        trees = dispatched_since(root, projects, started)
+        frm = since or started
         out = REPO_ROOT / READABLE / f"iteration-{number}"
-        iteration.sessions = settle(trees, started + SETTLE, clock, out=out, busy=live_dirs)
+        iteration.sessions = settle(
+            lambda: dispatched_since(root, projects, frm),
+            started + SETTLE,
+            clock,
+            out=out,
+            busy=live_dirs,
+        )
         iteration.violations += check_sessions(iteration.sessions)
         iteration.violations += check_spend(iteration.sessions)
     return iteration
@@ -397,9 +473,27 @@ def main(argv: list[str] | None = None) -> int:
         "--brake-tokens", type=int, default=BRAKE_TOKENS, help="stop starting iterations past this"
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.mode == "dispatch" and agent_tabs.is_elevated():
+        # The pass would hand every iteration to the scheduled task, which runs main's
+        # code rather than this tree's and sends sessions this script never sees.
+        print(
+            "fix-pass-supervise: this shell is elevated, so the pass would hand each "
+            "dispatch to the scheduled task -- run it from an unelevated shell",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
+    if why := stale_dispatch(args.mode, REPO_ROOT):
+        print(f"fix-pass-supervise: {why}", file=sys.stderr)
+        return EXIT_REFUSED
     iterations: list[Iteration] = []
+    since: _dt.datetime | None = None
     for number in range(1, args.iterations + 1):
-        iteration = iterate(args.workspace.resolve(), number, args.mode, utc_now)
+        if iterations and (why := stale_dispatch(args.mode, REPO_ROOT)):
+            # Origin moved during the run: every iteration from here would be a plan.
+            iterations[-1].violations.append(f"stopped before iteration {number}: {why}")
+            break
+        iteration = iterate(args.workspace.resolve(), number, args.mode, utc_now, since)
+        since = utc_now()
         iterations.append(iteration)
         iteration.violations += check_progress(iterations)
         write_report(iterations)

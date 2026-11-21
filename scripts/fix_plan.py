@@ -24,7 +24,9 @@ shapes `gh` returns, so `tests/test_fix_plan.py` drives every branch without a n
   has moved, so what it says may already be fixed on the base; the pass updates the
   branch and reads the new run next time. No session is spent on it.
 - **A nightly red before its base's tip is re-run, not fixed**, for the same reason:
-  the pass dispatches the workflow on the tip and reads that run next time.
+  the pass dispatches the workflow on the tip and reads that run next time. **A gate
+  whose only red jobs never got a runner is re-run too** (`gh run rerun --failed`):
+  no step ran, so there is nothing for a session to read and nothing in the code to fix.
 - **Three shapes are never dispatched.** A release PR is red by construction
   (`RELEASING.md`: `test_fallback_devkit_ref_tracks_the_newest_tag` fails until the
   tag exists, and `release-pipeline.py` judges exactly that red), so an agent sent at
@@ -36,6 +38,8 @@ shapes `gh` returns, so `tests/test_fix_plan.py` drives every branch without a n
 - **A PR against a red default branch is held**, out loud, for the base's fixer: it
   inherits the base's failure, and one pass sent a base and two of its PRs three
   sessions in one second for one cause.
+- **The direct flow differs twice** (`plan`'s `direct`): a resolver is not held behind a
+  red base, and a default branch red on nothing but what tidy rewrites sends no one.
 - **The ledger** (`fix_ledger.py`) is what makes a second click safe: every dispatch is
   recorded against the commit it was observed on, so clicking again sends nothing at a
   failure an agent is already on.
@@ -46,6 +50,8 @@ is the half that asks GitHub.
 
 from __future__ import annotations
 
+import ast
+import datetime as _dt
 import functools
 import re
 import sys
@@ -55,10 +61,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+import harness_triage
 import task_branch as tb
 from _loader import load_by_path
 
-# The four sources of red this plans for. A `COMMIT` is a session's intent the fix pass
+# The sources of red this plans for. A `COMMIT` is a session's intent the fix pass
 # could not commit: the commit stage refused it, and the branch is the worktree it sits in.
 # A `BRANCH` is a default branch whose own gate is red: a push landed red, so nothing
 # rebased onto it can be green and every PR against it inherits the failure.
@@ -66,9 +73,30 @@ PR = "pr"
 NIGHTLY = "nightly"
 COMMIT = "commit"
 BRANCH = "branch"
+# A `LOCAL` is a default branch red in the scheduled local end-to-end run
+# (`e2e_results.py`): the tests no hosted runner can run, run on this machine. It is a
+# red default branch in every way the plan cares about, read off a file, not a run.
+LOCAL = "local"
+# The `workflow` of a `LOCAL` from the medium tier (`tier-pass.py`), which runs the
+# project's own tests here rather than its end-to-end script. Spelled here because
+# `e2e_results` imports this module, and `local_name` reads it.
+MEDIUM_TIER = "Medium Tier"
 # The harness-defect ledger's open backlog (`harness_triage.py`), as one failure for the
 # devkit session: every entry on it is a devkit defect, whichever project filed it.
 LEDGER = "ledger"
+# What Dependabot cannot do for a project (`fix_dependabot.py`): its update runs failing,
+# and security alerts no PR answers. One per project, keyed by what it names rather than
+# by a commit, so a merge to the base is not a reason to send again.
+DEPENDABOT = "dependabot"
+# The head every Dependabot PR is opened from: a red one is an ordinary PR to fix, but
+# it counts against the same daily cap (`fix_budget.DEPENDABOT_DAILY`).
+DEPENDABOT_BRANCH = "dependabot/"
+# How `fix_dependabot` spells the two kinds of entry in a DEPENDABOT signature: an alert
+# no PR answers, and a run that failed because a path dependency cannot be fetched.
+ALERT_ENTRY = "alert "
+UNFETCHABLE_ENTRY = "unfetchable path dependency "
+# The file under `EVIDENCE_DIR` a DEPENDABOT fixer reads first: every alert and job, in full.
+DEPENDABOT_EVIDENCE = "dependabot.md"
 
 # The one test a release commit fails by construction, and the reason a red default
 # branch is not always red: `release-pipeline.py` bumps `FALLBACK_DEVKIT_REF` to a tag
@@ -81,7 +109,10 @@ DISPATCH = "dispatch"  # one agent, in a worktree on the failure's own branch
 RESOLVE = "resolve"  # the same worktree, a conflict-only prompt, and nothing about the gate
 UPSTREAM = "upstream"  # one agent in devkit, for a signature shared across consumers
 UPDATE = "update"  # no agent: the PR is behind its base, so update it and let the gate re-run
-RERUN = "rerun"  # no agent: a nightly's red run predates the tip, so run it there first
+# no agent: a nightly's red run predates the tip, so run it there first; or no job of a
+# run's first attempt started a step, or GitHub said no runner took its red jobs
+# (`lost_runs`), so re-run its failed jobs (`reruns_in_place`)
+RERUN = "rerun"
 SKIP = "skip"  # nothing, and the note says why
 HOLD = "hold"  # nothing this pass: its base is red, and the base's fixer goes first
 # The actions that are one GitHub call and no session: free, so never rationed.
@@ -95,11 +126,39 @@ RUNNING = "running"
 # devkit defect by construction, because the file is byte-identical everywhere.
 VENDORED_TESTS = "scripts/hooks/tests/"
 
+# The files every project keeps its own copy of (`scripts/CLAUDE.md`, "Never vendored"):
+# rendered once from `templates/`, then the project's. A vendored test that checks one
+# is byte-identical everywhere and what it judges is not -- sports_betting #67 was red
+# on the vendored lint-runner contract because its own `scripts/lint-all.py` failed it,
+# and the devkit session it was folded into could change nothing that would turn it
+# green (`project_owned_subject`).
+PROJECT_OWNED = (
+    "scripts/lint-all.py",
+    "scripts/run-tests.py",
+    ".devkit.toml",
+    ".claude/settings.json",
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 # `release.py`'s branch namespace. The PR gate on one of these is red by design.
 RELEASE_PREFIX = "release/"
 
 # The signature a conflicted PR carries, beside whatever its gate said.
 CONFLICT = "merge conflict"
+# What a job GitHub never gave a runner is signed with, after its name: it ran no step,
+# so there is no step name, test id or log line to sign it by.
+NO_RUNNER = "no runner acquired"
+# What a job GitHub refused to start over the account's Actions billing is signed with,
+# after its name. productivity-tracker #3 and social-scraper #108 were red on nothing
+# else, the shared signature folded them into a devkit session, and that session could
+# only report that a payment had failed: no fixer, re-run or code change turns it green.
+NO_BILLING = "refused by the account's Actions billing"
+# The step it takes, which only the account's owner can (`harness_triage.PERSON_STEP`).
+BILLING_STEP = (
+    "settle the GitHub account's Actions billing (Settings > Billing and plans: the failed "
+    "payment or the spending limit), then re-run the red gates"
+)
 
 # Where the evidence lands inside the worktree the agent opens in. Under `logs/`
 # because every project ignores that directory, so nothing here can be committed.
@@ -107,8 +166,10 @@ EVIDENCE_DIR = "logs/gate"
 
 # pytest's short-summary line, `FAILED tests/x.py::test_y - AssertionError: ...`. The
 # id alone is the signature: the message carries a line number or a value that changes
-# between two runs of the same failure.
-FAILED_LINE = re.compile(r"^FAILED (\S+)")
+# between two runs of the same failure. A fixture or a collection failure prints as
+# `ERROR tests/x.py::test_y - ...`; held to a Python path, because `ERROR <word>` is also
+# what a logger prints, and the first word of a message is no test.
+FAILED_LINE = re.compile(r"^(?:FAILED|ERROR(?= \S+\.py)) (\S+)")
 # ruff (`path:1:2: E501 ...`) and mypy (`path:1: error: ...`) both start with the file
 # and a line; the file is the stable part.
 LINT_LINE = re.compile(r"^(\S+?\.\w+):\d+(?::\d+)?: (?:error|[A-Z]{1,4}\d{3,4})\b")
@@ -118,15 +179,58 @@ JS_FAIL_LINE = re.compile(r"^\s*FAIL\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?(?: > .+
 # What `gh run view --log-failed` puts before each line -- `job<TAB>step<TAB>timestamp ` --
 # and the colour codes a runner leaves in. Stripped before the patterns above are tried,
 # since every one of them is anchored at the line's start.
-LOG_PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ?")
+LOG_PREFIX = re.compile(r"^([^\t]*)\t[^\t]*\t\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# What a job with no steps at all carries after its name in a signature.
+UNSTARTED = "(never started a step)"
+
+# What `is_tidy_owned` recognises: what the post-merge tidy of a direct-flow project
+# rewrites, so a red default branch made of nothing else needs no session. The step of
+# devkit's own gate that runs `ruff format --check`; the vendored test that compares the
+# Codex mirror with its source, and the one hook that says the same in devkit's config.
+FORMAT_STEP = "Format"
+MIRROR_TEST = (
+    "scripts/hooks/tests/test_sync_codex_context.py"
+    "::test_the_committed_mirror_is_its_source_byte_for_byte"
+)
+# A generated gate has no step of its own for formatting: it fails in a step that runs
+# many checks, whose name says nothing of which (`job / Run every hook over the whole
+# repo`, `job / Lint`). Those are read by the hooks their own job's log names
+# (`failed_hooks`).
+HOOK_STEPS = (
+    "Run every hook over the whole repo",
+    "Lint",
+    "Lint + typecheck via the wrapper devkit ships",
+)
+TIDY_HOOKS = frozenset(
+    {
+        "ruff-format",
+        "trailing-whitespace",
+        "end-of-file-fixer",
+        "mixed-line-ending",
+        "codex-skill-mirror",
+    }
+)
+# pre-commit's report of a hook that failed, and `ruff format --check`'s of a file it
+# would change, which `lint-all.py` prints without naming a hook.
+HOOK_ID_LINE = re.compile(r"^- hook id: (\S+)")
+WOULD_REFORMAT = re.compile(r"^Would reformat: ")
+# `lint-all.py`'s artifact, which carries no log prefix to say whose it is, and the job a
+# generated gate runs it in. Any other text with no prefix belongs to no job.
+LINT_ARTIFACT = "# source: scripts/lint-all.py"
+LINT_JOB = "Lint"
+# How long a direct-flow default branch red on what tidy rewrites waits for tidy, from when
+# a pass first saw it (`red_seen.py`). Tidy cannot land everything: it restores
+# `.github/workflows` before staging, so whitespace there stays red through every merge,
+# and past this it is a failure like any other.
+TIDY_GRACE = _dt.timedelta(hours=1)
 
 
 @dataclass(frozen=True)
 class Failure:
     """One red thing, with everything the plan and the prompt need to know about it."""
 
-    kind: str  # PR, NIGHTLY, COMMIT or BRANCH
+    kind: str  # PR, NIGHTLY, COMMIT, BRANCH, LOCAL, LEDGER or DEPENDABOT
     project: str  # the checkout name in the workspace registry
     number: int  # PR number, or the tracker issue's number for a nightly; 0 otherwise
     title: str
@@ -140,18 +244,47 @@ class Failure:
     signature: tuple[str, ...] = ()
     evidence: str = ""  # the directory the run's artifacts were downloaded to
     behind: bool = False  # PR only: its head lacks the base's tip, so its gate is stale
+    # PR only: GitHub calls it conflicting and git merges it with the base cleanly, so it
+    # is updated by a merge the pass pushes, not by a resolver or `gh pr update-branch`.
+    merges_clean: bool = False
     # PR only: the runs behind its failing checks, off the rollup, for when the gate
     # workflow's own run list has nothing at this sha -- a required check from another
     # workflow, a consumer whose gate is named differently.
     check_runs: tuple[str, ...] = ()
     # COMMIT only: the worktree the refused intent sits in, which is where the fixer opens.
     tree: str = ""
-    # NIGHTLY only: origin/<base>'s tip when the evidence was read, which the red run at
+    # NIGHTLY and LOCAL: origin/<base>'s tip when the evidence was read, which the red run at
     # `sha` may predate; whether a run of the workflow at that tip is still going; and
     # the workflow's file when it takes `workflow_dispatch`, so the pass can run it there.
     tip: str = ""
     tip_running: bool = False
     rerun_file: str = ""
+    # LOCAL, medium tier: the last commit the tier judged green, the good end of the range
+    # its fixer bisects; "" when it has judged none. `green_at` is the BRANCH field below.
+    green_sha: str = ""
+    # LOCAL, medium tier: the commit a failure that came back was first seen on, the bad
+    # end of that range and what the ledger keys it under; `sha` stays the run the hold
+    # compares with `tip`. "" for a red seen once.
+    first_seen: str = ""
+    # BRANCH only: when the gate last passed on the branch (`gate_evidence.last_green`),
+    # ISO, among the runs read; "" when none of them did. Sessions sent at this problem
+    # before then were at another failure that was fixed (`fix_budget.since`).
+    green_at: str = ""
+    # PR or BRANCH: the runs read whose only red jobs GitHub never gave a runner
+    # (`gate_evidence.runner_lost`), set only when that is every run read. Such a run is
+    # re-run (`gh run rerun --failed`), not fixed: nothing in the code made it red.
+    lost_runs: tuple[str, ...] = ()
+    # The run's attempt, read only when its signature `is_runner_side`; 0 when not read.
+    attempt: int = 0
+    # Red, and `gh` answered nothing for its run's jobs (`gate_evidence.reread`): a read
+    # that failed, not a run that names nothing, so it is skipped and read again.
+    unread: bool = False
+    # BRANCH only: `(job, hook)` for each pre-commit hook its logs name as failed
+    # (`failed_hooks`), which a step-level signature cannot say. Read by `is_tidy_owned`.
+    hooks: tuple[tuple[str, str], ...] = ()
+    # BRANCH only: red on what tidy rewrites for longer than `TIDY_GRACE`, so it is an
+    # ordinary failure now. Set by the pass, which holds the first-seen state.
+    tidy_lapsed: bool = False
 
 
 @dataclass(frozen=True)
@@ -185,26 +318,54 @@ def _entry(raw: str) -> str:
 def signature_from_jobs(jobs: Iterable[dict]) -> tuple[str, ...]:
     """`job / step` for every failed step, when no artifact says anything finer.
 
-    A job that failed with no failed step named -- a cancelled one, a runner that
-    never started -- contributes its own name, so a run that failed outside any step
-    still has a signature rather than an empty one that would match every other
-    artifact-less failure.
+    A failed job with no failed step named contributes its own name, so a run that
+    failed outside any step still has a signature rather than an empty one that would
+    match every other artifact-less failure. A job with no steps at all never started
+    one, and says so (`UNSTARTED`): failed, or cancelled while nothing else failed --
+    carameli's PR Gate run 37363944090 failed on one job no hosted runner ever picked up,
+    `cancelled` with zero steps, and its fixer was sent out with "see the run". A
+    cancelled job beside a real failure is that failure's collateral, and left out.
     """
     found: set[str] = set()
+    unstarted: set[str] = set()
     for job in jobs:
-        if not isinstance(job, dict) or str(job.get("conclusion", "")).lower() != "failure":
+        if not isinstance(job, dict):
             continue
+        conclusion = str(job.get("conclusion", "")).lower()
         name = str(job.get("name", "?"))
-        steps = [
-            s
-            for s in job.get("steps", []) or []
-            if isinstance(s, dict) and str(s.get("conclusion", "")).lower() == "failure"
-        ]
-        if steps:
-            found.update(f"{name} / {s.get('name', '?')}" for s in steps)
-        else:
-            found.add(name)
-    return tuple(sorted(found))
+        steps = [s for s in job.get("steps", []) or [] if isinstance(s, dict)]
+        if not steps and conclusion in ("failure", "cancelled"):
+            (found if conclusion == "failure" else unstarted).add(f"{name} {UNSTARTED}")
+        elif conclusion == "failure":
+            failed = [s for s in steps if str(s.get("conclusion", "")).lower() == "failure"]
+            found.update([f"{name} / {s.get('name', '?')}" for s in failed] or [name])
+    return tuple(sorted(found or unstarted))
+
+
+def is_unstarted(sig: tuple[str, ...]) -> bool:
+    """Every entry is a job that never started a step: a runner never acquired, or a
+    `runs-on`/`if:` that never let it start -- nothing a session can read code for."""
+    return bool(sig) and all(entry.endswith(UNSTARTED) for entry in sig)
+
+
+# The steps GitHub's runner runs before any the workflow names: a job red in one of them
+# failed to be stood up, which no line of the repo took part in. social-scraper #90 and
+# #91 were each red on `Tests / Initialize containers` alone -- public ECR answered the
+# postgres service image's pull with `toomanyrequests` -- and each was sent a fixer.
+RUNNER_STEPS = ("Set up job", "Initialize containers")
+
+
+def is_runner_side(sig: tuple[str, ...]) -> bool:
+    """Every entry is a job none of whose workflow steps ran: one that never started a
+    step (`is_unstarted`), or one that failed in a step of the runner's (`RUNNER_STEPS`)."""
+    return bool(sig) and all(
+        entry.endswith(UNSTARTED) or entry.rpartition(" / ")[2] in RUNNER_STEPS for entry in sig
+    )
+
+
+def is_billing_refused(sig: tuple[str, ...]) -> bool:
+    """Every entry is a job GitHub refused to start over billing (`NO_BILLING`)."""
+    return bool(sig) and all(entry.endswith(f" / {NO_BILLING}") for entry in sig)
 
 
 def signature(conflicted: bool, texts: Iterable[str], jobs: Iterable[dict]) -> tuple[str, ...]:
@@ -213,6 +374,11 @@ def signature(conflicted: bool, texts: Iterable[str], jobs: Iterable[dict]) -> t
     fine = signature_from_logs(texts)
     parts.extend(fine or signature_from_jobs(jobs))
     return tuple(parts)
+
+
+def names_nothing(sig: tuple[str, ...]) -> bool:
+    """No test id, lint line or failed step in it: a conflict alone is no evidence."""
+    return not [entry for entry in sig if entry != CONFLICT]
 
 
 @functools.cache
@@ -259,20 +425,121 @@ def is_vendored(sig: tuple[str, ...]) -> bool:
     return bool(sig) and all(in_vendored_tier(entry) for entry in sig)
 
 
+def project_owned_subject(entry: str, root: Path = REPO_ROOT) -> str:
+    """The project-owned file the vendored test `entry` reads, or "" when it names none.
+
+    Read off devkit's copy of the test, which is the consumer's byte for byte: the path
+    spelled whole as a string, or every segment of it spelled as one (`REPO_ROOT /
+    "scripts" / "lint-all.py"`). The docstring is skipped -- a test of a vendored file may
+    *mention* a runner -- and so is a test devkit no longer has: unreadable is "", so the
+    failure stays devkit's, the answer before this existed.
+    """
+    path, _, rest = entry.partition("::")
+    name = rest.rsplit("::", 1)[-1].split("[", 1)[0]
+    if not name or not in_vendored_tier(entry):
+        return ""
+    try:
+        source = (root / path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return ""
+    said = _spelled_by(source, name)
+    return next(
+        (owned for owned in PROJECT_OWNED if owned in said or set(owned.split("/")) <= said), ""
+    )
+
+
+def _spelled_by(source: str, name: str) -> set[str]:
+    """Every string the function `name` in `source` spells outside its docstring."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+    found = [node for node in ast.walk(tree) if isinstance(node, functions) and node.name == name]
+    if not found:
+        return set()
+    body = found[0].body[1:] if ast.get_docstring(found[0]) is not None else found[0].body
+    nodes = (node for statement in body for node in ast.walk(statement))
+    return {n.value for n in nodes if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+
+
 def is_release_red(sig: tuple[str, ...]) -> bool:
     """The signature is the newest-tag test and nothing else: a release commit's red."""
     return bool(sig) and all(entry.rsplit("::", 1)[-1] == RELEASE_TEST for entry in sig)
+
+
+def failed_hooks(texts: Iterable[str]) -> tuple[tuple[str, str], ...]:
+    """`(job, hook)` for each pre-commit hook these logs name as failed, sorted, deduped;
+    `ruff format --check` reporting a file counts as its hook. The job is the log prefix's,
+    "" for a text that has none and says nothing else. Kept out of the signature, which
+    groups failures across every project: only the direct flow asks which hook it was."""
+    found: set[tuple[str, str]] = set()
+    for text in texts:
+        fallback = LINT_JOB if str(text).startswith(LINT_ARTIFACT) else ""
+        for raw in str(text).splitlines():
+            prefixed = LOG_PREFIX.match(raw)
+            job = prefixed.group(1) if prefixed else fallback
+            line = ANSI.sub("", LOG_PREFIX.sub("", raw))
+            if hook := HOOK_ID_LINE.match(line):
+                found.add((job, hook.group(1)))
+            elif WOULD_REFORMAT.match(line):
+                found.add((job, "ruff-format"))
+    return tuple(sorted(found))
+
+
+def is_tidy_owned(sig: tuple[str, ...], hooks: Iterable[tuple[str, str]] = ()) -> bool:
+    """Every entry is formatting or the Codex mirror, both of which the post-merge tidy of
+    a direct-flow project rewrites. `hooks` is `failed_hooks`' answer: an entry for a
+    step that runs many checks counts only when its own job's logs name hooks and each is
+    tidy's, so a log that says nothing reads as not tidy's, and a fixer goes. A hook another
+    job names says nothing about this one."""
+    by_job: dict[str, set[str]] = {}
+    for job, hook in hooks:
+        by_job.setdefault(job, set()).add(hook)
+
+    def tidy(entry: str) -> bool:
+        job, _, step = entry.rpartition(" / ")
+        named = by_job.get(job, set())
+        hooks_are_tidy = step in HOOK_STEPS and bool(named) and named <= TIDY_HOOKS
+        return entry == MIRROR_TEST or step == FORMAT_STEP or hooks_are_tidy
+
+    return bool(sig) and all(tidy(entry) for entry in sig)
+
+
+def owned_by_tidy(failure: Failure, direct: frozenset[str]) -> bool:
+    """A red default branch of a direct-flow project that only tidy has to answer, for as
+    long as `TIDY_GRACE` lasts: past it (`Failure.tidy_lapsed`) it is anyone's."""
+    return (
+        failure.kind == BRANCH
+        and failure.project in direct
+        and not failure.tidy_lapsed
+        and is_tidy_owned(failure.signature, failure.hooks)
+    )
 
 
 def name_of(failure: Failure) -> str:
     """How a failure is named in a record: `#412`, the branch it sits on, or `origin/main`."""
     if failure.kind == BRANCH:
         return f"origin/{failure.base}"
+    if failure.kind == LOCAL:
+        return f"origin/{failure.base} ({local_name(failure)})"
     if failure.kind == COMMIT:
         return failure.head
-    if failure.kind == LEDGER:
-        return LEDGER
+    if failure.kind in (LEDGER, DEPENDABOT):
+        return failure.kind
     return f"#{failure.number}"
+
+
+def local_name(failure: Failure) -> str:
+    """Which scheduled local tier a `LOCAL` came from, as a record and a tab title name it."""
+    return "medium tier" if failure.workflow == MEDIUM_TIER else "local e2e"
+
+
+def is_dependabot(failure: Failure) -> bool:
+    """Dependabot's own red: its runs and alerts, or a PR it opened."""
+    return failure.kind == DEPENDABOT or (
+        failure.kind == PR and failure.head.startswith(DEPENDABOT_BRANCH)
+    )
 
 
 # --- the two shapes that never get an agent -------------------------------------------
@@ -303,7 +570,13 @@ def is_adoption(decision: Decision, prefixes: Iterable[str]) -> bool:
 
 
 def skip_reason(failure: Failure, latest_tag: str, prefixes: tuple[str, ...]) -> str:
-    """Why this failure gets no agent, or "" when it gets one. Three shapes, each said."""
+    """Why this failure gets no agent, or "" when it gets one. Four shapes, each said."""
+    if failure.unread:
+        return (
+            "unread: gh answered nothing for the red run's jobs, or would not hand over the "
+            "artifacts it uploaded, this pass, which is not a run that names nothing; the "
+            "next pass reads it again rather than send one blind"
+        )
     on_branch = failure.kind in (PR, COMMIT)
     if on_branch and is_release(failure.head):
         return (
@@ -331,28 +604,37 @@ def plan(
     failures: Iterable[Failure],
     latest_tag: str,
     adoption_prefixes: Iterable[str],
+    direct: Iterable[str] = (),
 ) -> list[Decision]:
     """Every failure placed under exactly one decision, in a stable order.
 
     `latest_tag` is devkit's newest release as written (`v0.11.21`) or already as a
     branch slug; it is compared to adoption branch names, so it is slugified here.
     Empty means "cannot tell", in which case no adoption PR is called superseded: an
-    unknown newest tag must not silently skip every adoption on the machine.
+    unknown newest tag must not silently skip every adoption on the machine. `direct`
+    names the projects in the direct flow (`delivery.py`), where `_place` differs.
     """
     prefixes = tuple(adoption_prefixes)
     latest = tb.slugify(latest_tag) if latest_tag else ""
+    flow = frozenset(direct)
     grouped: dict[tuple[str, ...], list[Failure]] = {}
     decisions: list[Decision] = []
     listed = list(failures)
+    # An unread branch is skipped and still red: its PRs stay held behind it. A branch
+    # refused over billing is skipped and holds nothing: its PRs are refused alike, and
+    # so is one no fixer is coming for because tidy owns it.
     red_bases = {
         (f.project, f.base)
         for f in listed
-        if f.kind == BRANCH and not skip_reason(f, latest, prefixes)
+        if f.kind == BRANCH
+        and not is_release_red(f.signature)
+        and not is_billing_refused(f.signature)
+        and not owned_by_tidy(f, flow)
     }
     for failure in sorted(listed, key=lambda f: (f.kind, f.project, f.number)):
         if why := skip_reason(failure, latest, prefixes):
             decisions.append(Decision(SKIP, why, (failure,)))
-        elif placed := _place(failure, red_bases):
+        elif placed := _place(failure, red_bases, flow):
             decisions.append(placed)
         else:
             grouped.setdefault(failure.signature, []).append(failure)
@@ -373,7 +655,9 @@ def plan(
     return decisions
 
 
-def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None:
+def _place(
+    failure: Failure, red_bases: set[tuple[str, str]], direct: frozenset[str] = frozenset()
+) -> Decision | None:
     """The decision a failure gets on its own, before any grouping; None to group it.
 
     A conflict is decided first: its gate has no merge ref to run against, GitHub
@@ -389,19 +673,115 @@ def _place(failure: Failure, red_bases: set[tuple[str, str]]) -> Decision | None
     there that is still going decides, and a red run from before the tip is re-run on it
     before any session goes. ibkr_trader's Nightly was fixed on main an hour after its
     run went red, and the fixer sent at that run spent its session finding out (85219e18).
+
+    A run whose first attempt failed only on jobs that never started a step, or that
+    failed in the runner's own setup (`is_runner_side`), is re-run in place, once: that
+    is a runner GitHub never handed out or a registry that refused a pull, not code. A second attempt
+    the same way is no longer luck, and its fixer goes, told the job never started --
+    unless GitHub's annotations say outright that no runner took them (`lost_runs`),
+    which is re-run at any attempt. Both come after the hold: a re-run under a red base
+    would only come back with the base's red.
+
+    A run GitHub refused to start over billing (`is_billing_refused`) is skipped, naming
+    the person's step, before the hold: a re-run is refused the same way, and a fixer
+    can only find the annotation.
+
+    In the `direct` flow two of these differ. A resolver is not held by a red base: nothing
+    waits on the base being green, and a conflicted PR is the one thing that cannot merge.
+    And a red default branch made of nothing but what tidy rewrites (`owned_by_tidy`) is
+    skipped for `TIDY_GRACE`: the post-merge job answers it, and a fixer would race that job.
     """
-    against_red = failure.kind in (PR, NIGHTLY) and (failure.project, failure.base) in red_bases
-    if CONFLICT in failure.signature and not against_red:
+    against_red = (
+        failure.kind in (PR, NIGHTLY, LOCAL) and (failure.project, failure.base) in red_bases
+    )
+    if CONFLICT in failure.signature and (not against_red or failure.project in direct):
         return Decision(RESOLVE, describe(failure), (failure,))
+    if owned_by_tidy(failure, direct):
+        return Decision(SKIP, tidy_note(failure), (failure,))
     if failure.behind and CONFLICT not in failure.signature:
-        return Decision(UPDATE, f"{describe(failure)}; behind origin/{failure.base}", (failure,))
+        why = (
+            f"GitHub says conflicting, git merges it with origin/{failure.base} cleanly"
+            if failure.merges_clean
+            else f"behind origin/{failure.base}"
+        )
+        return Decision(UPDATE, f"{describe(failure)}; {why}", (failure,))
+    if is_billing_refused(failure.signature):
+        return Decision(SKIP, billing_note(failure), (failure,))
     if against_red:
         return Decision(HOLD, held_note(failure), (failure,))
     if failure.kind == NIGHTLY and failure.tip_running:
         return Decision(HOLD, tip_note(failure, "a run at the tip is in progress"), (failure,))
-    if failure.kind == NIGHTLY and failure.rerun_file and failure.tip not in ("", failure.sha):
+    if is_stale_local(failure):
+        why = "the next scheduled local run re-tests the tip"
+        return Decision(HOLD, tip_note(failure, why), (failure,))
+    return runner_rerun(failure)
+
+
+def is_stale_local(failure: Failure) -> bool:
+    """A local end-to-end red at a commit its base has moved past.
+
+    No GitHub run can be dispatched at the tip, so where a stale nightly is re-run the
+    stale local run is held until the scheduled job re-tests: the commits between may
+    carry the fix -- a fixer's own merged PR always does -- and a session sent at the old
+    red would be re-sent every `fix_ledger.RESEND_AFTER` until the next night. An unknown
+    tip is not a moved one, so a run whose base git cannot read is still dispatched. The
+    medium tier's red inherits this, and re-tests within minutes, not at night.
+    """
+    return failure.kind == LOCAL and failure.tip not in ("", failure.sha)
+
+
+def runner_rerun(failure: Failure) -> Decision | None:
+    """The `RERUN` `_place` gives a failure no code took part in, past its holds; None
+    when it is not one."""
+    if reruns_at_tip(failure):
         return Decision(RERUN, tip_note(failure, "re-running it there"), (failure,))
+    if failure.lost_runs and CONFLICT not in failure.signature:
+        # c354f451, 27327483: roguelike's and social-scraper's gates each lost every red
+        # job to "not acquired by Runner", and a fixer was sent at a log that did not exist.
+        why = "GitHub never gave its red jobs a runner: re-running them"
+        return Decision(RERUN, f"{describe(failure)}; {why}", (failure,))
+    if reruns_in_place(failure) and failure.attempt == 1:
+        return Decision(RERUN, f"{describe(failure)}; {_in_place_note(failure)}", (failure,))
     return None
+
+
+def billing_note(failure: Failure) -> str:
+    """Why a run GitHub refused to start over billing is skipped, and whose step it is."""
+    return (
+        f"{describe(failure)}; GitHub refused to start its jobs over the account's billing "
+        f"-- {harness_triage.PERSON_STEP} {BILLING_STEP}"
+    )
+
+
+def tidy_note(failure: Failure) -> str:
+    """Why a default branch red on formatting or the Codex mirror gets no fixer yet."""
+    return (
+        f"{describe(failure)}; nothing but what tidy rewrites, which runs on every merge: "
+        "a fixer goes if it outlasts the grace"
+    )
+
+
+def _in_place_note(failure: Failure) -> str:
+    """Why a runner-side failure (`is_runner_side`) is re-run in place rather than fixed."""
+    how = (
+        "no runner started it" if is_unstarted(failure.signature) else "the runner never set it up"
+    )
+    return f"{how}, so run {failure.run_id}'s failed jobs are re-run once"
+
+
+def reruns_at_tip(failure: Failure) -> bool:
+    """A nightly's red run predates its base's tip, and its workflow can be run there."""
+    return (
+        failure.kind == NIGHTLY
+        and bool(failure.rerun_file)
+        and failure.tip not in ("", failure.sha)
+    )
+
+
+def reruns_in_place(failure: Failure) -> bool:
+    """A `RERUN` of this failure re-runs its own run's failed jobs (`gh run rerun
+    --failed`) rather than dispatching its workflow at the tip."""
+    return bool(failure.run_id) and is_runner_side(failure.signature) and not reruns_at_tip(failure)
 
 
 def tip_note(failure: Failure, what: str) -> str:
@@ -424,8 +804,12 @@ def describe(failure: Failure) -> str:
     """The one-line reason a row is red, for the report and the prompt."""
     if failure.kind == LEDGER:
         head = f"{len(failure.signature)} open group(s) on the harness-defect ledger"
+    elif failure.kind == DEPENDABOT:
+        head = failure.title
     elif failure.kind in (NIGHTLY, BRANCH):
         head = f"{failure.workflow} workflow failing on origin/{failure.base}"
+    elif failure.kind == LOCAL:
+        head = f"{failure.workflow} failing on origin/{failure.base} on this machine"
     else:
         head = failure.reason or "red"
     if failure.signature:

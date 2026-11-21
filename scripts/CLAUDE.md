@@ -42,19 +42,25 @@ what the hook runs and CI does not, are both held to a written reason by
 - **Never hard-code project specifics in a hook script.** A new behaviour gets a manifest
   field and a neutral default in `harness_config.py`, not an `if project ==` branch.
 - **`templates/` is a one-shot copy.** `--pull` never looks at a template again, so every
-  fix made here after a project was generated stays here, and nothing can report the gap.
-  When a file stops having a per-project value, move it into `MANIFEST` rather than
-  leaving it rendered.
+  fix made here after a project was generated stays here. The one exception is a copy the
+  project never edited: `template_refresh.py`, run in every adoption box, replaces one
+  byte-identical to an earlier version of a template it lists, a rendered line it names
+  (`RENDERED_LINES`) aside. A project's own edits
+  keep it out of reach, so when a file stops having a per-project value, move it into
+  `MANIFEST` rather than leaving it rendered.
 - **A file that only one tier can use goes in `GATED_MANIFEST`, not in `templates/`.**
   `MANIFEST` is unconditional -- every consumer holds every path -- which is right for
   the harness and wrong for `frontend/src/worktreePort.ts`, which is nonsense in devkit
   itself and in every stackless repo. The gated tier is keyed on a `.devkit.toml` section
-  (`[frontend] enabled`) and resolved per consumer at that section's `src`, so it is
+  (`[frontend] enabled`, `[desktop] enabled`) and resolved per consumer at that gate's
+  prefix -- the frontend's `src`, the repo root for the desktop's -- so it is
   drift-checked and `--pull`ed like everything else and simply absent where the tier is
   off. The gate reads the *consumer's* `harness_config.py` by path, so it answers "off"
   on the bootstrap pull that has not delivered that file yet; the second pull delivers
   what the gate selects. Spell the literal with string keys -- `structure_check` reads
-  it off the source with `ast.literal_eval` in every consumer.
+  it off the source with `ast.literal_eval` in every consumer. **A new gate is three
+  edits that must agree:** its entry here, its prefix in `sync-devkit.gate_prefixes` and
+  `DEFAULT_GATE_PREFIX`, and its arm in `structure_check._gate_prefixes`.
 - **Vendoring a generator does not vendor its output.** `.codex/hooks.json` is written by
   `sync-codex-hooks.py` from the project's own `.claude/settings.json`, so the script is
   in `MANIFEST` and the file it produces cannot be. No agent hook is wired, so today that
@@ -62,6 +68,11 @@ what the hook runs and CI does not, are both held to a written reason by
   script needs a check that regenerates it and compares**, running in the consumer's own
   gate where no `$DEVKIT_DIR` exists — `sync_devkit.codex_hooks_stale` is that check.
   Regenerating on `--pull` is not enough alone: a project only pulls when asked to.
+  The `.agents/skills/` mirror is the same shape: `--pull` re-mirrors it
+  (`remirror_codex_skills`), so does `ship.py --fix` before every gated commit the pass
+  makes (`mirror_codex_skills`), and the vendored `test_sync_codex_context.py` is its check.
+  A direct-flow commit runs no `ship.py --fix`, so there it stays stale until `ship.py
+  --tidy` runs after the merge.
 
 ## `templates/` is content, not source
 
@@ -130,6 +141,10 @@ state a checkout can only reach by surviving the work done in it. A box cut fres
   `origin/<default>` commits (`head_tree_landed`), and the merged PR's `headRefOid`. Every
   unknown reads as *not landed*, and all of it is refused while the box is dirty: a landed
   tree says where the committed work is and nothing about the edits on top of it.
+- **Every reaper destroys a box through `apply_reap`, which holds that box's
+  `reap_lock`.** Reapers run concurrently (`reconcile`, `reap`, an adoption's cleanup), and
+  one reading a box another is tearing down sees a half-removed tree; `reconcile` waits on
+  the lock and reads a box gone by then as reaped (`unless_reaped_elsewhere`, 3f2e8171).
 - **Only a reaper passes `-v` to `compose down`,** scoped with `-p` to the tree's own
   project so it cannot widen to the source project: `reap` for a box, and
   `session_trees.py` for a merged `.claude/worktrees` tree, which refuses a name equal to
@@ -140,6 +155,8 @@ state a checkout can only reach by surviving the work done in it. A box cut fres
   can clear. `box_teardown.py` evicts a process whose **executable or a loaded module**
   lives under the box, never one whose command line merely names it: an agent's own shell
   names it too, and killing the session that asked for the reap is worse than the husk.
+  A session *standing in* the box maps nothing there, so `reconcile` asks `claude agents`
+  (`box_teardown.vacate`): an idle background one is stopped, any other is a `WAIT`.
 - **A box is never registered in the workspace file.** That would put it in `sweep.py`'s
   scope and give its lifecycle two owners; `workspace-status.py` reports boxes instead.
 - **`worktree-guard.py` is the one caller that skips provisioning.** It was built as a
@@ -170,15 +187,51 @@ log. Four things a change must keep:
   user; `devkit_schtasks.secured` names the user, and
   `tests/test_installer_contract.py` fails a document that would need elevation.
 
+**One job is the exception to that rule and to "scheduled jobs run unelevated", and there
+can only be one.** `devkit-elevated` (`install-elevated-worker.py`) is
+`support.ELEVATED_EXEMPTION`, reason beside it: ending a stuck `WSLService` is refused to
+every unelevated token, and a dispatcher running tasks as admin would run merged code as
+admin. A second elevated job is a design change, not a second entry; the contract test
+holds `HighestAvailable` to that one file. What a change there must keep, because each
+looks like the house pattern and is a privilege escalation here:
+
+- **The residual risk, which cannot be closed.** The installer and the interpreter it
+  copies are read from places the user can write, the checkout and on a typical PC an
+  `AppData` Python, so the install assumes a clean machine at that moment. What runs
+  afterwards is a copy in `C:\ProgramData\devkit\elevated\`, so a merged change cannot
+  reach it. Upgrading is an administrator re-running `--yes` by choice.
+- **The harness never prompts for it.** An unreviewed merge plus a prompted admin paste
+  is the dispatcher this design refused. `--check` reports a missing or outdated worker;
+  `fix_elevated.py` files a person's step only for a real request waiting on a PC with no
+  worker, never for an upgrade, and a working installed worker keeps working. It stays
+  out of `installers.py` (`HELD_OUT`), which runs unelevated.
+- **Not `register`, `secured` or `logged`.** `register` hands an elevated `schtasks` a file
+  in the user's temp folder; `secured` grants the user full access to the task, which lets
+  them rewrite its action; `logged` would run `log-wrap.py` from the checkout as admin.
+  Its document is written into the locked folder and carries a read-only descriptor, read
+  back after registering and by `elevated_request.state` every pass. It is
+  `OFF_THE_LEDGER`, its artifact is the one outside `logs/`, and a failed or refused run
+  reaches the pass through `elevated_request.results`.
+- **`ROOT` is never `mkdir` then ACL.** `make_protected` creates it with its descriptor
+  in one call, and `tree_problems` reads back the owner and ACL of everything beneath
+  before anything there runs, on a reinstall too, refusing rather than reusing.
+- **The name of an empty file is the whole interface** (`elevated_worker.py`): no content
+  read, no argument, nothing from the environment, which here is the user's. It is
+  Windows-only, and elsewhere each part says so and exits 0.
+
 Every installer declares `TASK_NAME` and `ARTIFACT`, because `pythonw.exe` sends stdout
 nowhere and a job leaves exactly what it writes itself;
 [`tests/test_scheduled_jobs.py`](../tests/test_scheduled_jobs.py) fails one that skips
-either. For a runner with no artifact of its own, wrap the scheduled call in
-`log-wrap.py --always`.
+either. **And every job's arguments go through `devkit_schtasks.logged`**, which runs
+them under `log-wrap.py --always` -- a runner that writes its own artifact included,
+because that artifact is overwritten by the next run and the wrapper's ledger event is
+not. Its label must not slug to the runner's own artifact. The exemptions -- the
+resident tray, the fix pass, whose runner files its own, and the elevated worker -- are
+`OFF_THE_LEDGER` in `tests/test_installer_contract.py`, each with its reason.
 
 **An installer is driven, not remembered.** `scripts/installers.py` runs every
-`scripts/install-*.py`'s `--check` on a schedule and `--yes` on each that needs it, so
-an installer is only as good as its answer to `--check`: exit 0 current, 1 needs
+`scripts/install-*.py`'s `--check` on a schedule, bar `HELD_OUT`, and `--yes` on each that
+needs it, so an installer is only as good as its answer to `--check`: exit 0 current, 1 needs
 (re)installing, 2 left alone. Answer it through `devkit_schtasks.run_check`, handing it
 the same document `--yes` registers, never a private parse of `schtasks` output — six
 installers each carried one, all six compared only the script path, and none could see
@@ -190,6 +243,76 @@ holds every installer to all of it, found by name rather than listed. [`windowle
 window-less — `CREATE_NO_WINDOW` on every spawn in the job's reachable set, paired with a
 **console** `python.exe` as the inner interpreter — and its rules are enforced by that
 same test.
+
+## A red end-to-end run is a result, not a failed job
+
+`devkit-local-e2e` exits 0 when a project's `scripts/e2e.py` is red. That is
+deliberate: the job's exit code goes to `log-wrap.py`, which files every failure on the
+events ledger, and every ledger row goes to the one devkit session ahead of all project
+fixers. A project's red e2e run belongs to that project's fixer. So the verdict travels
+as `logs/e2e/<project>/result.json`, and `e2e_results.collect` hands it to the fix pass
+as a `fix_plan.LOCAL` failure. Keep the job's non-zero exit for the pass itself breaking.
+`e2e_results.py` carries the rest, including why a run older than the tip is held
+rather than sent.
+
+## The test tiers
+
+CI is Linux, so a check that must also hold on Windows needs a job on a PC. Each tier
+runs after the last, and none stands between a change and `main`.
+
+| Tier | Runs | Where | When | Job |
+| --- | --- | --- | --- | --- |
+| fast | the `PR Gate` workflow | CI | every commit | `.github/workflows/pr-gate.yml` |
+| medium | each project's `scripts/run-tests.py`, whole suite | a PC whose `devkit.fixPass` is `dispatch`, one project at a time | every 15 minutes, whatever the person is doing; never takes focus | `devkit-medium-tier` |
+| heavy | each project's `scripts/e2e.py`, may take focus | the PC `devkit.localE2e` assigns | nightly, once the PC is idle | `devkit-local-e2e` |
+| full | the `Nightly` workflow | CI | nightly | `.github/workflows/nightly.yml` |
+
+The medium tier is `e2e_results.MEDIUM`: the same result file in its own folder, and the
+same `fix_plan.LOCAL` red, so a change to either tier's result reaches both. What differs
+is `tier-pass.py`'s to say. It tests only the tip, in a tree nobody works in
+(`disposable_tree.py`), so a red can span many merges: its fixer bisects from
+`Result.last_green`. A tree has no `.env` and no stack, so a project that needs either is
+not applicable, never red (`tier_command.not_applicable`), and what stops a run judging
+at all is a backoff and a count, not a ledger row (`tier_state.py`).
+
+## The after-merge queue, and claims across PCs
+
+`.devkit-queue/<name>.toml` is data a project commits; `after_merge.py` decides,
+`after-merge-pass.py` acts, and neither is vendored. **A claim is a ref only one PC can
+create** (`job_claims.py`, which says why each detail of the push is the way it is): keep
+its commit unique per call, keep `FAILED` distinct from `LOST`, and keep `--no-verify`
+inside `_push`, which refuses anything outside `refs/devkit/`.
+
+**No task may be silently lost, so a change here keeps these:**
+
+- A task's id is a hash of its path and the commit that added it. Nothing about its bytes
+  goes in, or a fixer rewriting whitespace runs a finished task again.
+- A task is open, handed, done or failed, and those are refs every PC reads. Done means
+  finished: a session that shipped, a command that passed, a request the worker took. A
+  launch or a request written is handed at most, and `removable` counts done alone.
+- A handed task is read back by the pass on the machine holding it, not by `fix_loop`,
+  which leaves those trees alone: the second PC runs with `devkit.fixPass` off.
+- Every state that is not over has a clock, `after_merge.UNCLAIMED_AFTER_DAYS`.
+- A winner asks the server before it acts, and a re-read of origin confirms the file right
+  before a task runs. A claim goes back only once the server holds the done ref.
+- Queue claims fail closed, and the fix pass's fail open (`fix_claims.py`).
+
+`fix_claims.py` puts the fix pass's sends behind the same claims, so a second PC can run
+`devkit.fixPass: dispatch` without sending a second fixer at the same red. **That is all
+it solves.** What stays per machine, and is not papered over:
+
+- **The dispatch ledger.** `fix_ledger.ATTEMPTS` is counted per machine, so a problem can
+  get that many fixers from each PC, and a dead session is read back only where its tree
+  is.
+- **A commit that moves under a running fixer.** The claim is per commit, and busy trees
+  are per machine, so `update-branch` from either PC is a new key the other may send at
+  while the first fixer still works.
+- **The harness ledger.** Each machine files to its own shard, and one PC reads another's
+  only through `ledger-pool.py`'s shared folder, so a finding can be filed, and worked,
+  twice. A PC with `devkit.fixPass` off drains nothing, so a finding the queue files there
+  waits for pooling or for that switch.
+- **The pass's other writes.** `merge_green_adoptions`, `cut_release` and `tend` take no
+  claim.
 
 ## The events ledger: append-only, and that is why resolution is an event
 
@@ -205,13 +328,25 @@ a hook that misbehaves under one routinely behaves under the other — while **`
 deliberately is not**, since one defect hit on two machines is one defect. The fix pass
 (`fix-pass.py`) sends the open backlog to its devkit session with everything else
 harness-shaped, and the `/triage-harness` skill is the same sweep run by hand; both are
-devkit-only on purpose: every defect on this ledger is a defect in devkit, whatever
-project the session that hit it was scoped to.
+devkit-only on purpose: devkit is what reads this ledger, whatever project the session
+that hit a row was scoped to. That does not make every cause devkit's -- a
+`scheduled-job-failed` row from `collectors.py fire <project>` ran that project's code
+(e0301529) -- so `fix_prompts.LEDGER_STEPS` sends the sweep to find the cause first.
 
 **The ledger is also the fix pass's own sink** (`fix_findings.py`): every outcome it cannot
 turn green -- a step that raised, a fixer that died or gave up, transcript friction, a
 stale wait -- is a `fix-pass-finding` or `session-friction` there, and nothing it does
-ends at a person. Two consequences for a change here: a finding is filed only when no
+ends at a person. The one exception is a step no fixer can take -- an elevated command, a
+reboot: a job says so with `harness_triage.PERSON_STEP` before the step, its group
+awaits that person (`awaiting_person`), and `workspace-status.events_line` names it in
+the morning toast instead of the pass sending a fixer that can only re-check it
+(aa6a9022). Two consequences for a change here: a finding is filed only when no
 open one shares its signature, so the detail must be stable across recurrences (lead with
-the kind, keep shas and counts out); and a resolution is held to its `pr=`
-(`fix_verify.py` reopens what never merged), so "resolved" means landed.
+the kind, keep shas and counts out). A scheduled job's `cause=` is held to the same: `log-wrap.py` reads it
+from the job's exception, `error:` line or logged error (`CAUSE_LINES`), never from a
+"details in <file>" pointer unless nothing else was said -- a status line that names its
+error before the pointer is read up to it (`_named`) -- else its last line, so a job
+whose failures name a tree or a file ends a failed run on an `error:` line naming only the
+kind (`reap-stale.cause_line`), and a status line that only points at a file
+(`FAILED -- details in <file>`) is followed into that file (`cause_source`); and a
+resolution is held to its `pr=` (`fix_verify.py` reopens what never merged), so "resolved" means landed.

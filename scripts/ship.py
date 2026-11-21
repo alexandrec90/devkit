@@ -35,6 +35,21 @@ EXIT_FIXERS_FAILED = 7
 PRE_COMMIT_TAILS = (Path("Scripts") / "pre-commit.exe", Path("bin") / "pre-commit")
 
 
+def venv_module_command(launcher: Path) -> list[str]:
+    """`<venv python> -m pre_commit` when the venv's interpreter sits beside `launcher`,
+    else the launcher itself.
+
+    uv writes the interpreter's absolute path into every console script, so one written
+    from a tree since deleted dies with `uv trampoline failed to canonicalize script
+    path` -- devkit's `claude --worktree` trees share the checkout's `.venv` through a
+    link, and the tree that last synced into it is gone the day it merges. The
+    interpreter reads `pyvenv.cfg` and survives that. The launcher still says pre-commit
+    is installed here. Mirrored in `git_policy.framework._pre_commit_command`.
+    """
+    python = launcher.with_name("python.exe" if launcher.suffix == ".exe" else "python")
+    return [str(python), "-m", "pre_commit"] if python.is_file() else [str(launcher)]
+
+
 # What `claude --worktree <name>` names the branch it cuts: the literal string
 # `worktree-` followed by the name, with any `/` replaced by `+`. It is hard-coded in the
 # CLI -- there is no setting for it -- so a session that isolates itself with the built-in
@@ -162,17 +177,34 @@ def runner_supports_paths(help_text: str) -> bool:
     return "--paths" in help_text
 
 
-def _lint_argv(paths: list[str], help_text: str) -> list[str]:
+def lint_python(
+    root: Path = REPO_ROOT,
+    env: dict[str, str] | None = None,
+    run: toolchain.Runner = subprocess.run,
+) -> str:
+    """The interpreter to run the lint runner under: the tree's `.venv` when this one lacks ruff.
+
+    `lint-all.py` is project-owned, so a project's copy can predate the template's own
+    re-run under the venv -- and that copy, handed an interpreter without ruff or mypy,
+    skips both and prints `clean`, the gate passing on a check that never ran (db3e57f7,
+    roguelike). Choosing the interpreter here reaches every such copy from the vendored
+    side; `toolchain.rerun_target` is the same ladder the template's runner climbs.
+    """
+    target = toolchain.rerun_target(root, "ruff", env, run)
+    return sys.executable if target is None else str(target)
+
+
+def _lint_argv(paths: list[str], help_text: str, python: str = sys.executable) -> list[str]:
     """The lint command to run, given the branch's files and the runner's capabilities."""
     if paths and runner_supports_paths(help_text):
-        return [sys.executable, str(LINT_ALL), "--paths", *paths]
-    return [sys.executable, str(LINT_ALL), "--changed"]
+        return [python, str(LINT_ALL), "--paths", *paths]
+    return [python, str(LINT_ALL), "--changed"]
 
 
-def _lint_help() -> str:
+def _lint_help(python: str = sys.executable) -> str:
     try:
         probe = subprocess.run(
-            [sys.executable, str(LINT_ALL), "--help"],
+            [python, str(LINT_ALL), "--help"],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
@@ -188,7 +220,8 @@ def _run_lint(base: str = "") -> bool:
         print(f"ship: required lint runner is missing: {LINT_ALL}", file=sys.stderr)
         return False
     paths = branch_diff_files(base) if base else []
-    argv = _lint_argv(paths, _lint_help())
+    python = lint_python()
+    argv = _lint_argv(paths, _lint_help(python), python)
     if paths and "--paths" not in argv:
         # Say it rather than quietly linting the empty working tree: the gate is about
         # to run, pass, and mean nothing, and only this line explains why.
@@ -227,7 +260,8 @@ def push_failure(stderr: str) -> str:
     if "failed to push some refs" in text:
         return (
             "push refused before anything was sent -- the pre-push gate failed (not a network "
-            "error). Its findings are above and in logs/test-failures.log / logs/lint-errors.log."
+            "error). Its findings are above and in logs/test-failures.log / "
+            "logs/lint-errors.log / logs/junit-hooks.xml."
         )
     return "push failed (not a network error): see git's output above."
 
@@ -291,7 +325,7 @@ def pre_commit_command(
         for tail in PRE_COMMIT_TAILS:
             candidate = base / ".venv" / tail
             if candidate.is_file():
-                return [str(candidate)]
+                return venv_module_command(candidate)
     found = which("pre-commit")
     if found:
         return [found]
@@ -334,8 +368,83 @@ def run_fixers(paths: list[str], command: list[str], runner=subprocess.run) -> t
     )
 
 
+def reconcile_baseline() -> tuple[tuple[int, int] | None, str]:
+    """`untested_symbols.reconcile` with nothing to record, and the baseline's name.
+
+    Imported here, not at the top: the scan reads every source file, and only `--fix`
+    pays for it.
+    """
+    import untested_symbols
+
+    root, cfg = untested_symbols.REPO_ROOT, untested_symbols.CFG
+    return untested_symbols.reconcile(root, cfg, None), untested_symbols.BASELINE_NAME
+
+
+def drop_covered_baseline(paths: list[str], reconcile=None) -> tuple[list[str], str]:
+    """Drop the untested-symbol baseline's lines this change covered: `(paths, line)`.
+
+    A test that covers a baselined symbol fails the vendored gate until its line goes,
+    and nothing a session runs locally says so -- ibkr_trader #74 claimed a green full
+    suite and went red on exactly that. Dropping a covered line only shrinks the debt,
+    the one direction the file may move without a decision, so the commit stage makes
+    it here like a formatter rewrite: the rewritten baseline joins `paths`, and the
+    line says what changed. `before=None` records nothing new, ever.
+    """
+    try:
+        result, name = (reconcile or reconcile_baseline)()
+    except (OSError, SyntaxError, ValueError) as exc:
+        return paths, f"could not reconcile the untested-symbol baseline: {exc}"
+    if not result or not result[0]:
+        return paths, ""
+    kept = paths if name in paths else [*paths, name]
+    return kept, f"dropped {result[0]} line(s) this change covered from {name}"
+
+
+CODEX_CONTEXT_SCRIPT = "scripts/sync-codex-context.py"
+CODEX_SKILLS_DIR = ".agents/skills"
+
+
+def mirror_codex_skills(root: Path = REPO_ROOT) -> str:
+    """Re-mirror `.claude/skills/` into `.agents/skills/`: the line saying so, else "".
+
+    The vendored `test_sync_codex_context.py` fails a stale mirror, and only devkit's own
+    pre-commit config re-mirrors at commit time -- a generated project's does not, so
+    roguelike #81 edited `art-check`'s source and went red in CI on the copy. Every
+    session's change is committed through `--fix`, which makes this the one place the
+    mirror can be kept current in every consumer at once, like a formatter rewrite.
+
+    Only where the mirror exists (a project that opted into Codex), and in-process via
+    the vendored `sync-codex-context.py`, whose `mirror_tree` is the one definition of
+    the mirror. Loaded here rather than through `scripts/precommit/_loader.py`, which is
+    not vendored; absent, there is nothing to do and the gate names the stale files.
+    """
+    mirror, script = root / CODEX_SKILLS_DIR, root / CODEX_CONTEXT_SCRIPT
+    if not mirror.is_dir() or not script.is_file():
+        return ""
+    try:
+        spec = importlib.util.spec_from_file_location("sync_codex_context", script)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"no loader for {script}")
+        context = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = context
+        spec.loader.exec_module(context)
+    except (ImportError, OSError, SyntaxError) as exc:
+        return f"could not load {CODEX_CONTEXT_SCRIPT} to re-mirror .agents/skills/: {exc}"
+    source = root / ".claude" / "skills"
+    wanted, held = context.relative_files(source), context.relative_files(mirror)
+    changed = (wanted ^ held) | {
+        rel for rel in wanted & held if (mirror / rel).read_bytes() != (source / rel).read_bytes()
+    }
+    if not changed:
+        return ""
+    context.mirror_tree(source, mirror)
+    return f"re-mirrored {len(changed)} file(s) into {CODEX_SKILLS_DIR}/ for Codex"
+
+
 def _fix(explicit: list[str]) -> int:
-    paths = explicit or changed_paths(_porcelain())
+    paths, dropped = drop_covered_baseline(explicit or changed_paths(_porcelain()))
+    if dropped:
+        print(f"ship: {dropped}")
     common = _git("rev-parse", "--path-format=absolute", "--git-common-dir")
     where = (common.stdout or "").strip()
     checkout = Path(where).parent if common.returncode == 0 and where else None
@@ -348,16 +457,61 @@ def _fix(explicit: list[str]) -> int:
         )
         return EXIT_FIXERS_FAILED
     code, verdict = run_fixers(paths, command)
+    if code:
+        # What ran, before the verdict: a launcher that dies on its own (uv's one-line
+        # `failed to canonicalize script path`) names neither itself nor its venv, and
+        # without this the pass's `pre-commit.log` held that line alone -- a dozen calls
+        # of binary scanning to find the stale `.venv` (4099febd). Kept off the last
+        # line, which `ship_intent.refusal_line` may take into a signature.
+        print(f"ship: ran {' '.join(command)} run --files ({len(paths)} path(s))", file=sys.stderr)
     print(f"ship: {verdict}", file=sys.stderr if code else sys.stdout)
+    # After the fixers, so a skill source they rewrote is what the mirror copies; the
+    # caller stages the whole tree (`ship_intent.commit_intent`), deletions included.
+    mirrored = "" if code else mirror_codex_skills()
+    if mirrored:
+        print(f"ship: {mirrored}")
     return code
+
+
+def tidy(runner=subprocess.run) -> int:
+    """`--fix`'s rewrites over the whole tree, with no opinion on what the checks say.
+
+    What `tidy-main.py` runs on a default branch in the direct flow, where nothing else
+    formats a change. Everything that rewrites a file: the commit-stage fixers, a covered
+    baseline line, the Codex mirror. A check that fails is not this step's to report: the
+    gate started after it says so, and stopping here would leave the rest untidied, which
+    is why the mirror does not wait for a quiet commit stage the way `--fix` does.
+    """
+    _, dropped = drop_covered_baseline([])
+    if dropped:
+        print(f"ship: {dropped}")
+    command = pre_commit_command(REPO_ROOT)
+    if command is None:
+        print("ship: pre-commit was not found; provision first.", file=sys.stderr)
+        return EXIT_FIXERS_FAILED
+    # Twice for the reason `run_fixers` is: a fixer's own rewrite can give the next fixer
+    # something to do, and nothing here may leave a tree the next run would change.
+    for _attempt in (1, 2):
+        try:
+            runner([*command, "run", "--all-files"], cwd=REPO_ROOT, check=False)
+        except OSError as exc:
+            print(f"ship: could not run pre-commit: {exc}", file=sys.stderr)
+            return EXIT_FIXERS_FAILED
+    if mirrored := mirror_codex_skills():
+        print(f"ship: {mirrored}")
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     mode, rest = (argv[0], argv[1:]) if argv else ("", [])
-    if mode not in ("", "--preflight", "--fix") or (mode != "--fix" and rest):
-        print("usage: ship.py [--preflight | --fix [PATH ...]]", file=sys.stderr)
+    known = mode in ("", "--preflight", "--fix", "--tidy")
+    if not known or (mode != "--fix" and rest):
+        print("usage: ship.py [--preflight | --tidy | --fix [PATH ...]]", file=sys.stderr)
         return EXIT_USAGE
+
+    if mode == "--tidy":
+        return tidy()
 
     # Before the branch rule, which is about where a new PR opens: `--fix` opens nothing,
     # and the pass runs it on an open PR's head whatever that branch is called (#390).

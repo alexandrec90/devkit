@@ -1,0 +1,78 @@
+using Velopack;
+using Velopack.Sources;
+
+namespace {{ desktop_name }}.Updates;
+
+/// <summary>Checks the release feed, downloads a newer release, and applies it on request.</summary>
+/// <remarks>
+/// Velopack does the work; this is the one place the app talks to it, so the policy --
+/// check on launch, download quietly, apply only when the user says so -- lives in one
+/// file. An installed copy accepts only releases packed with its own package id, which
+/// is `[desktop] pack_id` in `.devkit.toml`.
+/// </remarks>
+public sealed class Updater
+{
+    private readonly string _repositoryUrl;
+    private UpdateManager? _manager;
+    private UpdateInfo? _pending;
+
+    public Updater(string repositoryUrl)
+    {
+        _repositoryUrl = repositoryUrl;
+    }
+
+    public async Task<UpdateOutcome> CheckAndDownloadAsync()
+    {
+        var manager = Manager();
+        if (manager is null || !manager.IsInstalled)
+        {
+            return UpdateOutcome.NotInstalled;
+        }
+
+        try
+        {
+            var update = await manager.CheckForUpdatesAsync();
+            if (update is null)
+            {
+                return UpdateOutcome.UpToDate;
+            }
+
+            await manager.DownloadUpdatesAsync(update);
+            _pending = update;
+            return UpdateOutcome.Ready(update.TargetFullRelease.Version.ToString());
+        }
+        catch (Exception ex)
+        {
+            // Offline, rate-limited, a release mid-upload: the app keeps working on the
+            // version it has, and the window says why it did not update.
+            return UpdateOutcome.Failed(ex.Message);
+        }
+    }
+
+    /// <summary>Restarts into the downloaded release; does nothing when none is waiting.</summary>
+    public void ApplyAndRestart()
+    {
+        if (_manager is not null && _pending is not null)
+        {
+            _manager.ApplyUpdatesAndRestart(_pending);
+        }
+    }
+
+    /// <summary>The update manager, or null where Velopack was never started.</summary>
+    /// <remarks>
+    /// Velopack refuses to build one until `VelopackApp.Build().Run()` has run, which
+    /// `Program.Main` does first. Anything that skipped it -- a test host, a designer --
+    /// is not an installed copy, so it is answered as one that is not installed.
+    /// </remarks>
+    private UpdateManager? Manager()
+    {
+        try
+        {
+            return _manager ??= new UpdateManager(new GithubSource(_repositoryUrl, null, false));
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+}

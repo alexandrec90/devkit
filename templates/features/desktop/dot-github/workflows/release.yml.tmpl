@@ -1,0 +1,57 @@
+name: Release
+
+# A tag is a release. Push `v<major>.<minor>.<patch>` and this builds the app, packs the
+# installer and the update files with Velopack, and publishes them as the GitHub release
+# for that tag -- which is the feed every installed copy checks.
+#
+# The steps are `scripts/desktop.py release`, vendored from devkit through the gated
+# tier, so a fix to how releases are built reaches this project on its next
+# `sync-devkit.py --pull`. This file is only the trigger, and is yours.
+
+on:
+  push:
+    tags: ["v*"]
+  # Re-runs a release by hand: the tag to release is the ref you pick.
+  workflow_dispatch:
+
+# Uploading a release writes to the repository; nothing else here does.
+permissions:
+  contents: write
+
+# Two pushes of one tag must not race each other's uploads.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, pack and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      # The release driver is stdlib-only by contract, so no project environment is
+      # built for it.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "{{ python_version }}"
+      - name: Release
+        shell: pwsh
+        env:
+          # Through the environment, never spliced into the command line: a ref name is
+          # text someone typed, and the shell would read it as script.
+          RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # signtool arguments for `vpk pack --signParams`. Unset, the installer is
+          # unsigned and SmartScreen warns whoever downloads it; add the secret once a
+          # code-signing certificate exists.
+          VPK_SIGN_PARAMS: ${{ secrets.VPK_SIGN_PARAMS }}
+        run: python scripts/desktop.py release --version "$env:RELEASE_TAG" --publish
+      - name: Upload release artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-release
+          path: logs/desktop-release.log

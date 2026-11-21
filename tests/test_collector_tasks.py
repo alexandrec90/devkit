@@ -1,0 +1,1351 @@
+"""`collector_tasks.py`: a scheduled collector's own task, and one fire of it.
+
+Every `schtasks` and every spawn goes through a fake. The properties pinned are the ones
+that decide whether the project's job runs and whether its failure is seen:
+
+- the task runs `collectors.py fire <name>` from the devkit checkout, window-less, never
+  under a `devkit-` name;
+- a current registration is left alone, a drifted one re-registered, a `stop` one removed;
+- a fire starts what the command `needs` first, and does not run it when that fails --
+  saying, on a timeout, whether the engine or the service stalled;
+- the exit code is the command's own, and its output is kept, tail first;
+- the command is told when the scheduler fired, from before its `needs` came up.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+from typing import ClassVar
+
+import pytest
+from support import load_script
+
+tasks = load_script("scripts/collector_tasks.py")
+log_wrap = load_script("scripts/log-wrap.py")
+config = tasks.config
+devkit_schtasks = tasks.devkit_schtasks
+
+SCRAPER = config.Collector(
+    "social-scraper", command=("uv", "run", "social-scraper", "scrape"), minutes=30, needs=("db",)
+)
+PYTHONW = r"C:\Python312\pythonw.exe"
+ROOT = Path(r"C:\ws\devkit")
+
+
+class Report:
+    def __init__(self):
+        self.lines: list[str] = []
+        self.failures = 0
+
+    def say(self, line):
+        self.lines.append(line)
+
+    def fail(self, line):
+        self.lines.append(line)
+        self.failures += 1
+
+
+class FakeSchtasks:
+    """Answers `/Query /XML` with whatever is registered, and records every call."""
+
+    def __init__(self, registered: str | None = None, delete_code: int = 0):
+        self.registered = registered
+        self.delete_code = delete_code
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv):
+        argv = list(argv)
+        self.calls.append(argv)
+        if argv[0] == "whoami":
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        if argv[1] == "/Query":
+            if self.registered is None:
+                return subprocess.CompletedProcess(argv, 1, "", "ERROR: not found")
+            return subprocess.CompletedProcess(argv, 0, self.registered, "")
+        if argv[1] == "/Create":
+            return subprocess.CompletedProcess(argv, 0, "SUCCESS", "")
+        if argv[1] == "/Delete":
+            return subprocess.CompletedProcess(argv, self.delete_code, "", "Access is denied.")
+        raise AssertionError(argv)
+
+    def verbs(self):
+        return [argv[1] for argv in self.calls if argv[0] == "schtasks"]
+
+
+# --- the task -----------------------------------------------------------------------
+
+
+def test_the_task_is_named_after_the_collector_not_devkit():
+    assert tasks.task_name(SCRAPER) == "social-scraper"
+    assert not tasks.task_name(SCRAPER).startswith("devkit-")
+
+
+def test_the_task_fires_the_wrapper_from_the_devkit_checkout_every_interval():
+    document = tasks.task_document(SCRAPER, ROOT, PYTHONW)
+    registration = devkit_schtasks.parse_task(document)
+    assert registration.command == PYTHONW
+    fire = rf'"{ROOT}\scripts\collectors.py" fire social-scraper'
+    label = "Scheduled collector: social-scraper"
+    assert registration.arguments == devkit_schtasks.logged(label, PYTHONW, fire, ROOT)
+    assert f"<WorkingDirectory>{ROOT}</WorkingDirectory>" in document
+    assert "<Interval>PT30M</Interval>" in document
+    assert "<ExecutionTimeLimit>PT1H</ExecutionTimeLimit>" in document
+
+
+def test_each_failed_fire_reaches_the_ledger_beside_its_own_log():
+    """Every devkit job files each failed run through `log-wrap.py --always`; a collector
+    that fails every 30 minutes was seen only when a fix pass caught the scheduler's Last
+    Result between runs. The wrapper's files must not overwrite the fire's own record."""
+    arguments = devkit_schtasks.parse_task(tasks.task_document(SCRAPER, ROOT, PYTHONW)).arguments
+    assert "log-wrap.py" in arguments and " --always " in arguments
+    label = tasks.wrapper_label("social-scraper")
+    slugged = "".join(c if c.isalnum() else "-" for c in label.lower()).strip("-")
+    assert f"logs/{slugged}.log" != tasks.log_path("social-scraper").as_posix()
+
+
+def test_task_arguments_name_the_fire_verb_since_the_default_runs_nothing():
+    assert tasks.task_arguments(ROOT, "x") == rf'"{ROOT}\scripts\collectors.py" fire x'
+
+
+def test_the_interpreter_is_the_windowless_twin_of_the_console_one(monkeypatch):
+    monkeypatch.setattr(tasks.sweep, "console_python", lambda: r"C:\py\python.exe")
+    monkeypatch.setattr(tasks.devkit_schtasks, "windowless", lambda exe: f"windowless:{exe}")
+    assert tasks.interpreter() == r"windowless:C:\py\python.exe"
+
+
+def test_is_registered_is_the_xml_querys_exit_code():
+    assert not tasks.is_registered("social-scraper", FakeSchtasks())
+    assert tasks.is_registered("social-scraper", FakeSchtasks(registered="<Task/>"))
+
+
+def test_interval_tag_is_the_cadence_as_the_document_spells_it():
+    assert tasks.interval_tag(SCRAPER) == "<Interval>PT30M</Interval>"
+    assert tasks.interval_tag(SCRAPER) in tasks.task_document(SCRAPER, ROOT, PYTHONW)
+
+
+def test_check_is_current_only_for_this_document_at_this_cadence():
+    current = FakeSchtasks(registered=tasks.task_document(SCRAPER, ROOT, PYTHONW))
+    assert tasks.check(SCRAPER, ROOT, PYTHONW, current)[0] == devkit_schtasks.CHECK_CURRENT
+    hourly = config.Collector("social-scraper", command=SCRAPER.command, minutes=60)
+    drifted = FakeSchtasks(registered=tasks.task_document(hourly, ROOT, PYTHONW))
+    code, message = tasks.check(SCRAPER, ROOT, PYTHONW, drifted)
+    assert code == devkit_schtasks.CHECK_STALE and "every 30 minutes" in message
+
+
+def test_the_reporter_is_the_say_and_fail_a_report_has():
+    assert {"say", "fail"} <= set(vars(tasks.Reporter))
+    assert callable(Report().say) and callable(Report().fail)
+
+
+def test_the_wrapper_ends_a_wedged_command_before_the_scheduler_would():
+    """The scheduler's kill records nothing; the wrapper's timeout writes the log."""
+    assert tasks.FIRE_TIMEOUT < 60 * 60
+
+
+def test_the_command_is_not_in_the_task_so_editing_it_needs_no_reregistration():
+    edited = config.Collector("social-scraper", command=("other",), minutes=30)
+    assert tasks.task_document(edited, ROOT, PYTHONW) == tasks.task_document(SCRAPER, ROOT, PYTHONW)
+
+
+def test_a_current_task_is_left_alone():
+    fake = FakeSchtasks(registered=tasks.task_document(SCRAPER, ROOT, PYTHONW))
+    report = Report()
+    tasks.keep_registered(SCRAPER, ROOT, PYTHONW, fake, report)
+    assert "/Create" not in fake.verbs()
+    assert report.lines == ["social-scraper: scheduled every 30 minutes"]
+
+
+def test_a_missing_task_is_registered():
+    fake = FakeSchtasks()
+    report = Report()
+    tasks.keep_registered(SCRAPER, ROOT, PYTHONW, fake, report)
+    assert "/Create" in fake.verbs() and report.failures == 0
+    assert "registered" in report.lines[0]
+
+
+def test_a_changed_cadence_is_reregistered():
+    """`devkit_schtasks.drift` compares no trigger, so `check` has to: `minutes` is a
+    hand-edited value, and an edit nothing could see would never reach the task."""
+    old = config.Collector("social-scraper", command=SCRAPER.command, minutes=60)
+    fake = FakeSchtasks(registered=tasks.task_document(old, ROOT, PYTHONW))
+    report = Report()
+    tasks.keep_registered(SCRAPER, ROOT, PYTHONW, fake, report)
+    assert "/Create" in fake.verbs()
+    assert "another interval" in report.lines[0]
+
+
+def test_a_task_registered_from_another_checkout_is_reregistered():
+    moved = FakeSchtasks(registered=tasks.task_document(SCRAPER, Path(r"C:\box"), PYTHONW))
+    tasks.keep_registered(SCRAPER, ROOT, PYTHONW, moved, Report())
+    assert "/Create" in moved.verbs()
+
+
+def test_a_failed_registration_is_a_failure():
+    class Refusing(FakeSchtasks):
+        def __call__(self, argv):
+            if list(argv)[:2] == ["schtasks", "/Create"]:
+                return subprocess.CompletedProcess(list(argv), 1, "", "Access is denied.")
+            return super().__call__(argv)
+
+    report = Report()
+    tasks.keep_registered(SCRAPER, ROOT, PYTHONW, Refusing(), report)
+    assert report.failures == 1 and "Access is denied." in report.lines[0]
+
+
+def test_removing_a_task_that_is_not_there_deletes_nothing():
+    fake, report = FakeSchtasks(), Report()
+    tasks.keep_removed("social-scraper", fake, report)
+    assert "/Delete" not in fake.verbs() and report.failures == 0
+
+
+def test_removing_a_registered_task_deletes_it():
+    fake, report = FakeSchtasks(registered="<Exec><Command>x</Command></Exec>"), Report()
+    tasks.keep_removed("social-scraper", fake, report)
+    assert fake.calls[-1] == devkit_schtasks.delete_argv("social-scraper")
+    assert report.failures == 0
+
+
+def test_a_refused_delete_is_a_failure():
+    fake = FakeSchtasks(registered="<Exec><Command>x</Command></Exec>", delete_code=1)
+    report = Report()
+    tasks.keep_removed("social-scraper", fake, report)
+    assert report.failures == 1 and "Access is denied." in report.lines[0]
+
+
+def test_describe_reads_without_registering():
+    fake = FakeSchtasks()
+    words = tasks.describe(SCRAPER, ROOT, PYTHONW, fake)
+    assert "nothing is scheduled" in words
+    assert "/Create" not in fake.verbs()
+
+
+def test_the_schtasks_runner_is_captured_and_a_spawn_failure_is_a_code(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        raise OSError("no schtasks here")
+
+    monkeypatch.setattr(tasks.subprocess, "run", fake_run)
+    result = tasks.run_argv(["schtasks", "/Query"])
+    assert result.returncode == 1 and "no schtasks" in result.stderr
+    assert seen["creationflags"] == tasks.NO_WINDOW and seen["capture_output"]
+
+
+# --- one fire -----------------------------------------------------------------------
+
+
+NO_UPDATER = '"Docker Desktop.exe","10072","RDP-Tcp#9","1","13,220 K"'
+UPDATER = (
+    f"{NO_UPDATER}\n"
+    '"Docker Desktop Updater-238679 (241994).exe","4410","RDP-Tcp#9","1","9,100 K"\n'
+    '"Docker Desktop Installer.exe","5120","RDP-Tcp#9","1","61,000 K"'
+)
+
+
+def sc_query(state, code=4):
+    """`sc query WSLService` as it printed on 2026-10-13, in `state`."""
+    return (
+        0,
+        "\r\nSERVICE_NAME: WSLService \r\n        TYPE               : 10  WIN32_OWN_PROCESS  \r\n"
+        f"        STATE              : {code}  {state} \r\n"
+        "                                (STOPPABLE, NOT_PAUSABLE, IGNORES_SHUTDOWN)\r\n"
+        "        WIN32_EXIT_CODE    : 0  (0x0)\r\n",
+    )
+
+
+WSL_RUNNING = sc_query("RUNNING")
+WSL_STOPPING = sc_query("STOP_PENDING", code=3)
+
+
+class FakeSpawn:
+    """Answers in order; the process listing `desktop_updating` asks for answers
+    `listing`, and the WSL service query `wsl_said` asks answers from `wsl` (its last
+    answer once spent), both kept out of `calls`, so a test counting docker calls is
+    unchanged."""
+
+    def __init__(self, *answers, listing=(0, NO_UPDATER), wsl=(WSL_RUNNING,)):
+        self.answers = list(answers)
+        self.listing = listing
+        self.listed = 0
+        self.wsl = list(wsl)
+        self.wsl_asked = 0
+        self.calls: list[tuple] = []
+        self.envs: list = []
+
+    def __call__(self, argv, cwd, timeout, env=None):
+        if list(argv) == list(tasks.UPDATE_LISTING):
+            self.listed += 1
+            return self.listing
+        if list(argv) == list(tasks.WSL_QUERY):
+            self.wsl_asked += 1
+            return self.wsl.pop(0) if len(self.wsl) > 1 else self.wsl[0]
+        self.calls.append((list(argv), Path(cwd).name, timeout))
+        self.envs.append(env)
+        return self.answers.pop(0)
+
+
+def checkout(tmp_path):
+    path = tmp_path / "social-scraper"
+    (path / ".git").mkdir(parents=True)
+    return path
+
+
+def test_a_fire_starts_what_it_needs_then_runs_the_command_in_the_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.shutil, "which", lambda name: rf"C:\bin\{name}.exe")
+    spawn = FakeSpawn((0, ""), (0, "reddit: 40 posts"))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0
+    assert spawn.calls[0] == (
+        ["docker", "compose", "up", "-d", "--wait", "db"],
+        "social-scraper",
+        tasks.NEEDS_TIMEOUT,
+    )
+    assert spawn.calls[1][0] == [r"C:\bin\uv.exe", "run", "social-scraper", "scrape"]
+    budget = tasks.fire_budget(SCRAPER)
+    assert budget - 1 <= spawn.calls[1][2] <= budget, "bounded to before the next fire"
+    assert "reddit: 40 posts" in lines
+
+
+def test_the_command_is_told_when_the_scheduler_fired_not_when_it_started(tmp_path):
+    """45f7adeb: the 17:30 fire reached its scrape at 17:35:44 -- compose took 3m24s and
+    `uv run` 2m20s under load -- and the scrape's cycle deadline, counted from its own
+    start, let it run past the 18:00 fire. The command gets the fire's moment, and only
+    the command: the `needs` spawn is devkit's own."""
+    fired = dt.datetime(2026, 10, 7, 21, 30, 0, 400000, tzinfo=dt.UTC)
+    spawn = FakeSpawn((0, ""), (0, "ok"))
+    tasks.fire(SCRAPER, checkout(tmp_path), spawn, fired=fired)
+    assert spawn.envs == [None, {tasks.FIRED_AT: "2026-10-07T21:30:00+00:00"}]
+
+
+def test_a_fire_with_no_moment_given_stamps_its_own(tmp_path):
+    before = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    fake = FakeSpawn((0, ""), (0, "ok"))
+    spawn: tasks.Spawner = fake  # the fake has `spawn`'s shape, `env` included
+    tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    stamped = dt.datetime.fromisoformat(fake.envs[1][tasks.FIRED_AT])
+    assert before <= stamped <= dt.datetime.now(dt.UTC)
+
+
+def test_started_at_reads_a_recorded_start_as_local_time_and_nothing_else(tmp_path):
+    marker = tmp_path / tasks.start_path("social-scraper")
+    assert marker.name == "collector-social-scraper.started"
+    assert tasks.started_at(marker) is None, "no run recorded"
+    naive = dt.datetime(2026, 10, 9, 16, 30)
+    marker.parent.mkdir(parents=True)
+    marker.write_text(naive.astimezone().isoformat() + "\n", encoding="utf-8")
+    assert tasks.started_at(marker) == naive
+    marker.write_text("2026-10-09T16:30:00\n", encoding="utf-8")
+    assert tasks.started_at(marker) == naive, "a naive stamp is already local"
+    marker.write_text("not a time\n", encoding="utf-8")
+    assert tasks.started_at(marker) is None
+
+
+def test_a_naive_fire_time_is_this_machines_local_time():
+    naive = dt.datetime(2026, 10, 7, 17, 30)
+    expected = naive.astimezone(dt.UTC).isoformat(timespec="seconds")
+    assert tasks.fired_env(naive) == {tasks.FIRED_AT: expected}
+    assert expected.endswith("+00:00")
+
+
+NO_IMAGE = (1, "Error response from daemon: no such image")
+ENGINE_UP = (0, "28.4.0\n")
+SILENT = (1, "error during connect: open //./pipe/dockerDesktopLinuxEngine")
+# What `restarted_under` asks of a failed command's `needs`: their ids, then their starts.
+DB_RUNNING = (0, "4a272914a359\n")
+STARTED_BEFORE = (0, "2026-10-29T16:23:33.106212512Z\n")
+
+
+def started_at_now(seconds=0):
+    """`docker inspect`'s `StartedAt` for a start `seconds` from now."""
+    when = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=seconds)
+    return (0, when.strftime("%Y-%m-%dT%H:%M:%S.123456789Z\n"))
+
+
+def test_the_exit_code_is_the_commands_own(tmp_path):
+    spawn = FakeSpawn((0, ""), (3, "x blocked"), DB_RUNNING, STARTED_BEFORE)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 3 and "x blocked" in lines
+    assert not any(tasks.WENT_AWAY in line for line in lines)
+
+
+def test_a_command_failed_by_its_db_restarting_under_it_is_skipped(tmp_path):
+    """8d30fbea: 2026-10-29 22:11 UTC Docker's VM froze mid-scrape, came back at 22:19 with
+    the db restarted, and the scrape had given up on the db -- the eighth filing of a
+    cause no fixer could reach. The next fire is the retry."""
+    error = "sqlalchemy.exc.OperationalError: connection timeout expired"
+    spawn = FakeSpawn((0, ""), (1, error), DB_RUNNING, started_at_now(60))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and error in lines, "the run's own output is kept"
+    assert spawn.calls[2][0] == ["docker", "compose", "ps", "-q", "db"]
+    assert spawn.calls[3][0][:4] == ["docker", "inspect", "--format", "{{.State.StartedAt}}"]
+    assert spawn.calls[3][0][4:] == ["4a272914a359"]
+    assert "exit 1, but db started again at" in lines[-1] and tasks.WENT_AWAY in lines[-1]
+    assert lines[-1].startswith("exit 1"), "no `error:` line for log-wrap to file"
+
+
+def test_a_command_failed_with_the_engine_gone_is_skipped(tmp_path):
+    spawn = FakeSpawn((0, ""), (1, "connection refused"), SILENT, SILENT)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "the Docker engine stopped answering" in lines[-1]
+    assert spawn.calls[3][0] == list(tasks.ENGINE_PROBE)
+
+
+def test_a_command_failed_with_its_db_stopped_is_skipped(tmp_path):
+    spawn = FakeSpawn((0, ""), (1, "connection refused"), (0, ""))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "db not all running after the command" in lines[-1]
+    assert len(spawn.calls) == 3, "nothing to inspect"
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param([(1, "no such service"), ENGINE_UP], id="compose-fails-engine-answers"),
+        pytest.param([DB_RUNNING, (1, "No such object")], id="inspect-fails"),
+        pytest.param([DB_RUNNING, (0, "<no value>\n")], id="start-unreadable"),
+        pytest.param([DB_RUNNING, (0, "")], id="start-missing"),
+    ],
+)
+def test_a_restart_the_engine_cannot_establish_does_not_excuse_a_failure(tmp_path, answers):
+    spawn = FakeSpawn((0, ""), (1, "boom"), *answers)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and lines[-1] == "boom"
+
+
+def test_a_start_from_before_the_command_does_not_excuse_it(tmp_path):
+    spawn = FakeSpawn((0, ""), (1, "boom"), DB_RUNNING, started_at_now(-5))
+    assert tasks.fire(SCRAPER, checkout(tmp_path), spawn)[0] == 1
+
+
+def test_a_passing_command_asks_nothing_about_its_needs(tmp_path):
+    spawn = FakeSpawn((0, ""), (0, "ok"))
+    assert tasks.fire(SCRAPER, checkout(tmp_path), spawn)[0] == 0 and len(spawn.calls) == 2
+
+
+def test_restarted_under_names_the_latest_start_of_several(tmp_path):
+    early, late = STARTED_BEFORE[1], "2026-10-29T22:19:42.309258733Z\n"
+    since = dt.datetime(2026, 10, 29, 22, 0, tzinfo=dt.UTC).timestamp()
+    spawn = FakeSpawn((0, "a\nb\n"), (0, early + late))
+    gone = tasks.restarted_under(["db", "cache"], checkout(tmp_path), spawn, since)
+    assert gone == "db, cache started again at 22:19:42 UTC, after the command began"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("2026-10-03T00:16:05.123456789Z", dt.datetime(2026, 10, 3, 0, 16, 5, tzinfo=dt.UTC)),
+        ("2026-10-03T00:16:05+02:00", dt.datetime(2026, 10, 2, 22, 16, 5, tzinfo=dt.UTC)),
+        ("2026-10-03T00:16:05", None),
+        ("<no value>", None),
+    ],
+)
+def test_dockers_created_is_read_to_the_second(text, expected):
+    assert tasks.parse_created(text) == (expected.timestamp() if expected else None)
+
+
+class Clock:
+    """A monotonic clock that `sleep` advances, so a wait costs the test nothing."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def instant(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(tasks, "_time", SimpleNamespace(monotonic=clock, sleep=clock.sleep))
+    return clock
+
+
+def started_db(lines):
+    """Whether the fire's log says its db came up, with how long that took."""
+    return any(line.startswith("started: db in ") and line.endswith("s") for line in lines)
+
+
+# The probe after a failed start and every probe of `await_engine`, none answering.
+PROBE_TIMED_OUT = (tasks.TIMED_OUT, "timed out after 30s")
+SILENT_THROUGH_WAIT = [PROBE_TIMED_OUT, *[SILENT] * (tasks.ENGINE_WAIT // tasks.ENGINE_POLL)]
+
+
+def test_a_need_that_will_not_start_skips_the_command_and_fails(tmp_path):
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and len(spawn.calls) == 2, "asked the engine once, and not again"
+    assert spawn.calls[1][0] == list(tasks.ENGINE_PROBE)
+    assert any("could not start db" in line for line in lines)
+    assert "Error response from daemon: no such image" in lines
+
+
+def test_a_need_that_failed_ends_on_an_error_line_naming_only_the_kind(tmp_path):
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert lines[-1] == "error: docker compose up failed for db"
+
+
+def test_a_fire_landing_in_an_engine_restart_waits_and_then_runs(tmp_path, instant):
+    """74c2ccd2: a fire inside the collectors pass's Docker Desktop restart failed at once
+    on "docker compose up failed for db", the cause that came back through fourteen
+    resolutions. The engine answering a minute later is a late fire, not a lost one."""
+    spawn = FakeSpawn(SILENT, SILENT, SILENT, SILENT, ENGINE_UP, (0, ""), (0, "reddit: 40"))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "reddit: 40" in lines and started_db(lines)
+    assert instant.slept == [tasks.ENGINE_POLL] * 3
+    up = ["docker", "compose", "up", "-d", "--wait", "db"]
+    assert [call[0] for call in spawn.calls].count(up) == 2, "tried again once it answered"
+
+
+def test_an_engine_silent_through_the_wait_is_the_cause(tmp_path, instant):
+    probes = 1 + tasks.ENGINE_WAIT // tasks.ENGINE_POLL
+    spawn = FakeSpawn(SILENT, *[SILENT] * probes)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and len(spawn.calls) == 1 + probes, "no second start, no command"
+    assert sum(instant.slept) == tasks.ENGINE_WAIT
+    assert lines[-1] == "error: the Docker engine did not answer"
+    assert log_wrap.failure_cause("\n".join(lines)) == "error: the Docker engine did not answer"
+
+
+def test_a_fire_landing_in_a_docker_desktop_update_skips_its_run(tmp_path, monkeypatch, instant):
+    """38b0ffb4: 2026-10-09 the 20:02 UTC fire's `compose up --wait db` ran its whole
+    `NEEDS_TIMEOUT` while Docker Desktop installed 4.94.0 (19:55-20:28), and the fire
+    failed "the Docker engine did not answer". An update is Docker's maintenance: the run
+    is skipped, and the next fire runs on the new engine."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(TIMED_OUT, *SILENT_THROUGH_WAIT, listing=(0, UPDATER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and spawn.listed == 1, "seen before the wait, so not asked again after it"
+    assert len(spawn.calls) == 1 + len(SILENT_THROUGH_WAIT), "no second start, no command"
+    assert "Docker Desktop is installing or has just installed an update" in lines[-1]
+    assert not any(line.startswith("error:") for line in lines)
+
+
+def test_an_update_that_ends_inside_the_wait_still_skips_the_run(tmp_path, monkeypatch, instant):
+    """7c00ca1a: 2026-11-05 Docker Desktop's installer ran until 17:33:42, the 17:30:01
+    fire waited to 17:36:02, and the updater was only looked for then: gone, so an update
+    the fire had landed in filed "the Docker engine did not answer". The listing is asked
+    before the wait as well, which is where this fire would have seen it."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+
+    class EndsInsideTheWait(FakeSpawn):
+        def __call__(self, argv, cwd, timeout, env=None):
+            answer = super().__call__(argv, cwd, timeout, env)
+            if list(argv) == list(tasks.UPDATE_LISTING):
+                self.listing = (0, NO_UPDATER)
+            return answer
+
+    spawn = EndsInsideTheWait(TIMED_OUT, *SILENT_THROUGH_WAIT, listing=(0, UPDATER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and spawn.listed == 1
+    assert "has just installed an update" in lines[-1]
+    assert not any(line.startswith("error:") for line in lines)
+
+
+def test_an_update_that_begins_inside_the_wait_skips_the_run(tmp_path, monkeypatch, instant):
+    """The ask after the wait stays: a start can fail before the installer has started."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+
+    class BeginsInsideTheWait(FakeSpawn):
+        def __call__(self, argv, cwd, timeout, env=None):
+            answer = super().__call__(argv, cwd, timeout, env)
+            if list(argv) == list(tasks.UPDATE_LISTING):
+                self.listing = (0, UPDATER)
+            return answer
+
+    spawn = BeginsInsideTheWait(TIMED_OUT, *SILENT_THROUGH_WAIT)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and spawn.listed == 2
+    assert "an update" in lines[-1]
+
+
+def test_an_engine_that_comes_back_after_an_update_runs_the_command(tmp_path, monkeypatch, instant):
+    """An update seen before the wait excuses only an engine still silent after it."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(SILENT, SILENT, ENGINE_UP, (0, ""), (0, "reddit: 40"), listing=(0, UPDATER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "reddit: 40" in lines and started_db(lines)
+
+
+def test_a_silent_engine_with_no_update_running_still_fails(tmp_path, monkeypatch, instant):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(TIMED_OUT, *SILENT_THROUGH_WAIT)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == tasks.TIMED_OUT and spawn.listed == 2, "before the wait, and after it"
+    assert lines[-1] == "error: the Docker engine did not answer"
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (r"C:\Windows", rf"C:\Windows;{tasks.DOCKER_BIN}"),
+        (r"C:\Windows;;C:\Git\cmd;", rf"C:\Windows;C:\Git\cmd;{tasks.DOCKER_BIN}"),
+        ("", tasks.DOCKER_BIN),
+        (rf"{tasks.DOCKER_BIN};C:\Windows", rf"{tasks.DOCKER_BIN};C:\Windows"),
+        (rf"C:\Windows;{tasks.DOCKER_BIN.upper()}\;", rf"C:\Windows;{tasks.DOCKER_BIN.upper()}\;"),
+    ],
+)
+def test_with_docker_bin_adds_the_directory_once_and_last(before, after):
+    assert tasks.with_docker_bin(before) == after
+
+
+def test_a_process_begun_inside_an_update_can_still_find_docker(monkeypatch):
+    """7c00ca1a: Docker Desktop's installer takes its bin directory off the machine PATH
+    at 17:23:17 and puts it back at 17:33:41. The 17:30:01 fire inherited the PATH without
+    it, and a process's PATH is fixed at its start, so all 24 of its polls said "docker is
+    not on PATH" long after docker.exe, there since 17:23, could have answered."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setenv("PATH", r"C:\Windows")
+    tasks.keep_docker_on_path()
+    assert tasks.os.environ["PATH"] == rf"C:\Windows;{tasks.DOCKER_BIN}"
+    tasks.keep_docker_on_path()
+    assert tasks.os.environ["PATH"] == rf"C:\Windows;{tasks.DOCKER_BIN}", "and only once"
+
+
+def test_docker_is_left_to_the_path_off_windows(monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "posix")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    tasks.keep_docker_on_path()
+    assert tasks.os.environ["PATH"] == "/usr/bin"
+
+
+def test_a_start_that_timed_out_on_an_engine_being_revived_waits_and_then_runs(tmp_path, instant):
+    """37e9acee: 2026-10-09 the collectors pass reset Docker's VM under the 21:00 fire,
+    whose `up --wait db` hung its whole `NEEDS_TIMEOUT` and gave up two minutes before the
+    engine answered. A timed-out start on a silent engine waits for it like a fast one."""
+    spawn = FakeSpawn(TIMED_OUT, PROBE_TIMED_OUT, SILENT, ENGINE_UP, (0, ""), (0, "reddit: 40"))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and "reddit: 40" in lines and started_db(lines)
+    up = ["docker", "compose", "up", "-d", "--wait", "db"]
+    assert [call[0] for call in spawn.calls].count(up) == 2, "tried again once it answered"
+
+
+def test_the_command_is_bounded_by_what_the_start_left_of_the_fire(tmp_path, instant):
+    """A start that waited out a restart must not push the command past the task's
+    `TIME_LIMIT`, where the scheduler kills it without the wrapper recording why."""
+
+    class Slow(FakeSpawn):
+        def __call__(self, argv, cwd, timeout, env=None):
+            answer = super().__call__(argv, cwd, timeout, env)
+            instant.now += timeout if answer[0] == tasks.TIMED_OUT else 1
+            return answer
+
+    spawn = Slow(TIMED_OUT, PROBE_TIMED_OUT, ENGINE_UP, (0, ""), (0, "ok"))
+    tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    spent = instant.now - 1  # all but the command's own second
+    assert spent > tasks.NEEDS_TIMEOUT, "the start did run out its timeout"
+    assert spawn.calls[-1][2] == tasks.fire_budget(SCRAPER) - int(spent)
+
+
+class Lasting(FakeSpawn):
+    """A `FakeSpawn` whose every call takes its whole timeout on `clock` when it times
+    out, and a second otherwise; and `costs` seconds more for an `up` that succeeds."""
+
+    def __init__(self, clock, *answers, costs=0, **kwargs):
+        super().__init__(*answers, **kwargs)
+        self.clock = clock
+        self.costs = costs
+
+    def __call__(self, argv, cwd, timeout, env=None):
+        answer = super().__call__(argv, cwd, timeout, env)
+        timed_out = answer[0] == tasks.TIMED_OUT
+        self.clock.now += timeout if timed_out else 1
+        if not timed_out and list(argv)[:3] == ["docker", "compose", "up"]:
+            self.clock.now += self.costs
+        return answer
+
+
+UP = ["docker", "compose", "up", "-d", "--wait", "db"]
+
+
+@pytest.mark.parametrize(
+    ("minutes", "budget"),
+    [
+        (30, 30 * 60 - tasks.END_MARGIN),
+        (0, tasks.FIRE_TIMEOUT),
+        (120, tasks.FIRE_TIMEOUT),
+        (1, tasks.LEAST_COMMAND),
+    ],
+)
+def test_a_fire_is_budgeted_to_end_before_its_next_fire(minutes, budget):
+    collector = config.Collector("x", command=("x",), minutes=minutes)
+    assert tasks.fire_budget(collector) == budget
+
+
+def test_a_start_that_spent_the_cycle_fails_instead_of_running_into_the_next_fire(
+    tmp_path, instant
+):
+    """b8e9fd6c: 2026-11-07 the 00:00 social-scraper fire's start ran to about 00:48 under
+    `FIRE_TIMEOUT`'s 55 minutes, so the 00:30 fire was skipped behind it, and the scrape's
+    own watchdog ended it the moment it began. The command is not started at all once
+    the start has left less than `LEAST_COMMAND` of the cycle, and the run says why."""
+    spawn = Lasting(instant, (0, ""), (0, "reddit: 40"), costs=tasks.fire_budget(SCRAPER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == tasks.TIMED_OUT
+    assert [call[0] for call in spawn.calls] == [UP], "the command never ran"
+    assert started_db(lines)
+    assert lines[-1] == "error: the fire's time ran out before the command could start"
+    assert log_wrap.failure_cause("\n".join(lines)) == lines[-1]
+
+
+def test_too_late_names_the_numbers_above_an_error_line_naming_only_the_kind():
+    """The cause `log-wrap.py` files stays stable across recurrences: no counts in it."""
+    *said, cause = tasks.too_late(SCRAPER, 1700)
+    assert said == [
+        f"1700s of this fire's {tasks.fire_budget(SCRAPER)}s were spent before the command "
+        "could start, so it was not run: the next fire runs on time instead of being skipped "
+        "behind it"
+    ]
+    assert cause == "error: the fire's time ran out before the command could start"
+    assert not any(ch.isdigit() for ch in cause)
+
+
+def test_a_fire_whose_every_call_hangs_still_ends_before_the_next_fire(tmp_path, instant):
+    """However the start goes -- a hung `up`, a silent engine waited for, a second `up`
+    -- the fire is over inside its cadence, so the scheduler never skips a fire behind
+    it. The diagnostics after a failed start get the margin."""
+    spawn = Lasting(instant, TIMED_OUT, *[PROBE_TIMED_OUT] * 200)
+    code, _lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == tasks.TIMED_OUT
+    assert instant.now <= SCRAPER.minutes * 60 - tasks.END_MARGIN + 2 * tasks.PROBE
+    assert instant.now < SCRAPER.minutes * 60
+
+
+def test_a_call_with_nothing_left_before_the_deadline_is_not_made(instant):
+    spawn = FakeSpawn((0, "made"))
+    bounded = tasks.within(spawn, until=100)
+    instant.now = 40
+    assert bounded(["docker"], Path("x"), 600) == (0, "made")
+    assert spawn.calls[-1][2] == 60, "cut to what is left"
+    instant.now = 100
+    assert bounded(["docker"], Path("x"), 600) == (tasks.TIMED_OUT, tasks.SPENT)
+    assert len(spawn.calls) == 1, "and not made once nothing is"
+
+
+def test_the_wait_for_the_engine_stops_at_the_deadline(instant):
+    spawn = FakeSpawn(*[SILENT] * 100)
+    answer = tasks.await_engine(Path("x"), spawn, until=2 * tasks.ENGINE_POLL)
+    assert answer == SILENT
+    assert sum(instant.slept) == 2 * tasks.ENGINE_POLL < tasks.ENGINE_WAIT
+
+
+def test_an_update_is_not_asked_about_while_the_engine_answers(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP, listing=(0, UPDATER))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and spawn.listed == 0
+    assert lines[-1] == "error: docker compose up failed for db"
+
+
+@pytest.mark.parametrize(
+    ("listing", "expected"),
+    [
+        ((0, UPDATER), True),
+        ((0, '"Docker Desktop Installer.exe","5120","Console","1","61,000 K"'), True),
+        ((0, NO_UPDATER), False),
+        ((0, "INFO: No tasks are running which match the specified criteria."), False),
+        ((0, ""), False),
+        ((1, UPDATER), False),
+    ],
+)
+def test_desktop_updating_reads_the_updater_or_installer_off_the_listing(
+    tmp_path, monkeypatch, listing, expected
+):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    assert tasks.desktop_updating(tmp_path, FakeSpawn(listing=listing)) is expected
+
+
+def test_updater_listed_matches_image_names_not_the_rest_of_the_row():
+    assert tasks.updater_listed(UPDATER)
+    assert not tasks.updater_listed(NO_UPDATER)
+    assert not tasks.updater_listed('"python.exe","1","Docker Desktop Installer.exe","1","1 K"')
+
+
+def test_desktop_updating_is_never_asked_off_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "posix")
+    spawn = FakeSpawn(listing=(0, UPDATER))
+    assert tasks.desktop_updating(tmp_path, spawn) is False and spawn.listed == 0
+
+
+def test_start_needs_says_what_the_engine_answered_and_only_when_it_asked(tmp_path, instant):
+    up = ["docker", "compose", "up", "-d", "--wait", "db"]
+    went_through = tasks.start_needs(("db",), tmp_path, FakeSpawn((0, "ok")))
+    assert went_through == (0, "ok", None, False)
+    timed_out = tasks.start_needs(("db",), tmp_path, FakeSpawn(TIMED_OUT, ENGINE_UP, TIMED_OUT))
+    assert timed_out == (*TIMED_OUT, ENGINE_UP, False), "an answering engine is not waited for"
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
+    assert tasks.start_needs(("db",), tmp_path, spawn) == (*NO_IMAGE, ENGINE_UP, False)
+    assert spawn.calls[0] == (up, tmp_path.name, tasks.NEEDS_TIMEOUT)
+    assert instant.slept == []
+
+
+def test_start_needs_says_an_update_was_running_when_its_wait_began(tmp_path, monkeypatch, instant):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(SILENT, SILENT, ENGINE_UP, (0, "ok"), listing=(0, UPDATER))
+    answer = tasks.start_needs(("db",), tmp_path, spawn)
+    assert answer == tasks.NeedsStart(0, "ok", None, updating=True)
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP, listing=(0, UPDATER))
+    assert tasks.start_needs(("db",), tmp_path, spawn) == (*NO_IMAGE, ENGINE_UP, False)
+    assert spawn.listed == 0, "only a silent engine is asked about"
+
+
+def test_probe_asks_docker_version_within_its_bound(tmp_path):
+    spawn = FakeSpawn(ENGINE_UP)
+    assert tasks.probe(tmp_path, spawn) == ENGINE_UP
+    assert spawn.calls == [
+        (["docker", "version", "--format", "{{.Server.Version}}"], tmp_path.name, tasks.PROBE)
+    ]
+
+
+# What `compose up` said on 2026-10-12 with WSL hung under Docker Desktop (08ec2a47), and
+# what `docker info --format {{.ServerVersion}}` answered beside it: exit 0, no version.
+UNABLE = (1, "Error response from daemon: Docker Desktop is unable to start")
+NO_VERSION = (0, "\n")
+
+
+def test_a_probe_that_names_no_server_version_is_no_answer(tmp_path):
+    code, said = tasks.probe(tmp_path, FakeSpawn(NO_VERSION))
+    assert code != 0 and "no server version" in said
+    assert tasks.probe(tmp_path, FakeSpawn(UNABLE)) == UNABLE
+
+
+def test_a_fire_on_a_desktop_unable_to_start_waits_for_the_engine_and_blames_it(tmp_path, instant):
+    """08ec2a47: the 22:30 fire failed nine seconds in on "docker compose up failed for
+    db": the probe read an exit 0 with no version as an answering engine, so the wait
+    for a silent one -- the fix of fifteen resolutions before it -- was never reached."""
+    probes = 1 + tasks.ENGINE_WAIT // tasks.ENGINE_POLL
+    spawn = FakeSpawn(UNABLE, *[NO_VERSION] * probes)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and sum(instant.slept) == tasks.ENGINE_WAIT
+    assert lines[-1] == "error: the Docker engine did not answer"
+
+
+# Docker Desktop's monitor logging its backend's answer to `docker desktop status`, as it
+# did on 2026-10-12 at 02:33 UTC, cut to the fields read.
+STOPPED_REASON = (
+    r"engine linux/wsl failed to start: getting WSL provisioner: listing WSL distros: "
+    r"DockerDesktop/Wsl/CommandTimedOut: c:\windows\system32\wsl.exe -l -v --all: exit status 1"
+)
+
+
+def state_line(state, reason=""):
+    payload = {"docker": state, "dockerAPI": "running", "state": state, "stopReason": reason}
+    return (
+        "[2026-10-13T02:33:04.447794700Z] [02:33:04.447794700Z][main.ipc              ] "
+        "(79fc0c5f-0) ea34ab33-BackendAPI S->C 67501fa1-docker-desktop-cli GET "
+        f"/backend/state (0s): {json.dumps(payload)}"
+    )
+
+
+def desktop_logs(tmp_path, *lines):
+    logs = tmp_path / "docker-logs"
+    logs.mkdir()
+    (logs / tasks.MONITOR_LOG).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return logs
+
+
+def test_stop_reason_reads_the_latest_logged_state(tmp_path):
+    asked = "... S<-C 67501fa1-docker-desktop-cli GET /backend/state"
+    logs = desktop_logs(
+        tmp_path, "[x] returning engine error:", asked, state_line("stopped", STOPPED_REASON)
+    )
+    assert tasks.stop_reason(logs) == STOPPED_REASON
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        [state_line("stopped", STOPPED_REASON), state_line("running")],
+        [state_line("stopped")],
+        ["[x] returning engine error:"],
+        [state_line("stopped", STOPPED_REASON).replace("(0s): {", "(0s): {broken")],
+    ],
+    ids=["recovered-since", "no-reason", "no-state-logged", "unreadable"],
+)
+def test_stop_reason_says_nothing_but_the_latest_states_reason(tmp_path, lines):
+    assert tasks.stop_reason(desktop_logs(tmp_path, *lines)) == ""
+
+
+def test_stop_reason_of_a_missing_log_is_nothing(tmp_path):
+    assert tasks.stop_reason(tmp_path / "absent") == ""
+
+
+def test_a_silent_engines_fire_says_docker_desktops_reason_beside_the_cause(
+    tmp_path, monkeypatch, instant
+):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    logs = desktop_logs(tmp_path, state_line("stopped", STOPPED_REASON))
+    status = (0, '{"SessionID": "x", "Status": "stopped"}')
+    spawn = FakeSpawn(UNABLE, *SILENT_THROUGH_WAIT, status)
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn, desktop_logs=logs)
+    assert spawn.calls[-1][0] == list(tasks.DESKTOP_STATUS), "asked, so the state is today's"
+    assert lines[-2] == f"Docker Desktop says its engine stopped: {STOPPED_REASON}"
+    assert log_wrap.failure_cause("\n".join(lines)) == "error: the Docker engine did not answer"
+
+
+def test_desktop_said_is_nothing_for_an_answering_engine_or_no_logs(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    logs = desktop_logs(tmp_path, state_line("stopped", STOPPED_REASON))
+    spawn = FakeSpawn()
+    assert tasks.desktop_said(ENGINE_UP, tmp_path, spawn, logs) == []
+    assert tasks.desktop_said(SILENT, tmp_path, spawn, None) == []
+    assert spawn.calls == [], "Docker Desktop is not asked either"
+
+
+def test_desktop_stopped_is_never_asked_off_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.os, "name", "posix")
+    spawn = FakeSpawn()
+    logs = desktop_logs(tmp_path, state_line("stopped", STOPPED_REASON))
+    assert tasks.desktop_stopped(tmp_path, spawn, logs) == "" and spawn.calls == []
+
+
+def test_a_fire_on_a_wsl_service_stuck_stopping_names_it_and_what_ends_it(
+    tmp_path, monkeypatch, instant
+):
+    """24907f2a: 2026-10-13 WSLService sat in STOP_PENDING, every `wsl.exe` call timed
+    out, and the fire's cause read "the Docker engine did not answer" -- the cause of
+    seventeen resolutions, none of which could end a service an unelevated job may not
+    stop. The cause names the machine's state, and the step beside it the person's."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(UNABLE, *SILENT_THROUGH_WAIT, wsl=(WSL_STOPPING,))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 1 and spawn.wsl_asked == 2
+    assert lines[-2] == tasks.WSL_STUCK_STEP and "elevated" in lines[-2]
+    assert log_wrap.cause_said("\n".join(lines)) == f"error: {tasks.WSL_STUCK}"
+
+
+def test_a_fire_on_a_wsl_service_stuck_stopping_reaches_the_ledger_as_a_persons_step(
+    tmp_path, monkeypatch, instant
+):
+    """063598eb: the stuck service's fire was filed with no `PERSON_STEP`, so the pass
+    sent a fixer at a service only an administrator can end. The line `log-wrap.py`
+    files, read back by `harness_triage`, has its group await the person instead."""
+    triage = load_script("scripts/harness_triage.py")
+    assert tasks.PERSON_STEP == triage.PERSON_STEP, "spelled twice, held equal here"
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(UNABLE, *SILENT_THROUGH_WAIT, wsl=(WSL_STOPPING,))
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    output = "\n".join(lines)
+    cause, said = log_wrap.failure_cause(output), log_wrap.cause_said(output)
+    row = triage.read_items(
+        "2026-10-13T07:36:33+00:00\tevent=scheduled-job-failed\tproject=devkit"
+        f"\tcause={cause}\tsaid={said}"
+    )[0]
+    assert triage.person_step(row) == tasks.WSL_REMEDY
+    assert "recover-wsl" in tasks.WSL_REMEDY
+
+
+def test_a_fire_on_a_running_wsl_service_still_blames_the_engine(tmp_path, monkeypatch, instant):
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    spawn = FakeSpawn(UNABLE, *SILENT_THROUGH_WAIT, wsl=(WSL_RUNNING,))
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert spawn.wsl_asked == 1 and tasks.WSL_STUCK_STEP not in lines
+    assert lines[-1] == "error: the Docker engine did not answer"
+
+
+@pytest.mark.parametrize(
+    ("answers", "stuck", "slept"),
+    [
+        ([WSL_STOPPING, WSL_STOPPING], True, [tasks.WSL_SETTLE]),
+        ([WSL_STOPPING, WSL_RUNNING], False, [tasks.WSL_SETTLE]),
+        ([WSL_RUNNING], False, []),
+        ([(1, "[SC] OpenService FAILED 1060")], False, []),
+        ([(tasks.TIMED_OUT, "timed out after 30s")], False, []),
+    ],
+    ids=["still-stopping", "stopped-meanwhile", "running", "no-service", "no-answer"],
+)
+def test_wsl_stuck_is_a_service_still_stopping_after_the_settle(answers, stuck, slept):
+    asked = iter(answers)
+    waits: list[float] = []
+    assert tasks.wsl_stuck(lambda: next(asked), waits.append) is stuck
+    assert waits == slept
+
+
+def test_service_state_reads_scs_state_column():
+    assert tasks.service_state(WSL_STOPPING[1]) == "STOP_PENDING"
+    assert tasks.service_state(WSL_RUNNING[1]) == "RUNNING"
+    assert tasks.service_state("[SC] EnumQueryServicesStatus:OpenService FAILED 1060") == ""
+
+
+def test_wsl_said_is_nothing_for_an_answering_engine_or_off_windows(tmp_path, monkeypatch):
+    spawn = FakeSpawn(wsl=(WSL_STOPPING,))
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    assert tasks.wsl_said(ENGINE_UP, tmp_path, spawn) == []
+    monkeypatch.setattr(tasks.os, "name", "posix")
+    assert tasks.wsl_said(SILENT, tmp_path, spawn) == []
+    assert spawn.wsl_asked == 0
+
+
+def test_await_engine_stops_asking_once_it_answers(tmp_path, instant):
+    spawn = FakeSpawn(SILENT, ENGINE_UP)
+    assert tasks.await_engine(tmp_path, spawn) == ENGINE_UP
+    assert instant.slept == [tasks.ENGINE_POLL] * 2 and len(spawn.calls) == 2
+
+
+def test_a_second_start_that_fails_is_probed_afresh(tmp_path, instant):
+    spawn = FakeSpawn(SILENT, SILENT, ENGINE_UP, NO_IMAGE, ENGINE_UP)
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert lines[-1] == "error: docker compose up failed for db"
+    assert len(spawn.calls) == 5
+
+
+TIMED_OUT = (tasks.TIMED_OUT, "\ntimed out after 600s; ended it and its children")
+
+
+def test_a_need_that_timed_out_with_the_engine_answering_says_the_service_stalled(tmp_path):
+    """3e8e7f26: `up --wait db` printed nothing for 600 s and the log asked whether Docker
+    Desktop was running, while the db had been up and healthy for hours. The re-ask says
+    which stalled, and the cause no longer reads as the scrape's own timeout."""
+    healthy = "NAME STATUS\nsocial-scraper-db-1 Up 4 hours (healthy)"
+    spawn = FakeSpawn(TIMED_OUT, (0, "28.4.0\n"), TIMED_OUT, (0, healthy))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == tasks.TIMED_OUT and len(spawn.calls) == 4
+    assert spawn.calls[1] == (list(tasks.ENGINE_PROBE), "social-scraper", tasks.PROBE)
+    assert spawn.calls[2] == (spawn.calls[0][0], "social-scraper", tasks.NEEDS_TIMEOUT)
+    assert spawn.calls[3][0] == ["docker", "compose", "ps", "--all", "db"]
+    assert not any("Docker Desktop running" in line for line in lines), lines
+    assert any("server 28.4.0" in line for line in lines), lines
+    assert "social-scraper-db-1 Up 4 hours (healthy)" in lines
+    assert lines[-1] == "error: db did not come up healthy within the compose timeout"
+
+
+def test_a_need_that_timed_out_on_an_answering_engine_is_started_once_more(tmp_path):
+    """2b286d27: at 02:00 on 2026-11-05 `up --wait db` printed nothing for 600 s with the
+    db up and healthy for three days; `ps` hung beside it, and the next fire's start went
+    through. A stalled compose is a fire minutes late, as a silent engine's is, and a
+    start that stalls twice running is the one worth filing."""
+    spawn = FakeSpawn(TIMED_OUT, (0, "28.4.0\n"), (0, "started"), (0, "ok"))
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == 0 and started_db(lines)
+    assert spawn.calls[2][0] == spawn.calls[0][0] and spawn.calls[3][0] != spawn.calls[0][0]
+
+
+def test_a_need_that_failed_fast_on_an_answering_engine_is_not_started_again(tmp_path):
+    spawn = FakeSpawn(NO_IMAGE, ENGINE_UP)
+    code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert code == NO_IMAGE[0], "compose said why, and the same start says it again"
+    assert [call[0][:3] for call in spawn.calls].count(["docker", "compose", "up"]) == 1
+    assert lines[-1] == "error: docker compose up failed for db"
+
+
+def test_a_need_that_timed_out_with_the_engine_silent_blames_the_engine(tmp_path, instant):
+    spawn = FakeSpawn(TIMED_OUT, *SILENT_THROUGH_WAIT[:-1], PROBE_TIMED_OUT)
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert len(spawn.calls) == 1 + len(SILENT_THROUGH_WAIT), "compose ps would only hang"
+    assert any("did not answer either (exit 124)" in line for line in lines), lines
+    assert lines[-1] == "error: the Docker engine did not answer"
+
+
+@pytest.mark.parametrize(
+    ("answers", "cause"),
+    [
+        ([TIMED_OUT, *SILENT_THROUGH_WAIT], "error: the Docker engine did not answer"),
+        ([TIMED_OUT, (0, "28"), TIMED_OUT, (0, "")], "error: db did not come up healthy within"),
+        ([NO_IMAGE, ENGINE_UP], "error: docker compose up failed"),
+    ],
+)
+def test_the_wrapper_files_the_needs_kind_as_the_cause(tmp_path, answers, cause, instant):
+    """What `log-wrap.py` reads off the fire's output is the line `needs_failed` ends on."""
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), FakeSpawn(*answers))
+    found = log_wrap.failure_cause("\n".join(lines))
+    assert found.startswith(cause), found
+
+
+def test_needs_failed_keeps_the_compose_tail_before_its_verdict(tmp_path):
+    out = "\n".join(f"compose {n}" for n in range(60))
+    lines = tasks.needs_failed(("db", "cache"), tmp_path, 1, out, FakeSpawn(ENGINE_UP))
+    assert lines[0] == "could not start db, cache (exit 1), so the command was not run"
+    assert "compose 19" not in lines and "compose 20" in lines and "compose 59" in lines
+    assert lines[-1] == "error: docker compose up failed for db, cache"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("28.4.0\nmore", "28.4.0"),
+        ("\n  27.1  \n", "27.1"),
+        ("", "(nothing)"),
+        ("  \n", "(nothing)"),
+    ],
+)
+def test_first_is_the_first_line_or_says_there_was_none(text, expected):
+    assert tasks.first(text) == expected
+
+
+def test_a_command_with_no_needs_spawns_only_itself(tmp_path):
+    bare = config.Collector("social-scraper", command=("uv",), minutes=5)
+    spawn = FakeSpawn((0, ""))
+    tasks.fire(bare, checkout(tmp_path), spawn)
+    assert len(spawn.calls) == 1
+
+
+def test_a_missing_checkout_runs_nothing(tmp_path):
+    spawn = FakeSpawn()
+    code, lines = tasks.fire(SCRAPER, tmp_path / "absent", spawn)
+    assert code == 2 and spawn.calls == [] and "no checkout" in lines[-1]
+
+
+def test_a_long_output_keeps_its_tail(tmp_path):
+    out = "\n".join(f"line {n}" for n in range(tasks.LOG_LINES + 50))
+    spawn = FakeSpawn((0, ""), (1, out), DB_RUNNING, STARTED_BEFORE)
+    _code, lines = tasks.fire(SCRAPER, checkout(tmp_path), spawn)
+    assert f"line {tasks.LOG_LINES + 49}" in lines and "line 0" not in lines
+    assert any("50 earlier lines dropped" in line for line in lines)
+
+
+def test_a_program_not_on_path_is_left_for_the_spawn_to_report():
+    assert tasks.resolve(["nope", "a"], which=lambda name: None) == ["nope", "a"]
+
+
+def test_the_spawn_reports_a_missing_program_as_127(tmp_path):
+    code, out = tasks.spawn(["definitely-not-a-program-here"], tmp_path, 10)
+    assert code == 127 and "not on PATH" in out
+
+
+class FakePopen:
+    instances: ClassVar[list[FakePopen]] = []
+    hang = False
+
+    def __init__(self, argv, **kwargs):
+        self.argv, self.kwargs = argv, kwargs
+        self.pid, self.returncode, self.killed = 4242, 3, False
+        self.waits = 0
+        FakePopen.instances.append(self)
+
+    def communicate(self, timeout=None):
+        self.waits += 1
+        if self.hang and self.waits == 1:
+            raise subprocess.TimeoutExpired(self.argv, timeout)
+        return "partial output\n", None
+
+    def kill(self):
+        self.killed = True
+
+
+def test_the_spawn_is_window_less_and_captured_with_the_streams_merged(monkeypatch, tmp_path):
+    FakePopen.hang = False
+    monkeypatch.setattr(tasks.subprocess, "Popen", FakePopen)
+    assert tasks.spawn(["uv"], tmp_path, 10) == (3, "partial output")
+    kwargs = FakePopen.instances[-1].kwargs
+    assert kwargs["creationflags"] == tasks.NO_WINDOW
+    assert kwargs["stderr"] == subprocess.STDOUT and kwargs["stdin"] == subprocess.DEVNULL
+
+
+def test_a_collector_runs_uv_frozen_so_it_never_rewrites_the_checkouts_lock(monkeypatch, tmp_path):
+    """The command runs in the static checkout, where a bare `uv run` relocks against a
+    moved sibling and leaves `uv.lock` uncommitted on the default branch -- ibkr_trader's
+    `main` from 2026-10-03 on."""
+    assert tasks.command_env({"PATH": "p", "UV_FROZEN": "0"}) == {"PATH": "p", "UV_FROZEN": "1"}
+    FakePopen.hang = False
+    monkeypatch.setattr(tasks.subprocess, "Popen", FakePopen)
+    tasks.spawn(["uv", "run", "x"], tmp_path, 10)
+    assert FakePopen.instances[-1].kwargs["env"]["UV_FROZEN"] == "1"
+    ran: list = []
+    monkeypatch.setattr(
+        tasks.subprocess,
+        "run",
+        lambda argv, **kw: ran.append(kw) or subprocess.CompletedProcess(argv, 0),
+    )
+    assert tasks.stream(["uv", "run", "x"], tmp_path) == 0
+    assert ran[0]["env"]["UV_FROZEN"] == "1"
+
+
+def test_a_spawns_env_is_added_to_the_commands_and_cannot_unfreeze_it(monkeypatch, tmp_path):
+    assert tasks.command_env({"PATH": "p"}, {tasks.FIRED_AT: "t"}) == {
+        "PATH": "p",
+        "UV_FROZEN": "1",
+        tasks.FIRED_AT: "t",
+    }
+    FakePopen.hang = False
+    monkeypatch.setattr(tasks.subprocess, "Popen", FakePopen)
+    tasks.spawn(["uv", "run", "x"], tmp_path, 10, {tasks.FIRED_AT: "t"})
+    env = FakePopen.instances[-1].kwargs["env"]
+    assert env[tasks.FIRED_AT] == "t" and env["UV_FROZEN"] == "1"
+
+
+def test_a_timeout_ends_the_whole_tree_and_keeps_what_was_said(monkeypatch, tmp_path):
+    """`uv`'s grandchild is the Chrome holding the profile lock; killing `uv` alone
+    leaves it, and every later fire fails on the lock."""
+    FakePopen.hang = True
+    killed = []
+    monkeypatch.setattr(tasks.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(tasks, "kill_tree", killed.append)
+    code, out = tasks.spawn(["uv"], tmp_path, 10)
+    assert code == 124 and killed == [4242] and FakePopen.instances[-1].killed
+    assert "partial output" in out and "timed out after 10s" in out
+
+
+def test_kill_tree_asks_taskkill_for_the_subtree_window_less(monkeypatch):
+    seen = []
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setattr(tasks.subprocess, "run", lambda argv, **kw: seen.append((argv, kw)))
+    assert tasks.kill_tree(7) == ""
+    ((argv, kwargs),) = seen
+    assert argv == ["taskkill", "/F", "/T", "/PID", "7"]
+    assert kwargs["creationflags"] == tasks.NO_WINDOW
+
+
+@pytest.mark.parametrize(
+    ("error", "said"),
+    [
+        (subprocess.TimeoutExpired(["taskkill"], 60), "did not finish within 60s"),
+        (OSError("access denied"), "could not run: access denied"),
+    ],
+)
+def test_a_taskkill_that_fails_is_said_not_raised(monkeypatch, error, said):
+    """a4796ff6: `taskkill` ran past its minute and its `TimeoutExpired` replaced the
+    log of the fire that had timed out with a traceback about the cleanup."""
+    monkeypatch.setattr(tasks.os, "name", "nt")
+
+    def run(argv, **kw):
+        raise error
+
+    monkeypatch.setattr(tasks.subprocess, "run", run)
+    assert said in tasks.kill_tree(7)
+
+
+class Held(FakePopen):
+    """A child whose pipe a surviving grandchild holds: every wait times out."""
+
+    def communicate(self, timeout=None):
+        self.waits += 1
+        raise subprocess.TimeoutExpired(self.argv, timeout)
+
+
+def test_a_timeout_whose_children_survive_still_returns(monkeypatch, tmp_path):
+    monkeypatch.setattr(tasks.subprocess, "Popen", Held)
+    monkeypatch.setattr(tasks, "kill_tree", lambda pid: "taskkill did not finish within 60s")
+    code, out = tasks.spawn(["uv"], tmp_path, 10)
+    assert code == tasks.TIMED_OUT and Held.instances[-1].killed
+    assert out.strip() == "timed out after 10s; ended it, but not its children: " + (
+        "taskkill did not finish within 60s"
+    )
+
+
+# --- a run by hand ------------------------------------------------------------------
+
+
+def test_a_run_by_hand_starts_its_needs_then_streams_the_command(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks.shutil, "which", lambda name: rf"C:\bin\{name}.exe")
+    seen = []
+
+    def streamer(argv, cwd):
+        seen.append((list(argv), Path(cwd).name))
+        return 0
+
+    assert tasks.run_once(SCRAPER, checkout(tmp_path), streamer) == 0
+    assert seen == [
+        (["docker", "compose", "up", "-d", "--wait", "db"], "social-scraper"),
+        ([r"C:\bin\uv.exe", "run", "social-scraper", "scrape"], "social-scraper"),
+    ]
+
+
+def test_a_run_by_hand_stops_when_its_needs_will_not_start(tmp_path):
+    seen = []
+    code = tasks.run_once(SCRAPER, checkout(tmp_path), lambda argv, cwd: seen.append(argv) or 1)
+    assert code == 1 and len(seen) == 1
+
+
+def test_a_run_by_hand_without_a_checkout_runs_nothing(tmp_path):
+    assert tasks.run_once(SCRAPER, tmp_path / "absent", lambda argv, cwd: 0 / 0) == 2
+
+
+def csv_answer(stdout, code=0):
+    return lambda argv: subprocess.CompletedProcess(list(argv), code, stdout, "")
+
+
+def test_running_reads_the_status_column_of_any_trigger_row():
+    ready = '"\\social-scraper","10/2/2026 3:00:00 PM","Ready"\n'
+    busy = ready + '"\\social-scraper","N/A","Running"\n'
+    assert not tasks.running("social-scraper", csv_answer(ready))
+    assert tasks.running("social-scraper", csv_answer(busy))
+    assert not tasks.running("social-scraper", csv_answer("", code=1))
+
+
+def test_the_streamed_spawn_is_window_less_and_hands_down_real_streams(monkeypatch, tmp_path):
+    handle = (tmp_path / "out.txt").open("w", encoding="utf-8")
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 5)
+
+    monkeypatch.setattr(tasks.sys, "stdout", handle)
+    monkeypatch.setattr(tasks.subprocess, "run", fake_run)
+    try:
+        assert tasks.stream(["uv"], tmp_path) == 5
+    finally:
+        handle.close()
+    assert seen["creationflags"] == tasks.NO_WINDOW and seen["stdout"] is handle
+
+
+def test_inherited_streams_names_only_streams_with_a_file_descriptor(monkeypatch, tmp_path):
+    """None under `pythonw.exe` and a capture object under pytest both mean nothing to
+    hand down; a real file is handed down under its own key."""
+
+    class Captured:
+        def fileno(self):
+            raise OSError("not a real descriptor")
+
+    handle = (tmp_path / "out.txt").open("w", encoding="utf-8")
+    try:
+        monkeypatch.setattr(tasks.sys, "stdout", handle)
+        monkeypatch.setattr(tasks.sys, "stderr", Captured())
+        assert tasks.inherited_streams() == {"stdout": handle}
+        monkeypatch.setattr(tasks.sys, "stdout", None)
+        assert tasks.inherited_streams() == {}
+    finally:
+        handle.close()
+
+
+def test_the_streamed_spawn_reports_a_missing_program_as_127(tmp_path):
+    assert tasks.stream(["definitely-not-a-program-here"], tmp_path) == 127
+
+
+def test_render_heads_the_log_with_the_name_time_and_exit():
+    import datetime as dt
+
+    text = tasks.render("social-scraper", 3, ["a"], dt.datetime(2026, 10, 2, 14, 30))
+    assert text.splitlines()[0] == "# collector social-scraper 2026-10-02T14:30:00 -- exit 3"
+    assert text.splitlines()[1] == "# earlier runs: logs/collector-runs/social-scraper-*.log"
+
+
+def test_each_fire_is_kept_under_its_own_stamp(tmp_path):
+    when = dt.datetime(2026, 10, 23, 13, 0, 1)
+    path = tasks.keep_run(tmp_path, "social-scraper", "rate limited\n", when)
+    assert path == tmp_path / "logs" / "collector-runs" / "social-scraper-20261023-130001.log"
+    assert path.read_text(encoding="utf-8") == "rate limited\n"
+    assert path.match(tasks.runs_glob("social-scraper"))
+
+
+def test_kept_fires_are_pruned_oldest_first_and_only_the_collectors_own(tmp_path, monkeypatch):
+    monkeypatch.setattr(tasks, "RUNS_KEEP", 2)
+    other = tasks.keep_run(tmp_path, "ibkr_trader", "x", dt.datetime(2026, 1, 1))
+    for hour in (9, 10, 11):
+        tasks.keep_run(tmp_path, "social-scraper", str(hour), dt.datetime(2026, 10, 23, hour))
+    kept = sorted(p.name for p in (tmp_path / "logs" / "collector-runs").iterdir())
+    assert kept == [
+        "ibkr_trader-20260101-000000.log",
+        "social-scraper-20261023-100000.log",
+        "social-scraper-20261023-110000.log",
+    ]
+    assert other is not None and other.exists()
+
+
+def test_a_kept_fire_that_cannot_be_written_is_none_not_a_raise(tmp_path):
+    (tmp_path / "logs").write_text("a file where the directory goes", encoding="utf-8")
+    assert tasks.keep_run(tmp_path, "social-scraper", "x", dt.datetime(2026, 10, 23)) is None
+
+
+def test_the_log_is_under_logs():
+    assert tasks.log_path("social-scraper").as_posix() == "logs/collector-social-scraper.log"

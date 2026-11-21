@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -105,12 +106,34 @@ def test_the_jobs_come_with_their_steps():
     assert ev.run_jobs(table({}), "7") == []
 
 
+def test_jobs_gh_could_not_read_are_none_and_a_run_with_none_is_empty():
+    assert ev.read_jobs(table({}), "7") is None
+    assert ev.read_jobs(table({("run", "view", "7"): {"jobs": []}}), "7") == []
+
+
+def test_reread_signs_by_every_runs_jobs_and_is_unread_when_one_says_nothing():
+    jobs = [
+        {
+            "name": "Lint",
+            "conclusion": "failure",
+            "steps": [{"name": "Lint", "conclusion": "failure"}],
+        }
+    ]
+    gh = table({("run", "view", "7"): {"jobs": jobs}})
+    assert ev.reread(gh, ["7"], False, []) == (("Lint / Lint",), False)
+    assert ev.reread(gh, ["7", "8"], False, []) == (("Lint / Lint",), True), "8 unread"
+    conflicted = (fix_plan.CONFLICT,)
+    assert ev.reread(table({}), ["7"], True, []) == (conflicted, False), "a conflict needs no run"
+
+
 def test_the_download_lands_under_dest_and_the_logs_are_read_back(tmp_path):
     dest = tmp_path / "evidence"
     (dest / "stale.log").parent.mkdir()
     (dest / "stale.log").write_text("FAILED old::one", encoding="utf-8")
 
     def gh(*args):
+        if args[:2] == ("run", "view"):
+            return subprocess.CompletedProcess(["gh", *args], 0, "Tests\t\tnothing new\n", "")
         assert args[:3] == ("run", "download", "7")
         target = Path(args[args.index("-D") + 1]) / "test-failures"
         target.mkdir(parents=True)
@@ -119,6 +142,35 @@ def test_the_download_lands_under_dest_and_the_logs_are_read_back(tmp_path):
 
     assert ev.run_evidence(gh, "7", dest) == ([SUMMARY], []), "named, so no jobs asked for"
     assert not (dest / "stale.log").exists(), "an earlier run's logs must not survive"
+    assert not (dest / ev.FAILED_LOG).exists(), "a log naming nothing new is not kept"
+
+
+def test_a_failed_job_the_artifacts_do_not_cover_is_still_read_from_its_log(tmp_path):
+    """sports_betting #48: the lint artifact named two files, so the failed Tests job's
+    log was never read, and the fixer's prompt listed only the lint findings. It found
+    the two ratchet failures by chance, and filed that the gate did not run them."""
+    lint = "# lint\nsports_betting/historical.py:3: error: Library stubs not installed\n"
+    tests_log = (
+        "Tests\tHarness hook tests\t2026-09-29T21:40:00.0Z FAILED "
+        "scripts/hooks/tests/test_structure_check.py::test_nothing_is_new_or_worse - x\n"
+    )
+
+    def gh(*args):
+        if args[:2] == ("run", "download"):
+            target = Path(args[args.index("-D") + 1]) / "lint-errors"
+            target.mkdir(parents=True)
+            (target / "lint-errors.log").write_text(lint, encoding="utf-8")
+            return subprocess.CompletedProcess(["gh", *args], 0, "", "")
+        assert args == ("run", "view", "7", "--log-failed")
+        return subprocess.CompletedProcess(["gh", *args], 0, tests_log, "")
+
+    dest = tmp_path / "e"
+    texts, asked = ev.run_evidence(gh, "7", dest)
+    named = fix_plan.signature_from_logs(texts)
+    assert "scripts/hooks/tests/test_structure_check.py::test_nothing_is_new_or_worse" in named
+    assert len(named) > 1, "the lint finding is still named beside it"
+    assert asked == []
+    assert (dest / ev.FAILED_LOG).read_text(encoding="utf-8") == tests_log
 
 
 def test_a_junit_report_in_the_download_is_also_written_out_readable(tmp_path):
@@ -129,7 +181,8 @@ def test_a_junit_report_in_the_download_is_also_written_out_readable(tmp_path):
     )
 
     def gh(*args):
-        (Path(args[args.index("-D") + 1]) / "junit.xml").write_text(junit, encoding="utf-8")
+        if "-D" in args:
+            (Path(args[args.index("-D") + 1]) / "junit.xml").write_text(junit, encoding="utf-8")
         return subprocess.CompletedProcess(["gh", *args], 0, "", "")
 
     dest = tmp_path / "e"
@@ -164,6 +217,51 @@ def test_an_artifact_less_run_is_read_from_its_failed_log_and_the_log_is_kept(tm
     assert asked == [], "named by the log, so no coarse job names"
     saved = tmp_path / "e" / ev.FAILED_LOG
     assert saved.read_text(encoding="utf-8") == FAILED_JOB_LOG
+
+
+def test_an_empty_artifact_is_not_left_beside_the_log_that_names_the_failure(tmp_path):
+    """1b01678b: roguelike #52's gate predates the template's JUnit upload, so a red
+    `Harness hook tests` step uploaded only the application suite's `test-failures.log`,
+    empty because that suite passed. The failure was named in `failed-jobs.log`, but the
+    fixer opened the empty artifact first and reported evidence that named nothing."""
+    hook_log = (
+        "Tests\tHarness hook tests\t2026-09-30T02:16:14Z FAILED scripts/hooks/tests/t.py::x\n"
+    )
+    answers = {("run", "view", "7", "--log-failed"): hook_log}
+
+    def gh(*args):
+        if args[:2] == ("run", "download"):
+            target = Path(args[args.index("-D") + 1]) / "test-failures"
+            target.mkdir(parents=True)
+            (target / "test-failures.log").write_text("", encoding="utf-8")
+            (target / "notes.log").write_text("kept", encoding="utf-8")
+            (Path(args[args.index("-D") + 1]) / "lint-errors").mkdir()
+            (Path(args[args.index("-D") + 1]) / "lint-errors" / "lint-errors.log").touch()
+            return subprocess.CompletedProcess(["gh", *args], 0, "", "")
+        return table(answers)(*args)
+
+    dest = tmp_path / "e"
+    texts, asked = ev.run_evidence(gh, "7", dest)
+    assert fix_plan.signature_from_logs(texts) == ("scripts/hooks/tests/t.py::x",)
+    assert asked == []
+    assert not (dest / "test-failures" / "test-failures.log").exists()
+    assert (dest / "test-failures" / "notes.log").read_text(encoding="utf-8") == "kept"
+    assert not (dest / "lint-errors").exists(), "a directory left empty goes too"
+    assert (dest / ev.FAILED_LOG).is_file()
+
+
+def test_drop_empty_leaves_dest_itself_and_every_file_with_content(tmp_path):
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "empty.log").touch()
+    (tmp_path / "a" / "full.log").write_text("x", encoding="utf-8")
+    (tmp_path / "c").mkdir()
+    assert ev.drop_empty(tmp_path) == ["a/b/empty.log"]
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == [
+        "a",
+        "a/full.log",
+    ]
+    assert ev.drop_empty(tmp_path / "missing") == []
+    assert ev.drop_empty(tmp_path / "a" / "full.log") == [], "a file is not a directory"
 
 
 def still_running(answers: dict[tuple[str, ...], object]) -> Table:
@@ -228,7 +326,7 @@ def test_a_job_log_that_names_nothing_hands_back_the_jobs_already_read(tmp_path)
 
 
 def test_a_log_that_names_nothing_still_falls_back_to_the_jobs(tmp_path):
-    jobs = [{"name": "Frontend", "conclusion": "failure", "steps": []}]
+    jobs = [{"name": "Frontend", "conclusion": "failure", "steps": [{"name": "s"}]}]
     gh = table(
         {("run", "view", "7"): {"jobs": jobs}, ("run", "view", "7", "--log-failed"): "x\ty\tz\n"}
     )
@@ -262,6 +360,8 @@ def artifact_gh(files: dict[str, str], jobs: list[dict] | None = None):
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[:2] == ("run", "view"):
             return subprocess.CompletedProcess(args, 0, json.dumps({"jobs": jobs or []}), "")
+        if "--log-failed" in args:  # asked beside every artifact; this run's names nothing
+            return subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(f"unexpected {args}")
 
     return gh
@@ -387,6 +487,8 @@ def test_reading_a_pr_downloads_the_run_at_its_sha_and_signs_it(monkeypatch, tmp
             target.mkdir(parents=True)
             (target / "test-failures.log").write_text(SUMMARY, encoding="utf-8")
             return subprocess.CompletedProcess(args, 0, "", "")
+        if "--log-failed" in args:  # asked beside every artifact; this run's names nothing
+            return subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(f"unexpected {args}")
 
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
@@ -406,8 +508,186 @@ def test_without_an_artifact_the_steps_are_asked_for(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
     failure = ev.read_pr(tmp_path, ev.pr_failure("carameli", pr()), tmp_path / "ev")
-    assert failure.signature == ("Drift",)
+    assert failure.signature == ("Drift (never started a step)",)
     assert failure.evidence == ""
+
+
+# roguelike's gate run 37364441127 as `gh` gave it: three jobs cancelled with no step
+# run, each annotated by GitHub, beside two that passed.
+NOT_ACQUIRED = "The job was not acquired by Runner of type hosted even after multiple attempts"
+LOST_JOBS = [
+    {"databaseId": 11, "name": "Tests", "conclusion": "cancelled", "steps": []},
+    {"databaseId": 12, "name": "Lint", "conclusion": "cancelled", "steps": []},
+    {"databaseId": 13, "name": "Drift", "conclusion": "success", "steps": [{"name": "s"}]},
+]
+
+
+def lost_gh(jobs: list[dict], said: dict[int, list[str]]) -> Table:
+    """A run that downloads nothing and views `jobs`, whose check runs say `said`."""
+    answers: dict[tuple[str, ...], object] = {
+        ("run", "list"): [{"databaseId": 7, "headSha": "sha1"}],
+        ("run", "view"): {"jobs": jobs},
+        ("run", "view", "7", "--log-failed"): "",
+    }
+    for job_id, messages in said.items():
+        path = f"repos/{{owner}}/{{repo}}/check-runs/{job_id}/annotations"
+        answers[("api", path)] = [{"message": m, "annotation_level": "failure"} for m in messages]
+    return table(answers)
+
+
+def test_red_jobs_no_runner_took_are_named_and_any_other_red_is_not():
+    """c354f451: the only failures were jobs GitHub never gave a runner -- zero steps,
+    nothing logged -- and a fixer was sent at them. Anything less certain is the code's."""
+    said = {11: [NOT_ACQUIRED, "ubuntu-latest will migrate"], 12: [NOT_ACQUIRED]}
+    assert ev.runner_lost(lost_gh(LOST_JOBS, said), LOST_JOBS) == ("Lint", "Tests")
+    assert ev.runner_lost(lost_gh(LOST_JOBS, {11: [NOT_ACQUIRED]}), LOST_JOBS) == (), (
+        "a cancelled job whose check run says nothing about its runner is not one"
+    )
+    ran = [{**LOST_JOBS[0], "steps": [{"name": "Set up job"}]}, LOST_JOBS[1]]
+    assert ev.runner_lost(lost_gh(ran, said), ran) == (), "a job that ran a step had a runner"
+    assert ev.runner_lost(lost_gh(LOST_JOBS, said), LOST_JOBS[2:]) == (), "nothing red"
+    assert ev.job_annotations(table({}), 11) == [], "a gh that cannot say says nothing"
+
+
+def test_a_pr_whose_red_jobs_never_got_a_runner_is_marked_for_a_re_run(monkeypatch, tmp_path):
+    said = {11: [NOT_ACQUIRED], 12: [NOT_ACQUIRED]}
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: lost_gh(LOST_JOBS, said))
+    failure = ev.read_pr(tmp_path, ev.pr_failure("roguelike", pr()), tmp_path / "ev")
+    assert failure.lost_runs == ("7",)
+    assert failure.signature == (f"Lint / {fix_plan.NO_RUNNER}", f"Tests / {fix_plan.NO_RUNNER}")
+    assert fix_plan.plan([failure], "", ())[0].action == fix_plan.RERUN
+    assert failure.signature == ev.lost_signature(("Lint", "Tests"))
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: lost_gh(LOST_JOBS, {11: [NOT_ACQUIRED]}))
+    failure = ev.read_pr(tmp_path, ev.pr_failure("roguelike", pr()), tmp_path / "ev")
+    assert failure.lost_runs == (), "one red job with a cause of its own keeps the fixer"
+
+
+def test_runs_off_the_rollup_are_lost_only_when_every_one_of_them_is(tmp_path):
+    """Two runs behind the failing checks: one that lost its runner and one that failed
+    a step is a failure in the code, and its fixer still goes."""
+    said = {11: [NOT_ACQUIRED], 12: [NOT_ACQUIRED]}
+    gh = lost_gh(LOST_JOBS, said)
+    gh.answers[("run", "view", "8", "--log-failed")] = ""
+    texts, jobs, lost = ev.read_runs(gh, ["7", "8"], tmp_path / "ev")
+    assert (texts, lost) == ([], ("Lint", "Tests")), "one entry per job name, as a signature"
+    assert len(jobs) == 2 * len(LOST_JOBS)
+    failed = [{"databaseId": 21, "name": "Tests", "conclusion": "failure", "steps": [{}]}]
+    gh.answers[("run", "view", "8")] = {"jobs": failed}
+    assert ev.read_runs(gh, ["7", "8"], tmp_path / "ev")[2] == ()
+
+
+def test_a_default_branch_whose_red_jobs_never_got_a_runner_is_marked_too(monkeypatch, tmp_path):
+    branch_world(monkeypatch, "failure", "", "")
+    gh = lost_gh(LOST_JOBS, {11: [NOT_ACQUIRED], 12: [NOT_ACQUIRED]})
+    gh.answers[("run", "list")] = [
+        {"databaseId": 7, "status": "completed", "conclusion": "failure", "headSha": "fb17a310"}
+    ]
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    green, failure = ev.read_default_branch("roguelike", tmp_path, tmp_path / "ev")
+    assert green is False and failure is not None
+    assert failure.lost_runs == ("7",)
+    assert failure.signature == (f"Lint / {fix_plan.NO_RUNNER}", f"Tests / {fix_plan.NO_RUNNER}")
+
+
+# productivity-tracker's PR Gate run 40962955157 as `gh` gave it: every job `failure`
+# with zero steps, each annotated with GitHub's billing refusal beside a runner notice.
+BILLING = (
+    "The job was not started because recent account payments have failed or your spending "
+    "limit needs to be increased. Please check the 'Billing & plans' section in your settings"
+)
+REFUSED_JOBS = [
+    {"databaseId": 11, "name": "Tests", "conclusion": "failure", "steps": []},
+    {"databaseId": 12, "name": "Lint", "conclusion": "failure", "steps": []},
+]
+REFUSED_SAID = {11: [BILLING, "The ubuntu-latest label will migrate"], 12: [BILLING]}
+
+
+def test_red_jobs_billing_refused_are_named_and_any_other_red_is_not():
+    assert ev.billing_refused(lost_gh(REFUSED_JOBS, REFUSED_SAID), REFUSED_JOBS) == (
+        "Lint",
+        "Tests",
+    )
+    one = {11: [BILLING], 12: [NOT_ACQUIRED]}
+    assert ev.billing_refused(lost_gh(REFUSED_JOBS, one), REFUSED_JOBS) == ()
+    assert ev.unstarted_for(lost_gh(REFUSED_JOBS, one), REFUSED_JOBS[1:], ev.RUNNER_LOST) == (
+        "Lint",
+    )
+    assert ev.runner_lost(lost_gh(REFUSED_JOBS, REFUSED_SAID), REFUSED_JOBS) == ()
+
+
+def test_the_billing_signature_is_asked_only_of_jobs_that_never_started():
+    gh = lost_gh(REFUSED_JOBS, REFUSED_SAID)
+    unstarted = ("Lint (never started a step)", "Tests (never started a step)")
+    assert ev.billing_signature(gh, unstarted, REFUSED_JOBS) == (
+        f"Lint / {fix_plan.NO_BILLING}",
+        f"Tests / {fix_plan.NO_BILLING}",
+    )
+    asked = len(gh.calls)
+    assert ev.billing_signature(gh, ("Tests / Pytest",), REFUSED_JOBS) == ("Tests / Pytest",)
+    assert len(gh.calls) == asked, "a run that named a failure costs no annotation read"
+    quiet = lost_gh(REFUSED_JOBS, {})
+    assert ev.billing_signature(quiet, unstarted, REFUSED_JOBS) == unstarted
+
+
+def test_a_pr_gate_refused_over_billing_is_skipped_as_a_persons_step(monkeypatch, tmp_path):
+    """productivity-tracker #3, social-scraper #108: the shared signature of four jobs
+    that never started folded both into a devkit session, which could change nothing."""
+    gh = lost_gh(REFUSED_JOBS, REFUSED_SAID)
+    gh.answers[("run", "view", "7", "--json", "attempt")] = {"attempt": 2}
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    failure = ev.read_pr(tmp_path, ev.pr_failure("productivity-tracker", pr()), tmp_path / "ev")
+    assert failure.signature == (f"Lint / {fix_plan.NO_BILLING}", f"Tests / {fix_plan.NO_BILLING}")
+    assert (failure.lost_runs, failure.attempt) == ((), 0)
+    [decision] = fix_plan.plan([failure], "", ())
+    assert decision.action == fix_plan.SKIP
+    assert f"{fix_plan.harness_triage.PERSON_STEP} {fix_plan.BILLING_STEP}" in decision.note
+
+
+def test_a_default_branch_refused_over_billing_is_signed_so(monkeypatch, tmp_path):
+    branch_world(monkeypatch, "failure", "", "")
+    gh = lost_gh(REFUSED_JOBS, REFUSED_SAID)
+    gh.answers[("run", "list")] = [
+        {"databaseId": 7, "status": "completed", "conclusion": "failure", "headSha": "fb17a310"}
+    ]
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    green, failure = ev.read_default_branch("social-scraper", tmp_path, tmp_path / "ev")
+    assert green is False and failure is not None
+    assert fix_plan.is_billing_refused(failure.signature)
+    assert failure.lost_runs == ()
+
+
+def test_a_run_whose_jobs_never_started_is_read_with_its_attempt(monkeypatch, tmp_path):
+    """carameli PR Gate run 37363944090: one job cancelled with zero steps. The plan
+    re-runs a first attempt like that instead of sending a session, so its attempt is
+    read -- and only then, one call, never for a run with a failure to name."""
+    jobs = [{"name": "Backend unit + integration", "conclusion": "cancelled", "steps": []}]
+    gh = table(
+        {
+            ("run", "list"): [{"databaseId": 7, "headSha": "sha1"}],
+            ("run", "view", "7", "--json", "jobs,conclusion,headSha,url"): {"jobs": jobs},
+            ("run", "view", "7", "--json", "attempt"): {"attempt": 1},
+            ("run", "view", "7", "--log-failed"): "",
+        }
+    )
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+    failure = ev.read_pr(tmp_path, ev.pr_failure("carameli", pr()), tmp_path / "ev")
+    assert failure.signature == ("Backend unit + integration (never started a step)",)
+    assert failure.attempt == 1
+    [decision] = fix_plan.plan([failure], "", ())
+    assert decision.action == fix_plan.RERUN
+
+
+def test_the_attempt_is_asked_for_only_of_a_runner_side_signature():
+    gh = table({("run", "view", "7", "--json", "attempt"): {"attempt": 2}})
+    assert ev.run_attempt(gh, "7", ("Drift (never started a step)",)) == 2
+    assert ev.run_attempt(gh, "7", ("Tests / Initialize containers",)) == 2
+    assert ev.run_attempt(gh, "7", ("Tests / Suite",)) == 0
+    assert ev.run_attempt(gh, "", ("Drift (never started a step)",)) == 0
+    assert len(gh.calls) == 2
+    for said in ({"attempt": "x"}, [], "not json"):
+        assert (
+            ev.run_attempt(table({("run", "view"): said}), "7", ("J (never started a step)",)) == 0
+        )
 
 
 def test_a_conflict_with_no_run_is_still_signed(monkeypatch, tmp_path):
@@ -434,7 +714,8 @@ def test_an_issue_becomes_a_nightly_failure_on_the_default_branch(monkeypatch, t
     monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "master")
     failure = ev.read_issue("carameli", tmp_path, issue, tmp_path / "ev")
     assert (failure.kind, failure.number, failure.workflow) == (fix_plan.NIGHTLY, 9, "Nightly")
-    assert (failure.base, failure.run_id, failure.signature) == ("master", "55", ("Suite",))
+    unstarted = ("Suite (never started a step)",)
+    assert (failure.base, failure.run_id, failure.signature) == ("master", "55", unstarted)
 
 
 NIGHTLY_YML = """\
@@ -511,6 +792,18 @@ def test_a_nightly_green_at_the_tip_is_nothing_to_fix(monkeypatch, tmp_path):
     assert ev.read_issue("ibkr_trader", tmp_path, ISSUE_69, tmp_path / "ev") is None
 
 
+def test_the_scheduled_workflow_is_read_at_the_tip_and_its_green_run_named(monkeypatch, tmp_path):
+    """What `fix_issues` closes on: the run that judged the tip green, and nothing else."""
+    green = {**run_at("new", 72, conclusion="success"), "url": "https://run/72"}
+    nightly_world(monkeypatch, tmp_path, [green, run_at("old")])
+    base, file, runs, tip = ev.scheduled_at_tip(tmp_path, "Nightly")
+    assert (base, file, tip) == ("main", "nightly.yml", "new")
+    assert ev.green_at_tip(runs, tip) == green
+    assert ev.green_at_tip([run_at("new", 71)], "new") == {}, "red at the tip"
+    assert ev.green_at_tip([run_at("old", 70, conclusion="success")], "new") == {}, "not the tip"
+    assert ev.green_at_tip(runs, "") == {}
+
+
 def test_a_nightly_with_a_run_going_at_the_tip_downloads_nothing(monkeypatch, tmp_path):
     calls = nightly_world(
         monkeypatch, tmp_path, [run_at("new", 73, "in_progress", ""), run_at("old")]
@@ -548,6 +841,18 @@ def test_collect_drops_a_nightly_green_at_the_tip(monkeypatch, tmp_path):
     issues = [{"number": 9, "title": "Nightly workflow is failing", "body": "", "url": ""}]
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _d: table({("issue", "list"): issues}))
     assert ev.collect(workspace, {"carameli": []}) == []
+
+
+def test_a_registered_checkout_missing_from_disk_costs_its_issues_not_the_pass():
+    """79505f2b: productivity-tracker was registered with no checkout beside the
+    workspace, `gh` refused its cwd with `NotADirectoryError: [WinError 267]`, and the
+    whole collect step raised -- no project's red PRs reached the pass that night.
+    `broken_prs` already answers empty on the same failure."""
+
+    def refused(*_args: str):
+        raise NotADirectoryError(267, "The directory name is invalid")
+
+    assert ev.nightly_issues(refused) == []
 
 
 def test_collect_reads_every_red_pr_and_every_tracker_issue(monkeypatch, tmp_path):
@@ -629,6 +934,16 @@ def test_one_slot_per_failure_named_for_what_it_is():
     ) == ("devkit-branch-main")
 
 
+def test_a_project_red_in_both_local_tiers_keeps_both_runs_output():
+    """One upstream session can hold both, and they share a kind and a base."""
+    e2e = fix_plan.Failure(fix_plan.LOCAL, "devkit", 0, "", "", base="main", workflow="Local E2E")
+    medium = fix_plan.Failure(
+        fix_plan.LOCAL, "devkit", 0, "", "", base="main", workflow=fix_plan.MEDIUM_TIER
+    )
+    assert ev.evidence_slot(e2e) == "devkit-local-main"
+    assert ev.evidence_slot(medium) == "devkit-medium-tier-main"
+
+
 def test_the_newest_completed_run_at_the_tip_is_the_branchs_verdict(monkeypatch, tmp_path):
     """An unfinished run for some other commit above it says nothing; the completed one
     at the tip is the verdict."""
@@ -642,7 +957,7 @@ def test_the_newest_completed_run_at_the_tip_is_the_branchs_verdict(monkeypatch,
     assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (None, None)
 
 
-def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
+def branch_world(monkeypatch, conclusion: str, summary: str, tags: str, earlier=()):
     runs = [
         {
             "databaseId": 55,
@@ -651,7 +966,8 @@ def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
             "headSha": "fb17a310",
             "url": "u/55",
             "workflowName": "PR Gate",
-        }
+        },
+        *earlier,
     ]
 
     def gh(*args):
@@ -661,6 +977,8 @@ def branch_world(monkeypatch, conclusion: str, summary: str, tags: str):
             target = Path(args[-1]) / "test-failures"
             target.mkdir(parents=True)
             (target / "test-failures.log").write_text(summary, encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if "--log-failed" in args:  # asked beside every artifact; this run's names nothing
             return subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(f"unexpected {args}")
 
@@ -689,6 +1007,39 @@ def test_a_red_default_branch_is_a_failure_with_its_run_downloaded(monkeypatch, 
     assert failure.workflow == "PR Gate" and failure.url == "u/55"
     assert failure.signature == ("tests/test_x.py::test_y",)
     assert Path(failure.evidence) == tmp_path / "ev" / "carameli-branch-main"
+    assert failure.green_at == "", "no run read passed"
+
+
+def test_a_red_default_branch_keeps_the_hooks_its_logs_name(monkeypatch, tmp_path):
+    """What lets the direct flow tell formatting from the rest of the pre-commit step."""
+    branch_world(monkeypatch, "failure", f"{SUMMARY}\n- hook id: ruff-format\n", "")
+    _, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert failure.hooks == (("", "ruff-format"),)
+
+
+def test_a_red_default_branch_says_when_its_gate_last_passed(monkeypatch, tmp_path):
+    """430656bd: carameli master passed on 10-19 between the 10-06 lint failure and the
+    10-22 one, and the pass could not tell them apart."""
+    earlier = [
+        {"status": "completed", "conclusion": "failure", "createdAt": "2026-10-20T01:00:00Z"},
+        {"status": "completed", "conclusion": "success", "createdAt": "2026-10-19T13:01:11Z"},
+        {"status": "completed", "conclusion": "success", "createdAt": "2026-10-19T08:01:13Z"},
+    ]
+    branch_world(monkeypatch, "failure", SUMMARY, "", earlier)
+    _, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert failure is not None and failure.green_at == "2026-10-19T13:01:11Z"
+
+
+def test_the_last_green_is_the_newest_passing_run_or_nothing():
+    runs = [
+        {"conclusion": "failure", "createdAt": "c"},
+        {"conclusion": "SUCCESS", "createdAt": "b"},
+        {"conclusion": "success", "createdAt": "a"},
+    ]
+    assert ev.last_green(runs) == "b"
+    assert ev.last_green(runs[:1]) == ""
+    assert ev.last_green([]) == ""
+    assert ev.last_green([{"conclusion": "success"}]) == "", "a run listed without its time"
 
 
 def test_a_tagged_release_commits_red_is_green(monkeypatch, tmp_path):
@@ -736,6 +1087,30 @@ def test_reading_a_pr_marks_it_behind_unless_it_conflicts(monkeypatch, tmp_path)
     assert conflicted.behind is False and fix_plan.CONFLICT in conflicted.signature
 
 
+def test_a_conflict_git_merges_cleanly_is_read_as_behind_not_conflicted(monkeypatch, tmp_path):
+    """#538: GitHub said `CONFLICTING` while `git merge-tree` merged it with origin/main
+    cleanly, and a resolver was sent only to record the merge parent."""
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({}))
+    monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: None)
+    monkeypatch.setattr(ev, "is_behind", lambda git, base, sha: False)
+    monkeypatch.setattr(ev, "clean_merge", lambda git, base, sha: "tree1")
+    said = pr(mergeable="CONFLICTING", statusCheckRollup=[])
+    phantom = ev.read_pr(tmp_path, ev.pr_failure("carameli", said), tmp_path / "ev")
+    assert (phantom.behind, phantom.merges_clean) == (True, True)
+    assert fix_plan.CONFLICT not in phantom.signature
+    monkeypatch.setattr(ev, "clean_merge", lambda git, base, sha: "")
+    real = ev.read_pr(tmp_path, ev.pr_failure("carameli", said), tmp_path / "ev")
+    assert (real.behind, real.merges_clean, real.signature) == (False, False, (fix_plan.CONFLICT,))
+
+
+def test_a_pr_github_calls_mergeable_is_never_merged_locally(monkeypatch, tmp_path):
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({}))
+    monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: None)
+    monkeypatch.setattr(ev, "clean_merge", lambda *a: pytest.fail("only a conflict is checked"))
+    plain = ev.read_pr(tmp_path, ev.pr_failure("carameli", pr()), tmp_path / "ev")
+    assert plain.merges_clean is False
+
+
 def test_every_checkout_on_disk_has_its_default_branch_read(monkeypatch, tmp_path):
     workspace = tmp_path / "alex.code-workspace"
     (tmp_path / "devkit").mkdir()
@@ -754,6 +1129,59 @@ def tip_world(monkeypatch, runs: list[dict], tip: str = "fb17a310"):
         lambda _p: lambda *a: subprocess.CompletedProcess(a, 0, f"{tip}\n", ""),
     )
     monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+
+
+RED_AT_TIP = [
+    {"databaseId": 7, "status": "completed", "conclusion": "failure", "headSha": "fb17a310"}
+]
+LINT_JOB = {
+    "name": "Lint",
+    "conclusion": "failure",
+    "steps": [
+        {"name": "Set up job", "conclusion": "success"},
+        {"name": "Lint", "conclusion": "failure"},
+    ],
+}
+
+
+def test_a_red_branch_gh_could_not_read_is_unread_not_blind(monkeypatch, tmp_path):
+    """6a7d386f: carameli's PR Gate run 39800864308 was red on `Lint / Lint` with its
+    lint artifact up, and every read of it failed in the 15:30 pass: the empty
+    signature was escalated as blind-evidence with no session sent at it."""
+    tip_world(monkeypatch, RED_AT_TIP)
+    green, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert green is False and failure is not None
+    assert failure.unread and failure.signature == ()
+    assert fix_plan.plan([failure], "", ())[0].action == fix_plan.SKIP
+
+
+def test_a_red_branch_whose_jobs_answer_when_asked_again_is_signed_by_them(monkeypatch, tmp_path):
+    """A read that failed once and answered the second time is evidence, not unread."""
+    tip_world(monkeypatch, RED_AT_TIP)
+    gh = ev.sweep.gh_for(tmp_path)
+    asked = {"jobs": 0}
+
+    def flaky(*args):
+        if args[:2] == ("run", "view") and "--json" in args:
+            asked["jobs"] += 1
+            if asked["jobs"] > 1:
+                return subprocess.CompletedProcess(args, 0, json.dumps({"jobs": [LINT_JOB]}), "")
+        return gh(*args)
+
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: flaky)
+    _green, failure = ev.read_default_branch("carameli", tmp_path, tmp_path / "ev")
+    assert failure is not None and not failure.unread
+    assert failure.signature == ("Lint / Lint",)
+
+
+def test_a_red_pr_gh_could_not_read_is_unread_unless_it_conflicts(monkeypatch, tmp_path):
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table({("run", "list"): RED_AT_TIP}))
+    pr_at = ev.pr_failure("carameli", pr(headRefOid="fb17a310"))
+    failure = ev.read_pr(tmp_path, pr_at, tmp_path / "ev")
+    assert failure.unread and failure.signature == ()
+    conflicted = replace(pr_at, reason=fix_plan.CONFLICT)
+    failure = ev.read_pr(tmp_path, conflicted, tmp_path / "ev")
+    assert not failure.unread, "a conflict is decided without the gate"
 
 
 def test_a_gate_still_running_at_the_tip_is_running_not_unreadable(monkeypatch, tmp_path):
@@ -783,6 +1211,18 @@ def test_the_default_branch_runs_are_the_listed_dicts_newest_first_or_nothing():
     assert ev.default_branch_runs(table({("run", "list"): runs}), "main") == [runs[0], runs[2]]
     assert ev.default_branch_runs(table({}), "main") == []
     assert ev.default_branch_runs(table({("run", "list"): {"not": "a list"}}), "main") == []
+
+
+def test_the_default_branch_runs_read_as_many_as_asked():
+    asked = []
+
+    def gh(*args):
+        asked.append(args)
+        return subprocess.CompletedProcess(args, 0, "[]", "")
+
+    ev.default_branch_runs(gh, "main")
+    ev.default_branch_runs(gh, "main", limit=7)
+    assert [a[a.index("--limit") + 1] for a in asked] == [str(ev.RUN_LIMIT), "7"]
 
 
 def test_the_runs_behind_failing_checks_are_read_off_the_rollup():
@@ -817,6 +1257,8 @@ def test_a_failing_check_from_another_workflow_is_its_own_evidence(monkeypatch, 
             target.mkdir(parents=True)
             (target / "test-failures.log").write_text(SUMMARY, encoding="utf-8")
             return subprocess.CompletedProcess(args, 0, "", "")
+        if "--log-failed" in args:  # asked beside every artifact; this run's names nothing
+            return subprocess.CompletedProcess(args, 0, "", "")
         raise AssertionError(f"unexpected {args}")
 
     monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: gh)
@@ -827,6 +1269,84 @@ def test_a_failing_check_from_another_workflow_is_its_own_evidence(monkeypatch, 
     assert downloaded == ["91"]
     assert failure.run_id == "91" and failure.signature == ("tests/test_x.py::test_y",)
     assert Path(failure.evidence) == tmp_path / "ev" / "carameli-pr-412"
+
+
+# bb6fdcee: PR #760's run 43092636831 uploaded `test-failures` (38 KB), but `gh` answered
+# HTTP 502 for the download and for `--log-failed`, and its fixer was told "No artifact
+# came down from the run" with nothing but the red job's name to go on.
+ARTIFACTS = ("api", "repos/{owner}/{repo}/actions/runs/7/artifacts")
+UPLOADED = {"artifacts": [{"name": "test-failures", "expired": False}]}
+
+
+def test_a_failed_download_is_tried_again_before_it_counts(tmp_path):
+    tries: list[str] = []
+
+    def gh(*args):
+        if args[:2] == ("run", "download"):
+            tries.append("download")
+            if len(tries) == 2:
+                (Path(args[args.index("-D") + 1]) / "test-failures.log").write_text(
+                    SUMMARY, encoding="utf-8"
+                )
+            return subprocess.CompletedProcess(args, 0 if len(tries) == 2 else 1, "", "502")
+        return subprocess.CompletedProcess(args, 1, "", "no")
+
+    assert ev.run_evidence(gh, "7", tmp_path / "e") == ([SUMMARY], [])
+    assert tries == ["download", "download"]
+    assert not ev.unfetched(tmp_path / "e")
+
+
+def test_uploaded_artifacts_that_will_not_come_down_are_unfetched(tmp_path):
+    jobs = [{"name": "Tests", "conclusion": "failure", "steps": []}]
+    failed_log = ("run", "view", "7", "--log-failed")
+    gh = table({("run", "view", "7"): {"jobs": jobs}, failed_log: "", ARTIFACTS: UPLOADED})
+    assert ev.run_evidence(gh, "7", tmp_path / "e") == ([], jobs)
+    assert ev.unfetched(tmp_path / "e"), "the run has evidence this pass could not read"
+    assert ev.junit_report.read_artifacts(tmp_path / "e") == [], "the note is not evidence"
+
+
+def test_a_run_that_uploaded_nothing_or_only_expired_artifacts_is_not_unfetched(tmp_path):
+    for listed in ({"artifacts": []}, {"artifacts": [{"name": "x", "expired": True}]}):
+        ev.run_evidence(table({ARTIFACTS: listed}), "7", tmp_path / "e")
+        assert not ev.unfetched(tmp_path / "e"), listed
+    ev.run_evidence(table({}), "7", tmp_path / "e")
+    assert not ev.unfetched(tmp_path / "e"), "a listing gh could not give proves nothing missed"
+
+
+def test_a_pr_whose_evidence_would_not_come_down_waits_for_the_next_pass(tmp_path):
+    jobs = [{"name": "Tests", "conclusion": "failure", "steps": [], "databaseId": 3}]
+    runs = [{"databaseId": 7, "headSha": "sha1"}]
+    answers = {
+        ("run", "list"): runs,
+        ("run", "view", "7"): {"jobs": jobs},
+        ("run", "view", "7", "--log-failed"): "",
+        ARTIFACTS: UPLOADED,
+    }
+    held = _read_pr_with(tmp_path, answers)
+    assert held.unread and held.signature, "named by its job alone, and still held"
+    named = _read_pr_with(tmp_path, {**answers, ("run", "view", "7", "--log-failed"): SUMMARY})
+    assert not named.unread, "the failed log named the test, so the fixer is not blind"
+
+
+def test_only_unfetched_evidence_with_nothing_named_holds_the_failure(tmp_path):
+    dest = tmp_path / "e"
+    dest.mkdir()
+    gh = table({ARTIFACTS: UPLOADED})
+    assert ev.download(gh, "7", dest) is False
+    assert ev.held_unfetched(dest, []), "uploaded, not fetched, and nothing names a test"
+    assert not ev.held_unfetched(dest, [SUMMARY]), "the failed log named it: not blind"
+    assert ev.settle_unread(gh, ["7"], False, [], ("Tests",), dest) == (("Tests",), True)
+    assert ev.settle_unread(gh, ["7"], True, [], ("Tests",), dest)[1] is False, (
+        "a conflict is read from git, not from the run"
+    )
+    assert not ev.held_unfetched(tmp_path / "never-read", [])
+
+
+def _read_pr_with(tmp_path: Path, answers: dict) -> fix_plan.Failure:
+    gh = table(answers)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ev.sweep, "gh_for", lambda _p: gh)
+        return ev.read_pr(tmp_path, ev.pr_failure("devkit", pr()), tmp_path / "ev")
 
 
 def test_no_failed_log_saves_nothing(tmp_path):

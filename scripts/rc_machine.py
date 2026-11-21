@@ -225,6 +225,10 @@ def launch_argv(claude: str, name: str, config: rc_config.Config) -> list[str]:
     random pair of words, so every project on this machine arrives at the phone as
     `<host>-<adjective>-<noun>` and the session list is unusable for the one thing it is
     for -- picking the right project on a small screen.
+
+    Check a flag against the CLI's docs, not by running `claude remote-control --help`
+    from an agent's shell: it prints the help and then blocks until the tool's timeout,
+    and had to be stopped by hand (67b8d542).
     """
     argv = [
         claude,

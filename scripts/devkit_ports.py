@@ -21,7 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import task_input
+import worktree_tiers
 
 REGISTRY_NAME = "ports.toml"
 
@@ -217,6 +219,28 @@ def load(root: Path) -> Registry:
     return from_dict(data)
 
 
+def checkout_of(name: str, registry: Registry, workspace: Path) -> str:
+    """`name`, or the registered checkout whose `claude --worktree` tree it names.
+
+    Such a tree holds no slot, so `.env.example`'s "regenerate with devkit_ports.py <tree>"
+    ended at "no slot registered" and gave a photolab tree no block for its own `.env`
+    (b270d662). What that tree publishes is its checkout's ports, so that is the answer,
+    with the collision it carries said out loud. A box leases a slot of its own."""
+    if name in registry.slots:
+        return name
+    relative = Path(*worktree_tiers.DEFAULT_TIER.segments) / name
+    for checkout in sorted(registry.slots):
+        if (workspace / checkout / relative).is_dir():
+            print(
+                f"devkit-ports: {name} is a worktree of {checkout} with no slot of its own: "
+                f"these are {checkout}'s ports, so its stack and one started here collide. "
+                f"For a stack beside it, cut a box (worktree.py new), which leases a slot.",
+                file=sys.stderr,
+            )
+            return checkout
+    return name
+
+
 def main(argv: list[str] | None = None) -> int:
     """Print the registry, or env blocks for comma-delimited checkout selections."""
     args = list(sys.argv[1:] if argv is None else argv)
@@ -255,7 +279,9 @@ def main(argv: list[str] | None = None) -> int:
                 if index:
                     print()
                 print(f"[{checkout}]")
-            for name, value in registry.env_for(checkout).items():
+            for name, value in registry.env_for(
+                checkout_of(checkout, registry, root.parent)
+            ).items():
                 print(f"{name}={value}")
     except RegistryError as exc:
         print(f"devkit-ports: {exc}", file=sys.stderr)

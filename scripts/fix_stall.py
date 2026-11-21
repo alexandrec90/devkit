@@ -24,12 +24,24 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fix_budget
 import fix_findings
 
 STALL_AFTER = _dt.timedelta(hours=24)
 FIELDS = ("waiting", "skipped")
-# Waits some other part of the loop already owns, by how the reason starts.
-TRACKED = ("escalated", "backing off", "already dispatched", "held until the devkit session")
+# Waits some other part of the loop already owns, by how the reason starts. A full
+# Dependabot cap frees itself within the day, and filing it as a stall would send the
+# devkit session the cap exists to save.
+TRACKED = (
+    "escalated",
+    "backing off",
+    "already dispatched",
+    "held until the devkit session",
+    # Another PC's claim, which frees itself at its TTL (`fix_claims.CLAIMED_BY`). The one
+    # hold a claim makes: one that could not be made sends anyway.
+    "claimed by",
+    fix_budget.DAILY_CAPPED,
+)
 
 
 def read_history(path: Path) -> list[dict]:
@@ -50,7 +62,11 @@ def read_history(path: Path) -> list[dict]:
 
 def streaks(history: list[dict], field: str) -> dict[str, tuple[str, str]]:
     """`name -> (since, latest why)` for every name in the newest pass's `field`, where
-    `since` is the first pass of the unbroken run of passes that carried it."""
+    `since` is the first pass of the unbroken run of passes that carried it.
+
+    A pass that carried it for a `TRACKED` reason breaks the run: the loop owned the
+    wait then, so a day of Dependabot cap ending in half an hour behind a red harness
+    is half an hour of harness hold, not a day of it."""
     if not history:
         return {}
     newest = history[-1].get(field)
@@ -61,7 +77,7 @@ def streaks(history: list[dict], field: str) -> dict[str, tuple[str, str]]:
         since = str(history[-1].get("when", ""))
         for row in reversed(history[:-1]):
             carried = row.get(field)
-            if not isinstance(carried, dict) or name not in carried:
+            if not isinstance(carried, dict) or name not in carried or tracked(carried[name]):
                 break
             since = str(row.get("when", since))
         found[name] = (since, str(why))
@@ -75,12 +91,23 @@ def stalled(
     found = []
     for field in FIELDS:
         for name, (since, why) in sorted(streaks(history, field).items()):
-            if why.lower().startswith(TRACKED) or not _older(since, now, after):
+            if tracked(why) or not _older(since, now, after):
                 continue
             project = name.split(" ", 1)[0]
             detail = f"{field} since {since[:16]}: {name} -- {why}"
             found.append(fix_findings.Finding("stalled", project, detail))
     return found
+
+
+def tracked(why: object) -> bool:
+    """Whether a wait's reason is one some other part of the loop already owns.
+
+    A wait that names a person's step (`harness_triage.PERSON_STEP`) is the person's, and
+    the finding that names it awaits them already (`fix_red.billing`'s, for a gate refused
+    over billing). Filed as a stall too, it is a second red tray row per PR for one step:
+    productivity-tracker and social-scraper's billing skips made six of one, 2026-11-01."""
+    text = str(why)
+    return text.lower().startswith(TRACKED) or fix_findings.triage.PERSON_STEP in text
 
 
 def _older(since: str, now: _dt.datetime, after: _dt.timedelta) -> bool:

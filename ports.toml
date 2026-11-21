@@ -89,3 +89,20 @@ apt-finder = 6
 # renumbering. Declaring it is what stops a future box lease being handed slot 2 while
 # the static stack is sitting on it.
 social-scraper = 2
+# Generated on slot 3 -- its compose defaults are db 5435 and app 8003 -- but the
+# "register the slot" step `new-project.py` prints was skipped, so this is the same
+# backfill again: the number the stack already publishes, not a new allocation.
+productivity-tracker = 3
+# Generated on slot 5 -- its compose defaults are db 5437 and app 8005 -- and registered
+# in the workspace without it, which reddened the PR carrying that registration. The
+# generator's registration branch now carries the slot too (`register_slot`).
+skinamp = 5
+photolab = 7
+homelab = 8
+agent-terminal = 9
+d2-trader = 10
+tvshell = 11
+# Generated on slot 12 -- its `.env.example` says so -- with the workspace registration
+# left in devkit's checkout rather than handed off, so only the hint carried the slot.
+radio = 12
+host-scripts = 13

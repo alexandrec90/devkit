@@ -38,17 +38,28 @@ before the session's first turn, whoever cut the tree, so it runs the project's 
 provisioner -- the manifest's `install_command` when it is one plain command, else the
 `uv sync` that `scripts/hooks/toolchain.py` would name -- when the checkout it was cut
 from already has a `.venv`, which is the one on-disk fact that says this machine
-provisions this project and its cache is warm. A cold checkout gets nothing and
+provisions this project and its cache is warm -- and only in a tree an agent tier cut
+(`agent_tree`): a scratch `git worktree add` elsewhere is named the command and left
+bare, since nobody works in it. A cold checkout gets nothing and
 `ship.py --preflight` still names the command; `DEVKIT_SKIP_WORKTREE_PROVISION=1`
 skips the step for a `git worktree add` that wants a bare tree. Anything else that
 leaves a tree unprovisioned -- a failure, a missing `uv`, a command that needs a shell --
 goes in the tree's `logs/friction.md` as well as the hook's output, which `claude
 --worktree` swallows: the fix pass files it, so it is fixed at the cause.
 
-**`post-checkout` alone never reached `claude --worktree`.** It cuts with
-`--no-checkout` and fills the tree with `git reset --hard`, and git skips `post-checkout`
-for a no-checkout add. So the same set-up also answers `post-index-change`
-(`index_change_main`), gated on a working-tree update in a tree not yet provisioned.
+**`post-checkout` alone misses a tree cut `--no-checkout`** and filled with
+`git reset --hard`, since git skips `post-checkout` for a no-checkout add. So the same
+set-up also answers `post-index-change` (`index_change_main`), gated on a working-tree
+update in a tree not yet provisioned.
+
+**Neither hook reaches `claude --worktree` any more.** Claude Code runs its own git with
+`-c core.hooksPath=/dev/null` (verified 2026-09-29: a plain `git worktree add` fired
+both hooks in a scratch repo, `claude -p --worktree` fired neither), and its only
+replacement seam is an agent hook, which this harness does not wire. Its trees borrow
+the checkout's `node_modules` through `worktree.symlinkDirectories` instead, which
+`--pull` fills into every project's settings (`project_settings.dependency_dirs`), and
+its `.venv` only where the project installs no package of its own; a project installed
+editable builds each tree its own through `toolchain.rerun_in_venv`.
 
 
 Every decision here is a pure function; `main` is the only part that touches git or the
@@ -73,6 +84,70 @@ from pathlib import Path
 # and every spawn here is held to `tests/test_scheduled_jobs.py`'s windowless rule. Spelled
 # here, like `console_python`, because the hook is installed alone with nothing to import.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def run_windowless(*args, **kwargs) -> subprocess.CompletedProcess:
+    """`sweep.run_windowless`, spelled here for the reason `NO_WINDOW` is."""
+    flags = kwargs.pop("creationflags", 0)
+    return subprocess.run(*args, creationflags=flags | NO_WINDOW, **kwargs)
+
+
+# Seconds between `run_reporting`'s "still running" lines.
+HEARTBEAT = 30
+# Seconds a killed child's output is waited for; past it, it is given up on.
+REAP_GRACE = 10
+
+
+def _say(line: str) -> None:
+    print(line, flush=True)
+
+
+def run_reporting(
+    argv,
+    *,
+    timeout: float | None = None,
+    interval: float = HEARTBEAT,
+    say=_say,
+    **kwargs,
+) -> subprocess.CompletedProcess:
+    """`run_windowless`, saying every `interval` seconds that the command is still going.
+
+    1be306c4: a cold `uv sync` ran 582 s inside `git worktree add` with its output
+    captured, so the caller saw nothing until it ended and a slow sync read exactly like a
+    hung one -- the session waiting on it hit its tool's 600 s cap with no way to tell.
+    Captured output is kept, as `run` keeps it; a timeout kills the child and raises
+    `TimeoutExpired`, as `run` does, carrying what the child had said by then; so do
+    `check` and `capture_output`.
+    """
+    check = kwargs.pop("check", False)
+    if kwargs.pop("capture_output", False):
+        kwargs["stdout"] = kwargs["stderr"] = subprocess.PIPE
+    flags = kwargs.pop("creationflags", 0)
+    label = " ".join([Path(str(argv[0])).stem, *map(str, argv[1:])])[:160]
+    started = time.monotonic()
+    with subprocess.Popen(argv, creationflags=flags | NO_WINDOW, **kwargs) as proc:
+        while True:
+            elapsed = time.monotonic() - started
+            if timeout is not None and elapsed >= timeout:
+                proc.kill()
+                try:
+                    out, err = proc.communicate(timeout=REAP_GRACE)
+                except subprocess.TimeoutExpired:
+                    out = err = None  # a grandchild holds the pipe: say nothing, not hang
+                raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
+            wait = interval if timeout is None else min(interval, timeout - elapsed)
+            try:
+                out, err = proc.communicate(timeout=wait)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - started
+                if timeout is None or elapsed < timeout:
+                    say(f"devkit: `{label}` still running after {elapsed:.0f}s")
+    done = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    if check:
+        done.check_returncode()
+    return done
+
 
 # `post-checkout` is handed `<old-oid> <new-oid> <branch-flag>`. A **fresh** checkout --
 # `git worktree add`, and also `git clone` -- reports an all-zero old OID, which is what
@@ -153,7 +228,7 @@ def rendered(existing: str, name: str) -> str:
 
     Appended rather than rewritten because this file is the project's, not devkit's --
     the box tier owns a whole managed block in a `.env` it seeded itself, and this hook
-    seeds nothing: it adds one line to whatever is (usually not) there.
+    only copies a missing one (`seed_env`), then adds one line to whatever is there.
     """
     if already_named(existing):
         return existing
@@ -165,6 +240,28 @@ def rendered(existing: str, name: str) -> str:
 def has_compose_file(root: Path) -> bool:
     """Whether this tree has a stack at all."""
     return any((root / name).is_file() for name in COMPOSE_FILES)
+
+
+# A top-level `name:` in a compose file, which only a mapping key at column 0 can be.
+PINNED_NAME = re.compile(r"^name[ \t]*:[ \t]*[\"']?(?P<name>[^\s\"'#]+)", re.M)
+
+
+def pinned_name(root: Path) -> str:
+    """The project name the tree's compose file pins, or "" when it pins none.
+
+    A pin is the project saying every tree shares one stack -- ibkr_trader's says so, so
+    that a worktree reaches the one database rather than starting an empty second one on
+    the same host port. `COMPOSE_PROJECT_NAME` outranks `name:`, so writing ours over it
+    starts exactly that second stack (244b4d87).
+    """
+    for name in COMPOSE_FILES:
+        try:
+            found = PINNED_NAME.search((root / name).read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if found:
+            return found["name"]
+    return ""
 
 
 def _git(root: Path, *args: str, env: Mapping[str, str] | None = None, timeout: float = 10) -> str:
@@ -240,17 +337,50 @@ def name_compose_project(here: Path, checkout: Path) -> str:
     # nothing either way, so stdout cannot tell the two answers apart.
     if not ignores_env(here):
         return ""
+    seeded = seed_env(here, checkout)
+    if pinned := pinned_name(here):
+        shared = f"devkit: compose pins `name: {pinned}`, so this worktree shares that stack"
+        return "\n".join(line for line in (seeded, shared) if line)
     name = compose_project(checkout.name, here.name)
     target = here / ENV_FILE
     try:
         existing = target.read_text(encoding="utf-8") if target.is_file() else ""
         updated = rendered(existing, name)
         if updated == existing:
-            return ""
+            return seeded
         target.write_text(updated, encoding="utf-8")
     except OSError:
+        return seeded
+    named = f"devkit: {ENV_FILE} {KEY}={name} (this worktree's own compose project)"
+    return "\n".join(line for line in (seeded, named) if line)
+
+
+ENV_EXAMPLE = ".env.example"
+
+
+def seed_env(here: Path, checkout: Path) -> str:
+    """Give a tree with no `.env` a copy of its checkout's, else of its `.env.example`;
+    the line to print, or "" when nothing was written.
+
+    Without it a linked tree -- a fixer's, a `claude --worktree` one -- held only the
+    managed line, or nothing where compose pins a name, so no `DATABASE_URL`: every
+    database test errored, and the session started a throwaway Postgres by hand and
+    polled it (productivity-tracker, 481859f1 and 9ca50d6a). The copy keeps the
+    checkout's ports, so the tree reaches the database the checkout runs; a box rebases
+    them onto its own stack instead (`worktree.seed_env`). A `.env` already there is
+    the tree's own and is never touched.
+    """
+    target = here / ENV_FILE
+    if target.exists():
         return ""
-    return f"devkit: {ENV_FILE} {KEY}={name} (this worktree's own compose project)"
+    for source in (checkout / ENV_FILE, checkout / ENV_EXAMPLE):
+        try:
+            if source.is_file():
+                target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                return f"devkit: {ENV_FILE} seeded from the checkout's {source.name}"
+        except OSError:
+            return ""
+    return ""
 
 
 # --- the worktree's own interpreter -------------------------------------------
@@ -269,6 +399,13 @@ UV_SYNC = ("uv", "sync", "--all-extras", "--all-groups")
 # the checkout-has-a-venv condition is what keeps this on the warm path. The timeout is
 # for the day the network is gone, so `git worktree add` still returns.
 PROVISION_TIMEOUT = 600
+# uv waits on a held lock in silence -- up to `UV_LOCK_TIMEOUT` (300 s) on `.venv\.lock`,
+# then goes on with a warning it does not print either -- so two such waits are this
+# whole bound with nothing said past "Resolved 26 packages", which is what a sync killed
+# here said twice (4cbc6b0e). At `info` uv names each lock it waits on and nothing more:
+# on 0.12.9 a fresh sync of this repo printed no extra line. So the quoted last line
+# says which lock, and so whose process held it.
+UV_LOG_VAR, UV_LOG_LEVEL = "RUST_LOG", "info"
 SKIP_PROVISION_VAR = "DEVKIT_SKIP_WORKTREE_PROVISION"
 # The worktree's own vendored copy of the manifest reader -- this hook is installed
 # machine-wide with no repo of its own, so the project's `[python]` table is read through
@@ -430,15 +567,99 @@ def path_sources(here: Path) -> list[str]:
     return found
 
 
+WORKFLOWS = Path(".github") / "workflows"
+# A step's start: a sequence item. Every key of one checkout step is read between two.
+STEP_START = re.compile(r"^\s*-\s", re.M)
+# `actions/checkout`'s two inputs that name another repo and where it stands.
+CHECKOUT_KEY = re.compile(r"^\s*(repository|ref)\s*:\s*(.*?)\s*(?:\s#.*)?$")
+
+
+def pinned_ref(here: Path, name: str) -> str:
+    """The ref this tree's own CI checks out its sibling repo `name` at; "" if none pins it.
+
+    b0b2f7d7: ibkr_trader's PR gate pins data-lake to the commit its `uv.lock` was
+    resolved against (its c221765), and the sibling was cut at data-lake's `origin/HEAD`
+    -- so a session's tests imported a module main had retired and the gate's pin still
+    had, and its `uv sync` relocked a `uv.lock` it never meant to touch. The gate is the
+    authority a session is held to, so its pin is the ref; `pr-gate*` is read first, as
+    a nightly may check the same repo out at its default branch on purpose. Matched by
+    the repository's last segment, the name the path source climbs to. A ref that is a
+    workflow expression is no pin. The vendored `toolchain.pinned_ref` is the same
+    reading, which every runner re-checks the shared tree with; a test holds the two equal.
+    """
+    try:
+        files = sorted(
+            (here / WORKFLOWS).glob("*.y*ml"),
+            key=lambda path: (not path.name.startswith("pr-gate"), path.name),
+        )
+    except OSError:
+        return ""
+    for workflow in files:
+        try:
+            text = workflow.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for step in STEP_START.split(text):
+            keys: dict[str, str] = {}
+            for line in step.splitlines():
+                found = CHECKOUT_KEY.match(line)
+                if found:
+                    keys.setdefault(found.group(1), found.group(2).strip("'\""))
+            repo = keys.get("repository", "").rstrip("/").rsplit("/", 1)[-1]
+            ref = keys.get("ref", "")
+            if repo.lower() == name.lower() and ref and "${{" not in ref:
+                return ref
+    return ""
+
+
+# `rev-parse`'s peel to a commit, spelled as `toolchain.PEEL_COMMIT` is.
+PEEL_COMMIT = "^{commit}"
+
+
+def resolve_pin(source: Path, pin: str, env: Mapping[str, str]) -> str:
+    """`pin` as `source` can check it out: a branch by its remote-tracking ref, which the
+    fetch just moved, ahead of a local branch of that name; "" when `source` has neither."""
+    for ref in (f"origin/{pin}", pin):
+        if _git(source, "rev-parse", "--verify", "--quiet", ref + PEEL_COMMIT, env=env):
+            return ref
+    return ""
+
+
+def clear_dead_link(target: Path) -> str:
+    """Remove `target` when it is a link to nothing; the line saying so, else "".
+
+    d2e29fee: `.worktrees/data-lake` was a junction to a box reaped weeks before.
+    `exists()` follows the link, so the sibling read as missing, and the `worktree add`
+    that would cut it refused the path as taken -- every ibkr box then failed `uv sync`.
+    Only the link goes: `unlink` and `rmdir` never follow one into its target.
+    """
+    if not os.path.lexists(target) or os.path.exists(target):
+        return ""
+    try:
+        aimed = os.readlink(target)
+    except OSError:
+        aimed = "a path"
+    try:
+        os.unlink(target)
+    except OSError:
+        try:
+            os.rmdir(target)  # a directory link on a Python whose `unlink` refuses one
+        except OSError as exc:
+            return f"devkit: {target} links to {aimed}, which is gone, and stays ({exc})"
+    return f"devkit: removed {target}, a link to {aimed}, which is gone"
+
+
 def link_path_sources(
     here: Path,
     checkout: Path,
-    runner=subprocess.run,
+    runner=run_windowless,
     environ: Mapping[str, str] | None = None,
+    wait: float = 0.0,
 ) -> list[str]:
     """Cut each missing sibling as a detached worktree of the repo the checkout sees there.
 
-    At that repo's `origin/HEAD`, never at its checkout's working state: ibkr's CLAUDE.md
+    At the ref the tree's own CI pins that repo to (`pinned_ref`), else at its
+    `origin/HEAD`; never at its checkout's working state: ibkr's CLAUDE.md
     records that building against the static data-lake checkout re-resolves `uv.lock`
     and smuggles its specifier bumps into whatever branch is open. One tree serves every
     worktree of the tier, since they all resolve the same `..`; a task that edits the
@@ -446,7 +667,9 @@ def link_path_sources(
     provisioning -- the sibling is built from source by this tree's sync, not its own.
     The sibling repo is fetched first, and a sibling tree already there is moved to that
     ref by `advance_sibling`: "origin/HEAD" meant the last fetch's, at the first cut's.
-    One line per sibling cut, moved or refused; nothing for one already current.
+    A link to nothing at the sibling's path is removed first (`clear_dead_link`).
+    One line per sibling cut, moved or refused; nothing for one already current. A move
+    waits up to `wait` seconds for runs in other trees on another pin (`advance_sibling`).
     """
     env = git_env(os.environ if environ is None else environ)
     env[SKIP_PROVISION_VAR] = "1"
@@ -458,9 +681,16 @@ def link_path_sources(
             continue
         # The remote-tracking ref is only as new as the sibling checkout's last fetch.
         _git(source, "fetch", "--quiet", "origin", env=env, timeout=60)
-        ref = _git(source, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", env=env) or "HEAD"
+        pin = pinned_ref(here, source.name)
+        ref = resolve_pin(source, pin, env) if pin else ""
+        if pin and not ref:
+            lines.append(f"devkit: CI pins {source.name} to {pin}, which {source} lacks")
+        ref = ref or (
+            _git(source, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", env=env) or "HEAD"
+        )
+        lines.append(clear_dead_link(target))
         if target.exists():
-            lines.append(advance_sibling(target, source, ref, env))
+            lines.append(advance_sibling(target, source, ref, env, tree=here, wait=wait))
             continue
         argv = ["git", "-C", str(source), "worktree", "add", "--detach", str(target), ref]
         try:
@@ -481,26 +711,103 @@ def _common_dir(root: Path, env: Mapping[str, str]) -> str:
     return os.path.normcase(os.path.normpath(found)) if found else ""
 
 
-def advance_sibling(target: Path, source: Path, ref: str, env: Mapping[str, str]) -> str:
+# Where the lease protocol `scripts/hooks/toolchain.py` runs under lives: beside this
+# module in devkit, and beside the installed hook under its installed name.
+SIBLING_PINS = (Path("hooks") / "sibling_pins.py", Path("devkit_sibling_pins.py"))
+# How long `worktree.py provision` -- a session asking for it -- waits for runs on another
+# pin, as a run does (`sibling_pins.WAIT`). The git hook never waits: a `worktree add`
+# that stalls reads as a hang, and the tree's first run provisions it instead.
+SESSION_WAIT = 900.0
+# In the line `advance_sibling` says when other runs hold the sibling; `held` reads it.
+HELD = "is held by"
+
+
+def sibling_pins():
+    """The vendored `sibling_pins` module, loaded by path; None where neither copy is.
+
+    By path because this module is installed alone as a git hook; registered before it
+    runs, since its dataclasses resolve their module by name (`scripts/CLAUDE.md`).
+    """
+    if "sibling_pins" in sys.modules:
+        return sys.modules["sibling_pins"]
+    here = Path(__file__).resolve().parent
+    for relative in SIBLING_PINS:
+        path = here / relative
+        spec = importlib.util.spec_from_file_location("sibling_pins", path)
+        if not path.is_file() or spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["sibling_pins"] = module
+        try:
+            spec.loader.exec_module(module)
+        except (ImportError, OSError, SyntaxError):
+            module = None
+        if module is None or not hasattr(module, "claim"):
+            # A broken or older copy: the move runs unguarded, as before it existed.
+            del sys.modules["sibling_pins"]
+            return None
+        return module
+    return None
+
+
+def held(lines: list[str]) -> bool:
+    """Whether `link_path_sources` left a sibling at another run's pin: no sync now."""
+    return any(HELD in line for line in lines)
+
+
+def advance_sibling(
+    target: Path,
+    source: Path,
+    ref: str,
+    env: Mapping[str, str],
+    tree: Path | None = None,
+    wait: float = 0.0,
+) -> str:
     """Move the shared sibling tree to `ref`; "" when it is there already or is work.
 
     2e681e63: the tree was cut once and never moved, so ibkr's `uv lock --check` judged
     its lock against a data-lake weeks behind main and disagreed with CI. Only the tree
     `link_path_sources` cuts is moved -- detached, with no tracked change; a branch
     checked out there is a task's own. One that is not the sibling's at all is named.
+
+    d32ffcc2: it is the one tree every worktree of the tier builds against, so a move
+    under a run in another tree on another pin broke that run. The move is a
+    `sibling_pins.claim` for `tree`: it waits up to `wait` seconds for every run leasing
+    it at another commit, and otherwise leaves it and says who holds it (`HELD`).
     """
     if _common_dir(target, env) != _common_dir(source, env):
         return f"devkit: {target} is not a worktree of {source}; remove it to have it re-cut"
     if _git(target, "symbolic-ref", "-q", "HEAD", env=env):
         return ""
-    want = _git(source, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", env=env)
+    want = _git(source, "rev-parse", "--verify", "--quiet", ref + PEEL_COMMIT, env=env)
     have = _git(target, "rev-parse", "HEAD", env=env)
-    if not want or want == have:
+    if not want:
         return ""
-    if _git(target, "status", "--porcelain", "--untracked-files=no", env=env):
+    if want != have and _git(target, "status", "--porcelain", "--untracked-files=no", env=env):
         return f"devkit: {target} has local changes, so it was left at {have[:7]}, not {ref}"
-    _git(target, "checkout", "--quiet", "--detach", want, env=env, timeout=60)
-    if _git(target, "rev-parse", "HEAD", env=env) != want:
+
+    def head() -> str:
+        return _git(target, "rev-parse", "HEAD", env=env)
+
+    def move() -> bool:
+        _git(target, "checkout", "--quiet", "--detach", want, env=env, timeout=60)
+        return head() == want
+
+    pins = sibling_pins()
+    if pins is None:
+        if want == have:
+            return ""
+        moved = move()
+    else:
+        shared = pins.Sibling(target, want, head, move)
+        done = pins.claim(shared, tree or target, pins.Pace(wait=wait))
+        if done.blocked:
+            holders = "; ".join(lease.line for lease in done.blocked)
+            return f"devkit: {target} {HELD} {holders}, so it was left at {have[:7]}, not {ref}"
+        if done.held is not None and not done.moved:
+            return ""
+        moved = done.moved
+    if not moved:
         return f"devkit: could not move {target} from {have[:7]} to {ref}"
     return f"devkit: {target} moved from {have[:7]} to {ref} ({want[:7]})"
 
@@ -537,7 +844,7 @@ def git_env(environ: Mapping[str, str]) -> dict[str, str]:
 def provision(
     here: Path,
     checkout: Path,
-    runner=subprocess.run,
+    runner=run_reporting,
     environ: Mapping[str, str] | None = None,
     uv: str | None = None,
 ) -> str:
@@ -545,7 +852,8 @@ def provision(
 
     "" when nothing ran. Captured rather than streamed: `uv sync` on the warm path prints
     a progress screen worth nothing to the person whose `worktree add` this is inside,
-    and the failure tail is relayed with the command so the fix is one paste.
+    and the failure tail is relayed with the command so the fix is one paste. What runs
+    is said before it starts, and `run_reporting` says it is still running meanwhile.
     """
     env = os.environ if environ is None else environ
     if env.get(SKIP_PROVISION_VAR):
@@ -559,6 +867,7 @@ def provision(
     # `C:\...\Scripts\uv.EXE sync` is not one anybody types.
     spelled = tool.install_command or " ".join((UV_SYNC[0], *command[1:]))
     mark_provisioned(here, False)
+    _say(f"devkit: provisioning {here} -- `{spelled}` (a cold cache takes minutes)")
     started = time.monotonic()
     try:
         done = runner(
@@ -570,19 +879,72 @@ def provision(
             errors="replace",
             timeout=PROVISION_TIMEOUT,
             check=False,
+            env=None if tool.install_command else uv_env(os.environ),
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as stopped:
+        said = last_said(stopped.stderr, stopped.output)
         return _trouble(
-            here, f"devkit: `{spelled}` did not finish in {PROVISION_TIMEOUT}s; run it here by hand"
+            here,
+            f"devkit: `{spelled}` did not finish in {PROVISION_TIMEOUT}s"
+            f"{f' (it last said: {said})' if said else ''}; run it here by hand",
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return _trouble(here, f"devkit: could not run `{spelled}` ({exc}); run it here by hand")
     if done.returncode != 0:
+        conflict = unresolvable(done.stderr, done.stdout)
+        if conflict:
+            return (
+                f"devkit: `{spelled}` failed: this tree's own dependencies do not resolve "
+                f"({conflict}) -- fix the project's manifest, then run it here again"
+            )
         tail = " | ".join((done.stderr or "").strip().splitlines()[-3:])
         return _trouble(here, f"devkit: `{spelled}` failed ({tail}); run it here by hand")
     elapsed = time.monotonic() - started
     mark_provisioned(here, True)
     return f"devkit: {VENV_DIR} provisioned by `{spelled}` in {elapsed:.0f}s (this worktree's own)"
+
+
+def uv_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """`environ` with uv's log level at `UV_LOG_LEVEL`, unless one is already set: a person
+    who set `RUST_LOG` meant theirs."""
+    return {UV_LOG_VAR: UV_LOG_LEVEL, **environ}
+
+
+def last_said(*streams: str | bytes | None) -> str:
+    """The last line any of `streams` holds, one line and cut short; "" for none.
+
+    88de458c: a `uv sync` that takes 19 s warm here ran past 600 s while the machine was
+    loaded, and the line said only that -- not whether uv was waiting on its cache lock,
+    downloading or building. What it last printed is the one witness of that.
+    """
+    for stream in streams:
+        text = stream.decode("utf-8", "replace") if isinstance(stream, bytes) else stream or ""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return lines[-1][:200]
+    return ""
+
+
+# How a package manager says the project's own dependency declarations cannot be met:
+# npm's peer conflict (and the `eresolve-report.txt` it names), uv's and pip's resolvers.
+UNRESOLVABLE = re.compile(r"ERESOLVE|No solution found when resolving|ResolutionImpossible", re.I)
+
+
+def unresolvable(*streams: str | bytes | None) -> str:
+    """The first line of `streams` saying the tree's own dependencies do not resolve, or "".
+
+    Such a failure is the project's, not the harness's: carameli's test-env branch
+    asked for vitest ^5 beside @vitest/ui ^4, npm refused it with ERESOLVE, and the two
+    friction lines that left became a devkit ledger group (05cedf4b, e155cd23) though
+    the PR's own gate failed on the same install and its fixer had already fixed it.
+    So a provisioner says it and leaves no friction line for the pass to file.
+    """
+    for stream in streams:
+        text = stream.decode("utf-8", "replace") if isinstance(stream, bytes) else stream or ""
+        for line in text.splitlines():
+            if UNRESOLVABLE.search(line):
+                return line.strip()[:200]
+    return ""
 
 
 def mark_provisioned(here: Path, ok: bool) -> None:
@@ -596,6 +958,33 @@ def mark_provisioned(here: Path, ok: bool) -> None:
             (here / PROVISIONED).write_text("", encoding="utf-8")
     except OSError:
         pass
+
+
+# The file each package manager writes inside `node_modules` once an install has finished:
+# npm 7+, pnpm, yarn 1 and yarn berry. The directory alone proves nothing. A roguelike
+# tree linked `node_modules` to its checkout's, which existed but was empty, so `vite`
+# was missing and nothing had checked (fcf111b9).
+NODE_INSTALL_MARKS = (".package-lock.json", ".modules.yaml", ".yarn-integrity", ".yarn-state.yml")
+
+
+def node_modules_installed(node_modules: Path) -> bool:
+    """Whether `node_modules`, or the directory it links to, holds a finished install."""
+    return any((node_modules / mark).is_file() for mark in NODE_INSTALL_MARKS)
+
+
+def borrowed(path: Path) -> Path | None:
+    """The real directory `path` links to, or None when `path` is its own or is absent.
+
+    A `claude --worktree` tree's dependency directories link into the checkout
+    (`worktree.symlinkDirectories`), as a symlink or, on Windows, possibly a junction,
+    and `is_symlink` is False for a junction. So this compares resolved paths instead.
+    """
+    try:
+        real = path.resolve(strict=True)
+        own = path.parent.resolve(strict=True) / path.name
+    except OSError:
+        return None
+    return None if os.path.normcase(str(real)) == os.path.normcase(str(own)) else real
 
 
 # `fix_reports.FRICTION_FILE`: the fix pass files each line of it on the harness-defect
@@ -637,7 +1026,7 @@ def is_unprovisioned_tree_update(args: list[str], here: Path) -> bool:
 def main(
     argv: list[str] | None = None,
     root: Path | None = None,
-    runner=subprocess.run,
+    runner=run_reporting,
     environ: Mapping[str, str] | None = None,
 ) -> int:
     """The hook. Always exits 0: git ignores a `post-checkout` status, and a traceback
@@ -651,7 +1040,7 @@ def main(
 def index_change_main(
     argv: list[str] | None = None,
     root: Path | None = None,
-    runner=subprocess.run,
+    runner=run_reporting,
     environ: Mapping[str, str] | None = None,
 ) -> int:
     """The `post-index-change` hook: the same set-up, for a tree cut `--no-checkout`.
@@ -669,15 +1058,67 @@ def _set_up(here: Path, runner, environ: Mapping[str, str] | None) -> int:
     checkout = checkout_of(here)
     if checkout is None:
         return 0
-    for line in (
-        name_compose_project(here, checkout),
+    lines = [name_compose_project(here, checkout)]
+    if agent_tree(here, environ):
         # Before the sync, which cannot resolve a path source that is not there yet.
-        *link_path_sources(here, checkout, runner=runner, environ=environ),
-        provision(here, checkout, runner=runner, environ=environ),
-    ):
+        linked = link_path_sources(here, checkout, runner=runner, environ=environ)
+        lines += linked
+        if held(linked):
+            # A sync now would relock against another run's pin; the tree's first lint or
+            # test run provisions it, after waiting its turn (`toolchain.rerun_target`).
+            lines.append(f"devkit: {here} was not provisioned while its sibling is held")
+        else:
+            lines.append(provision(here, checkout, runner=runner, environ=environ))
+    elif Toolchain.observe(here, checkout).command():
+        lines.append(
+            f"devkit: {here} is in no agent worktree tier, so it was not provisioned -- "
+            f"`python <devkit>/scripts/worktree.py provision {here} --yes` gives it a .venv"
+        )
+    for line in lines:
         if line:
             print(line)
     return 0
+
+
+# `worktree_tiers.ALL_TIERS`, one `(segments, depth, home_env, home_default)` row per
+# tier: copied because this hook is installed alone, and held equal to the owner by
+# `tests/test_worktree_env.py` and `tests/test_worktree_tiers_single_source.py`.
+AGENT_TIERS = (
+    ((".claude", "worktrees"), 1, "", ""),
+    (("worktrees",), 2, "CODEX_HOME", "~/.codex"),
+    ((".worktrees",), 1, "", ""),
+)
+
+
+def _same_dir(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+def agent_tree(here: Path, environ: Mapping[str, str] | None = None) -> bool:
+    """Whether `here` sits where an agent tier cuts its worktrees -- the trees somebody
+    works in, and so the only ones this hook provisions.
+
+    9d690d5a: a throwaway `git worktree add --detach <tmp> HEAD`, cut for a test baseline,
+    ran a 236 s `uv sync` that blew its caller's timeout, and the `.venv` it left made
+    `git worktree remove --force` fail. Shape only, as `worktree_tiers.match` is; a
+    detached tier's base must also be the runtime's home.
+    """
+    env = os.environ if environ is None else environ
+    parents = Path(os.path.abspath(here)).parents
+    for segments, depth, home_env, home_default in AGENT_TIERS:
+        anchor_at = depth - 1 + len(segments)
+        if len(parents) <= anchor_at:
+            continue
+        if any(
+            parents[depth - 1 + offset].name != wanted
+            for offset, wanted in enumerate(reversed(segments))
+        ):
+            continue
+        home = ((env.get(home_env, "") or "").strip() or home_default) if home_env else ""
+        if home and not _same_dir(parents[anchor_at], Path(home).expanduser()):
+            continue
+        return True
+    return False
 
 
 if __name__ == "__main__":

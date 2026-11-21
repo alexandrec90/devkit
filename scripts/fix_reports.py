@@ -15,7 +15,8 @@ the entry stood. Files under the worktree's ignored `logs/` close that:
 - `logs/friction.md`, which any session may write: one line per thing the harness cost
   it turns. The pass files each line on the harness-defect ledger.
 - No outcome at all: a stamped tree with no intent, no report and a transcript gone
-  quiet (`session_state`) is a session that died, which frees its dispatch at once.
+  quiet (`session_state`) is a session that died, which frees its dispatch at once --
+  or, last heard from before the machine started (`booted_at`), one a restart killed.
 
 `agent_trees` is the walk both this and `ship_intent.find_intents` make: every
 worktree of every registered checkout, through `git worktree list`, so a box, a
@@ -35,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
+import machine_clock
 import sweep
 
 STAMP_FILE = Path("logs") / "fix-dispatch.json"
@@ -43,8 +45,8 @@ STAMP_FILE = Path("logs") / "fix-dispatch.json"
 LAUNCH_FILE = Path("logs") / "fix-launch.json"
 BLOCKED_FILE = Path("logs") / "fix-blocked.md"
 FRICTION_FILE = Path("logs") / "friction.md"
-# The mark of a tree the fix pass cut for a fixer, which makes its PR merge itself once
-# green (`ship_intent.labels_for`). Only what the pass authored carries it.
+# The mark of a tree the fix pass cut for a fixer, which makes its PR the pass's own to
+# close (`ship_intent.pass_owned`). Only what the pass authored carries it.
 ORIGIN_FILE = Path("logs") / "fix-origin"
 CHECKOUT = Path(__file__).resolve().parents[1]
 # The message a refused intent was being shipped with, set aside by the pass at
@@ -65,12 +67,21 @@ REASON_LIMIT = 400
 # A launch's diagnosis is a status page, not a line: `claude daemon status` is ~800 chars.
 DIAGNOSIS_LIMIT = 2000
 
-# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words.
+# The refusals of Claude Code's `claude --worktree` isolation guard, in its own words, of
+# its PowerShell tool's protected-path check (9a2a5478: an `rm` inside `docker exec`), and
+# of its built-in `rm` check (b945aedf: a target built from variables).
 CLAUDE_CODE_GUARD = re.compile(
     r"too complex to verify|stays? inside the worktree|cannot be shown not to be git|"
-    r"isolated in the worktree|worktree isolation guard",
+    r"isolated in the worktree|worktree isolation guard|protected from removal|"
+    r"Dangerous rm operation",
     re.I,
 )
+
+# A Markdown list item, the shape a friction file's entries take when it marks them.
+LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s")
+# Every marker an entry opens on, nested ones too -- and nothing past them: stripped as a
+# set of characters, `- 2026-10-10, desktop-ml5f3pj:` lost its date and kept the comma.
+MARKERS = re.compile(r"^(?:(?:[-*+]|\d+[.)])\s+)+")
 
 # A dispatched session with no transcript this long after its stamp never started; one
 # whose transcript has been quiet this long, with nothing left behind, has ended. Both
@@ -113,6 +124,22 @@ def note_on_stamp(tree: Path, field: str, value: str) -> None:
         payload[field] = value
         text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         (tree / STAMP_FILE).write_text(text, encoding="utf-8")
+
+
+# The stamp field naming the issue a dispatch was sent at, in the tree's own repository:
+# the tracker issue of a scheduled workflow. Written by `fix-prs.dispatch_fresh`, read by
+# `closing_line` when the tree's PR opens.
+CLOSES = "closes"
+
+
+def closing_line(tree: Path) -> str:
+    """`Closes #N` for the issue this tree's dispatch named, or "".
+
+    Only what the pass itself sent the session at: an issue a fixer merely mentions is
+    not one its PR solves, and GitHub closes whatever a closing keyword names on merge.
+    """
+    number = str(read_stamp(tree).get(CLOSES, "")).strip()
+    return f"Closes #{number}" if number.isdigit() else ""
 
 
 def inherit_origin(tree: Path, home: Path | None = None) -> bool:
@@ -188,22 +215,73 @@ def record_launch(tree: Path, argv: list[str], done: object, diagnosis: str = ""
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def launch_refused(tree: Path) -> bool:
-    """This dispatch's launcher exited non-zero; `stamp` clears an older record."""
+def _launch_record(tree: Path) -> dict:
     try:
         record = json.loads((tree / LAUNCH_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def launch_refused(tree: Path) -> bool:
+    """This dispatch's launcher exited non-zero; `stamp` clears an older record."""
+    record = _launch_record(tree)
+    return bool(record) and record.get("returncode") not in (0, None)
+
+
+# What `claude --bg` says, exiting 1, in a checkout Claude Code was never told to trust.
+# Trust is held per checkout, not inherited from a trusted folder above it: the first
+# fixer sent at productivity-tracker, generated that afternoon under a trusted
+# `vs-code`, was refused on 2026-10-28 and filed twice, as a failed dispatch and as a
+# session that never started (10a9810d, 18e737b9). Accepting the prompt is a person's.
+UNTRUSTED_SAID = "Workspace not trusted"
+
+
+def untrusted(said: str) -> bool:
+    """Whether a launcher's words are its refusal of an untrusted checkout."""
+    return UNTRUSTED_SAID in said
+
+
+# Where Claude Code keeps the answer to its trust prompt, per directory.
+CLAUDE_CONFIG = Path.home() / ".claude.json"
+
+
+def trusted(checkout: Path, config: Path | None = None) -> bool:
+    """Whether Claude Code holds a yes to its trust prompt for `checkout` itself.
+
+    Its own yes covers the session trees cut under it; a parent's does not. This read
+    once took 'C:/Users/alexa/vs-code' accepted as covering every checkout beside devkit,
+    and Claude Code 2.1.330 refused four sessions in host-scripts, which had no entry of
+    its own, while the pass called it trusted. A file that cannot say is not a yes:
+    the hold this feeds (`fix_send._untrusted`) lasts while a refusal is open, and the
+    person's documented step of resolving that group still ends it."""
+    try:
+        text = (config or CLAUDE_CONFIG).read_text(encoding="utf-8")
+        projects = json.loads(text).get("projects")
+    except (OSError, ValueError, AttributeError):
         return False
-    return isinstance(record, dict) and record.get("returncode") not in (0, None)
+    if not isinstance(projects, dict):
+        return False
+    accepted = {
+        Path(key)
+        for key, entry in projects.items()
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+    }
+    return checkout in accepted
+
+
+def launch_untrusted(tree: Path) -> bool:
+    """This dispatch's launcher refused the tree's checkout as untrusted (`untrusted`)."""
+    record = _launch_record(tree)
+    return launch_refused(tree) and untrusted(
+        f"{record.get('stdout') or ''}\n{record.get('stderr') or ''}"
+    )
 
 
 def launch_line(tree: Path) -> str:
     """The launch record as one line of a finding's detail; "" when there is none."""
-    try:
-        record = json.loads((tree / LAUNCH_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return ""
-    if not isinstance(record, dict):
+    record = _launch_record(tree)
+    if not record:
         return ""
     said = " ".join(str(record.get("stderr") or record.get("stdout") or "").split())
     return f"launcher exited {record.get('returncode')}" + (f": {said[-160:]}" if said else "")
@@ -225,6 +303,26 @@ def blocked_reason(tree: Path) -> str:
         return ""
     words = " ".join(line.strip().lstrip("#").strip() for line in text.splitlines()).split()
     return " ".join(words)[:REASON_LIMIT]
+
+
+# The line a blocked report carries when its fix is another PR's merge, in any repository.
+WAITS_LINE = re.compile(r"^\W*Waits on:\W*(https://github\.com/[\w.-]+/[\w.-]+/pull/\d+)", re.M)
+
+
+def waits_on(tree: Path) -> str:
+    """The PR the tree's blocked report says its fix waits on, or "" when it names none.
+
+    f7c4e5db: ibkr_trader #116 needed columns only data-lake #66 adds, still open. Its
+    fixer stopped correctly and the pass escalated that to the devkit session, which can
+    no more merge #66 than the fixer could -- and resolving it sent a fresh fixer at the
+    same wall. A wait is not a defect: the pass holds the problem until that PR closes.
+    """
+    try:
+        text = (tree / BLOCKED_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    found = WAITS_LINE.search(text)
+    return found.group(1) if found else ""
 
 
 def agent_trees(
@@ -262,7 +360,10 @@ class Tree:
 
 def _entries(path: Path) -> tuple[str, ...]:
     """A friction file's entries, one per line: headings and blanks dropped, list
-    markers stripped; empty when there is no file.
+    markers stripped; empty when there is no file. In a file that lists its entries
+    (`LIST_ITEM`), a line that is not an item is a label or a wrapped tail, never an
+    entry: b25fcfe9 was `supervise-fix-pass`, the bare line over two bulleted reports,
+    filed as a third.
 
     Whole, never cut to `REASON_LIMIT`: a line ends with what fixed it and the
     `fixed on this branch` that settles it (`fixed_here`), so a cut dropped exactly that
@@ -272,14 +373,17 @@ def _entries(path: Path) -> tuple[str, ...]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ()
-    kept = (line.strip() for line in text.splitlines())
-    lines = (line.lstrip("-*0123456789. ").strip() for line in kept if not line.startswith("#"))
+    kept = [line.strip() for line in text.splitlines()]
+    kept = [line for line in kept if line and not line.startswith("#")]
+    if any(LIST_ITEM.match(line) for line in kept):
+        kept = [line for line in kept if LIST_ITEM.match(line)]
+    lines = (MARKERS.sub("", line).strip() for line in kept)
     return tuple(line for line in lines if line)
 
 
 def friction_lines(tree: Path) -> tuple[str, ...]:
     """The tree's `logs/friction.md` entries this tree has not already had filed, less
-    any about Claude Code's own worktree guard.
+    any about Claude Code's own guards (`CLAUDE_CODE_GUARD`).
 
     A session writes the file whole, and once the pass has filed it away the next write
     carries the old lines again: a174d816's line was filed twice from one tree, and the
@@ -341,13 +445,10 @@ def last_spoke(path: Path) -> _dt.datetime | None:
     tree as busy for `QUIET_AFTER`. Only the file's tail is read; a tail holding no dated
     record (one enormous last line) falls back to the mtime, which errs towards busy.
     """
-    try:
-        with path.open("rb") as handle:
-            handle.seek(max(0, path.stat().st_size - TAIL_BYTES))
-            tail = handle.read().decode("utf-8", errors="replace")
-    except OSError:
+    tail = _tail(path)
+    if tail is None:
         return None
-    for line in reversed(tail.splitlines()):
+    for line in reversed(tail):
         try:
             record = json.loads(line)
             when = _dt.datetime.fromisoformat(str(record["timestamp"]).replace("Z", "+00:00"))
@@ -359,6 +460,56 @@ def last_spoke(path: Path) -> _dt.datetime | None:
 
 
 TAIL_BYTES = 256 * 1024
+
+
+def _tail(path: Path) -> list[str] | None:
+    """The lines in a transcript's last `TAIL_BYTES`, or None where it cannot be read."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, path.stat().st_size - TAIL_BYTES))
+            return handle.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+
+
+# What Claude Code puts on the reply it writes for a session whose stored login the API
+# refused, a reply reading "Login expired" and asking for /login. On 2026-10-18 five dispatched fixers in a
+# row said that and nothing else, and each was filed as a dead fixer of its own -- the
+# ledger ones naming their fresh branch, so three groups -- whose own fixer then died the
+# same way (2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40). social-scraper #90's and
+# #91's sends also spent the day's Dependabot cap doing it.
+LOGIN_REFUSED = "authentication_failed"
+
+
+def login_refused(path: Path) -> bool:
+    """Whether a transcript's last reply is Claude Code saying its login was refused."""
+    for line in reversed(_tail(path) or []):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "assistant":
+            return bool(record.get("isApiErrorMessage")) and record.get("error") == LOGIN_REFUSED
+    return False
+
+
+# What Claude Code files as a reply it could not get because the API was unreachable:
+# "API Error: Can't reach the API server -- check your internet or DNS (ENOTFOUND)".
+API_UNREACHABLE = "connection_failed"
+
+
+def api_unreachable(path: Path) -> bool:
+    """Whether a transcript's last reply is Claude Code failing to reach the API at all."""
+    for line in reversed(_tail(path) or []):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "assistant":
+            return bool(record.get("isApiErrorMessage")) and (
+                record.get("apiError") == API_UNREACHABLE
+            )
+    return False
 
 
 def newest_transcript(tree: Path, projects_root: Path | None = None) -> Path | None:
@@ -414,20 +565,124 @@ def active_transcript(
     return newest if touched and now - touched <= QUIET_AFTER else None
 
 
+# A background task a session started, and the notification that it ended. Read as
+# text, not parsed: both are in the transcript verbatim, a JSON escape or two aside.
+_TASK_LAUNCHED = re.compile(r"running in background with ID: ([A-Za-z0-9_-]+)")
+_TASK_NOTIFIED = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
+
+
+def pending_tasks(path: Path) -> frozenset[str]:
+    """The background tasks a transcript's session launched that have not reported back."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return frozenset()
+    return frozenset(set(_TASK_LAUNCHED.findall(text)) - set(_TASK_NOTIFIED.findall(text)))
+
+
+def _waiting(transcript: Path | None, now: _dt.datetime) -> bool:
+    """`transcript` spoke within `QUIET_AFTER` and still has a background task out.
+
+    A session that ends its turn on "the tests will notify me" is idle to `claude
+    agents` and has its intent written, and the pass shipped 0929-7 mid-test that way
+    (8d2f56f5). The bound is what lets a session stopped mid-task count as gone again.
+    """
+    touched = last_spoke(transcript) if transcript else None
+    return bool(
+        transcript and touched and now - touched <= QUIET_AFTER and pending_tasks(transcript)
+    )
+
+
+def awaiting_task(tree: Path, now: _dt.datetime, projects_root: Path | None = None) -> bool:
+    """Whether the session the tree's stamp sent is still waiting on a background task."""
+    payload = read_stamp(tree)
+    if not payload or payload.get("dead"):
+        return False
+    try:
+        sent = _dt.datetime.fromisoformat(str(payload.get("when", "")))
+    except ValueError:
+        return False
+    return _waiting(session_transcript(tree, sent, projects_root), now)
+
+
 WORKING = "working"
 DONE = "done"
 NEVER_STARTED = "never started"
 NO_OUTCOME = "ended without an outcome"
-DEAD = (NEVER_STARTED, NO_OUTCOME)
+# Killed by the machine going down, not by anything the session did: on 2026-09-30 the
+# operator powered off mid-pass, and the three fixers then at work were filed as three
+# `fixer-no-outcome` defects (4dc413a1, 9201a08f, e2feebab) and two of them spent their
+# PRs' one blind attempt, escalating #480 and #482 as `blind-evidence`.
+INTERRUPTED = "stopped by a restart"
+# Refused at its first turn because Claude Code's login had lapsed (`login_refused`): like
+# a restart, nothing the session did, so its send is taken back.
+LOGGED_OUT = "logged out"
+# Refused by its launcher because the checkout is untrusted (`launch_untrusted`): the
+# machine's setup again, not the session's, and a person's to take.
+UNTRUSTED = "refused as an untrusted workspace"
+# Ended on a reply it could not get because the API was unreachable (`api_unreachable`):
+# the machine's network, not the session. On 2026-11-12 four ledger fixers in a row died
+# this way during a night without DNS, each filed as `fixer-no-outcome`, so like a
+# restart its send is taken back and nothing is filed.
+OFFLINE = "cut off from the API"
+DEAD = (NEVER_STARTED, NO_OUTCOME, INTERRUPTED, LOGGED_OUT, UNTRUSTED, OFFLINE)
+
+
+def booted_at(now: _dt.datetime | None = None) -> _dt.datetime | None:
+    """When this machine last started, or None where it cannot say.
+
+    No session's process outlives a restart, so one last heard from before it is over,
+    however recently. Windows counts the tick from boot through sleep and hibernation,
+    which a session does survive; Linux's `/proc/uptime` does the same. Elsewhere this
+    says nothing, and a session is judged by its silence alone, as before.
+    """
+    now = now or _dt.datetime.now(_dt.UTC)
+    seconds = _uptime()
+    return None if seconds is None else now - _dt.timedelta(seconds=seconds)
+
+
+def _uptime() -> float | None:
+    return machine_clock.uptime()
+
+
+def _restarted(last: _dt.datetime, booted: _dt.datetime | None, now: _dt.datetime) -> bool:
+    """The machine started between `last` and `now`: whatever ran at `last` is gone."""
+    return booted is not None and last < booted <= now
+
+
+def _unheard(tree: Path, sent: _dt.datetime, now: _dt.datetime, booted: _dt.datetime | None) -> str:
+    """The state of a session that has said nothing since it was sent."""
+    # The grace is for a session starting, not one its launcher refused: 0927-2's
+    # held every ledger send for two iterations while the backlog grew.
+    if launch_refused(tree):
+        return UNTRUSTED if launch_untrusted(tree) else NEVER_STARTED
+    if _restarted(sent, booted, now):
+        return INTERRUPTED
+    return NEVER_STARTED if now - sent > START_GRACE else WORKING
+
+
+def _with_outcome(transcript: Path | None, now: _dt.datetime) -> str:
+    """`DONE`, unless the outcome was written before the session's last background task
+    came back: then it is not the session's last word, and stopping it as finished
+    (`bg_sessions`) would cut the task off."""
+    return WORKING if _waiting(transcript, now) else DONE
 
 
 def session_state(
-    tree: Path, now: _dt.datetime, projects_root: Path | None = None
+    tree: Path,
+    now: _dt.datetime,
+    projects_root: Path | None = None,
+    booted: _dt.datetime | None = None,
 ) -> tuple[str, str]:
     """`(state, transcript)` of the session the tree's stamp sent.
 
-    `DONE` once it left an intent or a report, `WORKING` while its transcript moves (or
-    it is still inside `START_GRACE`), one of `DEAD` otherwise. `""` for a tree with no
+    `DONE` once it left an intent or a report and has no background task still out,
+    `WORKING` while its transcript moves (or it is still inside `START_GRACE`), one of
+    `DEAD` otherwise: `LOGGED_OUT` when its last reply was the login's refusal,
+    `OFFLINE` when it was the API being unreachable,
+    `UNTRUSTED` when its launcher refused the checkout as untrusted, and
+    `INTERRUPTED` when the machine started (`booted`, from `booted_at`) after the session
+    was last heard from, with no wait. `""` for a tree with no
     stamp, one already judged dead, or a session this cannot see -- only Claude Code
     keeps a transcript here, and a Codex tab is watched by the person who opened it.
     """
@@ -444,13 +699,22 @@ def session_state(
         return "", ""
     transcript = session_transcript(tree, sent, projects_root)
     if any((_mtime(tree / name) or sent) > sent for name in OUTCOME_FILES):
-        return DONE, str(transcript or "")
+        return _with_outcome(transcript, now), str(transcript or "")
     touched = last_spoke(transcript) if transcript else None
-    if touched is None or touched < sent:
-        # The grace is for a session starting, not one its launcher refused: 0927-2's
-        # held every ledger send for two iterations while the backlog grew.
-        refused = launch_refused(tree)
-        return (NEVER_STARTED, "") if refused or now - sent > START_GRACE else (WORKING, "")
-    if now - touched > QUIET_AFTER:
-        return NO_OUTCOME, str(transcript)
-    return WORKING, str(transcript)
+    if transcript is None or touched is None or touched < sent:
+        return _unheard(tree, sent, now, booted), ""
+    return _heard(transcript, touched, now, booted), str(transcript)
+
+
+def _heard(
+    transcript: Path, touched: _dt.datetime, now: _dt.datetime, booted: _dt.datetime | None
+) -> str:
+    """The state of a session that has spoken since it was sent, and left no outcome."""
+    # Judged at once rather than after `QUIET_AFTER`: the session is over on that reply.
+    if login_refused(transcript):
+        return LOGGED_OUT
+    if api_unreachable(transcript):
+        return OFFLINE
+    if _restarted(touched, booted, now):
+        return INTERRUPTED
+    return NO_OUTCOME if now - touched > QUIET_AFTER else WORKING

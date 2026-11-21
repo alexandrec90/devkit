@@ -1,0 +1,33 @@
+namespace {{ desktop_name }}.Updates;
+
+/// <summary>What one update check found, in terms the window can show.</summary>
+public sealed record UpdateOutcome(UpdateState State, string Detail = "")
+{
+    /// <summary>Running from a build output rather than an install: nothing to update.</summary>
+    public static readonly UpdateOutcome NotInstalled = new(UpdateState.NotInstalled);
+
+    public static readonly UpdateOutcome UpToDate = new(UpdateState.UpToDate);
+
+    public static UpdateOutcome Ready(string version) => new(UpdateState.Ready, version);
+
+    public static UpdateOutcome Failed(string reason) => new(UpdateState.Failed, reason);
+
+    /// <summary>A newer release is downloaded and waits for a restart.</summary>
+    public bool ReadyToApply => State == UpdateState.Ready;
+
+    public string Describe() => State switch
+    {
+        UpdateState.NotInstalled => "not installed, so not updating",
+        UpdateState.UpToDate => "up to date",
+        UpdateState.Ready => $"version {Detail} is ready",
+        _ => $"update check failed: {Detail}",
+    };
+}
+
+public enum UpdateState
+{
+    NotInstalled,
+    UpToDate,
+    Ready,
+    Failed,
+}

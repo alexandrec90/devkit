@@ -92,6 +92,47 @@ def test_a_main_that_is_not_green_holds_the_release(green):
     assert "2 change(s) v0.11.25 cannot deliver" in why and "not green" in why
 
 
+def _red(project="devkit", kind="branch", *tests):
+    names = tests or (f"tests/test_new_project.py::{fix_release.fix_plan.RELEASE_TEST}",)
+    return fix_release.fix_plan.Failure(kind, project, 0, "main", "u", signature=names)
+
+
+def test_a_main_red_on_the_release_test_alone_reads_green_to_the_release():
+    """c6c538d9 / devkit #763: the bump merged, the tag did not land, and only the tag
+    clears that red -- a release held for a green main was held for good."""
+    verdict = fix_release.release_verdict(False, [_red()])
+    assert verdict is True
+    assert fix_release.release_refusal(OWED, "v0.11.25", verdict, 0, None, NOW) == ""
+
+
+@pytest.mark.parametrize(
+    "failures",
+    [
+        [],
+        [_red("devkit", "branch", "tests/test_x.py::test_y")],
+        [
+            _red(
+                "devkit",
+                "branch",
+                "tests/test_x.py::test_y",
+                f"tests/test_new_project.py::{fix_release.fix_plan.RELEASE_TEST}",
+            )
+        ],
+        [_red("carameli")],
+        [_red("devkit", "nightly")],
+    ],
+)
+def test_any_other_red_still_holds_the_release(failures):
+    """Another failing test on main, a consumer's branch, or a nightly is not the
+    release's own red: the pipeline would stop on it, so the hold stands."""
+    assert fix_release.release_verdict(False, failures) is False
+
+
+@pytest.mark.parametrize("green", [True, None, "running"])
+def test_a_verdict_that_is_not_red_is_passed_through(green):
+    assert fix_release.release_verdict(green, [_red()]) == green
+
+
 def test_a_release_pr_already_up_is_a_release_in_flight():
     why = fix_release.release_refusal(OWED, "v0.11.25", True, 401, None, NOW)
     assert "#401" in why

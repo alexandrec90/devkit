@@ -1,0 +1,41 @@
+using {{ desktop_name }}.Updates;
+using Xunit;
+
+namespace {{ desktop_name }}.Tests;
+
+public class UpdateTests
+{
+    [Fact]
+    public void TheFeedIsThisProjectsGitHubRepository()
+    {
+        Assert.StartsWith("https://github.com/", UpdateFeed.Repository);
+        Assert.DoesNotContain(".git", UpdateFeed.Repository);
+    }
+
+    [Fact]
+    public void OnlyADownloadedReleaseOffersARestart()
+    {
+        Assert.True(UpdateOutcome.Ready("1.2.3").ReadyToApply);
+        Assert.False(UpdateOutcome.UpToDate.ReadyToApply);
+        Assert.False(UpdateOutcome.NotInstalled.ReadyToApply);
+        Assert.False(UpdateOutcome.Failed("offline").ReadyToApply);
+    }
+
+    [Theory]
+    [InlineData(UpdateState.Ready, "1.2.3", "version 1.2.3 is ready")]
+    [InlineData(UpdateState.UpToDate, "", "up to date")]
+    [InlineData(UpdateState.Failed, "offline", "update check failed: offline")]
+    public void EveryOutcomeSaysWhatHappened(UpdateState state, string detail, string expected)
+    {
+        Assert.Equal(expected, new UpdateOutcome(state, detail).Describe());
+    }
+
+    [Fact]
+    public async Task ABuildThatIsNotInstalledNeverReachesTheNetwork()
+    {
+        // Running from `dotnet run` or a test host: Velopack reports it is not installed,
+        // and the check answers before it builds a request.
+        var outcome = await new Updater(UpdateFeed.Repository).CheckAndDownloadAsync();
+        Assert.Equal(UpdateOutcome.NotInstalled, outcome);
+    }
+}

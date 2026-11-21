@@ -28,9 +28,12 @@ one somebody eventually removes. `--notify` is how an unattended pass reaches a 
 
 Design constraints, all from the fact that nobody is watching when this runs:
 
-- **Never blocks.** Always exits 0, `--notify` included. Findings are not a job
-  failure, and an exit code is the scheduler's `Last Result` -- a status line that
-  reports itself as a broken task teaches `schedule_health` to cry wolf.
+- **Findings never fail the job.** They exit 0, `--notify` included: an exit code is
+  the scheduler's `Last Result`, and a status line that reports itself as a broken task
+  teaches `schedule_health` to cry wolf. A finding that is a *failure* -- something
+  broken, `FAILURES` -- goes on the harness-events ledger instead (`record_failures`).
+  **A crash is a job failure** and exits `CRASHED` with its traceback, which is what
+  `log-wrap.py --always` around the scheduled run files on the ledger.
 - **No network.** `--no-fetch`, so ahead/behind may be stale -- but "3 checkouts
   have uncommitted work" does not need a fetch to be true.
 - **Silent when healthy.** Prints nothing when there is nothing to say, so the one
@@ -47,10 +50,12 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import re
 import shutil
 import subprocess
 import sys
 import time as _time
+import traceback
 from pathlib import Path
 from typing import ClassVar
 
@@ -59,12 +64,15 @@ import codex_context
 import devkit_jsonc
 import devkit_project
 import harness_triage as _triage
+import machine_clock
 import notify as _notify
 import schedule_health
 import sweep
 import task_branch
+import toolchain
 import vscode_extensions
 import worktree
+import wt_profile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # `notify.py` says notifications are a task-wrapper concern and that a diagnostic script
@@ -97,6 +105,50 @@ _GB = 1024**3
 # than archaeology. Under the permanent checkout's `logs/` for `events_line`'s reason.
 HEADROOM_LOG = Path("logs") / "headroom.log"
 HEADROOM_HISTORY = 400
+# Two reconcile fires (`install-reconcile-task.DEFAULT_INTERVAL_MINUTES`): how long after
+# a boot or wake a stale reconcile log is a catch-up fire not yet run, not a stopped job.
+RECONCILE_GRACE = 30 * 60
+
+# What a crash exits with. Findings exit 0 (see the module docstring); a pass that could
+# not check anything is the job failing, and `log-wrap.py --always` around the scheduled
+# run files a non-zero exit as `scheduled-job-failed` with the exception as its cause.
+CRASHED = 1
+
+# The scheduled run's record, which a filed failure names as its evidence.
+ARTIFACT = "logs/scheduled-workspace-status.log"
+
+# --- which findings are failures -----------------------------------------------------
+#
+# The report goes to a toast and a log, which reach whoever reads them that morning and
+# nothing that fixes things. A finding that says something is *broken* is also filed on
+# the harness-events ledger, where the fix pass's devkit session picks it up with every
+# other routine failure. Each marker below is spelled once and used by the line that
+# carries it, so the wording and the classification cannot drift apart.
+#
+# A failure: the toolchain lines (all of them -- a missing uv, git identity, task
+# extension, Codex context or a terminal that elevates each breaks work outright), and:
+POLICY_DRIFTED = "branch policy drifted: "  # the installed hooks are not what was installed
+RETIRED_HOOKS = "settings wire retired hooks: "  # a hook entry spawning a deleted file
+GATE_UNREAD = "PR gates upload no failure log: "  # a red gate the pass cannot read
+RECONCILE_STOPPED = "unattended pass last ran "  # reconcile stopped, unexplained
+PUBLISH_REFUSED = "the live file carries edits devkit never wrote"  # needs a decision
+FAILURES: tuple[tuple[str, str], ...] = (
+    ("branch-policy-drift", POLICY_DRIFTED),
+    ("retired-hooks", RETIRED_HOOKS),
+    ("gate-uploads-no-log", GATE_UNREAD),
+    ("reconcile-stopped", RECONCILE_STOPPED),
+    ("workspace-publish-refused", PUBLISH_REFUSED),
+)
+# Not a failure: stranded work, boxes, previews, a project behind on devkit or a policy
+# installed from an older release (ordinary lag the daily jobs close), a checkout never
+# adopted (a state, not a fault), a publish held while devkit is on a task branch, disk
+# headroom (machine pressure, not a harness defect) and the open-defect count (which IS
+# the ledger). Nor the `schedule:` lines: each is a job the scheduler reports failing,
+# which that job's `log-wrap.py` run and `fix_loop.job_findings` already file -- a third
+# row here would split one failure into three groups.
+FAILURE_EVENT = "workspace-failure"
+# What varies between two days' copies of one failure: counts and ages.
+_NUMBER = re.compile(r"\d+")
 
 # `install-git-policy.py` is hyphenated and so cannot be imported by name. Going
 # through the shared loader keeps the file list and the comparison in one place --
@@ -197,8 +249,10 @@ def policy_line(
         parts.append(f"installed from {behind}, {latest} available")
     if not parts:
         return ""
+    # Drift leads with its own marker: it is a failure (`FAILURES`), and being behind a
+    # release is not.
     return (
-        f"branch policy: {'; '.join(parts)} "
+        f"{POLICY_DRIFTED if drifted else 'branch policy: '}{'; '.join(parts)} "
         f"(fix: python devkit/scripts/install-git-policy.py --yes)"
     )
 
@@ -313,9 +367,52 @@ def retired_hooks_line(root: Path, names: list[str], source: Path = SOURCE_ROOT)
     if not offenders:
         return ""
     return (
-        f"settings wire retired hooks: {', '.join(offenders)} "
+        f"{RETIRED_HOOKS}{', '.join(offenders)} "
         f"(fix: python devkit/scripts/sync-devkit.py --pull, from that checkout)"
     )
+
+
+# Each runner a PR gate may call, and the failure log it writes, which the fix pass reads
+# only when the gate uploads it (`gate_evidence.run_evidence`).
+GATE_FILE = Path(".github") / "workflows" / "pr-gate.yml"
+GATE_LOGS: tuple[tuple[str, str], ...] = (
+    ("scripts/run-tests.py", "logs/test-failures.log"),
+    ("scripts/lint-all.py", "logs/lint-errors.log"),
+)
+
+
+def gate_uploads_line(root: Path, names: list[str]) -> str:
+    """Checkouts whose PR gate runs a runner and never uploads its log; "" when none do.
+
+    A runner prints "FAILED - details in <its log>" and nothing more, so a gate that
+    does not upload that log hands the fix pass a job log naming no failing test.
+    data-lake's own gate was that shape, and its fixer re-ran the suite to find the name
+    (669db913). The template's gate uploads both, but a project's gate is its own after
+    generation and `--pull` never reads it, so the check is here. A gate that names the
+    log at all is taken to upload it: this is a text check, not a workflow parser.
+    """
+    offenders: list[str] = []
+    for name in names:
+        try:
+            text = (root / name / GATE_FILE).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        missing = [log for runner, log in GATE_LOGS if runner in text and log not in text]
+        if missing:
+            offenders.append(f"{name} ({', '.join(missing)})")
+    if not offenders:
+        return ""
+    return (
+        f"{GATE_UNREAD}{', '.join(offenders)} (fix: an `if: failure()` upload-artifact "
+        f"step for each, as devkit's templates/core/dot-github/workflows/pr-gate.yml.tmpl has)"
+    )
+
+
+def checkout_config_line(root: Path, names: list[str]) -> str:
+    """`retired_hooks_line` and `gate_uploads_line` as one half of `render`: both are a
+    checkout's own config that the harness cannot work with, each its own failure kind."""
+    found = (retired_hooks_line(root, names), gate_uploads_line(root, names))
+    return "\n".join(line for line in found if line)
 
 
 # The four box states `boxes_line` reports, in the order they are printed, each with the
@@ -431,7 +528,12 @@ def previews_line(source: Path = SOURCE_ROOT, loader=None) -> str:
     return line
 
 
-def scheduler_line(source: Path = SOURCE_ROOT, now: float = 0.0, stale_hours: float = 2.0) -> str:
+def scheduler_line(
+    source: Path = SOURCE_ROOT,
+    now: float = 0.0,
+    stale_hours: float = 2.0,
+    resumed: float | None = None,
+) -> str:
     """Reports an unattended pass that has stopped running; "" while it is running.
 
     Everything automatic in this workspace hangs off one Windows scheduled task, and a
@@ -457,19 +559,43 @@ def scheduler_line(source: Path = SOURCE_ROOT, now: float = 0.0, stale_hours: fl
     the task -- a fresh clone, CI, anyone else's machine -- and a standing line
     demanding a Windows-only convenience be installed is one you learn to skim, which
     is the failure this line is trying to fix rather than repeat.
+
+    Silent, too, for `RECONCILE_GRACE` after the machine came up (`resumed`, from
+    `machine_clock.awake_since`): a machine off overnight has a log as old as the night,
+    and its catch-up fire has not had its turn. The daily pass's own catch-up fire read a
+    fourteen-hour-old log sixteen seconds before reconcile's wrote it (87bae129). The
+    unattended run does not stop at silence -- it waits the window out
+    (`catch_up_wait`) and asks again, or a pass that always fires just after a wake
+    would never report a stopped reconcile at all.
     """
     log = source / worktree.RECONCILE_LOG
+    now = now or _time.time()
     try:
-        age = (now or _time.time()) - log.stat().st_mtime
+        age = now - log.stat().st_mtime
     except OSError:
         return ""
     if age < stale_hours * 3600:
         return ""
+    if resumed is not None and 0 <= now - resumed < RECONCILE_GRACE:
+        return ""
     return (
-        f"unattended pass last ran {_age(age)} ago -- boxes are not being reaped and "
+        f"{RECONCILE_STOPPED}{_age(age)} ago -- boxes are not being reaped and "
         f"checkouts are not being synced "
         f"(fix: python devkit/scripts/install-reconcile-task.py --status)"
     )
+
+
+def catch_up_wait(source: Path, now: float, resumed: float | None) -> float:
+    """Seconds the unattended run waits before its pass: what is left of
+    `RECONCILE_GRACE` when that window is all that keeps `scheduler_line` silent, 0
+    otherwise -- a fresh log, an absent one, or a machine long up has nothing to wait for.
+    """
+    if resumed is None:
+        return 0.0
+    left = resumed + RECONCILE_GRACE - now
+    if left <= 0 or not scheduler_line(source, now):
+        return 0.0
+    return min(left, RECONCILE_GRACE)
 
 
 class _MEMORYSTATUSEX(ctypes.Structure):
@@ -658,7 +784,20 @@ def _age(seconds: float) -> str:
     return f"{hours}h" if hours < 24 else f"{hours // 24}d {hours % 24}h"
 
 
-def toolchain_lines(which=shutil.which, git=None, extensions=None, codex=None) -> list[str]:
+def launcher_lines(workspace: Path = DEFAULT_WORKSPACE) -> list[str]:
+    """One line per checkout with console scripts that name a gone interpreter; [] for
+    none, or no workspace to read. No gate runs a launcher, and a filed line is a fixer."""
+    try:
+        names = sweep.parse_workspace(workspace.read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    gaps = ((name, toolchain.launcher_gap(workspace.parent / name)) for name in names)
+    return [f"{name}: {gap.line}" for name, gap in gaps if gap]
+
+
+def toolchain_lines(
+    which=shutil.which, git=None, extensions=None, codex=None, terminal=None, launchers=None
+) -> list[str]:
     """The workstation prerequisites nothing else reports missing; [] when they are set.
 
     Reported here because none has a symptom at the moment it is wrong. A machine with no `uv` cannot provision anything at all -- devkit is uv-native,
@@ -671,7 +810,9 @@ def toolchain_lines(which=shutil.which, git=None, extensions=None, codex=None) -
     The fourth, `codex_context.py`, is the same shape one runtime over: two files in
     `CODEX_HOME` decide whether Codex reads a repo's instruction tier at all, neither is
     in any repository, and a session that has read none of `.claude/rules/` is
-    indistinguishable from one that has.
+    indistinguishable from one that has. The fifth, `wt_profile.status_lines`, is a
+    default terminal profile that elevates: every session typed into it cuts trees the
+    unelevated fix pass cannot own, and each such tree read as its own problem (1ee03f0f).
 
     The first three were found by hand on a fresh workstation bootstrap, which is exactly
     the session that has no idea which of its failures are its own doing; the fourth was
@@ -691,7 +832,12 @@ def toolchain_lines(which=shutil.which, git=None, extensions=None, codex=None) -
             f"'Author identity unknown', `sweep.py --ship` included "
             f"(fix: git config --global {unset[0]} ...)"
         )
-    reporters = (extensions or vscode_extensions.report_lines, codex or codex_context.report_lines)
+    reporters = (
+        extensions or vscode_extensions.report_lines,
+        codex or codex_context.report_lines,
+        terminal or wt_profile.status_lines,
+        launchers or launcher_lines,
+    )
     return lines + [line for report in reporters for line in report()]
 
 
@@ -754,17 +900,43 @@ def events_line(source: Path = SOURCE_ROOT) -> str:
     Read against `SOURCE_ROOT` for `scheduler_line`'s reason: every writer resolves
     the ledger to the permanent checkout (`$DEVKIT_DIR`, or the guard's own path), so
     from a box `REPO_ROOT` would be a `logs/` nothing writes to.
+
+    A pooled ledger that is unreachable is said here too, since it bears on the count:
+    while it is, this machine reads only its own rows and writes where no other machine
+    reads them. Not a filed failure -- a synced folder not mounted yet is the machine's
+    state, which no fixer can change.
+
+    A group awaiting a person (`harness_triage.awaiting_person`) is named here with its
+    step rather than counted: the fix pass sends it no fixer, so this line -- and the
+    toast it rides in -- is what reaches the one person who can take it.
     """
     try:
-        count = len(_triage.open_items(_triage.load(source)))
+        items = _triage.open_items(_triage.load(source))
+        awaiting = _triage.awaiting_person(items)
     except Exception:
         return ""
-    if not count:
-        return ""
-    return (
+    count = sum(1 for item in items if item.signature not in awaiting)
+    person = [
+        f"a person's step is owed: {step} -- then retire it: python devkit/scripts/"
+        f"harness_triage.py --resolve-like {bucket[0].id} --note '<the step taken>'"
+        for _, bucket in _triage.groups(items)
+        if (step := awaiting.get(bucket[0].signature))
+    ]
+    events = _triage.harness_events
+    named = events.pool_named(source)
+    pool = (
+        f"ledger pool {named} unreachable -- rows stay in this machine's logs/: "
+        "python devkit/scripts/ledger-pool.py"
+        if named is not None and events.pool_dir(source) is None
+        else ""
+    )
+    backlog = (
         f"{count} harness defect(s) open -- agent reports or failed box spawns nobody "
         f"has retired: python devkit/scripts/harness_triage.py"
+        if count
+        else ""
     )
+    return "\n".join(line for line in (*person, backlog, pool) if line)
 
 
 def publish_verdict(branch: str, default: str, canonical_dirty: bool) -> str:
@@ -782,6 +954,26 @@ def publish_verdict(branch: str, default: str, canonical_dirty: bool) -> str:
     if canonical_dirty:
         return f"{devkit_project.CANONICAL_WORKSPACE.name} has uncommitted changes"
     return ""
+
+
+def held_line(workspace: Path, payload: dict, problems: list[str]) -> str:
+    """The refusal's line when every live edit is already on a pushed branch; "" else.
+
+    `new-project.py` registers a project in the live file at once and in
+    `workspace.jsonc` through a PR, so between the two every daily publish refused and
+    was filed as `workspace-publish-refused` (4ea2781c, photolab's #704) -- a failure
+    that asked for `--adopt-workspace` or `--force` while all it awaited was a merge.
+    Still a line, naming the branch: a branch that never merges keeps it in the toast,
+    and past `devkit_project.HELD_DAYS` the branch stops counting and the failure returns.
+    """
+    held = devkit_project.awaited_merge(problems, payload, devkit_project.pending_copies(workspace))
+    if not held:
+        return ""
+    return (
+        f"{workspace.name}: {len(problems)} difference(s), not published -- its own edits "
+        f"are on unmerged {', '.join(sorted(set(held.values())))}, so it publishes once "
+        "that merges"
+    )
 
 
 def workspace_sync_line(workspace: Path) -> str:
@@ -804,9 +996,9 @@ def workspace_sync_line(workspace: Path) -> str:
             return ""
         # This machine's view, not the whole registry: a project registered from another
         # workstation and not cloned here is left out of the render, so it is not drift.
+        payload = devkit_jsonc.loads(workspace.read_text(encoding="utf-8"))
         problems = devkit_project.workspace_drift(
-            devkit_jsonc.loads(workspace.read_text(encoding="utf-8")),
-            devkit_jsonc.loads(devkit_project.canonical_view(workspace)[0]),
+            payload, devkit_jsonc.loads(devkit_project.canonical_view(workspace)[0])
         )
         if not problems:
             return ""
@@ -823,10 +1015,11 @@ def workspace_sync_line(workspace: Path) -> str:
             )
         outcome, published = devkit_project.publish_workspace(workspace)
         if outcome == devkit_project.RENDER_REFUSED:
+            if held := held_line(workspace, payload, published):
+                return held
             return (
-                f"{workspace.name}: {len(problems)} difference(s), and the live file "
-                "carries edits devkit never wrote -- `--adopt-workspace` keeps them, "
-                "`--render-workspace --force` discards them"
+                f"{workspace.name}: {len(problems)} difference(s), and {PUBLISH_REFUSED} "
+                "-- `--adopt-workspace` keeps them, `--render-workspace --force` discards them"
             )
         if outcome != devkit_project.RENDER_PUBLISHED:
             return ""
@@ -893,7 +1086,8 @@ def render(
         events,
         workspace_sync,
     )
-    lines = [line for line in halves if line]
+    # Split, so a half that says two things gets the prefix on both.
+    lines = [line for half in halves if half for line in half.splitlines() if line]
     if not lines:
         return ""
     return "\n".join(f"[workspace] {line}" for line in lines)
@@ -977,7 +1171,56 @@ def toast_text(message: str) -> tuple[str, str]:
     lines = [line.removeprefix("[workspace] ") for line in message.splitlines() if line.strip()]
     head = lines[0] if lines else ""
     rest = f" (+{len(lines) - 1} more)" if len(lines) > 1 else ""
-    return NOTIFY_TITLE, f"{head}{rest} -- see logs/scheduled-workspace-status.log"
+    return NOTIFY_TITLE, f"{head}{rest} -- see {ARTIFACT}"
+
+
+def failure_kind(line: str) -> str:
+    """The `FAILURES` kind a report line is, or "" for a report of ordinary state."""
+    text = line.removeprefix("[workspace] ")
+    return next((kind for kind, marker in FAILURES if marker in text), "")
+
+
+def failures(toolchain: list[str], report: str) -> list[tuple[str, str]]:
+    """`(kind, line)` for every finding that is a failure: each toolchain line, and each
+    line of `report` (`render`'s) that `failure_kind` names."""
+    found = [("toolchain", line) for line in toolchain]
+    lines = [line.removeprefix("[workspace] ") for line in report.splitlines()]
+    return found + [(kind, line) for line in lines if (kind := failure_kind(line))]
+
+
+def record_failures(found: list[tuple[str, str]], root: Path) -> list[str]:
+    """File each failure on the harness-events ledger under `root`; the messages filed.
+
+    Only while no open row shares its signature, as the fix pass files its own findings:
+    a fault that stands for a week is one open row, not seven, and one resolved while
+    still present is filed again the next day. The message is the line with its counts
+    and ages folded to `N` -- `harness_triage.Item.signature` groups by it, so "3
+    difference(s)" and "4 difference(s)" are one failure; `said` keeps the line as
+    printed. Filed against `devkit`, which owns every defect on this ledger.
+    """
+    if not found:
+        return []
+    events = _triage.harness_events
+    held = {item.signature for item in _triage.open_items(_triage.load(root), (FAILURE_EVENT,))}
+    filed = []
+    for kind, line in found:
+        said = " ".join(line.split())
+        message = f"{kind}: {_NUMBER.sub('N', said)}"
+        fields: tuple[tuple[str, object], ...] = (
+            ("project", "devkit"),
+            ("message", message),
+            ("evidence", ARTIFACT),
+            *((("said", said),) if _NUMBER.search(said) else ()),
+        )
+        probe = _triage.parse_line(
+            events.event_line("-", FAILURE_EVENT, (*fields, ("agent", events.agent_name())))
+        )
+        if probe is None or probe.signature in held:
+            continue
+        held.add(probe.signature)
+        events.record(FAILURE_EVENT, fields, root=root)
+        filed.append(message)
+    return filed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -992,6 +1235,10 @@ def main(argv: list[str] | None = None) -> int:
     workspace = DEFAULT_WORKSPACE
     if not workspace.is_file():
         return 0
+    resumed = machine_clock.awake_since()
+    if args.notify:
+        # The unattended run only: a person at a terminal is not made to wait.
+        _time.sleep(catch_up_wait(SOURCE_ROOT, _time.time(), resumed))
     try:
         names = sweep.parse_workspace(workspace.read_text(encoding="utf-8"))
         if not names:
@@ -1001,15 +1248,17 @@ def main(argv: list[str] | None = None) -> int:
         latest = latest_devkit_tag(root / "devkit")
         behind = projects_behind(root, names, latest) if latest else {}
         schedule = schedule_lines()
-        scheduler = scheduler_fallback(scheduler_line(), schedule, schedule_health.stood_down())
-        message = render(
+        scheduler = scheduler_fallback(
+            scheduler_line(resumed=resumed), schedule, schedule_health.stood_down()
+        )
+        report = render(
             results,
             behind,
             latest,
             policy_line(latest=latest),
             adoption_line(root, names),
             boxes_line(box_survey(workspace)),
-            retired_hooks_line(root, names),
+            checkout_config_line(root, names),
             scheduler,
             schedule,
             events_line(),
@@ -1021,15 +1270,20 @@ def main(argv: list[str] | None = None) -> int:
         # machine missing uv, a git identity or a task's extension cannot act on the
         # lines below, so saying them second would hand out fixes that cannot run --
         # and `render` already takes more arguments than anything should.
-        toolchain = "\n".join(f"[workspace] {line}" for line in toolchain_lines())
+        tools = toolchain_lines()
+        toolchain = "\n".join(f"[workspace] {line}" for line in tools)
         # No plug-menu rebuild rides on this pass any more. That checklist was the last
         # dropdown reading a cached file, and it now scans when it opens
         # (`plug-projects.py --rows`), so there is nothing left for a scheduled writer to
         # keep fresh -- and nothing for this pass to warn about when it could not.
-        message = "\n".join(part for part in (toolchain, message) if part)
-    except Exception as exc:
-        print(f"[workspace] status unavailable ({type(exc).__name__})", file=sys.stderr)
-        return 0
+        message = "\n".join(part for part in (toolchain, report) if part)
+    except Exception:
+        # The job failing, unlike a finding: exit non-zero with the traceback, so the
+        # scheduled run's `log-wrap.py --always` files it, cause and all. It exited 0 with
+        # only the exception's name once, and a pass that checked nothing read as healthy.
+        print("[workspace] status unavailable -- the pass crashed:", file=sys.stderr)
+        traceback.print_exc()
+        return CRASHED
     if message:
         # Printed first, and never conditional on the toast: the report is the artifact
         # and must not depend on a notifier that a POSIX machine, a locked session or a
@@ -1041,6 +1295,10 @@ def main(argv: list[str] | None = None) -> int:
             # task` is what holds it to that. A second broad `except` around a call with
             # that contract buys nothing and hides the next bug in this function.
             _notify.notify(*toast_text(message))
+    # After the report is out, so a ledger that cannot be read costs the filing and not
+    # the report -- and raises, failing the job, since `harness_events.record` itself
+    # never does and anything else here is a defect worth a traceback.
+    record_failures(failures(tools, report), SOURCE_ROOT)
     return 0
 
 

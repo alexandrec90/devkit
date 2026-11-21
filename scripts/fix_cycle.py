@@ -9,7 +9,8 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   -- a vendored test, a lint finding in a vendored path, a signature shared by two or
   more projects, a commit refused by the toolchain rather than by the change, or
   anything in devkit -- `PROJECT` when the evidence points at the project's own code,
-  a vendored ratchet red on one project's ordinary PR included, and `UNKNOWN` when there is no evidence to point anywhere. Unknown goes to the project
+  a vendored ratchet red on one project's ordinary PR included, and a vendored test of a
+  file that one project owns (`checks_own_files`), and `UNKNOWN` when there is no evidence to point anywhere. Unknown goes to the project
   bucket, where the fixer will say "upstream" and stop; guessing the other way sends a
   devkit session at a project bug.
 - **Hold every project fixer while the harness is red.** Nearly every red PR of the last
@@ -23,7 +24,8 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   dispatch at the same commit. A failure `fix_ledger.ATTEMPTS` fixers left unchanged
   is filed on the harness-defect ledger (`fix_budget.py`), where the devkit session takes it
   over, and gets fresh fixers once that is resolved. The devkit session, with nothing
-  above it, backs off instead. No daily fuse caps any of it: the supervisor's spend
+  above it, backs off instead. One daily fuse caps one source -- Dependabot's own
+  sessions (`fix_budget.DEPENDABOT_DAILY`) -- and nothing else: the supervisor's spend
   watch does that job, with a person reading it.
 
 The switch is the workspace file: `"devkit.fixPass"` under `settings`, `off` (the
@@ -43,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
+import e2e_results
 import fix_ledger
 import fix_plan
 
@@ -106,7 +109,8 @@ HARNESS_REFUSALS = (
 # was a conflict folded this way, and the session it opened was told to fix the harness
 # "in the vendored file, the test, or the template" on a branch that could never land
 # on the PR. A harness PR in either shape goes as itself, before the folded session.
-# A `RERUN` is a `gh workflow run` call, and goes as itself for the same reason.
+# A `RERUN` is a `gh workflow run` or `gh run rerun` call, and goes as itself for the
+# same reason.
 BRANCH_SHAPED = (fix_plan.UPDATE, fix_plan.RERUN, fix_plan.RESOLVE)
 
 
@@ -155,9 +159,20 @@ def _harness_shaped(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> 
     of the two it is decides where the fixer goes -- the one devkit session, or the
     adoption branch itself.
 
-    A devkit PR is not the harness by any of these: see `classify`.
+    A devkit PR is not the harness by any of these: see `classify`. Nor is what
+    Dependabot cannot do: two consumers of one sibling share the signature `"data-lake"
+    is unfetchable`, and as a shared signature it would fold into the devkit session,
+    which can bump neither lock. Its entries name no harness path, so it is the project's.
+    Nor is a gate GitHub refused to start over billing (`fix_plan.is_billing_refused`):
+    every consumer shares it, and as harness it held every project fixer behind a red no
+    session could clear -- the plan skips it as a person's step.
+    Nor is a project with no local end-to-end tier (`e2e_results.is_missing`): the one
+    line says a file each project owns is absent, which is eleven gaps and not one cause,
+    and a devkit session can write no project's tests. Its fixer goes to that project.
     """
-    return (
+    if fix_plan.is_billing_refused(failure.signature) or e2e_results.is_missing(failure.signature):
+        return False
+    return failure.kind != fix_plan.DEPENDABOT and (
         failure.project == DEVKIT
         or bool(failure.signature and failure.signature in shared)
         or fix_plan.is_vendored(failure.signature)
@@ -182,6 +197,30 @@ def is_own_ratchet(
     )
 
 
+def checks_own_files(failure: fix_plan.Failure, shared: set[tuple[str, ...]]) -> bool:
+    """Red, in one project, only on vendored tests of files that project owns.
+
+    The test is right everywhere else it runs, so what differs is the project's own
+    copy, and the fix is on the failure's own branch: sports_betting #67 failed the
+    vendored lint-runner contract on its own `scripts/lint-all.py` and was folded into a
+    devkit session told the fix belonged upstream, where nothing could turn it green.
+    Shared across projects it stays devkit's, as a ratchet does: the test may be wrong.
+    """
+    ids = [entry for entry in failure.signature if entry != fix_plan.CONFLICT]
+    return (
+        bool(ids)
+        and failure.signature not in shared
+        and all(fix_plan.project_owned_subject(entry) for entry in ids)
+    )
+
+
+def is_projects_own(
+    failure: fix_plan.Failure, shared: set[tuple[str, ...]], prefixes: Iterable[str]
+) -> bool:
+    """A vendored test red on what one project owns: its ratchet, or its own files."""
+    return is_own_ratchet(failure, shared, prefixes) or checks_own_files(failure, shared)
+
+
 def classify(
     failure: fix_plan.Failure, shared: set[tuple[str, ...]], prefixes: Iterable[str] = ()
 ) -> str:
@@ -196,7 +235,7 @@ def classify(
     if failure.project == DEVKIT and failure.kind in (fix_plan.PR, fix_plan.COMMIT):
         return PROJECT if ids else UNKNOWN
     # Before `_harness_shaped` and `HARNESS_PATHS`, each of which would claim it (#395).
-    if is_own_ratchet(failure, shared, prefixes):
+    if is_projects_own(failure, shared, prefixes):
         return PROJECT
     if _harness_shaped(failure, shared):
         return HARNESS
@@ -237,12 +276,17 @@ def harness_state(
     The harness-defect ledger's backlog is harness-shaped and rides in the devkit
     session when one goes, but does not by itself make one go: one unresolved hook
     event anywhere was holding every project fixer.
+
+    devkit's local end-to-end red (`fix_plan.LOCAL`) gets its devkit session and holds
+    no one either: that tier judges this workstation's tooling -- a picker over budget,
+    a task VS Code cannot resolve -- not the harness a project fixer runs under.
     """
     reasons = []
+    unholding = (fix_plan.LEDGER, fix_plan.LOCAL)
     red = sum(
         1
         for key, cls in classes.items()
-        if cls == HARNESS and fix_ledger.key_kind(key) != fix_plan.LEDGER
+        if cls == HARNESS and fix_ledger.key_kind(key) not in unholding
     )
     if red:
         reasons.append(f"{red} harness failure(s) open")
@@ -322,15 +366,21 @@ def _harness_first(harness_ones: list[fix_plan.Decision]) -> list[fix_plan.Decis
     return go
 
 
+PLAN_RAISED = "the plan step raised"
+PLAN_LATE = "the plan was left for the deadline"
+
+
 def only_the_harness(
     backlog: fix_plan.Failure | None,
+    why: str = PLAN_RAISED,
 ) -> tuple[Harness, list[fix_plan.Decision], list, list]:
-    """What the pass sends when planning itself raised: the backlog, and nothing else.
+    """What the pass sends with no plan, because planning raised or was never reached
+    (`why`): the backlog, and nothing else.
 
-    The crash is on that backlog by then, so the devkit session is what fixes the plan.
+    A crash is on that backlog by then, so the devkit session is what fixes the plan.
     Everything else waits a pass rather than going out on a plan nobody could make.
     """
-    harness = Harness(False, ("the plan step raised; only the devkit session goes",))
+    harness = Harness(False, (f"{why}; only the devkit session goes",))
     go = (
         [
             fold_harness(
@@ -392,6 +442,27 @@ class Account:
     backlog: int = 0
     # Finished fixers' idle processes the pass stopped (`bg_sessions.py`).
     stopped: tuple[str, ...] = ()
+    # What the pass decided on the ledger itself: retired, reopened, settled, pending.
+    verified: tuple[str, ...] = ()
+    # What Dependabot is failing on that the pass sends no one at (`fix_dependabot`),
+    # uncommitted drift on a default branch carried or left (`fix_drift`), and the
+    # scheduled-failure issues closed once their workflow went green (`fix_issues`), and
+    # the dev databases brought to their merged head (`fix_migrate`).
+    dependabot: tuple[str, ...] = ()
+    drift: tuple[str, ...] = ()
+    issues: tuple[str, ...] = ()
+    migrated: tuple[str, ...] = ()
+    # The commits reverted off a direct-flow branch that stayed red (`fix_revert`).
+    reverted: tuple[str, ...] = ()
+    # What a pass past its send deadline left to the next one (`fix-pass.LATE`).
+    late: tuple[str, ...] = ()
+    # The tray's half (`tray_state.fix_pass_states`): the fixer trees with a session at
+    # work, each person's step the ledger awaits (`fix_loop.person_steps`), and the open
+    # groups a fixer is owed. `backlog` counts rows, and counts the person's groups too,
+    # so "owed and nothing sent" cannot be read off it.
+    working: tuple[str, ...] = ()
+    person: tuple[str, ...] = ()
+    owed: int = 0
 
 
 def _names(decision: fix_plan.Decision) -> str:
@@ -402,8 +473,7 @@ def render(account: Account) -> str:
     """The pass's own record, written whether or not it sent anything."""
     harness = account.harness
     lines = [f"fix-pass: mode={account.mode}"]
-    lines += [f"shipped  {line}" for line in account.shipped]
-    lines += [f"regate   {line}" for line in account.regated]
+    lines += labelled("shipped", account.shipped) + labelled("regate", account.regated)
     lines.append(
         "harness  clean" if harness.clean else "harness  RED -- " + "; ".join(harness.reasons)
     )
@@ -412,18 +482,34 @@ def render(account: Account) -> str:
             f"adopting {', '.join(harness.adopting)} -- the newest release; "
             "each one's other PRs wait for its adoption"
         )
-    lines += [f"blocked  {line}" for line in account.blocked]
+    lines += labelled("blocked", account.blocked) + labelled("verified", account.verified)
     lines += [f"{d.action:8} {_names(d)} -- {d.note}" for d in account.go]
-    lines += [f"held     {_names(d)} -- {why}" for d, why in account.held]
-    lines += [f"capped   {_names(d)} -- {why}" for d, why in account.capped]
-    lines += [f"skip     {_names(d)} -- {d.note}" for d in account.skipped]
-    lines += [f"sent     {line}" for line in account.sent]
-    lines += [f"merged   {line}" for line in account.merged]
-    lines += [f"filed    {line}" for line in account.filed]
-    lines += [f"stopped  {line}" for line in account.stopped]
+    lines += labelled("held", [f"{_names(d)} -- {why}" for d, why in account.held])
+    lines += labelled("capped", [f"{_names(d)} -- {why}" for d, why in account.capped])
+    lines += labelled("skip", [f"{_names(d)} -- {d.note}" for d in account.skipped])
+    for label, rows in (
+        ("sent", account.sent),
+        ("merged", account.merged),
+        ("filed", account.filed),
+        ("stopped", account.stopped),
+        ("dependabot", account.dependabot),
+        ("drift", account.drift),
+        ("issue", account.issues),
+        ("migrate", account.migrated),
+        ("revert", account.reverted),
+        ("late", account.late),
+        ("working", account.working),
+        ("you", account.person),
+    ):
+        lines += labelled(label, rows)
     lines.append(f"ledger   {account.backlog} open on the harness-defect ledger")
-    lines += [f"release  {account.release}"] if account.release else []
+    lines += labelled("release", [account.release] if account.release else [])
     return "\n".join(lines)
+
+
+def labelled(label: str, rows: Iterable[str]) -> list[str]:
+    """Each row under its record label, the labels padded to one column."""
+    return [f"{label:8} {row}" for row in rows]
 
 
 def history_line(account: Account, now: _dt.datetime) -> str:
@@ -444,5 +530,8 @@ def history_line(account: Account, now: _dt.datetime) -> str:
             "filed": len(account.filed),
             "backlog": account.backlog,
             "release": account.release,
+            "working": list(account.working),
+            "person": list(account.person),
+            "owed": account.owed,
         }
     )

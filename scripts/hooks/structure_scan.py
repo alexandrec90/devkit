@@ -74,6 +74,9 @@ class FileMetrics:
     counts: dict[str, int] = field(default_factory=dict)
     react_state: int = 0
     react_effects: int = 0
+    # The imports left out of `modules`. They bind no cycle, but they are still a use:
+    # a module only ever imported for its types is not an orphan.
+    type_modules: tuple[str, ...] = ()
 
 
 def is_test_file(rel: str) -> bool:
@@ -98,6 +101,32 @@ _PY_SUPPRESSION = re.compile(
     r"#\s*(noqa|type:\s*ignore|nosec|pragma:\s*no\s*cover|pyright:\s*ignore|"
     r"ruff:\s*noqa|mypy:\s*ignore|fmt:\s*(off|skip))"
 )
+# What explains a suppression, written after it: a dash, `because`, `;` or a second
+# comment marker, then a word. Only an unexplained one counts, because the remedy the
+# gate prints is to name the reason, and a named one still counting cost a session a
+# check cycle (7d307f16); `engineering.md`'s lint policy asks for exactly that form.
+_DASHES = "-\N{EN DASH}\N{EM DASH}"
+_REASON = re.compile(rf"(?:\s[{_DASHES}]{{1,2}}|#|//|;|\bbecause\b)\s*[A-Za-z]")
+
+
+def unexplained(pattern: re.Pattern[str], comments: str) -> int:
+    """How many of `pattern`'s matches in `comments` carry no reason on their own line
+    before the next match, so one comment's reason never explains another's."""
+    hits = list(pattern.finditer(comments))
+    if not hits:
+        return 0
+    ends = [m.start() for m in hits[1:]] + [len(comments)]
+    return sum(
+        not _REASON.search(comments, m.end(), min(end, _line_end(comments, m.end())))
+        for m, end in zip(hits, ends, strict=True)
+    )
+
+
+def _line_end(text: str, at: int) -> int:
+    newline = text.find("\n", at)
+    return len(text) if newline < 0 else newline
+
+
 _TODO = re.compile(r"\b(TODO|FIXME|XXX|HACK)\b")
 _PY_SKIP = re.compile(
     r"\bpytest\.mark\.(skip|skipif|xfail)\b|\bpytest\.(skip|xfail)\s*\("
@@ -206,6 +235,15 @@ def _runtime_imports_of(nodes: list[ast.stmt]) -> list[str]:
     return _runtime_imports(holder)
 
 
+def _type_imports(tree: ast.AST) -> list[str]:
+    """Import specifiers `_runtime_imports` skips: those under `if TYPE_CHECKING:`."""
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and _is_type_checking(node.test):
+            found.extend(_runtime_imports_of(node.body))
+    return found
+
+
 def _swallows(handler: ast.ExceptHandler) -> bool:
     """A broad handler that never re-raises: the shape that hides every bug at once."""
     kind = handler.type
@@ -263,7 +301,7 @@ def scan_python(text: str) -> FileMetrics | None:
             swallowed += 1
     comments = python_comments(text)
     counts = {
-        "suppressions": sum(bool(_PY_SUPPRESSION.search(c)) for c in comments),
+        "suppressions": sum(bool(unexplained(_PY_SUPPRESSION, c)) for c in comments),
         "any_types": 0,
         "todos": sum(bool(_TODO.search(c)) for c in comments),
         "skipped_tests": len(_PY_SKIP.findall(_without_comments(text, comments))),
@@ -278,6 +316,7 @@ def scan_python(text: str) -> FileMetrics | None:
         symbols=tuple(sorted(symbols, key=lambda s: s.line)),
         modules=tuple(dict.fromkeys(_runtime_imports(tree))),
         counts=counts,
+        type_modules=tuple(dict.fromkeys(_type_imports(tree))),
     )
 
 
@@ -642,15 +681,14 @@ def scan_js(text: str, react: bool = False) -> FileMetrics:
         if depths[m.start()] == 0:
             top_level += 1
     modules: list[str] = []
+    type_modules: list[str] = []
     for m in _JS_SPECIFIER.finditer(masked):
-        if m.group("type"):
-            continue
         spec = text[m.start("spec") : m.end("spec")]
         if spec:
-            modules.append(spec)
+            (type_modules if m.group("type") else modules).append(spec)
     comment_text = "\n".join(comments)
     counts = {
-        "suppressions": len(_JS_SUPPRESSION.findall(comment_text)),
+        "suppressions": unexplained(_JS_SUPPRESSION, comment_text),
         "any_types": len(_JS_ANY.findall(masked)),
         "todos": len(_TODO.findall(comment_text)),
         "skipped_tests": len(_JS_SKIP.findall(masked)),
@@ -666,6 +704,7 @@ def scan_js(text: str, react: bool = False) -> FileMetrics:
         counts=counts,
         react_state=len(re.findall(r"\buseState\s*[<(]", masked)) if react else 0,
         react_effects=len(re.findall(r"\buse(?:Layout)?Effect\s*\(", masked)) if react else 0,
+        type_modules=tuple(dict.fromkeys(type_modules)),
     )
 
 

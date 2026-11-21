@@ -7,11 +7,15 @@ could not move is escalated -- a finding on the harness-defect ledger, which the
 session takes over -- and gets fresh fixers once that finding is resolved. The devkit
 session has nothing above it, so its own exhaustion backs off instead of stopping.
 
-There are no daily fuses. They were a cap on sessions per day, set for a pass nobody was
-watching; the first supervised run showed what one costs -- two dead launches spent the
-devkit target's four and held a 21-item backlog for the rest of the day. What stops a
-pass that reads wrong now is the supervisor's spend watch (`fix-pass-supervise.py`)
-and a person reading it, not a count that also stops a pass that reads right.
+There is one daily fuse, and it is on a source rather than on the pass. A cap on all
+sessions per day, set for a pass nobody was watching, was removed: the first supervised
+run showed what one costs -- two dead launches spent the devkit target's four and held a
+21-item backlog for the rest of the day. What stops a pass that reads wrong is the
+supervisor's spend watch (`fix-pass-supervise.py`) and a person reading it. Dependabot
+is the exception (`DEPENDABOT_DAILY`): it was added as an input on 2026-10-04 while the
+devkit ledger session was already going out a dozen times a day, and an alert backlog
+is the kind of red that can always find one more session to spend. Its cap holds only
+its own sessions -- updates are free, and the devkit session is never held by it.
 
 Tested in `tests/test_fix_budget.py`.
 """
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,10 +41,7 @@ DEVKIT = "devkit"
 
 def is_blind(decision: fix_plan.Decision) -> bool:
     """No failure under it has any evidence: no test id, no lint line, no failed step."""
-    return all(
-        not [entry for entry in f.signature if entry != fix_plan.CONFLICT]
-        for f in decision.failures
-    )
+    return all(fix_plan.names_nothing(f.signature) for f in decision.failures)
 
 
 @dataclass(frozen=True)
@@ -67,11 +69,21 @@ BACKOFF = (
 TOP_EFFORT = "max"
 
 
+# What a PR a fix waits on reads as once it can no longer change: either way, the next
+# fixer goes. Anything else -- open, or unreadable -- keeps the problem waiting.
+SETTLED = frozenset({"MERGED", "CLOSED"})
+
+
+def _unreadable(url: str) -> str:
+    return ""
+
+
 def budget(
     decision: fix_plan.Decision,
     ledger: dict[str, dict],
     now: _dt.datetime,
     escalated: fix_findings.Escalation = fix_findings.NOT_ESCALATED,
+    pr_state: Callable[[str], str] = _unreadable,
 ) -> Budget:
     """Whether this dispatch goes now; when it does not, why, and whether to file that.
 
@@ -84,6 +96,10 @@ def budget(
     moved since (`fix_ledger.moved_on`): a resolver pushes only a merge that resolved,
     so a new conflict at a new commit is the base moving again (devkit #390). The
     devkit session's own exhaustion backs off instead (`BACKOFF`).
+
+    A fixer that found its fix waits on another PR (`fix_ledger.waiting_on`) holds the
+    problem, unescalated, while `pr_state` reads that PR as anything but `SETTLED`: no
+    session can merge it, so neither another fixer nor the devkit session moves it.
     """
     if decision.action in fix_plan.NO_SESSION:
         # Free, so never rationed -- but made once per head (or tip), like everything else.
@@ -91,11 +107,15 @@ def budget(
         return Budget(False, f"already dispatched at {when}") if when else Budget(True)
     if escalated.open:
         return Budget(False, "escalated: the devkit session has it on the harness ledger")
-    since = escalated.resolved_at
+    since = since_for(decision, escalated)
+    if (url := fix_ledger.waiting_on(decision, ledger, since)) and (
+        state := pr_state(url)
+    ) not in SETTLED:
+        return Budget(False, f"waits on {url}: {state.lower() or 'its state is unreadable'}")
     if reason := fix_ledger.blocked_reason(decision, ledger, since):
         return _escalate(decision, "fixer-blocked", f"a fixer reported it blocked: {reason}")
-    if when := fix_ledger.already_sent(decision, ledger, now, since):
-        return Budget(False, f"already dispatched at {when}")
+    if why := _in_flight(decision, ledger, now, since):
+        return Budget(False, why)
     made = fix_ledger.attempts(decision, ledger, since)
     limit = fix_ledger.BLIND_ATTEMPTS if is_blind(decision) else fix_ledger.ATTEMPTS
     rebased = decision.action == fix_plan.RESOLVE and fix_ledger.moved_on(decision, ledger)
@@ -103,7 +123,73 @@ def budget(
         if decision.action == fix_plan.UPSTREAM:
             return _back_off(decision, ledger, now, made - limit)
         return _exhausted(decision, made)
+    if over := over_daily_cap(decision, ledger, now):
+        return Budget(False, over)
     return Budget(True)
+
+
+def _in_flight(
+    decision: fix_plan.Decision, ledger: dict[str, dict], now: _dt.datetime, since: str
+) -> str:
+    """Why a session already sent stands in for this one, or "" when none does."""
+    if when := fix_ledger.already_sent(decision, ledger, now, since):
+        return f"already dispatched at {when}"
+    if when := fix_ledger.open_medium_session(decision, ledger, now, since):
+        return f"a medium tier session went at {when}; one per project at a time"
+    return ""
+
+
+def since_for(decision: fix_plan.Decision, escalated: fix_findings.Escalation) -> str:
+    """The stamp this problem's ledger entries count after: the later of its escalation's
+    resolution and the last time a branch under it passed its gate (`Failure.green_at`).
+
+    `fix_ledger.problem_key` drops the commit so a fixer that pushed and left the same
+    tests red is the same problem. On a default branch that also joined every failure
+    of one coarse signature for the life of the ledger: carameli master's pip-audit
+    `Lint / Lint` on 2026-10-22 was escalated fixers-exhausted with no fixer sent, its
+    two attempts spent on 09-29 and 10-06 at other lint failures, though master had
+    passed on 10-19 (430656bd). A branch that passed in between was fixed in between.
+    """
+    latest = escalated.resolved_at
+    for stamp in (f.green_at for f in decision.failures):
+        if stamp and fix_findings.after(latest, stamp):
+            latest = stamp
+    return latest
+
+
+# Dependabot sessions per rolling day, machine-wide: its runs, its unanswered alerts and
+# its red PRs together. Two covers one project's alert backlog and its retry.
+DEPENDABOT_DAILY = 2
+DAY = _dt.timedelta(hours=24)
+# How a capped decision's reason starts; `fix_stall.TRACKED` names it.
+DAILY_CAPPED = "dependabot daily cap"
+
+
+def over_daily_cap(decision: fix_plan.Decision, ledger: dict[str, dict], now: _dt.datetime) -> str:
+    """Why a Dependabot session waits for tomorrow, or "" when it may go.
+
+    Only a session of its own: a folded devkit session that carries a Dependabot PR among
+    the harness failures is the harness's, and is never held by this.
+    """
+    if decision.action == fix_plan.UPSTREAM or not any(
+        fix_plan.is_dependabot(f) for f in decision.failures
+    ):
+        return ""
+    sent = fix_ledger.sent_since(ledger, fix_plan.DEPENDABOT, now - DAY)
+    if sent < DEPENDABOT_DAILY:
+        return ""
+    return f"{DAILY_CAPPED}: {sent} of {DEPENDABOT_DAILY} sessions sent in the last 24h"
+
+
+def source(decision: fix_plan.Decision) -> str:
+    """The ledger source a dispatch is recorded under: what `over_daily_cap` counts.
+
+    A free action has none: stamped, four updates of one Dependabot PR behind its base
+    spent the day's cap and held another's conflict resolver (2026-10-11).
+    """
+    if decision.action == fix_plan.UPSTREAM or decision.action in fix_plan.NO_SESSION:
+        return ""
+    return fix_plan.DEPENDABOT if any(fix_plan.is_dependabot(f) for f in decision.failures) else ""
 
 
 def _exhausted(decision: fix_plan.Decision, made: int) -> Budget:

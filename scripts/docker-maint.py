@@ -30,13 +30,13 @@ project whose plain `docker compose` stack the fallback handles correctly.
 Delegate paths are `scripts/<name>.py` and nothing else. Every consuming project keeps
 its scripts there, so a candidate list per mode is no longer needed -- see DELEGATES.
 
-Usage:  python docker-maint.py {up|down|stop-idle|restart-engine|fix|prune}
+Usage:  python docker-maint.py {up|down|stop-idle|restart-engine|fix|recover-wsl|prune}
         [--generic] [args...]
         (run with cwd set to the workspace folder; --generic skips delegation)
 
-`prune --idle-only` is the unattended spelling: it normally does nothing while
-containers are running, because the half that actually returns disk to Windows needs
-`wsl --shutdown`. Its one exception is a disk already low enough that `worktree.py
+`prune --idle-only` is the unattended spelling: it always prunes inside the VM, but
+normally does not compact while containers are running, because the half that actually
+returns disk to Windows needs `wsl --shutdown`. Its one exception is a disk already low enough that `worktree.py
 reconcile` has started destroying boxes with open PRs, where waiting for an idle
 machine is the more expensive mistake -- `prune_verdict` owns that call. See
 `generic_prune`. `scripts/install-docker-prune.py` is what
@@ -71,9 +71,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import agent_clis
+import collector_tasks
 import docker_vhdx
 
-MODES = ("up", "down", "stop-idle", "restart-engine", "fix", "prune")
+MODES = ("up", "down", "stop-idle", "restart-engine", "fix", "recover-wsl", "prune")
 
 # Windows only. The scheduled prune reaches this script under `pythonw.exe`, which has no
 # console, and Windows answers a console-less parent by giving each console child a brand
@@ -122,6 +124,8 @@ DELEGATES = {
     # No delegate on purpose: `stop-idle` acts on every project's stack at once, so no
     # single repo is better informed about it than the generic pass.
     "stop-idle": (),
+    # Nor for `recover-wsl`: its target is the machine's WSL service, which no repo owns.
+    "recover-wsl": (),
 }
 
 # Any of these in the cwd means there is a stack to act on. Checked before running a
@@ -240,10 +244,60 @@ def poll_engine(timeout: int = POLL_TIMEOUT) -> bool:
     return False
 
 
-def stop_docker() -> None:
+# How long `stop_docker` waits for every name in `DOCKER_PROCESSES` to be gone. A launch
+# that finds the old `Docker Desktop.exe` still exiting stalls on Docker Desktop's
+# "lingering processes detected" dialog (2026-10-08: `PID 5848 could not be terminated`),
+# and an unattended restart has nobody to click it. Killing everything and waiting about
+# five seconds brought the engine up in twelve; a minute is that with room to spare.
+EXIT_TIMEOUT = 60
+EXIT_POLL_INTERVAL = 1
+
+
+def lingering(names: set[str] | None) -> list[str]:
+    """Which of `DOCKER_PROCESSES` are still in `names`, a set of running process names
+    (`agent_clis.running_processes`). Every one of them when the machine could not be
+    asked: unknown is still running, so the wait goes on."""
+    if names is None:
+        return list(DOCKER_PROCESSES)
+    return [name for name in DOCKER_PROCESSES if agent_clis.normalise_process(name) in names]
+
+
+def wait_for_exit(
+    timeout: float = EXIT_TIMEOUT,
+    listing: Callable[[], set[str] | None] = agent_clis.running_processes,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[str]:
+    """Block until no name in `DOCKER_PROCESSES` is running, or `timeout` passes.
+
+    The names still running at the deadline, `[]` once all are gone.
+    """
+    deadline = clock() + timeout
+    while True:
+        left = lingering(listing())
+        if not left or clock() >= deadline:
+            return left
+        sleep(EXIT_POLL_INTERVAL)
+
+
+def stop_docker(wait: Callable[[], list[str]] = wait_for_exit) -> None:
+    """Kill Docker Desktop, shut WSL down, and wait until its processes have exited.
+
+    `taskkill /F` returns once the kill is issued, not once the process is gone, so
+    without the wait the `start_docker` after it races the old process's exit. One more
+    `/F` for whatever outlived the wait, then the start goes ahead with a warning: the
+    dialog it may meet is a worse outcome than a failed poll, but no start at all is
+    worse still.
+    """
     for name in DOCKER_PROCESSES:
         run(["taskkill", "/F", "/IM", f"{name}.exe", "/T"], timeout=30)
     run(["wsl", "--shutdown"], timeout=60)
+    left = wait()
+    if not left:
+        return
+    print(f"  [warn] still running after {EXIT_TIMEOUT}s: {', '.join(left)}")
+    for name in left:
+        run(["taskkill", "/F", "/IM", f"{name}.exe", "/T"], timeout=30)
 
 
 def start_docker_service() -> None:
@@ -273,12 +327,25 @@ def start_docker_service() -> None:
         print("         if the engine never answers, start 'Docker Desktop Service' by hand")
 
 
-def start_docker() -> None:
+def desktop_launch(exe: Path, elevated: bool) -> list[str]:
+    """The argv that starts Docker Desktop with the desktop's own, unelevated token.
+
+    Launched from an elevated shell, Docker Desktop and its `com.docker.backend` inherit
+    the elevated token -- 2026-10-13, after a hung WSL was ended from an admin prompt, the
+    relaunch ran the whole backend elevated, which nothing in this harness is meant to
+    do (`elevated_writes.py`). `explorer.exe` hands the start to the shell, which runs it
+    as the signed-in user whatever the caller holds.
+    """
+    return ["explorer.exe", str(exe)] if elevated else [str(exe)]
+
+
+def start_docker(elevated: Callable[[], bool] = docker_vhdx.is_elevated) -> None:
     if not DOCKER_DESKTOP_EXE.is_file():
         print(f"  [skip] {DOCKER_DESKTOP_EXE} not found -- start Docker Desktop manually")
         return
     start_docker_service()
-    subprocess.Popen([str(DOCKER_DESKTOP_EXE)], creationflags=NO_WINDOW)
+    as_admin = sys.platform == "win32" and elevated()
+    subprocess.Popen(desktop_launch(DOCKER_DESKTOP_EXE, as_admin), creationflags=NO_WINDOW)
 
 
 def find_delegate(mode: str) -> Path | None:
@@ -488,20 +555,25 @@ def generic_prune(
     kills every running container and every other WSL distro with them.
 
     `idle_only` is that distinction made operable, and it exists for the scheduled
-    caller: it waits for a machine with nothing running rather than stopping containers
-    at 4am to reclaim disk. `prune_verdict` owns the one case where it stops waiting --
-    a disk low enough that the box tier has started destroying open-PR checkouts -- and
-    its docstring owns why that reverses the trade. Interactive callers leave the flag
-    off entirely: a human choosing this from the task list has already decided.
+    caller: it gates **only the compaction**, waiting for a machine with nothing running
+    rather than stopping containers at 4am to reclaim disk. The first half runs against
+    a live engine and stops nothing, so it runs regardless -- the gate used to cover
+    both, and on a machine whose collectors never stop it skipped every night while
+    19 GB of build cache sat reclaimable (2026-10-09). `prune_verdict` owns the one case
+    where the compaction stops waiting -- a disk low enough that the box tier has
+    started destroying open-PR checkouts -- and its docstring owns why that reverses
+    the trade. Interactive callers leave the flag off entirely: a human choosing this
+    from the task list has already decided.
     """
+    compact_ok = True
     if idle_only:
-        proceed, why = prune_verdict(running_containers(), free_gb())
-        if not proceed:
-            print(banner(f"SKIPPED -- {why}"))
-            print("  Compacting needs `wsl --shutdown`, which would stop them.")
-            print("  Run without --idle-only to prune and compact anyway.")
+        running = running_containers()
+        if running < 0:
+            # The prune itself needs the engine, so there is nothing safe to do at all.
+            print(banner("SKIPPED -- the engine could not be asked"))
             return 0
-        print(f"  Proceeding: {why}")
+        compact_ok, why = prune_verdict(running, free_gb())
+        print(f"  {'Proceeding' if compact_ok else 'Pruning only, not compacting'}: {why}")
     print(banner("Docker Prune + Compact VHDX (generic)"))
     if not docker_info_ok():
         print("  Docker is not responding; starting it first.")
@@ -528,6 +600,11 @@ def generic_prune(
     # stopping every container would buy nothing (`docker_vhdx` has the history).
     if not elevated():
         print(banner("PRUNED INSIDE THE VM -- NOT COMPACTED (not elevated)"))
+        return 0
+    if not compact_ok:
+        print(banner("PRUNED INSIDE THE VM -- NOT COMPACTED (containers are up)"))
+        print("  Compacting needs `wsl --shutdown`, which would stop them.")
+        print("  Run without --idle-only to compact anyway.")
         return 0
     compacted = docker_vhdx.compact(run, stop_docker)
     start_docker()
@@ -731,12 +808,176 @@ def generic_stop_idle() -> int:
 # the same signature rather than dispatched differently. Annotated because a dict of
 # mixed function shapes infers as `object`, and `GENERIC[mode](forwarded)` then fails
 # mypy with "Cannot call function of unknown type".
+# Windows' WSL service stuck between states, which no stop/start above reaches: every one
+# of them goes through it. 2026-10-12 22:16 to 2026-10-13 08:50, Windows Update tried
+# three times to install WSL 3.0.3.0; each time its MSI could not stop `WSLService`
+# (MsiInstaller 11921, "Error 1921 ... could not be stopped"), left it in STOP_PENDING,
+# and every `wsl.exe` call -- Docker's engine start among them -- hung until a person
+# ended it. The scheduled jobs detect it (`collector_tasks.wsl_stuck`) but run
+# unelevated by design and may not end a service, so they name this mode as the
+# person's step. It ends the service through one UAC prompt, finishes the WSL update
+# itself while the service is fresh -- so Windows Update has no install left to retry
+# and hang again -- and restarts Docker Desktop as the signed-in user.
+WSL_SERVICE = collector_tasks.WSL_QUERY[-1]
+WSL_KILL = ["taskkill", "/F", "/FI", f"SERVICES eq {WSL_SERVICE}"]
+WSL_UPDATE_TIMEOUT = 600
+WSL_ANSWER_TIMEOUT = 60
+WSL_SETTLED = ("RUNNING", "STOPPED")
+WSL_SETTLE_WAIT = 60
+TIMED_OUT = 124
+ELEVATED_STEP = "--elevated-step"
+# The parseable record of the elevated half, which runs hidden behind the UAC prompt;
+# the half the person watches prints it back.
+RECOVER_LOG = Path(__file__).resolve().parent.parent / "logs" / "wsl-recover.log"
+
+
+def ask(cmd: list[str], timeout: int) -> tuple[int, str]:
+    """`(exit code, stdout+stderr)` of `cmd`, NULs dropped (`wsl.exe` prints UTF-16);
+    `TIMED_OUT` when it ran past `timeout`, 127 when it is not on PATH."""
+    try:
+        done = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout,
+            creationflags=NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return 127, f"{cmd[0]} not on PATH"
+    except subprocess.TimeoutExpired:
+        return TIMED_OUT, f"timed out after {timeout}s"
+    return done.returncode, (done.stdout + done.stderr).replace("\x00", "").strip()
+
+
+Asker = Callable[[list[str], int], tuple[int, str]]
+
+
+def wsl_service_state(ask: Asker = ask) -> str:
+    """`WSLService`'s state as `sc query` names it; "" when it cannot say."""
+    code, out = ask(list(collector_tasks.WSL_QUERY), 30)
+    return collector_tasks.service_state(out) if code == 0 else ""
+
+
+def wsl_answers(ask: Asker = ask) -> bool:
+    """Whether `wsl.exe` lists its distros inside `WSL_ANSWER_TIMEOUT`: only silence is
+    hung, since an exit code is WSL answering."""
+    return ask(["wsl", "--list", "--quiet"], WSL_ANSWER_TIMEOUT)[0] != TIMED_OUT
+
+
+def wsl_stuck(ask: Asker = ask, sleep: Callable[[float], None] = time.sleep) -> str:
+    """Why WSL needs recovering, or "" when it does not: a service still `*_PENDING`
+    `collector_tasks.WSL_SETTLE` seconds after first seen so (a start in progress is
+    not stuck), or a `wsl.exe` that does not answer."""
+    state = wsl_service_state(ask)
+    if state.endswith("_PENDING"):
+        sleep(collector_tasks.WSL_SETTLE)
+        state = wsl_service_state(ask)
+        if state.endswith("_PENDING"):
+            return f"{WSL_SERVICE} is stuck in {state}"
+    if not wsl_answers(ask):
+        return f"{WSL_SERVICE} is {state or 'in an unknown state'} and `wsl --list` does not answer"
+    return ""
+
+
+def elevated_recover(
+    ask: Asker = ask, sleep: Callable[[float], None] = time.sleep
+) -> tuple[int, list[str]]:
+    """End `WSLService`, wait for it to settle, install any pending WSL update. Needs an
+    administrator's token. `(0 when WSL answers afterwards, the lines it logged)`."""
+    lines = [f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} recover-wsl"]
+    code, out = ask(WSL_KILL, 30)
+    lines.append(f"$ {' '.join(WSL_KILL)} -> exit {code}: {out}")
+    state = ""
+    for _ in range(WSL_SETTLE_WAIT // 2):
+        state = wsl_service_state(ask)
+        if state in WSL_SETTLED:
+            break
+        sleep(2)
+    lines.append(f"{WSL_SERVICE} after the kill: {state or 'unknown'}")
+    code, out = ask(["wsl", "--update"], WSL_UPDATE_TIMEOUT)
+    lines.append(f"$ wsl --update -> exit {code}: {' '.join(out.split())}")
+    answers = wsl_answers(ask)
+    lines.append(f"wsl --list {'answers' if answers else 'still does not answer'}")
+    return (0 if answers else 1), lines
+
+
+def elevated_argv(python: str, script: Path) -> list[str]:
+    """PowerShell that runs this script's elevated half through one UAC prompt and
+    exits with its code; a declined prompt is a PowerShell error, so a non-zero exit."""
+
+    def quoted(text: str) -> str:
+        return "'" + text.replace("'", "''") + "'"
+
+    inner = f'"{script}" recover-wsl {ELEVATED_STEP}'
+    command = (
+        f"$p = Start-Process -FilePath {quoted(python)} -ArgumentList {quoted(inner)} "
+        "-Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode"
+    )
+    return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+
+
+def write_recover_log(lines: list[str], log: Path = RECOVER_LOG) -> None:
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _print_indented(lines: list[str]) -> None:
+    print("\n".join(f"  {line}" for line in lines))
+
+
+def generic_recover_wsl(
+    extra: list[str] | None = None, elevated: Callable[[], bool] = docker_vhdx.is_elevated
+) -> int:
+    """Recover a stuck WSL service, then bring Docker's engine back on it."""
+    if ELEVATED_STEP in (extra or []):
+        code, lines = elevated_recover()
+        write_recover_log(lines)
+        return code
+    print(banner("Recover Stuck WSL"))
+    why = wsl_stuck()
+    if not why:
+        print(f"  {WSL_SERVICE} is settled and `wsl --list` answers -- nothing to recover.")
+        if docker_info_ok():
+            print(banner("DOCKER ENGINE READY"))
+            return 0
+        print(
+            "  Docker's engine is not answering on a healthy WSL: run 'Docker: Restart Engine'.\n"
+        )
+        return 1
+    print(f"  {why}")
+    if elevated():
+        code, lines = elevated_recover()
+        write_recover_log(lines)
+        _print_indented(lines)
+    else:
+        print("  ending it needs an administrator -- accept the UAC prompt")
+        RECOVER_LOG.unlink(missing_ok=True)
+        code = run(elevated_argv(console_python(), Path(__file__).resolve()), timeout=900)
+        if RECOVER_LOG.is_file():
+            _print_indented(RECOVER_LOG.read_text(encoding="utf-8").splitlines())
+    if code:
+        print(banner("WSL NOT RECOVERED"))
+        print(f"  The elevated step exited {code} (a declined prompt does too); see {RECOVER_LOG}.")
+        print("  If it ran and WSL still hangs, restart Windows.\n")
+        return 1
+    stop_docker()
+    start_docker(elevated)
+    if poll_engine(timeout=COLD_POLL_TIMEOUT):
+        print(banner("WSL RECOVERED, DOCKER ENGINE READY"))
+        return 0
+    print(banner("WSL RECOVERED, ENGINE STILL NOT RESPONDING"))
+    print("  Run 'Docker: Restart Engine', or check the Docker Desktop UI.\n")
+    return 1
+
+
 GENERIC: dict[str, Callable[[list[str]], int]] = {
     "up": generic_up,
     "down": generic_down,
     "stop-idle": lambda extra: generic_stop_idle(),
     "restart-engine": lambda extra: generic_restart_engine(),
     "fix": lambda extra: generic_fix(),
+    "recover-wsl": generic_recover_wsl,
     "prune": lambda extra: generic_prune(idle_only="--idle-only" in extra),
 }
 

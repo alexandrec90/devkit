@@ -61,6 +61,33 @@
 		},
 		{
 			"path": "social-scraper"
+		},
+		{
+			"path": "productivity-tracker"
+		},
+		{
+			"path": "skinamp"
+		},
+		{
+			"path": "photolab"
+		},
+		{
+			"path": "homelab"
+		},
+		{
+			"path": "agent-terminal"
+		},
+		{
+			"path": "d2-trader"
+		},
+		{
+			"path": "tvshell"
+		},
+		{
+			"path": "radio"
+		},
+		{
+			"path": "host-scripts"
 		}
 	],
 	"extensions": {
@@ -87,7 +114,7 @@
 	// keeps its project-specific script and gains a picker over the two checkouts that
 	// can actually run it — which is all the `--project` argument ever was.
 	// `devkit_project.py`'s `Action.projects` is the enforcement: `test-target`, `e2e`
-	// and `ngrok` are defined for the carameli pair only, the five IBKR actions for the
+	// and `ngrok` are defined for the carameli pair only, the IBKR actions for the
 	// ibkr_trader pair only, and the dispatcher refuses any other checkout BY NAME
 	// instead of falling through to "does not implement this action", which reads like
 	// an invitation to go implement it.
@@ -164,6 +191,10 @@
 					"id": "beaker",
 					"color": "terminal.ansiGreen"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -195,6 +226,10 @@
 					"id": "checklist",
 					"color": "terminal.ansiYellow"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -217,6 +252,10 @@
 				"icon": {
 					"id": "sync",
 					"color": "terminal.ansiCyan"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "silent",
@@ -264,6 +303,10 @@
 					"id": "cloud-upload",
 					"color": "terminal.ansiRed"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -295,6 +338,10 @@
 				"icon": {
 					"id": "save",
 					"color": "terminal.ansiCyan"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -329,6 +376,10 @@
 					"id": "table",
 					"color": "terminal.ansiBlue"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -346,16 +397,21 @@
 				// it costs, and a hazardous retirement still refuses — which is what `--yes`
 				// rests on and why no question is asked once the terminal opens.
 				//
-				// Still no `log-wrap.py`, and now for one reason rather than two: the script
-				// writes `logs/plug-projects.log` itself, so the one artifact covers this
-				// task and the bare CLI, whose checkbox loop log-wrap could not carry
-				// anyway (it pipes stdout by line, so an unfinished prompt never appears).
+				// Inside `log-wrap.py` like every task, so a failed run -- a refusal from a
+				// task branch, a clone that failed -- is filed on the harness-events ledger.
+				// The script's own `logs/plug-projects.log` names the registry it ended with;
+				// log-wrap's keeps the run. Piping is safe on this path: `--picks ... --yes`
+				// never reaches the terminal checkbox loop, the one thing that reads stdin.
 				"label": "Workspace: Plug / Unplug Projects",
 				"detail": "Every project — in the workspace registry, on disk, and on GitHub — scanned when the picker opens. Ticking acts on one: a project registered from another PC is cloned onto this one (the registry is untouched), an unregistered project is plugged in (cloning its repo, or creating the repo when only the folder exists), and a registered project on this PC is retired from the registry on every PC, which touches NOTHING on disk. Tick nothing and nothing changes. Edits devkit's workspace.jsonc and republishes the live .code-workspace, so it refuses from a task branch or a box.",
 				"type": "process",
 				"command": "python",
 				"args": [
 					"scripts/notify-wrap.py",
+					"Workspace: Plug / Unplug Projects",
+					"--",
+					"python",
+					"scripts/log-wrap.py",
 					"Workspace: Plug / Unplug Projects",
 					"--",
 					"python",
@@ -370,6 +426,10 @@
 				"icon": {
 					"id": "checklist",
 					"color": "terminal.ansiBrightGreen"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -421,6 +481,10 @@
 					"id": "git-merge",
 					"color": "terminal.ansiBrightCyan"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -455,6 +519,10 @@
 					"id": "vm-running",
 					"color": "terminal.ansiGreen"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -477,6 +545,10 @@
 				"icon": {
 					"id": "vm-outline",
 					"color": "terminal.ansiYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -501,6 +573,10 @@
 					"id": "debug-restart",
 					"color": "terminal.ansiBlue"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -524,6 +600,37 @@
 					"id": "tools",
 					"color": "terminal.ansiYellow"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Docker: Recover Stuck WSL",
+				"detail": "For a WSL service stuck stopping (every `wsl` call hangs, Docker's engine cannot start): ends WSLService through one UAC prompt, installs any pending WSL update, restarts Docker Desktop unelevated. Ends every running WSL distro.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:daemonProject}",
+					"docker-recover-wsl"
+				],
+				"icon": {
+					"id": "debug-disconnect",
+					"color": "terminal.ansiRed"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -546,6 +653,10 @@
 				"icon": {
 					"id": "trash",
 					"color": "terminal.ansiRed"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -573,6 +684,10 @@
 				"icon": {
 					"id": "flame",
 					"color": "terminal.ansiBrightRed"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -621,6 +736,43 @@
 					"id": "checklist",
 					"color": "terminal.ansiBrightCyan"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"clear": true,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			{
+				// Which ingestion collectors THIS PC runs -- the machine-local half of
+				// `devkit.collectors` (see the setting below and README, "Ingestion
+				// collectors"). One live pick: `collectorAction` lists every verb for all
+				// collectors and for each one, beside what this PC is set to now. Acting
+				// verbs act at once; `devkit-collectors` keeps it that way every 15 minutes.
+				"label": "Machine: Ingestion Collectors",
+				"detail": "Pick what this PC does with the ingestion collectors (ibkr_trader, sports_betting, social-scraper): run them here (starts now, kept up), stop them here (stops now, kept stopped), forget this PC's choice, run a scheduled one once now in this terminal, or just show status. Other PCs are unaffected.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"devkit",
+					"collectors",
+					"${input:collectorAction}"
+				],
+				"icon": {
+					"id": "cloud-download",
+					"color": "terminal.ansiGreen"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -648,6 +800,10 @@
 				"icon": {
 					"id": "pulse",
 					"color": "terminal.ansiYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -720,7 +876,8 @@
 				// a second batch later in the day should not offer to kill the first. Ports
 				// are free-scanned per server, so instances cannot collide.
 				"runOptions": {
-					"instanceLimit": 4
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"problemMatcher": []
 			},
@@ -801,7 +958,8 @@
 				// what actually bounds the concurrency; this only stops VS Code adding a
 				// bound of one on top of it.
 				"runOptions": {
-					"instanceLimit": 4
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"problemMatcher": []
 			},
@@ -828,6 +986,10 @@
 				"icon": {
 					"id": "debug-stop",
 					"color": "terminal.ansiBrightRed"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -869,6 +1031,10 @@
 					"id": "file-media",
 					"color": "terminal.ansiBrightMagenta"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -896,6 +1062,10 @@
 				"icon": {
 					"id": "radio-tower",
 					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -928,6 +1098,10 @@
 					"id": "device-desktop",
 					"color": "terminal.ansiBrightBlue"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -953,6 +1127,10 @@
 					"id": "cloud-download",
 					"color": "terminal.ansiBrightCyan"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -976,6 +1154,10 @@
 				"icon": {
 					"id": "calendar",
 					"color": "terminal.ansiBrightYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1012,6 +1194,10 @@
 					"id": "graph-line",
 					"color": "terminal.ansiBrightBlue"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -1038,6 +1224,192 @@
 				"icon": {
 					"id": "graph",
 					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			// One task and a view picker rather than four tasks: the views differ only in
+			// which report `scripts/report-task.py` renders. The lab is the separate one
+			// because it costs minutes of simulation and asks two more questions.
+			{
+				"label": "Report: Open Model & Strategy Views",
+				"detail": "Open the chosen results view in each selected IBKR Trader checkout: backtest leaderboard and charts, factor tear sheet, MLflow model browser, or a terminal summary. Every view but MLflow needs the `db` container up; MLflow runs until you close the terminal.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"report",
+					"${input:reportView}"
+				],
+				"icon": {
+					"id": "pie-chart",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			{
+				"label": "Report: Run Strategy Lab",
+				"detail": "Re-simulate the strategy line-up over since-2010, 5y, 3y and 1y windows in each selected IBKR Trader checkout, then open reports/lab-report.html. Takes minutes; needs the `db` container up and only reads from it.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"strategy-lab",
+					"--universe",
+					"${input:labUniverse}",
+					"--account",
+					"${input:btAccount}"
+				],
+				"icon": {
+					"id": "beaker",
+					"color": "terminal.ansiBrightYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			// Advisory: the Questrade client is GET-only. The single-use token lives in the
+			// main checkout's .env, so a worktree checkout fails naming QUESTRADE_TOKEN.
+			{
+				"label": "Questrade: Recommend Orders",
+				"detail": "Recommend laddered limit orders for every Questrade account from the chosen strategy's latest forward snapshot. Advisory only: nothing is sent to Questrade. Needs the db container and QUESTRADE_TOKEN in the checkout's .env; writes reports/questrade-plan.csv.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"${input:ibkrCheckout}",
+					"questrade-plan",
+					"--strategy",
+					"${input:questradeStrategy}"
+				],
+				"icon": {
+					"id": "credit-card",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			// A literal checkout, not `ibkrCheckout`: the server binds one port, so a
+			// second ticked checkout could only queue behind the first or collide with it.
+			{
+				"label": "IBKR: Open Trader UI",
+				"detail": "Build the frontend if it is stale, then serve ibkr_trader's local web UI on 127.0.0.1:8001 (UI_PORT in .env overrides) and open the browser. Runs until you close the terminal; ibkr_trader's scripts/ui-task.py says what else it needs.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"ibkr_trader",
+					"trader-ui"
+				],
+				"icon": {
+					"id": "dashboard",
+					"color": "terminal.ansiBrightCyan"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"close": false,
+					"clear": true
+				},
+				"problemMatcher": []
+			},
+			// --- scoped: social-scraper -------------------------------------------
+			// One checkout, so `--project` is spelled out rather than asked.
+			{
+				"label": "Scraper: Log In to X",
+				"detail": "Open a visible browser on X's sign-in page for social-scraper; sign in, then close the window. The session is kept in data/browser-profiles/x/ and reused by every later scrape.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"social-scraper",
+					"scraper-login",
+					"x"
+				],
+				"icon": {
+					"id": "sign-in",
+					"color": "terminal.ansiBrightGreen"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
+				"presentation": {
+					"reveal": "always",
+					"panel": "new",
+					"showReuseMessage": false,
+					"close": false
+				},
+				"problemMatcher": []
+			},
+			// --- scoped: photolab -------------------------------------------------
+			// A literal checkout, not a picker: the album binds fixed ports, so a second
+			// checkout could only collide with the first.
+			{
+				"label": "Photolab: Open Album",
+				"detail": "Start Postgres in Docker and the API and Vite on this machine, then open the album on localhost (FRONTEND_HOST_PORT in .env, 5180 by default). Needs .env with PHOTO_LIBRARY_HOST_DIR. Runs until you close the terminal. AI images and subscription annotation use the codex and claude commands on this machine.",
+				"type": "process",
+				"command": "python",
+				"args": [
+					"${workspaceFolder:devkit}/scripts/devkit_project.py",
+					"--project",
+					"photolab",
+					"album"
+				],
+				"icon": {
+					"id": "device-camera",
+					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1069,6 +1441,10 @@
 					"id": "database",
 					"color": "terminal.ansiBrightRed"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -1080,7 +1456,7 @@
 			// --- workspace-scoped: act across every checkout ---------------------
 			{
 				"label": "Project: New from devkit",
-				"detail": "Scaffold a whole new project — templates, Docker stack on registry-allocated ports, vendored devkit harness, parallel worktree, PR gate, and a PRIVATE GitHub repo. Registers it in this workspace's folder list and project picker. DRY RUN by default: pick 'Apply' to actually write.",
+				"detail": "Scaffold a whole new project — templates, Docker stack on registry-allocated ports, vendored devkit harness, parallel worktree, PR gate, and a PUBLIC GitHub repo (its Actions minutes are free only while public). Registers it in this workspace's folder list and project picker. DRY RUN by default: pick 'Apply' to actually write.",
 				"type": "process",
 				"command": "python",
 				"args": [
@@ -1107,6 +1483,14 @@
 				"icon": {
 					"id": "new-folder",
 					"color": "terminal.ansiCyan"
+				},
+				// Every task carries this pair; see TASK_CONTRACT in
+				// tests/test_devkit_project.py. This is the task that taught it: a second
+				// run offered to terminate the first, which was mid-push, and left an
+				// empty GitHub repo beside a scaffold with no `.git`.
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1141,6 +1525,10 @@
 				"icon": {
 					"id": "tag",
 					"color": "terminal.ansiBrightYellow"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1179,6 +1567,10 @@
 				"icon": {
 					"id": "package",
 					"color": "terminal.ansiBlue"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1235,6 +1627,10 @@
 				"icon": {
 					"id": "list-tree",
 					"color": "terminal.ansiCyan"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1314,7 +1710,8 @@
 				// unrelated pieces of work, and the second must not offer to terminate the
 				// first. Nothing here is leased, so the only bound is the machine's.
 				"runOptions": {
-					"instanceLimit": 4
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"problemMatcher": []
 			},
@@ -1342,6 +1739,10 @@
 					"id": "trash",
 					"color": "terminal.ansiBrightRed"
 				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
+				},
 				"presentation": {
 					"reveal": "always",
 					"panel": "new",
@@ -1357,11 +1758,20 @@
 				// from `folders` by design. What you want back is the last few sessions
 				// wherever they happened, so the script reads the transcript store — which
 				// records each session's own directory — instead of asking.
+				//
+				// `log-wrap.py` but no toast: the tabs it opens are the notification, and the
+				// wrapper is what files a failed run (no `wt.exe`, no resumable session found)
+				// on the harness-events ledger. Nothing here reads stdin, and the
+				// reopened sessions run in Windows Terminal's own tabs, not in this pipe.
 				"label": "Agents: Resume Recent Sessions",
-				"detail": "Check Claude, Codex, or both, optionally pick a model and a reasoning effort for the reopened sessions — the first row of each leaves the CLI's own setting alone — and choose how many sessions, then reopen the globally most recent matching sessions as tabs in the Windows Terminal window you already have open (a new one only if there is none), one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it. A model picked for one CLI applies to that CLI's tabs and leaves the other's on their own default. The checked CLIs are updated first, which takes a few seconds and is the one moment they can be — an update cannot replace a binary a running agent is executing, so any agent already up is skipped.",
+				"detail": "Check Claude, Codex, or both, optionally pick a model and a reasoning effort for the reopened sessions — the first row of each leaves the CLI's own setting alone — and choose how many sessions, then reopen the globally most recent matching sessions as tabs in the Windows Terminal window you already have open (a new one only if there is none), one tab each, OLDEST TAB FIRST. Scope-blind: no project picker, so it reaches sessions run in an ephemeral box too. Claude subagent transcripts and fix-pass fixer sessions are skipped, and sessions whose directory has been reaped are skipped and named. Resuming a session that is still open elsewhere gives you a second window on it. A model picked for one CLI applies to that CLI's tabs and leaves the other's on their own default. The checked CLIs are updated first, which takes a few seconds and is the one moment they can be — an update cannot replace a binary a running agent is executing, so any agent already up is skipped.",
 				"type": "process",
 				"command": "python",
 				"args": [
+					"scripts/log-wrap.py",
+					"Agents: Resume Recent Sessions",
+					"--",
+					"python",
 					"scripts/resume-sessions.py",
 					"--agent",
 					"${input:resumeAgents}",
@@ -1382,6 +1792,10 @@
 				"icon": {
 					"id": "history",
 					"color": "terminal.ansiBrightMagenta"
+				},
+				"runOptions": {
+					"instanceLimit": 4,
+					"instancePolicy": "warn"
 				},
 				"presentation": {
 					"reveal": "always",
@@ -1417,7 +1831,16 @@
 								"data-lake",
 								"sports_betting",
 								"roguelike",
-								"social-scraper"
+								"social-scraper",
+								"productivity-tracker",
+								"skinamp",
+								"photolab",
+								"homelab",
+								"agent-terminal",
+								"d2-trader",
+								"tvshell",
+								"radio",
+								"host-scripts"
 							]
 						}
 					]
@@ -1456,7 +1879,16 @@
 								"data-lake",
 								"sports_betting",
 								"roguelike",
-								"social-scraper"
+								"social-scraper",
+								"productivity-tracker",
+								"skinamp",
+								"photolab",
+								"homelab",
+								"agent-terminal",
+								"d2-trader",
+								"tvshell",
+								"radio",
+								"host-scripts"
 							]
 						}
 					]
@@ -1488,8 +1920,13 @@
 							"label": "Tick jobs, or none for all",
 							"minCount": 0,
 							"options": [
+								"after-merge-schedule",
+								"agent-env",
+								"collectors",
 								"docker-prune",
 								"docker-stop-idle",
+								"e2e-schedule",
+								"fix-pass-task",
 								"git-policy",
 								"global-tools",
 								"installers-schedule",
@@ -1497,6 +1934,8 @@
 								"reap-schedule",
 								"reconcile-task",
 								"release-schedule",
+								"ship-schedule",
+								"tier-schedule",
 								"tray",
 								"upgrade-schedule",
 								"workspace-status",
@@ -1559,6 +1998,22 @@
 				}
 			},
 			{
+				// Live, so the list is `devkit.collectors` as it stands and each row can say
+				// what this PC is set to now. Single-select: a value is `<verb>` for every
+				// collector or `<verb>:<project>` for one, which `collectors.split_pick`
+				// takes apart. Reads no docker, so it opens at once.
+				"id": "collectorAction",
+				"type": "command",
+				"command": "shellCommand.execute",
+				"args": {
+					"command": "python \"${workspaceFolder:devkit}/scripts/collectors_picker.py\"",
+					"cwd": "${workspaceFolder:devkit}",
+					"description": "What should this PC do with the ingestion collectors?",
+					"fieldSeparator": "|",
+					"rememberPrevious": false
+				}
+			},
+			{
 				// The daemon restart/fix actions are machine-scoped. Running either once
 				// per checked project would restart the same Docker Desktop repeatedly.
 				"id": "daemonProject",
@@ -1571,7 +2026,16 @@
 					"data-lake",
 					"sports_betting",
 					"roguelike",
-					"social-scraper"
+					"social-scraper",
+					"productivity-tracker",
+					"skinamp",
+					"photolab",
+					"homelab",
+					"agent-terminal",
+					"d2-trader",
+					"tvshell",
+					"radio",
+					"host-scripts"
 				],
 				"default": "carameli"
 			},
@@ -1882,9 +2346,9 @@
 				"default": "ml_lt_ridge"
 			},
 			{
-				// Shared by both Backtest tasks — the account is the one input the OOS
-				// run still takes, since which account you evaluate does not affect
-				// whether two OOS runs are comparable.
+				// Shared by both Backtest tasks and the strategy lab — the account is the
+				// one input the OOS run still takes, since which account you evaluate
+				// does not affect whether two OOS runs are comparable.
 				"id": "btAccount",
 				"type": "pickString",
 				"description": "Registered account to simulate",
@@ -1932,6 +2396,70 @@
 				"default": "2026-07-01"
 			},
 			{
+				"id": "reportView",
+				"type": "pickString",
+				"description": "Which results view to open",
+				"options": [
+					{
+						"label": "Backtest results — leaderboard + equity/drawdown charts",
+						"value": "results"
+					},
+					{
+						"label": "Factor tear sheet — latest OOS run (Alphalens)",
+						"value": "factor"
+					},
+					{
+						"label": "Model experiments — MLflow browser, runs until you close the terminal",
+						"value": "models"
+					},
+					{
+						"label": "Terminal summary — leaderboard, latest model, forward shadow",
+						"value": "summary"
+					}
+				],
+				"default": "results"
+			},
+			{
+				"id": "labUniverse",
+				"type": "pickString",
+				"description": "Universe for the strategy lab",
+				"options": [
+					{
+						"label": "sp500 — S&P 500 point-in-time + broad ETFs, survivorship-free",
+						"value": "sp500"
+					},
+					{
+						"label": "tickers-etfs.txt — ETF floor; today's names, survivor-biased",
+						"value": "tickers-etfs.txt"
+					},
+					{
+						"label": "tickers.txt — stocks + ETFs; today's names, survivor-biased",
+						"value": "tickers.txt"
+					}
+				],
+				"default": "sp500"
+			},
+			{
+				// The whole strategy registry (ibkr_trader's `signals.portfolio.available()`),
+				// wider than `btStrategy`'s allocators: a plan reads a forward snapshot any
+				// registered strategy writes.
+				"id": "questradeStrategy",
+				"type": "pickString",
+				"description": "Strategy whose latest forward snapshot the orders should follow",
+				"options": [
+					"core_satellite",
+					"couch_potato",
+					"recent_momentum",
+					"steady_compounders",
+					"ml_lt_ridge",
+					"ml_lt",
+					"momentum_lt",
+					"equal_weight",
+					"buy_and_hold"
+				],
+				"default": "core_satellite"
+			},
+			{
 				"id": "newProjectName",
 				"type": "promptString",
 				"description": "New project name — becomes the directory, the Python package, and COMPOSE_PROJECT_NAME",
@@ -1959,6 +2487,18 @@
 						"value": "fullstack"
 					},
 					{
+						"label": "desktop — a C#/WPF Windows app: installer + auto-update from GitHub Releases",
+						"value": "desktop"
+					},
+					{
+						"label": "desktop-static — the same app and installer, without the auto-updater",
+						"value": "desktop-static"
+					},
+					{
+						"label": "desktop-web — a TypeScript Electron app: installer + auto-update, for apps whose work is their UI",
+						"value": "desktop-web"
+					},
+					{
 						"label": "bare — no Docker, no database; just the harness and CI",
 						"value": "bare"
 					}
@@ -1978,10 +2518,10 @@
 				// `--dry-run` and `--remote` flags alongside their negations.
 				"id": "newProjectRemote",
 				"type": "pickString",
-				"description": "Create a PRIVATE GitHub repo and push? (ignored on a dry run)",
+				"description": "Create a PUBLIC GitHub repo and push? (ignored on a dry run)",
 				"options": [
 					{
-						"label": "Yes — create alexandrec90/<name> as private, and push",
+						"label": "Yes — create alexandrec90/<name> as public, and push",
 						"value": "--remote"
 					},
 					{
@@ -2193,7 +2733,16 @@
 					"data-lake",
 					"sports_betting",
 					"roguelike",
-					"social-scraper"
+					"social-scraper",
+					"productivity-tracker",
+					"skinamp",
+					"photolab",
+					"homelab",
+					"agent-terminal",
+					"d2-trader",
+					"tvshell",
+					"radio",
+					"host-scripts"
 				],
 				"default": "carameli"
 			},
@@ -2582,6 +3131,18 @@
 	,
 	"settings": {
 		"powershell.cwd": "carameli",
+		// Memory on a 16 GB box: the folders above hold ~75 agent worktrees under
+		// .claude/worktrees (devkit's alone are ~100k files) and a .venv each. The
+		// default watcher exclude covers only node_modules' children, and the git
+		// extension opens every worktree `git worktree list` names as a repository of
+		// its own, each with its own status refresh. Made live by hand on 2026-10-08 and
+		// adopted here (e6579536).
+		"files.watcherExclude": {
+			"**/.claude/worktrees/**": true,
+			"**/.venv/**": true,
+			"**/node_modules/**": true
+		},
+		"git.detectWorktrees": false,
 		// Projects nothing should be in flight for. `upgrade-project.py --all` passes over
 		// them and `worktree.py` reports any box cut for one as stranded at any age
 		// (`sweep.on_hold`). Naming a project explicitly on the command line still works.
@@ -2592,9 +3153,10 @@
 		// exits and, once a day, updates the Claude CLI in the gap between stopping them
 		// and starting them again -- see README, "Remote Control servers".
 		//
-		// The three on hold above are deliberately absent: `rc_config.selected` refuses
-		// them anyway, since a paused project is one nothing should be in flight for and
-		// a phone-reachable server is an invitation to start something.
+		// `"all"` rather than a list: every project in `folders` gets a server, read on
+		// each fire, so a project plugged in later is served without editing this. The
+		// live file is this machine's view, so that means every project checked out HERE,
+		// on hold above or not: the phone always matches this machine's workspace.
 		//
 		// `bypassPermissions` because a phone has no way to escalate: a session spawned
 		// from the mobile app opens in `auto` and the UI offers no switch, so a standing
@@ -2610,10 +3172,72 @@
 		// and no COMPOSE_PROJECT_NAME, which only bites when two sessions run compose at
 		// the same time. Use `worktree.py new` for those; this is fine for everything
 		// else. Gitignored in each repo so the checkout does not read as dirty.
+		// `hosts`: this file is the same on every PC, and the phone needs one server per
+		// project, not one per project per machine -- so only desktop-b9fc8vp serves.
 		"devkit.remoteControl": {
-			"projects": ["devkit", "carameli", "roguelike"],
+			"projects": "all",
 			"spawn": "worktree",
-			"permissionMode": "bypassPermissions"
+			"permissionMode": "bypassPermissions",
+			"hosts": "desktop-b9fc8vp"
+		},
+		// Which machine runs each project's nightly local end-to-end tests
+		// (`devkit-local-e2e`, `scripts/e2e-pass.py`). Every PC registers the job; at fire
+		// time each tests only what `hosts` assigns it, so two PCs never test, record and
+		// send fixers at the same red. Same shape as `devkit.remoteControl`'s: one name for
+		// every project, or {"*": "pc-a", "carameli": "pc-b"} to spread them. Moving the
+		// job to another PC is editing this value -- nothing is re-registered.
+		"devkit.localE2e": {
+			"hosts": "desktop-b9fc8vp"
+		},
+		// Ingestion that runs with nobody connected, kept going by `devkit-collectors` --
+		// see README, "Ingestion collectors". Declared here for every machine; RUN on none
+		// until `collectors.py run-here` on that machine, which is recorded in devkit's
+		// ignored `logs/` and so never follows the workspace to a second PC.
+		// A `service` is a compose service kept up; `health` runs inside the container and
+		// its exit code is the project's own verdict on whether ingestion is pulling data,
+		// not asked for `settle` minutes (default 60) after a start or redeploy.
+		// A `command` is argv run from the project's checkout every `minutes`, by a
+		// Scheduled Task named after the collector (never `devkit-`: it is not devkit's
+		// job), after starting the compose services it `needs`. Its exit code is the verdict.
+		"devkit.collectors": {
+			// `buildsFrom`: its image copies the sibling data-lake checkout in, so a merge
+			// there redeploys it as one in ibkr_trader does. `handoff`: the project's own
+			// command that carries its database through its archive store for `collectors.py move`
+			// (`collector_handoff`); `--extra archive` because boto3 comes only with it.
+			"ibkr_trader": {
+				"service": "app",
+				"health": ["ibkr-trader", "health"],
+				"buildsFrom": ["data-lake"],
+				"handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"],
+				// Its `app` and `db` caps. Not `rebalance`: the move carries the whole database.
+				"memoryGb": 3
+			},
+			// `handoff`: as ibkr_trader's. The data-lake store it imports lazily is declared
+			// in no form (its pyproject says why), so the argv brings the sibling itself:
+			// a hand install into the venv was missing on the second PC, and every `uv
+			// sync` removes one, so `pending` exited 2 there on every pass.
+			"sports_betting": {
+				"service": "collector",
+				"health": ["sports-betting", "health", "--quiet"],
+				"handoff": [
+					"uv", "run", "--with-editable", "../data-lake[archive]", "python", "scripts/handoff.py"
+				],
+				// Its one container's cap. `rebalance`: the only collector whose move is cheap.
+				"memoryGb": 0.5,
+				"rebalance": true
+			},
+			// On the host, not in a container: it drives the installed Chrome with the
+			// browser profiles in its checkout. `handoff`: dumps its `db` through the
+			// archive store; boto3 is a core dependency, so no extra.
+			"social-scraper": {
+				"command": ["uv", "run", "social-scraper", "scrape"],
+				"minutes": 30,
+				"needs": ["db"],
+				"handoff": ["uv", "run", "python", "scripts/handoff.py"],
+				// An estimate of its `db` and Chrome, which `docker stats` sees only half of.
+				// Not `rebalance`: its browser logins belong to one machine.
+				"memoryGb": 2
+			}
 		},
 		// Options an installer should keep, keyed by installer file name. The daily
 		// `devkit-installers` pass (`installers.py`) re-registers a scheduled job from

@@ -38,7 +38,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
@@ -67,6 +67,13 @@ GROUP = "delivery"
 # Declared on the installer because that is the one place that knows a job exists at
 # all; `tests/test_scheduled_jobs.py` checks it against the runner's own constant.
 ARTIFACT = "logs/upgrade.log"
+
+# The `log-wrap.py --always` label the task runs under (`devkit_schtasks.logged`), which
+# files each failed run on the harness-events ledger; its files are
+# `logs/scheduled-upgrade-projects[.failed].log`, beside the runner's own `ARTIFACT` and
+# apart from the clicked task's `devkit-upgrade-projects.log`, so a click cannot erase
+# the record of what fired at 03:00.
+LABEL = "Scheduled: Upgrade Projects"
 
 # Resolved once, at import, so a test can force the Windows path without touching
 # `os.name` itself. `pathlib` reads `os.name` to decide whether `Path(...)` builds a
@@ -175,13 +182,17 @@ def task_document(schedule: Schedule) -> str:
     an upgrade with nothing to do. See `devkit_schtasks`.
 
     The action's program is separated from its arguments because `<Exec>` takes them
-    that way; `schedule.command` stays the single source for both.
+    that way; `schedule.command` stays the single source for both. Both run under
+    `log-wrap.py` (`devkit_schtasks.logged`), started in the checkout the wrapper writes
+    `logs/` in.
     """
     program, *arguments = schedule.command
+    root = str(PureWindowsPath(schedule.script).parent.parent)
     return devkit_schtasks.task_xml(
         program,
-        subprocess.list2cmdline(arguments),
+        devkit_schtasks.logged(LABEL, program, subprocess.list2cmdline(arguments), root),
         devkit_schtasks.daily_trigger(schedule.at),
+        working_dir=root,
         # Longer than the reconcile pass: this one provisions a box and opens a PR per
         # project that is behind, and a release landing in several at once is the run
         # that takes longest. Still finite -- `IgnoreNew` means a wedged run suppresses

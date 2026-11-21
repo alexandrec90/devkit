@@ -62,9 +62,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import PurePath
+from pathlib import Path, PurePath
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import harness_events
 
 # Windows gives a console-less parent a brand new console window for every console
 # child, so an unattended pass under `pythonw.exe` flickers a window per CLI call
@@ -276,6 +280,16 @@ def looks_offline(text: str) -> bool:
     return any(marker in lowered for marker in OFFLINE_MARKERS)
 
 
+def online() -> bool:
+    """Whether this machine can look GitHub up now (`harness_events.resolves`).
+
+    Asked of an update that failed without saying why: Codex's updater, offline, says
+    only that its `irm https://chatgpt.com/codex/install.ps1 | iex` exited 1, so
+    `looks_offline` had nothing to read, and the nights of 2026-11-11 and -12 without
+    DNS each filed a `Global Tools` failure (27c099e4) that the next online run cleared."""
+    return harness_events.resolves()
+
+
 def last_line(text: str) -> str:
     """The last non-empty line of a CLI's output -- where each of these puts its error."""
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
@@ -307,7 +321,8 @@ def update_one(agent: Agent, executable: str, run: Runner = run_command) -> Outc
     result = run(update_argv(executable), UPDATE_TIMEOUT)
     if result.returncode != 0:
         detail = last_line(result.stderr) or last_line(result.stdout) or "the updater failed"
-        status = OFFLINE if looks_offline(f"{result.stderr}\n{result.stdout}") else FAILED
+        said = f"{result.stderr}\n{result.stdout}"
+        status = OFFLINE if looks_offline(said) or not online() else FAILED
         return Outcome(agent.name, status, before, before, detail)
     after = installed_version(executable, run)
     if before and after and before != after:

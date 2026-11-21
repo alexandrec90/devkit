@@ -50,8 +50,36 @@ def test_what_another_part_of_the_loop_already_tracks_is_not_filed_twice():
         "a #1": "escalated: the devkit session has it on the harness ledger",
         "b #2": "backing off: retried at max effort after 2026-09-27 12:00",
         "c #3": "held until the devkit session in C:/t finishes",
+        # A full Dependabot cap frees itself; filed, it would send the devkit session it saves.
+        "d dependabot": f"{fix_stall.fix_budget.DAILY_CAPPED}: 2 of 2 sessions sent in the last 24h",
     }
     assert fix_stall.stalled([line(72, tracked), line(0, tracked)], NOW) == []
+    assert all(fix_stall.tracked(why) for why in tracked.values())
+    assert not fix_stall.tracked(HELD["carameli #8"]) and not fix_stall.tracked(None)
+
+
+def test_a_skip_naming_a_persons_step_is_the_persons_not_a_stall():
+    """2026-11-01: five PRs GitHub refused over billing were each filed as a stall that
+    carried the step, so the tray showed the account's one step six times."""
+    why = (
+        "4 checks failing: Lint / refused by the account's Actions billing; GitHub refused "
+        f"-- {fix_stall.fix_findings.triage.PERSON_STEP} settle the GitHub account's billing"
+    )
+    skip = {"productivity-tracker #3": why, "social-scraper #108": why}
+    assert fix_stall.stalled([line(48, skipped=skip), line(0, skipped=skip)], NOW) == []
+    assert fix_stall.tracked(why)
+
+
+def test_a_tracked_wait_breaks_the_run_an_untracked_one_is_dated_from():
+    # data-lake dependabot, 2026-10-05: a session sent, then a day under the Dependabot
+    # cap, then half an hour behind a red harness -- filed as a day-long harness hold.
+    sent = {"carameli #8": "already dispatched at 2026-09-25T06:00:05+00:00"}
+    capped = {"carameli #8": f"{fix_stall.fix_budget.DAILY_CAPPED}: 2 of 2 sessions sent"}
+    history = [line(30, HELD), line(26, sent), line(20, capped), line(0.5, HELD), line(0, HELD)]
+    assert fix_stall.streaks(history, "waiting") == {
+        "carameli #8": (history[3]["when"], HELD["carameli #8"])
+    }
+    assert fix_stall.stalled(history, NOW) == []
 
 
 def test_history_reads_skip_junk_and_a_missing_file_is_empty(tmp_path):

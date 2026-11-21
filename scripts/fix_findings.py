@@ -26,6 +26,7 @@ import datetime as _dt
 import hashlib
 import subprocess
 import sys
+import time
 import traceback
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
@@ -33,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harness_triage as triage
+import sweep
 
 harness_events = triage.harness_events
 
@@ -77,6 +79,10 @@ class Finding:
     # A branch whose merge settles it: the finding is filed already resolved against it,
     # and `fix_verify` reopens it if that branch never lands. Not a ledger field.
     settles_with: str = ""
+    # When the work that settles it was done (`stamp_of`), "" when unknown: the
+    # resolution is held to that branch's merges from then, not from the filing, which
+    # follows the ship and can follow the merge (f0308756). Not a ledger field.
+    since: str = ""
 
     @property
     def headline(self) -> str:
@@ -126,12 +132,29 @@ def fresh(findings: Iterable[Finding], items: list[triage.Item]) -> list[Finding
 def record_all(
     findings: Iterable[Finding], items: list[triage.Item], devkit_dir: Path
 ) -> list[Finding]:
-    """Append every fresh finding to the ledger under `devkit_dir`; what was written."""
-    written = fresh(findings, items)
+    """Append every fresh finding to the ledger under `devkit_dir`; what was written.
+    Bar one that says a name could not be looked up while this machine still cannot
+    (`networked`)."""
+    written = networked(fresh(findings, items))
     for finding in written:
         harness_events.record(finding.event, finding.fields(), root=devkit_dir)
     settle(written, devkit_dir)
     return written
+
+
+def networked(findings: list[Finding], lookup=None) -> list[Finding]:
+    """`findings` bar those that say a lookup failed (`harness_events.says_unresolved`)
+    while `harness_events.PROBE_HOST` does not resolve either, which is
+    `harness_events.cut_off` asked once for the lot: offline, each probe waits.
+
+    On 2026-11-12 a night without DNS filed eleven `regate-failed` rows at 04:01, one per
+    checkout, each "check your internet connection", and a `pass-stale` for the fetch: no
+    session could act on any of them until the network came back, and then there was
+    nothing to act on."""
+    said = [f for f in findings if harness_events.says_unresolved(f"{f.detail}\n{f.command}")]
+    if not said or harness_events.resolves(lookup=lookup):
+        return findings
+    return [f for f in findings if f not in said]
 
 
 def settle(written: list[Finding], devkit_dir: Path) -> list[str]:
@@ -142,6 +165,11 @@ def settle(written: list[Finding], devkit_dir: Path) -> list[str]:
     it then shipped; a fixer's own friction line saying "fixed on this branch" is the same
     case (`fix_reports.fixed_here`). Resolved-pending-merge rather than dropped: `fix_verify` reopens the
     row if the branch never becomes a merged PR, so the ones nobody fixed come back.
+
+    Resolved as of `Finding.since` when known: the pass files a line after its tree
+    shipped, often after its PR merged, and `fix_verify.relevant` discounts a branch's
+    merge from before the resolution as a reused name's -- f0308756 was filed five
+    minutes after #578 merged its fix, and reopened two days on.
     """
     pending = [f for f in written if f.settles_with]
     if not pending:
@@ -153,14 +181,55 @@ def settle(written: list[Finding], devkit_dir: Path) -> list[str]:
         ids = [item.id for item in open_now if item.signature == sig]
         if ids:
             note = f"the session it concerns went on to ship {finding.settles_with}"
-            refs += triage.resolve(ids[:1], note, pr=finding.settles_with, root=devkit_dir)
+            refs += triage.resolve(
+                ids[:1], note, pr=finding.settles_with, root=devkit_dir, resolved=finding.since
+            )
     return refs
 
 
+def stamp_of(moment: object) -> str:
+    """A ledger stamp (UTC, to the second) for an ISO time or an epoch mtime; "" for
+    anything unreadable. A naive time is read as UTC, as `fix_verify` reads one."""
+    try:
+        if isinstance(moment, int | float):
+            when = _dt.datetime.fromtimestamp(moment, _dt.UTC)
+        elif isinstance(moment, str) and moment.strip():
+            when = _dt.datetime.fromisoformat(moment.strip())
+        else:
+            return ""
+    except (ValueError, OverflowError, OSError):
+        return ""
+    when = when if when.tzinfo else when.replace(tzinfo=_dt.UTC)
+    return when.astimezone(_dt.UTC).isoformat(timespec="seconds")
+
+
+# git's dubious-ownership refusal, by any of the lines it prints: the refusal, the owner,
+# and the `safe.directory` hint a truncated detail may keep alone. It quotes the tree's
+# path and a ship's detail leads with the tree's branch, so each tree an elevated session
+# cut filed a group of its own -- two roguelike ships in one pass (936fd498, 91fa12f2)
+# while the fix for the first, #467, was pending and would have held them all.
+OWNERSHIP_MARKS = ("dubious ownership", "is owned by:", "add safe.directory")
+OWNERSHIP = "git refused a tree another account owns (detected dubious ownership)"
+
+
+def by_cause(project: str, detail: str) -> str:
+    """`detail`, or one naming only its cause when that cause is one whose text names
+    the tree it happened in; `project` stays, since the ledger groups by it anyway."""
+    if any(mark in detail for mark in OWNERSHIP_MARKS):
+        return f"{project}: {OWNERSHIP}"
+    return detail
+
+
 def file(journal: Journal | None, kind: str, project: str, detail: str, evidence: str = "") -> None:
-    """Add one finding to `journal`, when the caller has one to add it to."""
-    if journal is not None:
-        journal.add(Finding(kind, project, detail, evidence=evidence))
+    """Add one finding to `journal`, when the caller has one to add it to.
+
+    A detail `by_cause` folds is kept whole as the evidence when there is no other."""
+    if journal is None:
+        return
+    stable = by_cause(project, detail)
+    if stable != detail and not evidence:
+        evidence = evidence_file(detail, journal.devkit_dir, kind)
+    journal.add(Finding(kind, project, stable, evidence=evidence))
 
 
 def evidence_file(text: str, devkit_dir: Path, stem: str) -> str:
@@ -197,14 +266,42 @@ class Journal:
     findings: list[Finding] = field(default_factory=list)
     crashed: list[str] = field(default_factory=list)
     errors: tuple[type[Exception], ...] = STEP_ERRORS
+    # Told each step's name as it starts: the pass prints it, so a pass the watchdog
+    # stopped leaves a timeline of where its minutes went.
+    trace: Callable[[str], None] | None = None
+    # Seconds before the pass's deadline; at or past it a step is not run but listed in
+    # `late`, so the pass reaches its record before the watchdog stops it.
+    left: Callable[[], float] | None = None
+    late: list[str] = field(default_factory=list)
 
     def add(self, *found: Finding) -> None:
         self.findings.extend(found)
 
-    def step(self, name: str, fn: Callable[..., object], *args, default=None, **kwargs):
-        """`fn(*args, **kwargs)`, or `default` with a finding when it raises."""
+    def step(
+        self,
+        name: str,
+        fn: Callable[..., object],
+        *args,
+        default=None,
+        always: bool = False,
+        **kwargs,
+    ):
+        """`fn(*args, **kwargs)`, or `default` with a finding when it raises -- or, past
+        the deadline, `default` with `name` in `late`, unless `always` (a step that keeps
+        its own time). A step started before the deadline has its `gh` and git calls end
+        by it (`sweep.until`): a step that starts in time is not one that ends in time."""
+        deadline = None
+        if not always and self.left is not None:
+            left = self.left()
+            if left <= 0:
+                self.late.append(name)
+                return default
+            deadline = time.monotonic() + left
+        if self.trace is not None:
+            self.trace(name)
         try:
-            return fn(*args, **kwargs)
+            with sweep.until(deadline):
+                return fn(*args, **kwargs)
         except self.errors as exc:
             trace = traceback.format_exc()
             where = evidence_file(trace, self.devkit_dir, f"step-{name}")

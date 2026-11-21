@@ -60,6 +60,12 @@ GROUP = "maintenance"
 # `schedule_health.ARTIFACTS` sends a reader here when the scheduler reports a failure.
 ARTIFACT = "logs/rc-servers.log"
 
+# The `log-wrap.py --always` label the task runs under (`devkit_schtasks.logged`), which
+# files each failed run on the harness-events ledger; its files are
+# `logs/scheduled-rc-servers[.failed].log` -- the captured console, a traceback the
+# runner died before writing included -- beside the runner's own `ARTIFACT`.
+LABEL = "Scheduled: RC Servers"
+
 # See `install-upgrade-schedule.WINDOWS` for why this is resolved once at import rather
 # than read from `os.name` at each call site.
 WINDOWS = os.name == "nt"
@@ -156,9 +162,13 @@ def task_document(schedule: Schedule) -> str:
     delayed restart, an hour of one is a job that looks dead.
     """
     program, *arguments = schedule.command
+    # `PureWindowsPath`, not `Path`: the document is Windows by construction, so it has to
+    # be split on backslashes whatever host builds it -- see the same line in
+    # `install-tray.py`.
+    root = str(PureWindowsPath(schedule.script).parent.parent)
     return devkit_schtasks.task_xml(
         program,
-        subprocess.list2cmdline(arguments),
+        devkit_schtasks.logged(LABEL, program, subprocess.list2cmdline(arguments), root),
         # Two triggers. The repetition is the job; the logon trigger only closes the gap
         # after a restart, where the servers are certainly down (a reboot kills them) and
         # the next repetition could be a full interval away. Fifteen minutes of an
@@ -168,10 +178,7 @@ def task_document(schedule: Schedule) -> str:
         # this job current (`devkit_schtasks.logon_trigger`).
         devkit_schtasks.repeating_trigger(schedule.every) + devkit_schtasks.logon_trigger(),
         time_limit="PT15M",
-        # `PureWindowsPath`, not `Path`: the document is Windows by construction, so it
-        # has to be split on backslashes whatever host builds it -- see the same line in
-        # `install-tray.py`.
-        working_dir=str(PureWindowsPath(schedule.script).parent.parent),
+        working_dir=root,
         # Lands disabled when this job has been stood down by name (`harness-switch.py
         # --off --job`): the ledger is the standing instruction, and an installer that
         # ignored it would hand the operator back a running job they had switched off.

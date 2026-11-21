@@ -19,6 +19,7 @@ in and the real `gh` path runs anyway.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -97,6 +98,12 @@ real_provision_tree = fix_trees.provision_tree
 def no_provisioning(monkeypatch):
     """Provisioning is a `uv sync`; the dispatch tests here assert what opens, not that."""
     monkeypatch.setattr(fix_prs, "provision_tree", lambda _tree: [])
+
+
+@pytest.fixture(autouse=True)
+def base_carried(monkeypatch):
+    """The base check is a fetch; a dispatch test's tree carries its base unless it says."""
+    monkeypatch.setattr(fix_prs, "base_lag", lambda _tree, _base: "")
 
 
 # --- what the agent is told -------------------------------------------------------
@@ -447,6 +454,23 @@ def test_a_tree_that_has_a_venv_is_left_alone(tmp_path):
     assert real_provision_tree(tmp_path, plan=lambda t: pytest.fail("must not plan")) == []
 
 
+def test_a_tree_with_a_venv_and_an_empty_node_modules_is_provisioned(tmp_path):
+    """fcf111b9: the `.venv` says nothing about the frontend tier, and a roguelike tree
+    with an empty `node_modules` could not start `vite`."""
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "."\n', encoding="utf-8"
+    )
+    ran = []
+    real_provision_tree(
+        tmp_path, plan=lambda t: ("npm ci",), run=lambda t, s: ran.append(s) or (True, [])
+    )
+    assert ran == [("npm ci",)]
+    (tmp_path / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    assert real_provision_tree(tmp_path, plan=lambda t: pytest.fail("must not plan")) == []
+
+
 def test_a_project_with_nothing_to_install_runs_nothing(tmp_path):
     assert real_provision_tree(tmp_path, plan=lambda t: (), run=lambda *a: pytest.fail("ran")) == []
 
@@ -456,6 +480,160 @@ def test_a_failed_install_is_a_note_not_a_refusal(tmp_path):
         tmp_path, plan=lambda t: ("uv sync",), run=lambda *a: (False, ["[warn] provision: x"])
     )
     assert notes == ["[warn] provision: x"]
+
+
+def test_a_cache_this_process_cannot_open_is_named_with_its_way_round(tmp_path):
+    """cadb6ba8: an elevated pytest run leaves `.pytest_cache` owner-only to
+    Administrators, which the unelevated pass can neither open nor rename."""
+
+    def refused(path):
+        raise PermissionError(5, "Access is denied", str(path))
+
+    assert fix_trees.locked_caches(tmp_path, opener=refused) == {
+        ".pytest_cache": "PYTEST_ADDOPTS=-p no:cacheprovider"
+    }
+
+
+def test_a_missing_or_readable_cache_is_not_locked(tmp_path):
+    assert fix_trees.locked_caches(tmp_path) == {}
+    (tmp_path / ".pytest_cache").mkdir()
+    assert fix_trees.locked_caches(tmp_path) == {}
+
+
+def test_any_other_failure_to_open_a_cache_is_not_called_locked(tmp_path):
+    """Only a refusal is the elevated leftover; a file where the directory would be, or
+    a path too long, is pytest's to report in its own words."""
+
+    def broken(path):
+        raise NotADirectoryError(20, "Not a directory", str(path))
+
+    assert fix_trees.locked_caches(tmp_path, opener=broken) == {}
+
+
+def test_a_reused_trees_locked_caches_reach_its_fixers_prompt(monkeypatch, root):
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    locked = {".pytest_cache": "PYTEST_ADDOPTS=-p no:cacheprovider"}
+    monkeypatch.setattr(fix_prs, "locked_caches", lambda tree: locked)
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
+    made = fix_trees.provenance(root / "carameli" / "t")
+    notes = fix_prs.fix_prompts.TreeNotes(locked=locked, made=made)
+    expected = fix_prs.fix_prompts.pr_prompt(failure(), notes)
+    assert opened[0]["prompt"] == fix_prs.tab_safe(expected)
+
+
+def test_a_conflicted_prs_resolver_is_told_of_an_earlier_squash_it_still_carries(monkeypatch, root):
+    """6c10216b: only a conflict is asked, and its prompt carries the finding."""
+    asked = []
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    monkeypatch.setattr(fix_prs, "locked_caches", lambda tree: {})
+    monkeypatch.setattr(
+        fix_prs,
+        "squashed_base",
+        lambda tree, base: asked.append(base) or "#96 (head a, squashed as b)",
+    )
+    opened = capture_sessions(monkeypatch)
+    conflicted = failure(signature=(fix_plan.CONFLICT,))
+    assert fix_prs.dispatch_pr(conflicted, root, agent_models.Launch("claude")) == 0
+    assert asked == [conflicted.base]
+    assert "PR #96 (head a, squashed as b) as one commit" in opened[0]["prompt"]
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
+    assert asked == [conflicted.base], "a red PR merges nothing, so nothing is asked"
+
+
+def _git_answers(ancestors: dict[tuple[str, str], int]):
+    """A `git_for` whose `merge-base --is-ancestor A B` exits `ancestors[(A, B)]` (128
+    for a commit it does not know), and every other call exits 0."""
+
+    def git_for(_tree):
+        def git(*args):
+            code = (
+                ancestors.get(args[2:4], 128) if args[:2] == ("merge-base", "--is-ancestor") else 0
+            )
+            return subprocess.CompletedProcess(args, code, "", "")
+
+        return git
+
+    return git_for
+
+
+def _merged(*rows, code=0):
+    return lambda _tree: lambda *args: subprocess.CompletedProcess(args, code, json.dumps(rows), "")
+
+
+def test_squashed_base_names_a_pr_the_branch_carries_but_the_base_holds_only_as_a_squash():
+    squashed = {"number": 96, "headRefOid": "aaaaaaa1", "mergeCommit": {"oid": "bbbbbbb2"}}
+    merged = {"number": 95, "headRefOid": "ccccccc3", "mergeCommit": {"oid": "ddddddd4"}}
+    other = {"number": 94, "headRefOid": "eeeeeee5", "mergeCommit": {"oid": "fffffff6"}}
+    ancestry = {
+        ("aaaaaaa1", "HEAD"): 0,
+        ("aaaaaaa1", "origin/main"): 1,
+        # A real merge: its head is in the base too, so the merge base is right.
+        ("ccccccc3", "HEAD"): 0,
+        ("ccccccc3", "origin/main"): 0,
+        # A PR from some other branch: not carried here.
+        ("eeeeeee5", "HEAD"): 1,
+    }
+    git_for = _git_answers(ancestry)
+    found = fix_trees.squashed_base(Path("t"), "main", git_for, _merged(other, merged, squashed))
+    assert found == "#96 (head aaaaaaa, squashed as bbbbbbb)"
+    assert fix_trees.squashed_base(Path("t"), "main", git_for, _merged(other, merged)) == ""
+
+
+def test_squashed_base_is_silent_when_gh_cannot_say():
+    git_for = _git_answers({})
+    assert fix_trees.squashed_base(Path("t"), "main", git_for, _merged(code=1)) == ""
+
+    def garbled(_tree):
+        return lambda *a: subprocess.CompletedProcess(a, 0, "not json", "")
+
+    assert fix_trees.squashed_base(Path("t"), "main", git_for, garbled) == ""
+    unmerged = {"number": 9, "headRefOid": "a", "mergeCommit": None}
+    assert fix_trees.squashed_base(Path("t"), "main", git_for, _merged(unmerged)) == ""
+
+
+def test_a_reused_tree_says_who_made_it_before_the_stamp_makes_it_the_passs(monkeypatch, root):
+    """df43b14e: two devkit sessions each spent about eight calls proving the tree they
+    were sent into was an operator's elevated `claude --worktree`, not the dispatcher's."""
+    tree = root / "carameli" / "t"
+    (tree / "logs").mkdir(parents=True)
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (tree, ""))
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    monkeypatch.setattr(fix_prs, "provenance", lambda t: fix_trees.provenance(t, lambda p: ""))
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude"), key="k") == 0
+    assert "a session a person started made it" in opened[0]["prompt"]
+    assert fix_prs.fix_reports.read_stamp(tree), "stamped after it was read"
+
+
+def test_provenance_names_the_pass_a_person_and_an_elevated_owner(tmp_path):
+    person = fix_trees.provenance(tmp_path, owner=lambda p: "S-1-5-21-1-2-3-1001")
+    assert "a session a person started made it" in person and "elevated" not in person
+    elevated = fix_trees.provenance(tmp_path, owner=lambda p: fix_trees.ADMINISTRATORS_SID)
+    assert "elevated: the Administrators group owns it" in elevated
+    (tmp_path / fix_prs.fix_reports.ORIGIN_FILE).parent.mkdir(parents=True)
+    (tmp_path / fix_prs.fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+    assert "the fix pass cut it for an earlier fixer" in fix_trees.provenance(
+        tmp_path, owner=lambda p: ""
+    )
+    for text in (person, elevated):
+        assert "spend no turns on who made it" in text
+        assert "'" not in text and '"' not in text and "`" not in text, "it crosses wt"
+
+
+def test_owner_sid_reads_this_machines_owner_or_nothing(tmp_path):
+    """Off Windows there is no SID to read; on it, a tree this process made is its own."""
+    sid = fix_trees.owner_sid(tmp_path)
+    if sys.platform == "win32":
+        assert sid.startswith("S-1-5-")
+    else:
+        assert sid == ""
+    assert fix_trees.owner_sid(tmp_path / "missing") == ""
 
 
 def test_both_dispatch_paths_provision_the_tree_before_the_session_opens(monkeypatch, root):
@@ -503,17 +681,20 @@ def test_an_upstream_fix_with_no_test_id_is_named_for_the_workflow():
 
 
 def fresh_with(monkeypatch, tmp_path, taken: tuple[str, ...] = ()):
+    """`cut_fresh_tree` over a checkout whose refs in the branch's family are `taken`,
+    each spelled as `for-each-ref --format=%(refname:short)` prints it."""
     checkout = tmp_path / "carameli"
     (checkout / ".claude" / "worktrees").mkdir(parents=True, exist_ok=True)
+    stem = "agent/fix-nightly-0918"
+    refs = ("for-each-ref", "--format=%(refname:short)")
+    patterns = (f"refs/heads/{stem}*", f"refs/remotes/origin/{stem}*")
     monkeypatch.setattr(
         fix_prs.sweep,
         "git_for",
-        lambda _path: fake_git(
-            {("rev-parse", "--verify", "--quiet", f"refs/heads/{name}"): (0, "") for name in taken}
-        ),
+        lambda _path: fake_git({(*refs, *patterns): (0, "".join(f"{n}\n" for n in taken))}),
     )
     run = FakeRun()
-    return fix_trees.cut_fresh_tree(checkout, "agent/fix-nightly-0918", "main", run), run
+    return fix_trees.cut_fresh_tree(checkout, stem, "main", run), run
 
 
 def test_a_fresh_branch_is_cut_off_the_default_branch_after_a_fetch(monkeypatch, tmp_path):
@@ -532,6 +713,28 @@ def test_a_branch_the_checkout_already_has_gets_a_counter(monkeypatch, tmp_path)
     )
     assert branch == "agent/fix-nightly-0918-3"
     assert path.name == "fix-nightly-0918-3"
+
+
+def test_a_name_only_origin_still_holds_is_not_cut_again(monkeypatch, tmp_path):
+    """The reaper deletes a merged tree's local branch and leaves origin's. Probing only
+    `refs/heads` cut `agent/fix-harness-ledger-1009` a second time, the head of #589,
+    merged that morning: its fixer worked a whole session on a retired name the commit
+    then had to carry off it."""
+    (_path, branch), _run = fresh_with(
+        monkeypatch, tmp_path, taken=("origin/agent/fix-nightly-0918", "agent/fix-nightly-0918-2")
+    )
+    assert branch == "agent/fix-nightly-0918-3"
+
+
+def test_a_gap_in_the_family_is_not_refilled(monkeypatch, tmp_path):
+    """A missing `-N` below the highest is usually a merged branch whose refs were
+    deleted, which the branch policy still refuses: count on from the top."""
+    (_path, branch), _run = fresh_with(
+        monkeypatch,
+        tmp_path,
+        taken=("origin/agent/fix-nightly-0918-2", "origin/agent/fix-nightly-0918-8"),
+    )
+    assert branch == "agent/fix-nightly-0918-9"
 
 
 def test_a_git_refusal_on_a_fresh_branch_names_the_branch(monkeypatch, tmp_path):
@@ -575,6 +778,26 @@ def test_open_session_is_the_one_place_a_mode_becomes_a_tab_or_a_background(monk
     fix_prs.open_session(agent_models.Launch("codex"), tmp_path, "agent/x", "p", "t")
     fix_prs.open_session(agent_models.Launch("claude-bg"), tmp_path, "agent/x", "p", "t")
     assert opened == [("tab", "codex", "t"), ("bg", "claude", "p")]
+
+
+def test_open_session_tells_a_tree_whose_runner_runs_the_suite_bare_so(monkeypatch, tmp_path):
+    """028caaaf: the conditional runner sentence reached carameli's fixer unchanged and it
+    ran the whole suite; the one place every prompt passes says it as that tree's fact."""
+    sent = []
+    monkeypatch.setattr(
+        fix_prs.agent_tabs,
+        "launch_background",
+        lambda launch, tree, prompt, off, run: sent.append(prompt) or 0,
+    )
+    prompt = fix_prs.tab_safe(fix_prs.fix_prompts.pr_prompt(failure()))
+    runner = tmp_path / "scripts" / "run-tests.py"
+    runner.parent.mkdir()
+    runner.write_text("subprocess.run(['pytest'])\n", encoding="utf-8")
+    fix_prs.open_session(agent_models.Launch("claude-bg"), tmp_path, "agent/x", prompt, "t")
+    runner.write_text('parser.add_argument("--all")\n', encoding="utf-8")
+    fix_prs.open_session(agent_models.Launch("claude-bg"), tmp_path, "agent/x", prompt, "t")
+    assert "runs the whole suite, so never run it bare" in sent[0]
+    assert sent[1] == prompt
 
 
 def test_the_model_and_effort_reach_both_modes_and_neither_invents_a_default(monkeypatch, tmp_path):
@@ -1103,17 +1326,31 @@ def test_a_dispatch_stamps_the_worktree_with_the_key_it_is_recorded_under(monkey
     assert fix_prs.fix_reports.read_stamp(unstamped) == {}, "a hand pick has no ledger key"
 
 
-def tree_git(porcelain: str = "", ff_ok: bool = True):
-    """A `git_for` whose tree is `porcelain`-dirty and whose fast-forward may fail."""
+NOT_FAST_FORWARD = "fatal: Not possible to fast-forward, aborting.\n"
+DUBIOUS = (
+    "fatal: detected dubious ownership in repository at 'C:/w/t'\n"
+    "To add an exception for this directory, call:\n"
+)
+
+
+def tree_git(
+    porcelain: str = "", ff_ok: bool = True, refused: str = "", ff_error: str = NOT_FAST_FORWARD
+):
+    """A `git_for` whose tree is `porcelain`-dirty and whose fast-forward may fail;
+    `refused` is what git says to every call when it will not read the tree at all."""
     calls: list[tuple[str, ...]] = []
 
     def git_for(_tree):
         def git(*args):
             calls.append(args)
+            if refused:
+                return subprocess.CompletedProcess(args, 128, "", refused)
             if args[0] == "status":
                 return subprocess.CompletedProcess(args, 0, porcelain, "")
             if args[0] == "merge":
-                return subprocess.CompletedProcess(args, 0 if ff_ok else 128, "", "")
+                return subprocess.CompletedProcess(
+                    args, 0 if ff_ok else 128, "", "" if ff_ok else ff_error
+                )
             return subprocess.CompletedProcess(args, 0, "", "")
 
         return git
@@ -1139,6 +1376,25 @@ def test_a_clean_reused_tree_is_fast_forwarded_to_origin_and_a_dirty_one_is_left
     assert "diverged" in fix_prs.refresh_head(tmp_path, "agent/x", git_for)
 
 
+def test_a_tree_git_will_not_read_is_said_as_that_not_as_a_divergence(tmp_path):
+    """sports_betting #48's prompt said the branch "has diverged from origin": git had
+    refused the Administrators-owned tree, so the fetch failed silently, an unreadable
+    status read as clean, and the refused fast-forward read as divergence. The branch was
+    five commits behind, and the fixer spent turns proving it."""
+    git_for, calls = tree_git(refused=DUBIOUS)
+    said = fix_prs.refresh_head(tmp_path, "agent/x", git_for)
+    assert "diverged" not in said
+    assert said == (
+        "left as is: git could not read the tree: "
+        "fatal: detected dubious ownership in repository at 'C:/w/t'"
+    )
+    assert [c[0] for c in calls] == ["fetch", "status"], "nothing merged over an unread tree"
+    git_for, _calls = tree_git(ff_ok=False, ff_error="error: cannot lock ref 'HEAD'\n")
+    assert fix_prs.refresh_head(tmp_path, "agent/x", git_for) == (
+        "left as is: git refused the fast-forward: error: cannot lock ref 'HEAD'"
+    )
+
+
 def test_a_planned_pr_is_refreshed_before_its_fixer_opens_and_a_refused_commit_is_not(
     monkeypatch, root, capsys
 ):
@@ -1157,6 +1413,46 @@ def test_a_planned_pr_is_refreshed_before_its_fixer_opens_and_a_refused_commit_i
     assert "stale" in capsys.readouterr().out
 
 
+def test_base_lag_is_checked_at_dispatch_against_a_fresh_fetch_of_the_base(tmp_path):
+    """carameli #474's fixer was told its head was "already up to date with its base"
+    while master already held the brotli bump that was the whole fix: the plan read
+    `behind` once at the start of the pass, and nothing looked again when the tree
+    opened. "" only when git says the head carries the base's tip."""
+    calls: list[tuple[str, ...]] = []
+    counted = ("rev-list", "--count", "HEAD..origin/master")
+
+    def git_for(answer):
+        table = fake_git({counted: answer, ("fetch", "--quiet", "origin", "master"): (0, "")})
+        return lambda _tree: lambda *args: calls.append(args) or table(*args)
+
+    assert fix_trees.base_lag(tmp_path, "master", git_for((0, "0\n"))) == ""
+    assert calls == [("fetch", "--quiet", "origin", "master"), counted]
+    lag = fix_trees.base_lag(tmp_path, "master", git_for((0, "3\n")))
+    assert lag == "origin/master has 3 commits it does not"
+    one = fix_trees.base_lag(tmp_path, "master", git_for((0, "1\n")))
+    assert one == "origin/master has 1 commit it does not"
+    unknown = "git could not say whether it carries origin/master"
+    assert fix_trees.base_lag(tmp_path, "master", git_for((128, ""))) == unknown
+    assert fix_trees.base_lag(tmp_path, "master", git_for((0, "garbled"))) == unknown
+
+
+def test_a_red_prs_fixer_is_told_how_far_behind_its_base_the_tree_is(monkeypatch, root):
+    asked = []
+    monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
+    monkeypatch.setattr(fix_prs, "refresh_head", lambda *a: "")
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    lag = "origin/main has 2 commits it does not"
+    monkeypatch.setattr(fix_prs, "base_lag", lambda tree, base: asked.append(base) or lag)
+    opened = capture_sessions(monkeypatch)
+    assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
+    assert asked == ["main"]
+    assert lag in opened[0]["prompt"]
+    assert "already up to date" not in opened[0]["prompt"]
+    refused = failure(kind=fix_plan.COMMIT, number=0, head="agent/i", signature=("x refused",))
+    assert fix_prs.dispatch_pr(refused, root, agent_models.Launch("claude")) == 0
+    assert asked == ["main"], "a refused commit is the session's own edits, not a PR head"
+
+
 def test_a_tree_left_as_is_is_named_in_its_fixers_prompt(monkeypatch, root):
     monkeypatch.setattr(fix_prs, "existing_tree", lambda *a: (root / "carameli" / "t", ""))
     monkeypatch.setattr(
@@ -1165,7 +1461,10 @@ def test_a_tree_left_as_is_is_named_in_its_fixers_prompt(monkeypatch, root):
     monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
     opened = capture_sessions(monkeypatch)
     assert fix_prs.dispatch_pr(failure(), root, agent_models.Launch("claude")) == 0
-    expected = fix_prs.fix_prompts.pr_prompt(failure(), "", "the tree has uncommitted changes")
+    left = "the tree has uncommitted changes"
+    made = fix_trees.provenance(root / "carameli" / "t")
+    notes = fix_prs.fix_prompts.TreeNotes(left=left, made=made)
+    expected = fix_prs.fix_prompts.pr_prompt(failure(), notes)
     assert opened[0]["prompt"] == fix_prs.tab_safe(expected)
 
 
@@ -1422,6 +1721,50 @@ def test_a_tree_the_pass_cuts_is_marked_fixer_work_and_a_persons_tree_is_not(mon
     assert not (persons / fix_prs.fix_reports.ORIGIN_FILE).exists()
 
 
+def test_a_nightly_fixers_tree_names_its_issue_for_the_pr_to_close(monkeypatch, root):
+    """The tracker issue the prompt sends the fixer at is the one its PR closes; an
+    upstream session, whose fix lands in devkit and not in that repo, closes nothing."""
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    capture_sessions(monkeypatch)
+    claude = agent_models.Launch("claude")
+    fresh = root / "carameli" / ".claude" / "worktrees" / "n"
+    fresh.mkdir(parents=True)
+    monkeypatch.setattr(fix_prs, "cut_fresh_tree", lambda *a: (fresh, "agent/fix-nightly"))
+    nightly = failure(kind=fix_plan.NIGHTLY, head="", workflow="Nightly", number=9)
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (nightly,))
+    assert fix_prs.dispatch_fresh(decision, root, claude, None, "nightly:carameli:9:k", "p") == 0
+    assert fix_prs.fix_reports.closing_line(fresh) == "Closes #9"
+    monkeypatch.setattr(fix_prs.tb, "detect_default_branch", lambda _git: "main")
+    upstream = fix_plan.Decision(fix_plan.UPSTREAM, "n", (nightly,))
+    assert fix_prs.dispatch_fresh(upstream, root, claude, None, "upstream:1:k", "p") == 0
+    assert fix_prs.fix_reports.closing_line(fresh) == ""
+
+
+def test_what_dependabot_cannot_do_opens_its_own_prompt_off_the_default_branch(monkeypatch, root):
+    monkeypatch.setattr(evidence, "place", lambda *a, **k: None)
+    opened = capture_sessions(monkeypatch)
+    fresh = root / "carameli" / ".claude" / "worktrees" / "d"
+    fresh.mkdir(parents=True)
+    cut = []
+    monkeypatch.setattr(
+        fix_prs,
+        "cut_fresh_tree",
+        lambda d, branch, base, runner: cut.append(branch) or (fresh, branch),
+    )
+    found = failure(
+        kind=fix_plan.DEPENDABOT,
+        head="",
+        number=0,
+        workflow="Dependabot Updates",
+        title="Dependabot in carameli: 1 package(s) with alerts no PR answers",
+        signature=(f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0",),
+    )
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "d", (found,))
+    assert fix_prs.dispatch_fresh(decision, root, agent_models.Launch("claude")) == 0
+    assert cut[0].startswith("agent/fix-dependabot-updates-")
+    assert "urllib3 >= 2.8.0" in opened[0]["prompt"] and opened[0]["title"] == "carameli dependabot"
+
+
 def test_a_folded_prs_head_is_named_with_the_tree_holding_it(root):
     """753e8b25: the upstream prompt named carameli #395 by URL only, and the devkit
     session searched carameli's worktrees for the tree holding its head."""
@@ -1441,3 +1784,29 @@ def test_a_folded_prs_head_is_named_with_the_tree_holding_it(root):
     text = fix_prs.fix_prompts.upstream_prompt(found, "agent/fix")
     assert f"(its head is checked out in {found[0].tree})" in text
     assert text.count("its head is checked out") == 1
+
+
+def test_a_fresh_branch_session_is_told_by_the_shape_of_its_first_failure(tmp_path):
+    """A local end-to-end red gets the prompt that says how to run it again here, not
+    the nightly one, which would send it to a GitHub run it does not have."""
+    local = failure(
+        kind=fix_plan.LOCAL, number=0, head="", url="", workflow="Local E2E", sha="b31b60c"
+    )
+    prompt, title = fix_prs.fresh_prompt(
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (local,)), tmp_path, "agent/fix-e2e"
+    )
+    assert prompt == fix_prs.fix_prompts.local_prompt(local, "agent/fix-e2e")
+    assert title == "carameli local e2e"
+    medium = failure(
+        kind=fix_plan.LOCAL, number=0, head="", url="", workflow=fix_plan.MEDIUM_TIER, sha="b31b"
+    )
+    prompt, title = fix_prs.fresh_prompt(
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (medium,)), tmp_path, "agent/fix-tier"
+    )
+    assert prompt == fix_prs.fix_prompts.local_prompt(medium, "agent/fix-tier")
+    assert title == "carameli medium tier"
+    nightly = failure(kind=fix_plan.NIGHTLY, number=3, head="", workflow="Nightly")
+    prompt, title = fix_prs.fresh_prompt(
+        fix_plan.Decision(fix_plan.DISPATCH, "n", (nightly,)), tmp_path, "b"
+    )
+    assert (prompt, title) == (fix_prs.fix_prompts.nightly_prompt(nightly, "b"), "carameli Nightly")

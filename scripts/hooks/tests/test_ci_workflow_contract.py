@@ -208,6 +208,58 @@ def test_the_pr_gate_exists_and_carries_the_title_automerge_waits_on():
     )
 
 
+def unguarded_compose_entries(dependabot: str, gate: str) -> list[str]:
+    """The `docker-compose` entries of `dependabot` that auto-merge can take a major from.
+
+    None where `gate` starts the stack: there the gate is the review it is said to be.
+    """
+    code = re.sub(r"^\s*#.*$", "", dependabot, flags=re.M)
+    if re.search(r"docker[ -]compose\s[^\n]*\bup\b", re.sub(r"^\s*#.*$", "", gate, flags=re.M)):
+        return []
+    entries = re.split(r"^\s*-\s*package-ecosystem:\s*", code, flags=re.M)[1:]
+    return [
+        entry.split("\n", 1)[0].strip()
+        for entry in entries
+        if entry.startswith("docker-compose") and "version-update:semver-major" not in entry
+    ]
+
+
+def test_a_compose_image_no_gate_starts_takes_no_major_through_auto_merge():
+    """Auto-merge takes every Dependabot PR the gate passes, on the premise that the gate
+    expresses all a person would check. A gate that starts no container expresses nothing
+    about an image: homelab's mariadb 11.4 to 13.0 was green on every check while
+    Nextcloud allowed 12.3 at most. So that ecosystem's majors stay out of the bot's hands.
+    """
+    if not DEPENDABOT.is_file():
+        return
+    gate = WORKFLOWS_DIR / PR_GATE
+    unguarded = unguarded_compose_entries(_read(DEPENDABOT), _read(gate) if gate.is_file() else "")
+    assert not unguarded, (
+        ".github/dependabot.yml has a `docker-compose` entry that can open a major, and "
+        f"{AUTOMERGE} merges what the gate passes, which starts no container. Add to it:\n\n"
+        "    ignore:\n"
+        '      - dependency-name: "*"\n'
+        "        update-types:\n"
+        '          - "version-update:semver-major"\n'
+    )
+
+
+def test_the_compose_check_reads_entries_not_comments():
+    entry = "  - package-ecosystem: docker-compose\n    directory: /\n"
+    actions = "  - package-ecosystem: github-actions\n    directory: /\n"
+    ignored = (
+        f"{entry}    ignore:\n      - dependency-name: '*'\n        update-types:\n"
+        '          - "version-update:semver-major"\n'
+    )
+    assert unguarded_compose_entries(entry + actions, "") == ["docker-compose"]
+    assert unguarded_compose_entries(ignored + actions, "") == []
+    assert unguarded_compose_entries(actions, "") == []
+    named = f"{entry}    # never version-update:semver-major here\n"
+    assert unguarded_compose_entries(named, "") == ["docker-compose"], "a comment guards nothing"
+    assert unguarded_compose_entries(entry, "run: docker compose up -d --wait\n") == []
+    assert unguarded_compose_entries(entry, "# docker compose up -d\n") == ["docker-compose"]
+
+
 def test_the_pr_gate_can_be_re_run_on_the_default_branch():
     """A merge by the auto-merge workflow is a push made with `GITHUB_TOKEN`, which raises
     no `push` event, so nothing gates the new tip. The fix pass re-runs the gate there with
@@ -257,6 +309,23 @@ def test_the_merge_job_is_gated_by_label_not_by_author():
     )
 
 
+def test_a_gate_on_the_default_branch_reaches_the_merge_job_as_a_sweep():
+    """The default branch's gate runs on `push`, and each completion follows the base
+    moving -- which is what leaves every open PR's `mergeable` undecided at its own gate's
+    completion. The merge job must wake for it and know it is the default branch, or a
+    green PR waits for the hourly pass (devkit #629, 2026-10-12)."""
+    text = _read(WORKFLOWS_DIR / AUTOMERGE)
+    merge_if = re.search(r"merge:\n(?:.*\n)*?    if: >-\n((?:      .*\n)+)", text)
+    assert merge_if and '"push"' in merge_if.group(1), (
+        f"{AUTOMERGE}'s merge job does not admit a `push` gate run, so the default "
+        "branch's own gate completion never sweeps the PRs its move left undecided."
+    )
+    assert "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}" in text, (
+        f"{AUTOMERGE} does not tell merge-dependabot-prs.py the default branch, so it "
+        "reads a completion there as a PR branch with no PR."
+    )
+
+
 def test_dependency_update_prs_are_assigned_to_someone():
     """Otherwise they are visible in no aggregate view, in any repo.
 
@@ -291,8 +360,11 @@ def test_dependency_update_prs_are_assigned_to_someone():
     )
 
 
-# Strategies that move the lock without raising a `>=` floor the code never needed.
-FLOOR_KEEPING = frozenset({"increase-if-necessary", "lockfile-only", "widen"})
+# Strategies that move the lock without raising a `>=` floor the code never needed. Only
+# the one whose definition forbids touching the manifest: Dependabot's uv updater raised
+# data-lake's `pyarrow>=17` to `pyarrow>=26.0.0` under `increase-if-necessary`, whose
+# documentation says it leaves a floor that already allows the release alone.
+FLOOR_KEEPING = frozenset({"lockfile-only"})
 FLOOR_RAISING_ECOSYSTEMS = frozenset({"uv", "pip"})
 
 
@@ -335,16 +407,20 @@ def test_python_dependency_updates_leave_the_declared_floors_alone():
     grouped patch bump rewrote `pandas>=2.2` as `pandas>=3.0.6`, and ibkr_trader, whose
     `alphalens-reloaded` needs `pandas<3`, went red on its own `main` with no PR of its
     own to show why. A floor says what the code needs; the lock says what was tested.
+
+    `increase-if-necessary` was the answer until it did the same: under it the uv updater
+    rewrote `pyarrow>=17` as `pyarrow>=26.0.0` for a release the floor already allowed,
+    and ibkr_trader's nightly, whose mlflow caps `pyarrow<26`, stopped resolving.
     """
     if not DEPENDABOT.is_file():
         return  # test_dependency_updates_are_configured owns that failure
     raisers = _floor_raisers(_read(DEPENDABOT))
     assert not raisers, (
         f".github/dependabot.yml would raise pyproject floors for: {', '.join(raisers)}. "
-        "Add to each Python entry:\n\n"
-        "    versioning-strategy: increase-if-necessary\n\n"
-        "It bumps uv.lock and leaves a floor alone unless the new release falls outside "
-        "it, so a project that depends on this one is not forced up with it."
+        "Give each Python entry:\n\n"
+        "    versioning-strategy: lockfile-only\n\n"
+        "It bumps uv.lock and never pyproject.toml, so a project that depends on this "
+        "one is not forced up with it. `sync-devkit.py --pull` writes it for you."
     )
 
 
@@ -357,9 +433,16 @@ def test_update_entries_are_read_per_entry():
     )
     assert _floor_raisers(text) == ["uv (no versioning-strategy)"]
     fixed = text.replace(
-        "    directory: /\n", "    directory: /\n    versioning-strategy: increase-if-necessary\n"
+        "    directory: /\n", "    directory: /\n    versioning-strategy: lockfile-only\n"
     )
     assert _floor_raisers(fixed) == []
+    # Neither the strategy the uv updater raised a floor under anyway nor `widen`, whose
+    # definition lets it rewrite the manifest too, counts as keeping one.
+    for raising in ("increase-if-necessary", "widen"):
+        assert _floor_raisers(fixed.replace("lockfile-only", raising)) == [
+            f"uv ({raising})",
+            f"pip ({raising})",
+        ]
     assert _floor_raisers(text.replace("lockfile-only", "increase")) == [
         "uv (no versioning-strategy)",
         "pip (increase)",
@@ -518,8 +601,8 @@ def test_every_workflow_declares_concurrency():
     completions as superseded. That reasoning was about the *key*, not about concurrency
     itself -- and when the file gained a `schedule:` for its retry sweep, the exemption
     would have silently swallowed the requirement that a scheduled run be allowed to
-    finish. It keys on `github.event.workflow_run.head_branch || github.run_id` now, so
-    branches stay independent and anything without a branch gets a group of its own.
+    finish. It keys on `github.event.workflow_run.head_sha || github.run_id` now, so
+    commits stay independent and anything without one gets a group of its own.
     """
     for path in _workflows():
         assert _top_level_block(_read(path), "concurrency") is not None, (

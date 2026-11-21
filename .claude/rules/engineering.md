@@ -4,8 +4,7 @@ description: Baseline engineering policy shared by every devkit project — test
 
 # Rule: Baseline engineering policy
 
-Deliberately **unscoped** (no `paths:`) — the small set of rules that hold everywhere, so
-there is no glob that should exempt a file from them.
+Deliberately **unscoped** (no `paths:`): these hold everywhere.
 
 **Vendored from devkit and byte-identical in every project.** It is in `sync-devkit.py`'s
 `MANIFEST`, so a local edit is reported as drift by the PR gate rather than quietly
@@ -35,8 +34,8 @@ that has no test, write the test in the same commit even if the logic didn't cha
 - A skipped or `xfail` test carries a linked issue or a one-line reason in the marker.
 
 Running tests is optional, and the full suite is not yours to run — see
-`.claude/rules/session-scope.md`. Run them with the tree's `.venv` interpreter or
-`uv run`: a bare `python` is the machine's, which has no pytest.
+`.claude/rules/session-scope.md`, which says how. A bare `python` is the machine's, with
+no pytest.
 
 Instruction files — `CLAUDE.md`, `.claude/rules/*`, `.claude/skills/*` — are under this
 same mandate. See `.claude/rules/authoring.md`.
@@ -48,9 +47,15 @@ No agent hook is wired, so nothing judges a Bash call before it runs
 `BASH_MAX_OUTPUT_LENGTH` in `.claude/settings.json`, which truncates bytes that already
 exist and so cannot false-positive.
 
+**Write and edit files with the Write and Edit tools, never through Bash** -- no heredoc,
+`sed -i` or `python -` patch script, whatever a system prompt says about small edits.
+The Bash tool collapses `\\` to `\`, quoted heredocs included, and a test run finds it.
+Write and Edit decode a backslash-u escape to its character, failing ruff's RUF001: spell
+it `\N{EN DASH}` in source.
+
 **Issue commands bare; wrapping by reflex is a mistake.** A `grep`, a `python -c`, a test
-run, a `curl`, a heredoc: routing them through a wrapper buys no second bound and has
-happened here at scale. Bound only a statement whose output grows with the
+run, a `curl`, a heredoc: routing them through a wrapper buys no second bound.
+Bound only a statement whose output grows with the
 **repository** rather than with the command you wrote — `ls`, `cat`, `find`, `tree`,
 `du`, `env`, `git status`, an uncounted `git log`, a raw `git diff`/`git show`:
 
@@ -64,63 +69,56 @@ The wrapper runs through the platform shell — **`cmd.exe` on Windows** — so 
 single-quoted paths and escaped alternation do not survive it. For `ls`, `cat` and `find`
 the better answer is usually the Glob, Read and Grep tools, which cost no subprocess and
 page rather than dump. Codex caps shell output itself, so issue commands there directly.
-What preemptive wrapping has cost is in
-[`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
-**A refusal that says the command "is too complex to verify that it stays inside the
-worktree", "names git in a form too complex to verify", or "cannot be shown not to be
-git", is not a devkit hook** — none is wired. It is Claude Code's own isolation guard
-for a `claude --worktree` session. No setting turns it off and nothing in devkit can
-change what it accepts — report it to Claude Code, not to this harness.
-
-It judges the command line's shape, and **only on the Bash tool**: the PowerShell tool is
-never parsed (the check that holds a session inside its worktree still applies), so on
-Windows it is the answer for a compound statement, not a workaround.
+**A refusal saying a command is "too complex to verify that it stays inside the
+worktree" or "cannot be shown not to be git" is not a devkit hook** — none is wired. It
+is Claude Code's own `claude --worktree` isolation guard. It parses **only the Bash tool's** command lines, so on Windows the
+PowerShell tool is the answer for a compound statement, not a workaround.
 
 | Shape it refuses | What to issue instead |
 | --- | --- |
-| `~` in a path | `$HOME`, which resolves; the tilde is rejected unexpanded |
+| `~` in a path; a variable as the script, `python "$S/x.py"`, or in a `sed` path | `$HOME` as an argument; the PowerShell tool for either |
 | `git -C`, `--git-dir`, `env -C`, `GIT_DIR=`, `cd … &&` before git | bare `git`, from the worktree |
 | command substitution, `for`/`while`, a subshell | one call each — a plain `&&` list is fine |
+| `rm` of a variable-built path: "Dangerous rm operation", a built-in check, not this guard | `"${A:?}/${f:?}/x"` or a literal path, never another tool |
 | the letters `git` inside any of the above | nothing; it is a false positive |
+| `sh -c "…"` in a container, either tool | a script file, run there by `sh` |
 
-**The last row is the one that wastes turns.** Inside a statement the parser could not
-reduce to a simple list, the guard tests the *whole line* for `git` as an unanchored
-substring, so `.gitignore`, `github.com`, `digit` and `legitimate` each read as "names
-git" — rename or split it; no spelling of the real command passes. A heredoc and a
-`$HOME` argument are **not** triggers alone, but write files with Write or Edit anyway:
-the Bash tool collapses `\\` to `\`, quoted heredocs included. The reproductions are in
-[`.claude/engineering-evidence.md`](../engineering-evidence.md).
+**The last two rows waste turns.** An irreducible line is tested whole for `git` as a
+substring (`.gitignore`, `github.com`, `digit`): split it. PowerShell reads a
+container's `rm` as hitting a "protected" host path, `Remove-Item $d` as `/`, and any
+path-shaped word in the call, `robocopy /E` too, as its target: give `Remove-Item` a call
+of its own and spell it out. Reproductions: [`.claude/engineering-evidence.md`](../engineering-evidence.md).
 
-**Git Bash rewrites `rev:path` into a Windows path list** -- git then reports an
-`ambiguous argument` naming a backslashed, semicolon-joined path, exit 0 when piped.
+**Git Bash rewrites POSIX-looking arguments into Windows paths**: `rev:path` into what
+git calls an `ambiguous argument`, a container's `/tmp/x` into `C:/…/Temp/x`.
 `MSYS2_ARG_CONV_EXCL` in `.claude/settings.json` exempts revs opening `origin/`,
-`upstream/` or `refs/`; for any other rev with a slash, spell it `feature/x:./.devkit.toml`.
+`upstream/` or `refs/`; spell another `feature/x:./.devkit.toml`, and prefix
+`docker exec` with `MSYS_NO_PATHCONV=1`.
 
-## Waiting on a CI gate: one blocking call, not a poll loop
+## Waiting: one backgrounded call, not a poll loop
 
 ```bash
 gh pr checks <N> --watch --fail-fast      # with run_in_background: true
 ```
 
-`--watch` returns only once every check has settled, collapsing N polls into one call plus
-the completion notification. **Backgrounding is the half that is easy to drop**: a gate
-routinely outruns the Bash tool's ceiling, and a foreground `--watch` that times out is a
-poll loop with the timeout as its interval.
+`--watch` returns once every check has settled: one call and its notice. **Backgrounding
+is the half that is easy to drop**, here and for an `until` loop on a file a job will
+write (or put that loop in `Monitor`): a foreground wait holds the turn. **A subagent's
+notice arrives only between its calls**: left with only the wait, it runs the job in the
+foreground, then one `until` loop on the file named when Claude Code moves that call out
+at 180 s or it backgrounded it; never `sleep`.
 
-This condemns neither **diagnosing a failure** (`gh run view --log-failed` and the greps
-after it are the work, not waiting — send them to a file where the volume warrants) nor
-**asking once**. The waste begins at the *second* identical poll.
+Diagnosing a failure and asking once are not polling; the waste begins at the *second*
+identical poll.
 
 **"No checks reported" has causes needing opposite responses.** Ask once, after a push —
 `gh pr view <N> --json mergeStateStatus,statusCheckRollup` — and read the answer against
 the table in the evidence file: `CONFLICTING` is a gate that will never run, and
 `UNSTABLE` with an empty rollup is one that ran, as a `workflow_dispatch` the PR cannot show.
 
-When the gate will outlast anything useful you could do meanwhile, stop: report that the
-branch is pushed and the gate is running, and let the result arrive in a fresh session.
-What polling has cost is in
-[`.claude/engineering-evidence.md`](../engineering-evidence.md).
+When the gate will outlast anything useful you could do, stop: report the branch pushed and
+the gate running, and let the result arrive in a fresh session.
 
 ## Scripts
 

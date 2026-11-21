@@ -15,12 +15,18 @@ harness-defect ledger, where the devkit session picks it up on the next pass:
   sessions nobody dispatched, which is most of them.
 - **Whether resolutions held** (`fix_verify.py`): a group retired against a fix that
   never merged is reopened, and one whose fix is still in flight sends no session; once
-  it merges, the rows filed while it waited are retired against it, not re-sent.
+  it merges, the rows filed while it waited are retired against it, not re-sent -- and
+  so is a wrapped job's failed run of code the checkout had not yet moved onto
+  (`_predates_fix`).
 - **Whether what was filed still stands** (`session_friction.outdated`): a friction row
   the detectors on the default branch no longer file is retired, with that reason, and
   one an open PR's detector no longer files is resolved against that PR
   (`friction_pending`).
 - **What has sat too long** (`fix_stall.py`): a hold, a cap or a skip past a day.
+- **What the machine's own jobs say**: a scheduled job the scheduler reports failing
+  (`job_findings`), and an ingestion collector the tray shows as anything but OK
+  (`collector_findings`). The tray is the only other reader of either, and a row only a
+  person sees is the ending the pass exists to rule out.
 
 Outside `dispatch` mode nothing is written -- not the ledger, not a tree, not the
 harvest cursor -- and what would be filed is only listed.
@@ -31,14 +37,19 @@ Tested in `tests/test_fix_loop.py`, and through the pass in `tests/test_fix_pass
 from __future__ import annotations
 
 import datetime as _dt
+import json
+import re
 import sys
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import after_merge
 import bg_sessions
+import collector_tasks
+import collectors
 import fix_cycle
 import fix_findings
 import fix_ledger
@@ -48,6 +59,7 @@ import fix_verify
 import friction_pending
 import ship_intent
 import harness_triage as triage
+import schedule_health
 import session_friction
 import sweep
 
@@ -63,6 +75,11 @@ class Context:
     history_path: Path
     mode: str
     now: _dt.datetime
+    # When the machine last started (`fix_reports.booted_at`); None judges a session by
+    # its silence alone.
+    booted: _dt.datetime | None = None
+    # The projects in the direct flow (`delivery.direct_projects`), read once per pass.
+    direct: frozenset[str] = frozenset()
 
     @property
     def writes(self) -> bool:
@@ -74,12 +91,16 @@ class Closed:
     """What reading back found that the rest of the pass needs."""
 
     lines: list[str] = field(default_factory=list)  # for the record, `blocked` rows
+    # What `fix_verify` and the rechecks decided on the ledger: `verified` rows, never
+    # `blocked` ones -- a retirement read as a stuck session in a record read for those.
+    verified: list[str] = field(default_factory=list)
     # A devkit session still working the harness, by tree: a second one is held, since
     # two sessions at one backlog was a waste the ledger alone could not see.
     harness_busy: str = ""
     # problem -> the tree its latest fixer worked in, which is where an escalation of
-    # that problem sends the devkit session to take it over.
+    # that problem sends the devkit session to take it over, and when it was stamped.
     trees: dict[str, str] = field(default_factory=dict)
+    stamped: dict[str, str] = field(default_factory=dict)
     # (project, branch) -> a tree some session other than the pass's is working in. A
     # fixer is never sent in beside it: the first supervised run sent one into the tree
     # an interactive session was editing, which only went well because it sat idle.
@@ -87,30 +108,63 @@ class Closed:
     # Trees whose stamped session is done or dead, and the idle sessions stopped in them.
     finished: list[str] = field(default_factory=list)
     stopped: list[str] = field(default_factory=list)
+    # Each tree some session is at work in now, as the record names it (`where`).
+    at_work: list[str] = field(default_factory=list)
+    # When the newest stamped session that reached an outcome began: proof the machine's
+    # login worked then, which retires a `LOGIN_KIND` row older than it (`retire_login`).
+    signed_in: str = ""
     # ref -> pr of each resolution whose fix has not merged (`in_flight`): the backlog
     # step sends no session at a group waiting on one.
     in_flight: dict[str, str] = field(default_factory=dict)
-    # Directories a session is busy in now (`bg_sessions.working`), stamped one or not.
+    # Every session `claude agents` lists (`session_listing`), and the directories one is
+    # busy in now (`bg_sessions.working`), stamped one or not.
+    listing: list[dict] = field(default_factory=list)
     working: frozenset[str] = frozenset()
+    # Each devkit PR still carrying a fix to consumers, as `(number, body)` (`devkit_fixes`):
+    # a consumer failure one names waits for it rather than for a second devkit session.
+    devkit_fixes: tuple[tuple[int, str], ...] = ()
+
+    def keep_tree(self, problem: str, path: str, when: str) -> None:
+        """Remember `path` for `problem` unless a tree stamped later already is: trees are
+        read in no order of age, and the last read used to win."""
+        if problem not in self.trees or fix_findings.after(self.stamped.get(problem, ""), when):
+            self.trees[problem] = path
+            self.stamped[problem] = when
+
+    def tree_after(self, problem: str, since: str) -> str:
+        """The tree `problem`'s latest fixer worked in, when it was stamped after `since`;
+        "" otherwise. An escalation named a 10-05 tree that worked a runner outage for
+        the 10-22 failure that shared its problem key (a0fb253d)."""
+        tree = self.trees.get(problem, "")
+        return tree if tree and fix_findings.after(since, self.stamped.get(problem, "")) else ""
 
 
 def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
     """Every read-back step, each isolated: one that raises is a finding, not a stop."""
     closed = Closed()
-    closed.working = journal.step("sessions", working_dirs, default=frozenset())
+    closed.listing = journal.step("sessions", session_listing, default=[])
+    closed.working = bg_sessions.working(closed.listing)
     trees = journal.step("trees", fix_reports.read_trees, ctx.root, ctx.projects, default=[])
     for tree in trees:
         journal.step("tree", _one_tree, ctx, tree, journal, closed)
     cursor = ctx.ledger_path.parent / session_friction.CURSOR_NAME
     journal.add(*journal.step("harvest", _harvest, ctx, cursor, default=[]))
+    journal.add(*journal.step("jobs", job_findings, ctx, default=[]))
+    journal.add(*journal.step("collectors", collector_findings, ctx, default=[]))
     if ctx.writes:
-        closed.lines += journal.step("verify", _verify, ctx, default=[])
-        closed.lines += journal.step("recheck", _recheck, ctx, default=[])
+        closed.verified += journal.step("verify", _verify, ctx, default=[])
+        closed.verified += journal.step("recheck", _recheck, ctx, default=[])
+        closed.verified += journal.step("predates-fix", _predates_fix, ctx, default=[])
+        closed.verified += journal.step(
+            "signed-in", retire_login, ctx, closed.signed_in, default=[]
+        )
+        closed.verified += journal.step("trusted", retire_trusted, ctx, default=[])
         runner = ship_intent.run_quiet
         closed.stopped = journal.step(
             "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
         )
     closed.in_flight = journal.step("in-flight", in_flight, ctx, default={})
+    closed.devkit_fixes = journal.step("devkit-fixes", devkit_fixes, ctx, default=())
     history = fix_stall.read_history(ctx.history_path)
     journal.add(*journal.step("stall", fix_stall.stalled, history, ctx.now, default=[]))
     return closed
@@ -123,52 +177,142 @@ def _one_tree(
     problem = str(tree.stamp.get("problem", ""))
     key = str(tree.stamp.get("key", ""))
     if problem:
-        closed.trees[problem] = str(tree.path)
+        closed.keep_tree(problem, str(tree.path), str(tree.stamp.get("when", "")))
     # Judged before anything is filed away: a filed report is still the session's outcome.
-    _judge_session(ctx, tree, where, journal, closed)
-    if reason := fix_reports.blocked_reason(tree.path):
+    at_work = _judge_session(ctx, tree, where, journal, closed)
+    if at_work:
+        closed.at_work.append(where)
+    if waits := fix_reports.waits_on(tree.path):
+        # Not a finding: no session can merge another PR. `fix_budget` holds the problem
+        # until that PR closes, then sends its next fixer.
+        closed.lines.append(f"{where} -- waits on {waits}")
+        if ctx.writes:
+            fix_ledger.mark_waiting(ctx.ledger_path, key, waits)
+            fix_reports.file_away(tree.path, fix_reports.BLOCKED_FILE)
+    elif reason := fix_reports.blocked_reason(tree.path):
         journal.add(
             Finding(
                 "fixer-blocked",
                 tree.project,
                 f"{where}: {reason}",
                 key=problem,
-                evidence=str(tree.path),
+                evidence=_beside_ledger(ctx, tree, fix_reports.BLOCKED_FILE) or str(tree.path),
             )
         )
         closed.lines.append(f"{where} -- {reason}")
         if ctx.writes:
             fix_ledger.mark_blocked(ctx.ledger_path, key, reason)
             fix_reports.file_away(tree.path, fix_reports.BLOCKED_FILE)
-    # Where the lines will be once filed away below: naming the file about to be renamed
-    # gave every friction row a dead path.
-    kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
+    _file_friction(ctx, tree, where, journal, closed, at_work)
+
+
+def _file_friction(
+    ctx: Context,
+    tree: fix_reports.Tree,
+    where: str,
+    journal: fix_findings.Journal,
+    closed: Closed,
+    at_work: bool,
+) -> None:
+    """File the tree's friction lines, a "fixed on this branch" one settled by the branch
+    once its work went out -- and none of them while its session is still at work on
+    one that has not.
+
+    Filed then, such a line is open, and a fixer is sent at a fix still being written:
+    c8d4f66b and 5d8e9962 were harvested from peaceful-jumping-cocke a minute after its
+    interactive session wrote them, both fixes uncommitted in its tree, and a second
+    session was dispatched at the pair. Held whole, because `file_away` takes the whole
+    file: the next pass after the session ships or goes quiet files every line.
+    """
+    claims = any(fix_reports.fixed_here(line) for line in tree.friction)
+    out = bool(tree.branch) and claims and went_out(tree.path)
+    if claims and tree.branch and not out and at_work:
+        closed.lines.append(f"{where} -- friction held: its session is still at work on a fix")
+        return
+    evidence = _friction_evidence(ctx, tree)
+    settled = _settlement(tree) if out else {}
     for line in tree.friction:
-        evidence = str(tree.path / kept)
-        # A line its session fixed here is settled by this branch, not a new job for a fixer.
-        settles = tree.branch if tree.branch and fix_reports.fixed_here(line) else ""
-        journal.add(
-            Finding(
-                "reported",
-                tree.project,
-                line,
-                evidence=evidence,
-                event=fix_findings.FRICTION,
-                settles_with=settles,
-            )
+        reported = Finding(
+            "reported",
+            tree.project,
+            line,
+            evidence=evidence,
+            event=fix_findings.FRICTION,
         )
+        # A line its session fixed here is settled by this branch, not a new job for a
+        # fixer -- once the fix is on the branch, which the words alone do not show.
+        journal.add(replace(reported, **settled) if fix_reports.fixed_here(line) else reported)
     if tree.friction and ctx.writes:
         fix_reports.file_away(tree.path, fix_reports.FRICTION_FILE)
 
 
+def _friction_evidence(ctx: Context, tree: fix_reports.Tree) -> str:
+    """What the tree's friction rows cite: the copy beside the ledger, else where the lines
+    will be once filed away -- naming the file about to be renamed gave every friction row
+    a dead path."""
+    kept = fix_reports.filed(fix_reports.FRICTION_FILE) if ctx.writes else fix_reports.FRICTION_FILE
+    if not tree.friction:
+        return str(tree.path / kept)
+    return _beside_ledger(ctx, tree, fix_reports.FRICTION_FILE) or str(tree.path / kept)
+
+
+def _beside_ledger(ctx: Context, tree: fix_reports.Tree, report: Path) -> str:
+    """A copy of the tree's `report` kept beside the ledger (`fix_findings.evidence_file`);
+    "" in a plan, which writes nothing, and when the report cannot be read or copied.
+
+    The tree's own `logs/` goes when its box is reaped, which a merged PR's box is within
+    the hour: 9000925f and 20322597 cited `<box>/logs/friction.filed.md`, and the fixer
+    sent at them found nothing there (5233840a)."""
+    if not ctx.writes:
+        return ""
+    try:
+        text = (tree.path / report).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    header = f"# {report.as_posix()} from {tree.path} ({tree.branch or 'no branch'})\n\n"
+    return fix_findings.evidence_file(header + text, ctx.devkit_dir, report.stem)
+
+
+def _settlement(tree: fix_reports.Tree) -> dict[str, str]:
+    """What settles a "fixed on this branch" line of `tree`'s: its branch, as of when the
+    session wrote the file -- this filing can follow the PR's merge, which a resolution
+    dated by the filing would discount as a reused name's (f0308756)."""
+    try:
+        written = fix_findings.stamp_of((tree.path / fix_reports.FRICTION_FILE).stat().st_mtime)
+    except OSError:
+        written = ""
+    return {"settles_with": tree.branch, "since": written}
+
+
+def went_out(tree: Path, runner=ship_intent.run_quiet) -> bool:
+    """Whether the tree's work is committed on its branch: its last ship `shipped`, and
+    nothing left uncommitted since.
+
+    A friction line saying "fixed on this branch" settles on that branch, and
+    `fix_verify` then holds it only to the branch merging -- not to the fix being in
+    it. 5d9806b0 was settled on worktree-rippling-juggling-oasis, whose intent the pass
+    had set aside over 19 uncommitted files, so the fix it named never reached the PR
+    that was to retire it (7c16fabc). Such a line is filed open instead.
+    """
+    if ship_intent.read_state(tree).get("stage") != ship_intent.SHIPPED:
+        return False
+    status = runner(["git", "status", "--porcelain"], cwd=tree)
+    return status.returncode == 0 and not (status.stdout or "").strip()
+
+
 def _judge_session(
     ctx: Context, tree: fix_reports.Tree, where: str, journal: fix_findings.Journal, closed: Closed
-) -> None:
+) -> bool:
+    """Judge the tree's stamped session; whether anyone is at work in the tree now."""
     key = str(tree.stamp.get("key", ""))
-    state, transcript = fix_reports.session_state(tree.path, ctx.now)
+    state, transcript = fix_reports.session_state(tree.path, ctx.now, booted=ctx.booted)
     if state in (fix_reports.DONE, *fix_reports.DEAD):
         closed.finished.append(str(tree.path))
+    if state == fix_reports.DONE:
+        _note_signed_in(closed, transcript)
     live = fix_reports.active_transcript(tree.path, ctx.now)
+    if live is not None and bg_sessions.gone(closed.listing, tree.path, live):
+        live = None
     # By its transcript, the stamped session is never "another" one: a finished fixer's
     # own transcript held six branches while this very pass shipped their intents. A
     # session listed busy in the tree is at work whoever it is, intent or no intent.
@@ -176,29 +320,105 @@ def _judge_session(
     if tree.branch and (running or (live and str(live) != transcript)):
         closed.busy[(tree.project, tree.branch)] = str(tree.path)
     if state in fix_reports.DEAD:
-        # No key: a dead session is re-sent at once, not parked behind the finding. One
-        # that never started is cited by what its launcher said, when it left a record.
-        # A launcher's answer is the signature, and the branch -- new every dispatch --
-        # stays in the evidence: filed under it, one unreachable service was eight open
-        # groups in eight hours, one per hourly re-send (1e5e57f4 and seven more).
-        launched = fix_reports.launch_line(tree.path) if not transcript else ""
-        detail = (
-            f"{tree.project}: the dispatched session {state} -- {launched}"
-            if launched
-            else f"{where}: the dispatched session {state}"
-        )
-        cited = str(tree.path / fix_reports.LAUNCH_FILE) if launched else str(tree.path)
-        journal.add(Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or cited))
-        if ctx.writes:
-            fix_ledger.mark_dead(ctx.ledger_path, key, state)
-            fix_reports.note_on_stamp(tree.path, "dead", state)
+        closed.lines.extend(judge_dead(ctx, tree, where, state, transcript, journal))
     elif (state == fix_reports.WORKING or running) and fix_ledger.is_upstream(key):
         closed.harness_busy = str(tree.path)
+    return running or live is not None
 
 
-def working_dirs() -> frozenset[str]:
-    """`bg_sessions.working` over what `claude agents` lists; empty where it cannot."""
-    return bg_sessions.working(bg_sessions.listed(ship_intent.run_quiet))
+def _note_signed_in(closed: Closed, transcript: str) -> None:
+    """Move `closed.signed_in` up to when a `DONE` session's transcript began."""
+    if not transcript:
+        return
+    began = fix_reports.started_at(Path(transcript))
+    closed.signed_in = max(closed.signed_in, fix_findings.stamp_of(began and began.isoformat()))
+
+
+# Stable across every tree it hits, and naming the step no fixer can take, so its group
+# awaits a person (`triage.awaiting_person`) instead of being sent a fixer that dies too;
+# every re-send until then dies free (`mark_interrupted`).
+LOGIN_KIND = "fixer-login-refused"
+LOGIN_DETAIL = (
+    "dispatched sessions end at their first reply, Claude Code's stored login refused "
+    f"-- {triage.PERSON_STEP} run `claude auth login` on this machine"
+)
+# A checkout Claude Code refuses to launch in (`fix_reports.UNTRUSTED`): one group per
+# project, filed alike by the dispatch the launcher refused (`fix_send`) and by the dead
+# session it leaves, which were two groups for one refusal (10a9810d, 18e737b9).
+UNTRUSTED_KIND = "fixer-workspace-untrusted"
+
+
+def untrusted_detail(checkout: Path) -> str:
+    """The finding's detail for an untrusted `checkout`, naming the step that trusts it."""
+    return (
+        f"Claude Code refuses to start a dispatched session in {checkout.name}, a checkout "
+        f"it was never told to trust -- {triage.PERSON_STEP} run `claude` in {checkout} "
+        "once and accept the trust prompt"
+    )
+
+
+def judge_dead(
+    ctx: Context,
+    tree: fix_reports.Tree,
+    where: str,
+    state: str,
+    transcript: str,
+    journal: fix_findings.Journal,
+) -> list[str]:
+    """Free a dead session's dispatch, and file it unless a restart killed it -- a lapsed
+    login or an untrusted checkout is filed once, for a person, and not as the fixer's;
+    the lines for the record."""
+    key = str(tree.stamp.get("key", ""))
+    if key.startswith(after_merge.SESSION_KEY):
+        # The queue's attempts, not this ledger's: the pass reads its own trees back on the
+        # machine that holds them, whatever `devkit.fixPass` says there. Nothing here could
+        # re-send one, and a record saying so would lose the task.
+        return [f"{where} -- {state}; the after-merge queue offers it again"]
+    if ctx.writes:
+        fix_reports.note_on_stamp(tree.path, "dead", state)
+    if state in (
+        fix_reports.INTERRUPTED,
+        fix_reports.LOGGED_OUT,
+        fix_reports.UNTRUSTED,
+        fix_reports.OFFLINE,
+    ):
+        # The machine went down under it or lost its network, nobody was logged in, or
+        # nobody trusted the checkout: no attempt spent, only a re-send, which finds a
+        # PR's tree as the session left it. The last is held until someone does
+        # (`fix_send._untrusted`).
+        if ctx.writes:
+            fix_ledger.mark_interrupted(ctx.ledger_path, key, state)
+        if state == fix_reports.LOGGED_OUT:
+            # The machine's login, not the fixer: one group whichever tree it hit, awaiting
+            # a person -- the re-send is what shows the login is back.
+            journal.add(Finding(LOGIN_KIND, "devkit", LOGIN_DETAIL, evidence=transcript))
+        elif state == fix_reports.UNTRUSTED:
+            detail = untrusted_detail(ctx.root / tree.project)
+            cited = str(tree.path / fix_reports.LAUNCH_FILE)
+            journal.add(Finding(UNTRUSTED_KIND, tree.project, detail, evidence=cited))
+            return [f"{where} -- {state}; held until {tree.project} is trusted"]
+        return [f"{where} -- {state}; sent again"]
+    # No key: a dead session is re-sent at once, not parked behind the finding. One
+    # that never started is cited by what its launcher said, when it left a record.
+    # A launcher's answer is the signature, and the branch -- new every dispatch --
+    # stays in the evidence: filed under it, one unreachable service was eight open
+    # groups in eight hours, one per hourly re-send (1e5e57f4 and seven more).
+    launched = fix_reports.launch_line(tree.path) if not transcript else ""
+    detail = (
+        f"{tree.project}: the dispatched session {state} -- {launched}"
+        if launched
+        else f"{where}: the dispatched session {state}"
+    )
+    cited = str(tree.path / fix_reports.LAUNCH_FILE) if launched else str(tree.path)
+    journal.add(Finding("fixer-no-outcome", tree.project, detail, evidence=transcript or cited))
+    if ctx.writes:
+        fix_ledger.mark_dead(ctx.ledger_path, key, state)
+    return []
+
+
+def session_listing() -> list[dict]:
+    """What `claude agents` lists (`bg_sessions.listed`); empty where it cannot say."""
+    return bg_sessions.listed(ship_intent.run_quiet)
 
 
 def fixers_working() -> frozenset[str]:
@@ -210,6 +430,449 @@ def fixers_working() -> frozenset[str]:
     interactive session, busy by definition, and ships its own tree through it.
     """
     return bg_sessions.working(bg_sessions.listed(ship_intent.run_quiet), ("background",))
+
+
+def still_working(busy: frozenset[str], tree: Path, now: _dt.datetime) -> bool:
+    """Whether the fixer in `tree` is at work: listed busy (`fixers_working`), or its
+    stamped session is waiting on a background task it started. A turn that ends on
+    "the tests will notify me" lists as idle, and 0929-7 was shipped mid-test (8d2f56f5)."""
+    return bg_sessions.busy_in(busy, tree) or fix_reports.awaiting_task(tree, now)
+
+
+def why_held(busy: frozenset[str], tree: Path, now: _dt.datetime) -> str:
+    """Why the pass must not ship `tree`'s intent yet, or "": `still_working`, then
+    `outran_intent`."""
+    if still_working(busy, tree, now):
+        return "its session is still working in the tree"
+    if late := outran_intent(tree, now):
+        return f"{late} changed after the intent was written, and a session is still at work in the tree"
+    return ""
+
+
+def outran_intent(tree: Path, now: _dt.datetime, runner=ship_intent.run_quiet) -> str:
+    """A changed path in `tree` written after its untried intent, while a session is
+    still live there; else "".
+
+    The commit takes the whole tree, so an intent describes the tree as it was when
+    written. A devkit fixer left one in roguelike #81's tree at 15:37; the person's
+    interactive session there began its next task at 15:56, and the pass committed its
+    half-written files under the fixer's message at 16:00 (e89a0224). `still_working`
+    sees only a background session, and an interactive one is busy by definition.
+    Once the session goes quiet the tree ships whole, as before. An intent the pass has
+    already tried is left alone: its own fixers rewrote files after it.
+    """
+    intent = tree / ship_intent.INTENT_FILE
+    try:
+        written = intent.stat().st_mtime
+        words = ship_intent.parse_intent(intent.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return ""
+    tried = ship_intent.read_state(tree).get("intent")
+    if tried == ship_intent.Intent("", tree, "", *words).digest:
+        return ""
+    if fix_reports.active_transcript(tree, now) is None:
+        return ""
+    status = runner(["git", "status", "--porcelain", "--untracked-files=all"], cwd=tree)
+    if status.returncode != 0:
+        return ""
+    for path in ship_intent.ship.changed_paths(status.stdout or ""):
+        try:
+            if (tree / path).stat().st_mtime > written:
+                return path
+        except OSError:
+            continue
+    return ""
+
+
+# A scheduled job's own failure, read off the scheduler. Every job but the resident tray
+# now runs under `log-wrap.py --always`, which files each failed run itself, so what is
+# left here is what only the scheduler can say -- disabled, stale, never ran -- plus a
+# failed run of a job that runs bare (a collector's task, an installer not yet re-run).
+JOB_KIND = "scheduled-job"
+# What `schedule_health.artifact_hint` says when a later run finished clean.
+JOB_HISTORY = "the scheduler is reporting history"
+# `schedule_health.problems`' line for a run that exited non-zero.
+JOB_FAILED_RUN = ": last run failed ("
+# The scheduled job this very pass runs under (`install-fix-pass-task.py`'s `TASK_NAME`).
+OWN_TASK = "devkit-fix-pass"
+# The run's time and count, kept out of the detail: a group must survive its recurrences.
+_JOB_WHEN = re.compile(r" (?:at|since) \d{4}-\d\d-\d\d \d\d:\d\d| \(\d+ intervals ago\)")
+
+
+def job_findings(
+    ctx: Context,
+    jobs: list[schedule_health.Job] | None = None,
+    git=ship_intent.run_quiet,
+    tasks: dict[str, str] | None = None,
+) -> list[Finding]:
+    """A finding per devkit job the scheduler says needs attention, bar one it is only
+    remembering: a line whose group was resolved after the run it reports. The scheduler
+    repeats a daily job's last result for a day, so that run would reopen its own fix.
+    Nor one that ran code older than its group's fix (`_ran_before_fix`).
+
+    The scheduled collectors (`collectors.scheduled_tasks`, `{task: log}`) are asked about
+    in the same query, as the tray asks: their tasks carry no `devkit-` prefix, so a
+    failing host collector was red in the tray and absent here. Each is filed against
+    its own project, which is its task's name -- and so is one this machine runs whose
+    task the scheduler does not have, which the query can only omit
+    (`tray_state.collector_task_states` paints the same row red)."""
+    if tasks is None:
+        tasks = collectors.scheduled_tasks(ctx.devkit_dir) if jobs is None else {}
+    jobs = schedule_health.query(also=frozenset(tasks)) if jobs is None else jobs
+    artifacts = {**schedule_health.ARTIFACTS, **tasks}
+    by_name = {job.name: job for job in jobs}
+    items = triage.load(ctx.devkit_dir)
+    found: list[Finding] = []
+    local_now = ctx.now.astimezone().replace(tzinfo=None)  # the scheduler speaks local time
+    deliberate = schedule_health.stood_down()
+    lines = schedule_health.problems(
+        jobs, local_now, deliberate, root=ctx.devkit_dir, artifacts=artifacts
+    )
+    for line in lines:
+        name, head = line.split(":", 1)[0], line.split(" -- ", 1)[0]
+        job = by_name.get(name)
+        finding = Finding(
+            JOB_KIND,
+            name if name in tasks else fix_cycle.DEVKIT,
+            _JOB_WHEN.sub("", head),
+            command=line[:300],
+        )
+        if not _filed_elsewhere(ctx, line, job, finding, items, git):
+            found.append(finding.at(_job_evidence(ctx, name, artifacts, job)))
+    return found + unscheduled(ctx, tasks, frozenset(by_name))
+
+
+def _job_evidence(
+    ctx: Context, name: str, artifacts: dict[str, str], job: schedule_health.Job | None
+) -> str:
+    """A copy of the reported run's own artifact, kept beside the ledger; "" when the
+    file on disk is not that run's account (`schedule_health.run_artifact`).
+
+    Never the artifact's path: 631737a8 cited `logs/collector-social-scraper.log`, which
+    every half-hourly run rewrites, so its triager read a later, passing run there and
+    nothing of the one that overlapped (`fix_findings.kept`)."""
+    since = job.last_run if job else None
+    artifact = schedule_health.run_artifact(name, artifacts, root=ctx.devkit_dir, since=since)
+    if not artifact:
+        return ""
+    return fix_findings.kept(ctx.devkit_dir / artifact, ctx.devkit_dir, Path(artifact).stem)
+
+
+def _filed_elsewhere(
+    ctx: Context,
+    line: str,
+    job: schedule_health.Job | None,
+    finding: Finding,
+    items: list[triage.Item],
+    git,
+) -> bool:
+    """Whether `line` is not this pass's to file: history the scheduler is only
+    repeating, a fire this very pass made good (`_covered_by_this_pass`), a failed run
+    its `log-wrap.py --always` wrapper filed already, or a run whose group a fix has
+    since retired (`_resolved_since`, `_ran_before_fix`)."""
+    if JOB_HISTORY in line:
+        return True
+    if job is None:
+        return False
+    if _covered_by_this_pass(ctx, job):
+        return True
+    if JOB_FAILED_RUN in line and "log-wrap.py" in job.command and "--always" in job.command:
+        return True
+    ran = _run_began(ctx, finding, job)
+    if ran is None:
+        return False
+    # A collector's task runs its own project's code, not devkit's.
+    code = ctx.devkit_dir if finding.project == fix_cycle.DEVKIT else ctx.root / finding.project
+    return _resolved_since(finding, items, ran) or _ran_before_fix(
+        code, fix_findings.signature(finding), items, ran, git
+    )
+
+
+def _covered_by_this_pass(ctx: Context, job: schedule_health.Job) -> bool:
+    """`job` is the pass's own task, refused at a fire this pass began at or after, inside
+    that fire's half hour: the half hour got its pass, and the pass is the one reading.
+
+    c4192c14 came back three times this way. On 2026-11-03 the pass that began at 22:00:58
+    read its own task as "a run was still going at 22:00" sixteen minutes in, and its
+    record, written only when it ends, as an earlier run's: a defect report about itself.
+    A pass begun *before* the refused fire did outlive it, and is still filed; a run
+    stopped at the bound is the watchdog's `pass-hung`."""
+    if job.name != OWN_TASK or job.last_result not in schedule_health.OVERLAPPING:
+        return False
+    if job.last_run is None or job.interval is None:
+        return False
+    began = ctx.now.astimezone().replace(tzinfo=None)  # the scheduler speaks local time
+    return _dt.timedelta(0) <= began - job.last_run < job.interval
+
+
+def _run_began(ctx: Context, finding: Finding, job: schedule_health.Job) -> _dt.datetime | None:
+    """When the run a scheduler line reports began, in the scheduler's local time.
+
+    `last_run`, but for a collector's fire skipped behind a run still going: that line
+    reports the earlier run, whose start `collectors.py fire` recorded. 4933b284 judged
+    the 16:30 scrape by the 17:00 skip, though it began four minutes before its fix
+    merged. A recorded start no earlier than the skip is not that run's."""
+    ran = job.last_run
+    if ran is None or finding.project == fix_cycle.DEVKIT:
+        return ran
+    if job.last_result not in schedule_health.OVERLAPPING:
+        return ran
+    began = collector_tasks.started_at(ctx.devkit_dir / collector_tasks.start_path(job.name))
+    return began if began is not None and began < ran else ran
+
+
+# A collector this machine runs whose task the scheduler has never heard of.
+UNSCHEDULED = "not scheduled on this machine"
+
+
+def unscheduled(ctx: Context, tasks: dict[str, str], listed: frozenset[str]) -> list[Finding]:
+    """A finding per scheduled collector in `tasks` that the scheduler did not list, nor
+    has when asked by name.
+
+    `schedule_health.query` answers [] for a bulk query that failed or ran past its
+    timeout, and absent from that, every collector read as unregistered: 9f5249cb filed
+    social-scraper while its task was registered and mid-scrape."""
+    return [
+        Finding(
+            COLLECTOR_KIND,
+            name,
+            f"{name}: {UNSCHEDULED}",
+            evidence=str(ctx.devkit_dir / collectors.ARTIFACT),
+        )
+        for name in sorted(tasks)
+        if name not in listed and not collector_tasks.is_registered(name, collector_tasks.run_argv)
+    ]
+
+
+# A container collector the tray shows amber or red. Its health check failing is "the
+# project's verdict, not a failure" to `collectors.py`, so `devkit-collectors` exits 0 and
+# the scheduler reports nothing: ibkr_trader's check failed for a day -- its reddit job
+# 39 runs in, on credentials never set -- with the tray the only thing that knew.
+COLLECTOR_KIND = "collector"
+# Where a row's state ends and its particulars begin: a container's uptime, a health
+# summary stamped with when it was written. Kept out of the detail, as `_JOB_WHEN` is.
+_COLLECTOR_PARTICULARS = re.compile(r" -- | \(")
+
+
+def collector_findings(
+    ctx: Context,
+    rows: list[tuple[str, str, str]] | None = None,
+    health: dict[str, dict] | None = None,
+) -> list[Finding]:
+    """A finding per collector row (`collectors.tray_rows`) that is not OK, against the
+    collector's own project, citing `collectors.py`'s log, which holds the health output.
+    Bar a failing health verdict taken from code older than its group's fix
+    (`_verdict_predates_fix`) or one failing on name lookups lately
+    (`_unresolved_lately`), and bar a silent engine (`collectors.NOT_ANSWERING`).
+    `health` is the verdicts the rows were drawn from.
+
+    A silent engine is the machine's, not a project's, and `collectors.py maintain` --
+    which revives a wedged one (`revive_engine`) -- fails on it under `log-wrap.py
+    --always`, filing it once with its own account. Filed here as well, it was a group per
+    project beside that one: 5cfe1e8a and df8dd4c0 were read off the tray at 20:11 and
+    20:19 on 2026-10-08, the first before the checkout moved onto the revive, the second
+    during the very restart that brought the engine back at 20:15."""
+    if rows is None:
+        rows = collectors.tray_rows(ctx.devkit_dir)
+        if health is None:
+            home = collectors.config.home(ctx.devkit_dir)
+            health = collectors.load_health(home / collectors.HEALTH)
+    items = triage.load(ctx.devkit_dir) if health else []
+    found: list[Finding] = []
+    for name, level, detail in rows:
+        if level == collectors.OK or detail == collectors.NOT_ANSWERING:
+            continue
+        project = name.removeprefix(collectors.ROW_PREFIX)
+        state = _COLLECTOR_PARTICULARS.split(detail, maxsplit=1)[0]
+        finding = Finding(
+            COLLECTOR_KIND,
+            project,
+            f"{project}: {state}",
+            evidence=str(ctx.devkit_dir / collectors.ARTIFACT),
+            command=f"{name}: {detail}"[:300],
+        )
+        verdict = (health or {}).get(project, {})
+        stale = _verdict_predates_fix(finding, items, verdict, ctx.now)
+        held = stale or _unresolved_lately(verdict, ctx.now)
+        if not (state.startswith(collectors.HEALTH_FAILING) and held):
+            found.append(finding)
+    return found
+
+
+def _unresolved_lately(verdict: dict, now: _dt.datetime) -> bool:
+    """Whether a verdict has said a name could not be looked up for less than
+    `collectors.UNRESOLVED_GRACE` (`collectors.UNRESOLVED_SINCE`): a night offline, and
+    a job's wait for its own next run after it, not a project's defect."""
+    since = verdict.get(collectors.UNRESOLVED_SINCE)
+    return isinstance(since, (int, float)) and now.timestamp() - since < collectors.UNRESOLVED_GRACE
+
+
+# The row a wrapped job's own `log-wrap.py --always` files for a failed run
+# (`log-wrap.FAILED_EVENT`; a hyphenated script, so spelled here rather than imported).
+FAILED_RUN_EVENT = "scheduled-job-failed"
+
+# How long a fix goes on excusing a failing verdict from code older than it: its PR's
+# merge, the checkout's fast-forward and `collectors.py`'s next pass, which redeploys.
+# Past it, a verdict still from older code is one the redeploy never reached.
+REDEPLOY_GRACE = _dt.timedelta(days=1)
+
+
+def _verdict_predates_fix(
+    finding: Finding, items: list[triage.Item], verdict: dict, now: _dt.datetime
+) -> bool:
+    """Whether a failing health verdict ran code older than `finding`'s group's latest
+    standing fix, made within `REDEPLOY_GRACE`, in a container `collectors.py` is free
+    to redeploy.
+
+    51cca249: ibkr_trader's fix merged at 22:32 and the pass refiled the group at 22:33
+    off a verdict from a day-old image, as `_ran_before_fix` saw for a scheduled job. A
+    commit holding a fix is made after its resolution, so code no newer than that cannot
+    hold it. `collectors.redeploy` moves the container onto the fix within a pass, and a
+    redeploy that fails fails `devkit-collectors` itself, so this defers a verdict and
+    hides none. A `held` redeploy can last, so it is filed at once: the evidence log
+    says why it was held."""
+    when = verdict.get(collectors.CODE_AT)
+    if verdict.get(collectors.HELD) or not isinstance(when, (int, float)):
+        return False
+    made = _last_fix(fix_findings.signature(finding), items)
+    return (
+        made is not None and when < made and now.timestamp() - made < REDEPLOY_GRACE.total_seconds()
+    )
+
+
+def _ran_before_fix(
+    checkout: Path, group: tuple, items: list[triage.Item], when: _dt.datetime, git
+) -> bool:
+    """Whether the run at `when` (naive: the scheduler's local time) executed code older
+    than `group`'s latest standing fix, in a checkout that has moved past that fix since.
+
+    cda106d0: `devkit-reap-stale` fired at 19:00:00 and the checkout fast-forwarded onto
+    the merged fix at 19:00:02, so the run reported the very failure that fix retired and
+    the group read "RECURRED ... that fix did not hold". A commit holding a fix is made
+    after its resolution, so code committed before it cannot hold it. This defers a
+    verdict by one run and never hides one: the next run executes the newer code.
+    """
+    made = _last_fix(group, items)
+    if made is None:
+        return False
+    since = when.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    ran = _commit_time(checkout, f"HEAD@{{{since}}}", git)
+    now = _commit_time(checkout, "HEAD", git)
+    return ran is not None and now is not None and ran < made <= now
+
+
+def _standing_fix(group: tuple, items: list[triage.Item]) -> triage.Item | None:
+    """The latest standing resolution of `group`, by when it was made; None if none is."""
+    ids = {item.id for item in items if item.signature == group}
+    verdict = triage.verdicts(items)
+    made = []
+    for item in items:
+        if (
+            item.event == triage.RESOLVED_EVENT
+            and item.fields.get("ref") in ids
+            and verdict.get(item.fields["ref"]) == (item.event, item.stamp)
+        ):
+            try:
+                made.append((_dt.datetime.fromisoformat(triage.resolved_at(item)), item))
+            except ValueError:  # a stamp no ledger writer produces
+                continue
+    return max(made, key=lambda pair: pair[0])[1] if made else None
+
+
+def _last_fix(group: tuple, items: list[triage.Item]) -> float | None:
+    """When the latest standing resolution of `group` was made, as a POSIX time."""
+    fix = _standing_fix(group, items)
+    return None if fix is None else _dt.datetime.fromisoformat(triage.resolved_at(fix)).timestamp()
+
+
+def _predates_fix(
+    ctx: Context, git=ship_intent.run_quiet, lookup: fix_verify.Lookup | None = None
+) -> list[str]:
+    """Retire each open failed-run row this machine's `log-wrap.py --always` filed from a
+    run of checkout code older than the merge of its group's standing fix, against that
+    fix's own PR -- so the row lands, or reopens, with it.
+
+    6a65dbe7: reap-stale failed at 19:17, before the checkout fast-forwarded onto #567 at
+    19:18 -- the fix it reported against had merged at 19:04 and was not yet running. A
+    wrapped job files its own row, so `job_findings`' `_ran_before_fix` never saw it, and
+    it read "RECURRED ... that fix did not hold". The bound is the fix's *merge*, not its
+    resolution: #565 merged between the two, so the code that ran was newer than the
+    resolution and still lacked the fix. The row's stamp is the run's end, so a
+    fast-forward during the run reads as the newer code: this can only under-retire.
+    """
+    items = triage.load(ctx.devkit_dir)
+    if lookup is None:
+        lookup = fix_verify.gh_lookup(ctx.root, ctx.projects, sweep.gh_for)
+    host = triage.harness_events.host_name()
+    lines = []
+    for item in triage.open_items(items, (FAILED_RUN_EVENT,)):
+        if item.host != host or item.project != fix_cycle.DEVKIT:
+            continue  # another machine's checkout, or a project's own, ran it
+        fix = _standing_fix(item.signature, items)
+        if fix is None or not (merged := _fix_merged_at(fix, lookup)):
+            continue  # no fix, or one in flight, which `pending_groups` already holds
+        if not _ran_before(ctx.devkit_dir, item.stamp, merged, git):
+            continue
+        ref, pr = fix.fields.get("ref", "-"), fix.fields.get("pr", "-")
+        note = (
+            f"ran code older than the fix for [{ref}] ({pr}), which merged at "
+            f"{merged.isoformat()}; the checkout moved onto it after this run"
+        )
+        made = triage.resolved_at(fix)
+        triage.resolve([item.id], note, pr=pr, root=ctx.devkit_dir, resolved=made)
+        lines.append(f"retired [{item.id}] -- {note}")
+    return lines
+
+
+def _fix_merged_at(fix: triage.Item, lookup: fix_verify.Lookup) -> _dt.datetime | None:
+    """When the PR the resolution `fix` names merged, as `fix_verify` judges it; None
+    while it has not, or when GitHub cannot say."""
+    pr = fix.fields.get("pr", "")
+    resolution = fix_verify.Resolution(fix.fields.get("ref", ""), triage.resolved_at(fix), pr, "")
+    project, what = fix_verify.target(pr)
+    if not what:
+        return None
+    merge = fix_verify.landed(resolution, lookup(project, what))
+    # `landed` returns only a merge whose `merged_at` it could read, so this parse holds.
+    return None if merge is None else _dt.datetime.fromisoformat(merge.merged_at)
+
+
+def _ran_before(checkout: Path, stamp: str, merged: _dt.datetime, git) -> bool:
+    """Whether the checkout's HEAD at ledger time `stamp` was committed before `merged`,
+    and its HEAD now was not. A merge commit is made at its PR's `mergedAt`, so a HEAD
+    older than that cannot hold it."""
+    try:
+        when = _dt.datetime.fromisoformat(stamp)
+    except ValueError:  # a stamp no ledger writer produces
+        return False
+    since = when.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    ran = _commit_time(checkout, f"HEAD@{{{since}}}", git)
+    now = _commit_time(checkout, "HEAD", git)
+    return ran is not None and now is not None and ran < merged.timestamp() <= now
+
+
+def _commit_time(checkout: Path, rev: str, git) -> float | None:
+    """`rev`'s commit time in `checkout`; None when git cannot say. A reflog that does not
+    reach back to a date answers with its oldest entry, which is not the code that ran."""
+    done = git(["git", "-C", str(checkout), "log", "-1", "--format=%ct", rev])
+    if done.returncode != 0 or "only goes back" in (done.stderr or ""):
+        return None
+    try:
+        return float(done.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _resolved_since(finding: Finding, items: list[triage.Item], when: _dt.datetime) -> bool:
+    """Whether `finding`'s group was resolved after `when` (the scheduler's local time)."""
+    since = when.astimezone(_dt.UTC).isoformat(timespec="seconds")
+    group = fix_findings.signature(finding)
+    ids = {item.id for item in items if item.signature == group}
+    verdict = triage.verdicts(items)
+    return any(
+        verdict.get(ref, ("", ""))[0] == triage.RESOLVED_EVENT and verdict[ref][1] > since
+        for ref in ids
+    )
 
 
 def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
@@ -224,12 +887,58 @@ def _harvest(ctx: Context, cursor: Path) -> list[Finding]:
         return session_friction.harvest(ctx.root, copy, ctx.now)
 
 
+# How long a merged devkit PR goes on holding the consumer failures it names: the release
+# and the adoption that carry its fix there, which the pass and the daily upgrade job each
+# drive within a day. Past it, a failure still red is one the fix did not reach.
+MERGED_FIX_HOLDS = _dt.timedelta(days=2)
+
+
+def devkit_fixes(ctx: Context, gh_for=sweep.gh_for) -> tuple[tuple[int, str], ...]:
+    """Every devkit PR open, or merged within `MERGED_FIX_HOLDS`, as `(number, body)`;
+    none when `gh` cannot say, which sends the devkit session as before.
+
+    Merged as well as open (f9ebcfd4): a consumer failure is red until the adoption that
+    carries devkit's fix merges, so a pass that held only for open PRs sent a devkit
+    session at social-scraper #23 while #483, naming it, sat merged in v0.11.37.
+    """
+    done = gh_for(ctx.devkit_dir)(
+        "pr", "list", "--state", "all", "--limit", "100", "--json", "number,body,state,mergedAt"
+    )
+    try:
+        rows = json.loads(done.stdout or "[]") if done.returncode == 0 else []
+    except ValueError:
+        return ()
+    since = ctx.now - MERGED_FIX_HOLDS
+    return tuple(
+        (row["number"], str(row.get("body") or ""))
+        for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict) and isinstance(row.get("number"), int) and _carries(row, since)
+    )
+
+
+def _carries(row: dict, since: _dt.datetime) -> bool:
+    """`row` is open, or merged at or after `since`."""
+    if row.get("state") == "OPEN":
+        return True
+    try:
+        merged = _dt.datetime.fromisoformat(str(row.get("mergedAt") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return row.get("state") == "MERGED" and merged >= since
+
+
 def _verify(ctx: Context) -> list[str]:
     items = triage.load(ctx.devkit_dir)
     lookup = fix_verify.gh_lookup(ctx.root, ctx.projects, sweep.gh_for)
+    mentions = fix_verify.gh_mentions(ctx.root, ctx.projects, sweep.gh_for)
     cache = ctx.ledger_path.parent / fix_verify.CACHE_NAME
-    outcome = fix_verify.verify(items, lookup, cache, ctx.now)
+    outcome = fix_verify.verify(items, lookup, cache, ctx.now, mentions)
     lines = []
+    for was, fix in outcome.found:
+        # The ledger names the PR that holds the fix, not the branch that never did.
+        note = f"{was.note} -- merged as {fix.url}, which names [{was.ref}]; pr= said {was.pr}"
+        triage.resolve([was.ref], note, pr=fix.url, root=ctx.devkit_dir, resolved=was.stamp)
+        lines.append(f"settled [{was.ref}] on {fix.url} -- {was.pr} never landed it")
     for ref, why in outcome.reopen:
         triage.reopen([ref], why, root=ctx.devkit_dir)
         lines.append(f"reopened [{ref}] -- {why}")
@@ -247,6 +956,87 @@ def _recheck(ctx: Context) -> list[str]:
         triage.resolve([ref], why, root=ctx.devkit_dir)
         lines.append(f"retired [{ref}] -- {why}")
     return lines
+
+
+def retire_login(ctx: Context, signed_in: str) -> list[str]:
+    """Retire each open `LOGIN_KIND` row filed before `signed_in`; lines for the record.
+
+    Nothing else retires one: the step is a person's, and the person who ran
+    `claude auth login` rarely comes back to write the resolution. 26291670 sat open for
+    three days after fixers were finishing again, telling the morning toast to log in.
+    A session that began after the row and reached an outcome is the proof the step
+    asked for, so the row goes as of that session; a refusal filed later stays open.
+    """
+    if not signed_in:
+        return []
+    marker = f"{LOGIN_KIND}: "
+    stale = [
+        item
+        for item in triage.open_items(triage.load(ctx.devkit_dir), (fix_findings.FINDING,))
+        if item.fields.get("detail", "").startswith(marker) and item.stamp < signed_in
+    ]
+    if not stale:
+        return []
+    note = f"the login works again: a fixer session begun at {signed_in} reached an outcome"
+    triage.resolve([item.id for item in stale], note, root=ctx.devkit_dir)
+    return [f"retired [{item.id}] -- {note}" for item in stale]
+
+
+def _open_untrusted(history: list[triage.Item]) -> list[triage.Item]:
+    """Each open `UNTRUSTED_KIND` row in `history`, the ledger as `triage.load` reads it."""
+    marker = f"{UNTRUSTED_KIND}: "
+    return [
+        item
+        for item in triage.open_items(history, (fix_findings.FINDING,))
+        if item.fields.get("detail", "").startswith(marker)
+    ]
+
+
+def awaiting_trust(history: list[triage.Item]) -> frozenset[str]:
+    """The projects with a launch refusal still open: `fix_send._untrusted` holds them."""
+    return frozenset(item.project for item in _open_untrusted(history))
+
+
+def retire_trusted(ctx: Context) -> list[str]:
+    """Retire each open `UNTRUSTED_KIND` row whose checkout is trusted now; lines for the
+    record. `retire_login`'s reason, and no re-send has to prove it: Claude Code's own
+    file says, and 1d0d0887 sat open a day past the step, telling the toast to take it."""
+    stale = [
+        item
+        for item in _open_untrusted(triage.load(ctx.devkit_dir))
+        if fix_reports.trusted(ctx.root / item.project)
+    ]
+    lines = []
+    for item in stale:
+        note = f"{item.project} is trusted now: Claude Code holds the prompt's answer"
+        triage.resolve([item.id], note, root=ctx.devkit_dir)
+        lines.append(f"retired [{item.id}] -- {note}")
+    return lines
+
+
+# Between a person's step and the command that retires its group: the tray cuts there
+# (`tray_state.RESOLVE_TAIL`), showing the step and leaving the command to the record.
+PERSON_RESOLVE_TAIL = " -- then: "
+
+
+def person_steps(ctx: Context) -> list[str]:
+    """Each step the open ledger awaits a person for (`triage.awaiting_person`), with
+    the command that retires its group once taken."""
+    items = triage.open_items(triage.load(ctx.devkit_dir))
+    awaiting = triage.awaiting_person(items)
+    return [
+        f"{step}{PERSON_RESOLVE_TAIL}python scripts/harness_triage.py --resolve-like "
+        f"{bucket[0].id} --note '<the step taken>'"
+        for _, bucket in triage.groups(items)
+        if (step := awaiting.get(bucket[0].signature))
+    ]
+
+
+def owed(ctx: Context) -> int:
+    """How many open ledger groups a fixer is owed: every group not awaiting a person."""
+    items = triage.open_items(triage.load(ctx.devkit_dir))
+    awaiting = triage.awaiting_person(items)
+    return sum(1 for signature, _ in triage.groups(items) if signature not in awaiting)
 
 
 def recheck_open(ctx: Context) -> list[str]:

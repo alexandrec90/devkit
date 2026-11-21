@@ -42,9 +42,10 @@ jobs:
     name: Full suite
     runs-on: ubuntu-latest
 {{#postgres}}
+    # mirror.gcr.io, not Docker Hub or ECR Public: see the same block in pr-gate.yml.
     services:
       db:
-        image: postgres:18
+        image: mirror.gcr.io/library/postgres:18
         env:
           POSTGRES_USER: {{ db_user }}
           POSTGRES_PASSWORD: {{ db_password }} # pragma: allowlist secret
@@ -58,7 +59,7 @@ jobs:
           --health-retries 5
 {{#redis}}
       redis:
-        image: redis:7
+        image: mirror.gcr.io/library/redis:7
         ports:
           - 6379:6379
         options: >-
@@ -88,10 +89,13 @@ jobs:
         run: uv run python -m alembic upgrade head
 {{/alembic}}
       - name: Application suite
+        id: application-suite
         run: uv run python scripts/run-tests.py
       - name: Harness hook tests
         # Separate from the application suite: pytest's testpaths excludes these, and
-        # they are stdlib-only by contract.
+        # they are stdlib-only by contract. After a red application suite too, so one
+        # run names both tiers' failures.
+        if: success() || steps.application-suite.outcome == 'failure'
         run: uv run python -m pytest scripts/hooks/tests/ -q
       - name: Upload test artifact
         if: failure()

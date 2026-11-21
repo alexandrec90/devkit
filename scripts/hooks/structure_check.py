@@ -33,6 +33,8 @@ Every finding is one line, `rule::path[::symbol] = value`. The gate fails when a
 is new, when a value grew, when a line is no longer true (the function shrank, the
 dependency went), or when the baseline is missing a line the code no longer earns --
 `--tighten` rewrites the file for the last two cases and refuses to do anything else.
+A rename is one new line and one gone one, which `renames` reads off the numbers and the
+report names, with the one call that moves them.
 
 ## What is not
 
@@ -63,6 +65,7 @@ from structure_baseline import (
     BASELINE_NAME,
     SIZE_HINT,
     baseline_path,
+    existing_header,
     existing_notes,
     read_baseline,
     reason_lines,
@@ -105,10 +108,12 @@ REMEDIES: dict[str, str] = {
     "component_lines": "extract child components and hooks",
     "react_state": "fold related useState calls into a reducer or a custom hook",
     "react_effects": "move effects into custom hooks, or derive the value instead",
-    "suppressions": "fix what the tool found, or name the reason on the suppression",
+    "suppressions": "fix what the tool found, or name the reason after the suppression "
+    "(`noqa: E402 - why`, `eslint-disable-line x -- why`)",
     "any_types": "give it a type; `unknown` if the shape is truly open",
     "todos": "do it, or file it and delete the comment",
-    "skipped_tests": "un-skip it, or delete it with the reason in the commit",
+    "skipped_tests": "un-skip it, or delete it with the reason in the commit; a test only this "
+    "workstation can run takes the local tier's marker instead (.claude/rules/local-e2e.md)",
     "focused_tests": "remove `.only` -- it silences every other test in the file",
     "swallowed_errors": "catch the specific exception, or re-raise after logging",
     "cycle": "break the cycle: move the shared piece below both modules",
@@ -266,13 +271,26 @@ def vendored_paths(root: Path) -> frozenset[str]:
     # and unskipped it would put devkit's TypeScript into the consumer's baseline.
     gated = literals.get("GATED_MANIFEST")
     if isinstance(gated, dict):
-        frontend = harness_config.load(root).frontend
-        if frontend.enabled:
-            prefix = str(frontend.src).replace("\\", "/").rstrip("/") + "/"
-            for name in gated.get("frontend", ()):
-                if isinstance(name, str):
-                    paths.add(prefix + name)
+        for prefix, names in _gate_prefixes(harness_config.load(root), gated):
+            paths.update(prefix + name for name in names if isinstance(name, str))
     return frozenset(paths)
+
+
+def _gate_prefixes(
+    cfg: harness_config.Config, gated: dict[object, object]
+) -> list[tuple[str, tuple[object, ...]]]:
+    """`(prefix, names)` for each gate `cfg` turns on, as `sync-devkit.gate_prefixes`
+    resolves them: the frontend's at its `src`, the desktop's from the repo root."""
+    on: list[tuple[str, object]] = []
+    if cfg.frontend.enabled:
+        on.append((str(cfg.frontend.src).replace("\\", "/").rstrip("/") + "/", "frontend"))
+    if cfg.desktop.enabled:
+        on.append(("", "desktop"))
+    return [
+        (prefix, tuple(names))
+        for prefix, gate in on
+        if isinstance(names := gated.get(gate, ()), (list, tuple))
+    ]
 
 
 def _manifest_literals(tree: ast.Module) -> dict[str, object]:
@@ -482,15 +500,16 @@ def resolve_js(spec: str, importer: str, roots: tuple[str, ...], files: set[str]
 
 
 def import_graph(
-    metrics: dict[str, scan_mod.FileMetrics], roots: tuple[str, ...]
+    metrics: dict[str, scan_mod.FileMetrics], roots: tuple[str, ...], typed: bool = False
 ) -> dict[str, set[str]]:
     """`importer -> {imported}` over the scanned files; edges to third-party code
-    are dropped, self-imports too."""
+    are dropped, self-imports too. `typed` adds the type-only imports, which close no
+    cycle and still use what they name."""
     files = set(metrics)
     graph: dict[str, set[str]] = {rel: set() for rel in files}
     for rel, m in metrics.items():
         py = PurePosixPath(rel).suffix in scan_mod.PY_SUFFIXES
-        for spec in m.modules:
+        for spec in (*m.modules, *m.type_modules) if typed else m.modules:
             target = (
                 resolve_python(spec, rel, roots, files)
                 if py
@@ -763,7 +782,7 @@ def findings(root: Path, cfg: harness_config.Config) -> list[Finding]:
         raw.extend(measure(rel, m, lim, is_test(rel, cfg)))
     graph = import_graph({r: m for r, m in metrics.items()}, roots)
     raw.extend(cycles({r: t for r, t in graph.items() if not is_test(r, cfg)}))
-    raw.extend(orphans(graph, texts, cfg))
+    raw.extend(orphans(import_graph(metrics, roots, typed=True), texts, cfg))
     raw.extend(layer_violations(metrics, graph, cfg))
     raw.extend(restrict_violations(texts, cfg))
     raw.extend(dependency_findings(root, cfg))
@@ -837,11 +856,63 @@ def verdict(
 # scanner it configures, and naming them here would make this comment a finding.
 UNRECORDABLE = frozenset(scan_mod.COUNTERS)
 
+RENAME_CALL = 'structure_check.py --tighten --record --reason "<what was renamed>"'
 
-def recordable(worse: list[Finding]) -> tuple[list[Finding], list[Finding]]:
-    """`worse`, split into what `--record` may move and what it must refuse."""
-    allowed = [f for f in worse if f.rule not in UNRECORDABLE]
-    refused = [f for f in worse if f.rule in UNRECORDABLE]
+
+def _could_be(gone: tuple[str, int], f: Finding, root: Path) -> bool:
+    """Whether the gone baseline line `(key, value)` can be what `f` was before a rename:
+    the same rule, no larger now, and for a counter a file that no longer exists -- moving
+    a `noqa` between two living files is a new decision to suppress, not a rename."""
+    rule, path, *_symbol = gone[0].split("::")
+    if rule != f.rule or gone[1] < f.value:
+        return False
+    return rule not in UNRECORDABLE or not (root / path).exists()
+
+
+def renames(
+    root: Path, worse: list[Finding], stale: list[tuple[str, int, int | None]]
+) -> list[tuple[str, Finding]]:
+    """`(gone key, new finding)` for each new finding a gone line could have become.
+
+    A baseline key is `rule::path::symbol`, so a pure rename reads as one new line and one
+    stale one: `--tighten` alone drops the stale half and leaves the gate red, and the test
+    beside it says not to add to the baseline at all (c03808d0). Nothing records what a
+    file was called before, so this is a reading of the numbers and the report words it
+    as one. It cannot loosen the ratchet: a pair never carries more than the line it
+    replaces. Each gone line answers for one new line, the largest new finding first and
+    the tightest fit, so the debt stays accounted for line by line.
+    """
+    recorded = read_baseline(baseline_path(root))
+    gone = [(key, value) for key, value, now in stale if now is None]
+    pairs: list[tuple[str, Finding]] = []
+    for f in sorted((f for f in worse if f.key not in recorded), key=lambda f: -f.value):
+        fits = [line for line in gone if _could_be(line, f, root)]
+        if fits:
+            tightest = min(fits, key=lambda line: line[1])
+            gone.remove(tightest)
+            pairs.append((tightest[0], f))
+    return pairs
+
+
+def rename_note(moved: list[tuple[str, Finding]]) -> str:
+    """The lines saying what reads as a rename and the one call that moves it, or nothing."""
+    if not moved:
+        return ""
+    pairs = "".join(f"\n  {old} -> {f.key}" for old, f in moved)
+    return (
+        f"\n{len(moved)} read(s) as a rename, the same debt under a new key:{pairs}\n"
+        f"if so, move them in one call: {RENAME_CALL}"
+    )
+
+
+def recordable(
+    worse: list[Finding], moved: list[tuple[str, Finding]] | None = None
+) -> tuple[list[Finding], list[Finding]]:
+    """`worse`, split into what `--record` may move and what it must refuse. A counter in
+    `moved` is the same count under a new path, so nobody chose anything: it may move."""
+    same_count = {f.key for _, f in moved or []}
+    allowed = [f for f in worse if f.rule not in UNRECORDABLE or f.key in same_count]
+    refused = [f for f in worse if f.rule in UNRECORDABLE and f.key not in same_count]
     return allowed, refused
 
 
@@ -870,8 +941,8 @@ def record(
     if not reason.strip():
         raise ValueError("--record needs a reason: say why the growth is the honest answer")
     path = baseline_path(root)
-    worse, _stale = verdict(root, cfg)
-    allowed, refused = recordable(worse)
+    worse, stale = verdict(root, cfg)
+    allowed, refused = recordable(worse, renames(root, worse, stale))
     if refused or not allowed:
         return [], refused
     entries = read_baseline(path)
@@ -881,9 +952,8 @@ def record(
         reason_lines(reason, stamp)
         + [f"#   {f.key} -> {f.value}" for f in sorted(allowed, key=lambda f: f.key)]
     )
-    path.write_text(
-        render_baseline(entries, [*existing_notes(path), note]), encoding="utf-8", newline="\n"
-    )
+    body = render_baseline(entries, [*existing_notes(path), note], existing_header(path))
+    path.write_text(body, encoding="utf-8", newline="\n")
     return allowed, []
 
 
@@ -907,8 +977,10 @@ def tighten(root: Path, cfg: harness_config.Config) -> tuple[int, int]:
     if dropped or lowered:
         # The `--record` log is carried through: it explains lines that are still here,
         # and a tighten that silently dropped it would leave the next reader with raised
-        # numbers and no account of who raised them.
-        path.write_text(render_baseline(kept, existing_notes(path)), encoding="utf-8", newline="\n")
+        # numbers and no account of who raised them. The header is carried through too, so
+        # a tighten's diff is the lines it dropped or lowered and nothing else.
+        body = render_baseline(kept, existing_notes(path), existing_header(path))
+        path.write_text(body, encoding="utf-8", newline="\n")
     return dropped, lowered
 
 
@@ -923,6 +995,7 @@ def report(
     stale: list[tuple[str, int, int | None]],
     lim: dict[str, int],
     advisory: list[Finding] | None = None,
+    moved: list[tuple[str, Finding]] | None = None,
 ) -> str:
     """The artifact body: everything an agent needs to fix the gate, one line each, and
     one warning line for the module-size rules that no longer fail it."""
@@ -937,6 +1010,8 @@ def report(
         for key, recorded, now in stale:
             state = "gone" if now is None else f"now {now}"
             lines.append(f"  {key} = {recorded} ({state})")
+    if moved:
+        lines.append(rename_note(moved).strip())
     if not lines:
         lines.append("structure-check: clean.")
     if advisory:
@@ -978,6 +1053,32 @@ def run_record(reason: str) -> int | None:
     for f in recorded:
         print(f"structure-check: recorded {f.key} = {f.value}")
     return None
+
+
+def failed_line(
+    worse: list[Finding],
+    stale: list,
+    artifact: str,
+    tightened: bool,
+    moved: list[tuple[str, Finding]] | None = None,
+) -> str:
+    """The status line of a failing run.
+
+    After `--tighten` it says whose verdict it is: that run exits 1 while anything is
+    still worse, so a `--record` chained after it with `&&` never runs, and the line read
+    as `--record`'s own -- recording nothing, silently (6e2a36b2). Both flags share one
+    call, which records first and then tightens. `moved` puts that call on the line
+    before `--tighten` is tried, since a rename is the case where it is the first answer.
+    """
+    line = f"structure-check: {len(worse)} worse, {len(stale)} stale"
+    if tightened and worse:
+        line += (
+            " after --tighten, which only drops and lowers; record growth in the same call"
+            ' with --tighten --record --reason "<why>"'
+        )
+    elif moved:
+        line += f"; {len(moved)} read(s) as a rename: {RENAME_CALL}"
+    return f"{line} -- see {artifact}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1030,12 +1131,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"structure-check: dropped {dropped} line(s), lowered {lowered} in {BASELINE_NAME}.")
 
     worse, stale, advisory = judge(REPO_ROOT, CFG)
-    body = report(worse, stale, limits(CFG), advisory)
-    path = write_artifact(REPO_ROOT, body)
+    moved = renames(REPO_ROOT, worse, stale)
+    path = write_artifact(REPO_ROOT, report(worse, stale, limits(CFG), advisory, moved))
     if worse or stale:
-        print(
-            f"structure-check: {len(worse)} worse, {len(stale)} stale -- see {path.relative_to(REPO_ROOT).as_posix()}"
-        )
+        artifact = path.relative_to(REPO_ROOT).as_posix()
+        print(failed_line(worse, stale, artifact, args.tighten, moved))
         return 1
     sizes = len({f.path for f in advisory})
     warned = f"; warning: {sizes} module(s) past a size limit (advisory)" if sizes else ""

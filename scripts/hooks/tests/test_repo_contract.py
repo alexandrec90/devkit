@@ -114,6 +114,7 @@ def _toml_schema() -> dict[str, frozenset[str]]:
         "paths": frozenset({"app", "tests", "unit_tests"}),
         "db": fields(cfg.DbConfig),
         "frontend": fields(cfg.FrontendConfig),
+        "desktop": fields(cfg.DesktopConfig),
         "python": fields(cfg.PythonConfig),
         "bash": fields(cfg.BashConfig),
         "docker": fields(cfg.DockerConfig),
@@ -277,6 +278,72 @@ def test_unconditional_lint_tier_has_its_script():
     assert hook._command_for(hook.CHECK_LINT) is not None
 
 
+# --- the lint runner cannot say clean having run no linter ---------------------
+# Ungated: it reads only the project's own `scripts/lint-all.py`, wired or not.
+
+# What hands a run to the tree's `.venv` when this interpreter lacks a linter: the
+# vendored `toolchain.rerun_in_venv`, which devkit's lint-all template calls, or
+# devkit's own `project_python.re_exec`.
+VENV_RERUNS = frozenset({"rerun_in_venv", "re_exec"})
+
+
+def runs_linters_from_this_interpreter(tree: ast.AST) -> bool:
+    """Whether a list in `tree` opens `[sys.executable, "-m", ...]`: a linter run as a
+    module of whatever interpreter started the script, and skipped where it has none."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.List) or len(node.elts) < 2:
+            continue
+        first, second = node.elts[:2]
+        if (
+            isinstance(first, ast.Attribute)
+            and first.attr == "executable"
+            and isinstance(first.value, ast.Name)
+            and first.value.id == "sys"
+            and isinstance(second, ast.Constant)
+            and second.value == "-m"
+        ):
+            return True
+    return False
+
+
+def hands_itself_to_the_venv(tree: ast.AST) -> bool:
+    """Whether `tree` reaches for one of `VENV_RERUNS`."""
+    return any(isinstance(n, ast.Attribute) and n.attr in VENV_RERUNS for n in ast.walk(tree))
+
+
+def test_the_venv_rerun_checks_read_the_shapes_a_lint_runner_is_written_in():
+    bare = ast.parse('subprocess.run([sys.executable, "-m", "ruff", "check"])')
+    handed = ast.parse('import toolchain\nrerun = toolchain.rerun_in_venv\nrerun(ROOT, "ruff")')
+    assert runs_linters_from_this_interpreter(bare) is True
+    assert runs_linters_from_this_interpreter(ast.parse('run(["ruff", "-m"])')) is False
+    assert hands_itself_to_the_venv(bare) is False
+    assert hands_itself_to_the_venv(handed) is True
+    assert hands_itself_to_the_venv(ast.parse("project_python.re_exec(ROOT, m, argv)")) is True
+
+
+def test_the_lint_runner_reruns_under_the_tree_venv_rather_than_skip_its_linters():
+    """A runner that calls each linter as `sys.executable -m <tool>` skips every one
+    the starting interpreter lacks, then prints `clean`. social-scraper's did exactly
+    that, run with the system Python from a tree whose `.venv` held both (1c984165).
+
+    devkit's lint-all template fixed it in `rerun_in_tree_venv`, but `templates/` is a
+    one-shot copy and every project had edited its runner, so the fix reached none of
+    them. This vendored check is what carries it: it fails a runner that never hands
+    itself to the tree's `.venv`.
+    """
+    runner = REPO_ROOT / "scripts" / "lint-all.py"
+    # No runner, or one that runs no linter as a module of its own interpreter (one that
+    # lints in a container, say), cannot skip a linter this way: it holds as it stands.
+    tree = ast.parse(runner.read_text(encoding="utf-8")) if runner.is_file() else ast.Module()
+    assert not runs_linters_from_this_interpreter(tree) or hands_itself_to_the_venv(tree), (
+        "scripts/lint-all.py runs its linters as `sys.executable -m <tool>` and never "
+        "hands itself to the tree's .venv, so under an interpreter without them it skips "
+        "each one and still says clean. Call the vendored `toolchain.rerun_in_venv` at the "
+        "top of main(), as `rerun_in_tree_venv` in devkit's "
+        "templates/core/scripts/lint-all.py.tmpl does."
+    )
+
+
 def _declared_interface(path: Path) -> str | None:
     """A script's usage text: its module-level `USAGE` string, else its docstring.
 
@@ -389,6 +456,23 @@ def test_frontend_paths_exist_when_the_tier_is_on():
         pytest.skip("project has no frontend tier")
     assert (REPO_ROOT / CFG.frontend.dir).is_dir(), f"[frontend] dir = {CFG.frontend.dir!r}"
     assert (REPO_ROOT / CFG.frontend.src).is_dir(), f"[frontend] src = {CFG.frontend.src!r}"
+
+
+@consumes_harness
+def test_desktop_paths_exist_when_the_tier_is_on():
+    """`scripts/desktop.py` builds `solution` and publishes `project`; a name that is not
+    on disk fails a release at the one moment it costs the most -- after the tag. With the
+    tier off nothing is named, so nothing is owed."""
+    named = (
+        [("[desktop] solution", CFG.desktop.solution), ("[desktop] project", CFG.desktop.project)]
+        if CFG.desktop.enabled
+        else []
+    )
+    # An empty value names the root, which is no file either.
+    missing = [
+        f"{label} = {value!r}" for label, value in named if not (REPO_ROOT / value).is_file()
+    ]
+    assert not missing, "not a file: " + ", ".join(missing)
 
 
 def undefined_npm_scripts(commands: dict[str, list[str]], scripts: Mapping[str, str]) -> list[str]:
@@ -1056,7 +1140,7 @@ def test_vendored_skills_are_not_locally_edited():
     skills = REPO_ROOT / ".claude" / "skills"
     if not skills.is_dir():
         pytest.skip("no vendored skills")
-    vendored = {"ship"}
+    vendored = {"ship", "go-nuts"}
     for name in sorted(vendored):
         skill = skills / name / "SKILL.md"
         if not skill.is_file():

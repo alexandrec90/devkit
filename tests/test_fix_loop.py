@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +24,7 @@ import harness_triage as triage
 NOW = _dt.datetime(2026, 9, 26, 12, 0, tzinfo=_dt.UTC)
 KEY = "pr:carameli:412:abc:d:dispatch"
 UPSTREAM_KEY = "upstream:2:deadbeef"
+REAL_DEVKIT_FIXES = fix_loop.devkit_fixes  # `ctx` stubs it for every other test
 
 
 @pytest.fixture
@@ -28,14 +32,26 @@ def ctx(tmp_path, monkeypatch):
     (tmp_path / "devkit").mkdir()
     monkeypatch.setattr(fix_reports, "CLAUDE_PROJECTS", tmp_path / "projects")
     monkeypatch.setattr(fix_loop.session_friction, "harvest", lambda *a, **k: [])
+    # The machine's own Task Scheduler, which `close` would otherwise read and file.
+    monkeypatch.setattr(fix_loop.schedule_health, "query", lambda *a, **k: [])
+    # Nor has it any task asked about by name.
+    monkeypatch.setattr(
+        fix_loop.collector_tasks,
+        "run_argv",
+        lambda argv: subprocess.CompletedProcess(argv, 1, "", "ERROR: no such task"),
+    )
+    # And its collectors: this machine's assignment, and a `docker ps` to judge it by.
+    monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda *a, **k: {})
+    monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda *a, **k: [])
     monkeypatch.setattr(
         fix_loop.fix_verify, "verify", lambda *a, **k: fix_loop.fix_verify.Outcome()
     )
     monkeypatch.setattr(
         fix_loop.bg_sessions, "stop_finished", lambda trees, runner: [f"x in {t}" for t in trees]
     )
-    monkeypatch.setattr(fix_loop, "working_dirs", frozenset)
+    monkeypatch.setattr(fix_loop, "session_listing", list)
     monkeypatch.setattr(fix_loop.friction_pending, "detector_fixes", lambda gh, git: [])
+    monkeypatch.setattr(fix_loop, "devkit_fixes", lambda ctx: ())  # GitHub's devkit PRs
     return fix_loop.Context(
         tmp_path,
         ["devkit", "carameli"],
@@ -107,6 +123,39 @@ def test_a_blocked_report_is_marked_filed_with_its_problem_and_read_once(ctx, mo
     assert closed.trees == {"problem-1": str(path)}
 
 
+def test_an_escalation_names_the_newest_tree_and_only_one_after_its_cutoff():
+    """a0fb253d: the 10-22 escalation named a 10-05 tree that worked an unrelated runner
+    outage under the same problem key."""
+    closed = fix_loop.Closed()
+    closed.keep_tree("p", "C:/t/new", "2026-10-22T15:30:00+00:00")
+    closed.keep_tree("p", "C:/t/old", "2026-10-05T20:00:04+00:00")
+    assert closed.trees == {"p": "C:/t/new"}, "read in no order: the later stamp wins"
+    assert closed.tree_after("p", "2026-10-19T13:01:11Z") == "C:/t/new"
+    assert closed.tree_after("p", "2026-10-22T16:00:00+00:00") == ""
+    assert closed.tree_after("p", "") == "C:/t/new"
+    assert closed.tree_after("other", "") == ""
+    closed.keep_tree("q", "C:/t/unstamped", "")
+    assert closed.tree_after("q", "") == "C:/t/unstamped"
+    assert closed.tree_after("q", "2026-10-01T00:00:00Z") == "", "no stamp, no claim it is recent"
+
+
+def test_a_report_that_waits_on_a_pr_is_marked_waiting_and_files_no_finding(ctx, monkeypatch):
+    url = "https://github.com/alexandrec90/data-lake/pull/66"
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW)
+    path = tree(
+        ctx,
+        monkeypatch,
+        blocked=f"# Fix blocked\n\nWaits on: {url}\n",
+        transcript_age=_dt.timedelta(hours=3),
+    )
+    closed, journal = close(ctx)
+    assert closed.lines == [f"carameli agent/x-0919 -- waits on {url}"]
+    assert journal.findings == []
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["waits"] == url and "blocked" not in entry
+    assert (path / "logs" / "fix-blocked.filed.md").exists()
+
+
 def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
     path = tree(
         ctx, monkeypatch, friction="- the prompt named logs/gate/ and it was empty\n\n- no .venv\n"
@@ -128,11 +177,32 @@ def test_each_friction_line_is_filed_and_the_file_read_once(ctx, monkeypatch):
         assert finding.detail in Path(finding.evidence).read_text(encoding="utf-8")
 
 
+def test_a_reports_evidence_outlives_the_tree_it_was_written_in(ctx, monkeypatch):
+    """5233840a: two friction groups cited `<box>/logs/friction.filed.md`, and the box was
+    reaped once its PR merged, so the fixer sent at them found no evidence at all. The
+    copy kept beside the ledger is what the row names; a blocked report's likewise."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        blocked="needs a database the box cannot start\n",
+        friction="- the prompt named logs/gate/ and it was empty\n",
+        transcript_age=_dt.timedelta(hours=3),
+    )
+    _, journal = close(ctx)
+    shutil.rmtree(path)  # reaped
+    by_kind = {f.kind: f for f in journal.findings}
+    for kind, said in (("reported", "logs/gate/"), ("fixer-blocked", "needs a database")):
+        evidence = Path(by_kind[kind].evidence)
+        assert evidence.is_relative_to(ctx.devkit_dir), evidence
+        assert said in evidence.read_text(encoding="utf-8"), kind
+
+
 def test_a_line_its_session_fixed_on_this_branch_is_filed_settled_by_that_branch(ctx, monkeypatch):
     """407df645, 6a3312bf, a8142f2a: a fixer's friction lines each said "fixed on this
     branch", were filed open, and sent a second fixer at three fixes already in review."""
     fixed = "evidence rewritten before it was read; fixed on this branch (`fix_findings.kept`)"
     tree(ctx, monkeypatch, friction=f"- {fixed}\n- no .venv\n")
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: True)
     _, journal = close(ctx)
     settles = {f.detail: f.settles_with for f in journal.findings if f.kind == "reported"}
     assert settles == {fixed: "agent/x-0919", "no .venv": ""}
@@ -141,17 +211,125 @@ def test_a_line_its_session_fixed_on_this_branch_is_filed_settled_by_that_branch
     assert still_open.detail == "reported: no .venv", "only what nobody fixed stays open"
 
 
+def test_a_settled_line_is_settled_as_of_when_its_session_wrote_it(ctx, monkeypatch):
+    """f0308756: filed after the tree's PR had merged, the line's resolution discounted
+    that merge as older than itself and was reopened. The file's mtime is when the
+    session said it fixed it, which the PR shipping that fix follows."""
+    path = tree(ctx, monkeypatch, friction="- x; fixed on this branch\n- no .venv\n")
+    os.utime(path / fix_reports.FRICTION_FILE, (1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: True)
+    _, journal = close(ctx)
+    since = {f.detail: f.since for f in journal.findings if f.kind == "reported"}
+    assert since == {"x; fixed on this branch": "2001-09-09T01:46:40+00:00", "no .venv": ""}
+
+
 def test_a_long_line_keeps_the_fixed_on_this_branch_it_ends_with(ctx, monkeypatch):
     """2d0bc76f: a 460-character line ended "..., fixed on this branch", the friction reader
     cut every line to 400 before anything asked, and the group was filed open against a
     fix already merging on #435. The marker is at the end by the nature of the sentence."""
     fixed = "the triage CLI counted a pending group open; " + "x" * 400 + ", fixed on this branch"
     tree(ctx, monkeypatch, friction=f"- {fixed}\n")
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: True)
     _, journal = close(ctx)
     [found] = [f for f in journal.findings if f.kind == "reported"]
     assert (found.detail, found.settles_with) == (fixed, "agent/x-0919")
     fix_loop.record(ctx, journal)
     assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
+def test_a_fixed_on_this_branch_whose_work_never_went_out_is_filed_open(ctx, monkeypatch):
+    """7c16fabc: 5d9806b0 was settled on worktree-rippling-juggling-oasis, whose intent
+    had been set aside over 19 uncommitted files -- the fix never reached its PR."""
+    tree(ctx, monkeypatch, friction="- x; fixed on this branch\n")
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
+    _, journal = close(ctx)
+    assert [f.settles_with for f in journal.findings if f.kind == "reported"] == [""]
+    fix_loop.record(ctx, journal)
+    assert len(triage.open_items(triage.load(ctx.devkit_dir))) == 1
+
+
+def test_a_fixed_on_this_branch_from_a_session_still_at_work_is_held(ctx, monkeypatch):
+    """c8d4f66b, 5d8e9962: harvested from peaceful-jumping-cocke a minute after its live
+    session wrote them, both fixes still uncommitted there, and filed open -- so a second
+    session was sent at a fix the first was still writing."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        friction="- x; Fixed on this branch (`y`).\n- no .venv\n",
+        transcript_age=_dt.timedelta(minutes=1),
+    )
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
+    closed, journal = close(ctx)
+    assert [f for f in journal.findings if f.kind == "reported"] == []
+    assert (path / fix_reports.FRICTION_FILE).is_file(), "filed away, its lines were lost"
+    assert closed.lines == [
+        "carameli agent/x-0919 -- friction held: its session is still at work on a fix"
+    ]
+
+
+def test_a_session_listed_busy_holds_its_claimed_friction_too(ctx, monkeypatch):
+    path = tree(ctx, monkeypatch, friction="- x; fixed on this branch\n")
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [{"cwd": str(path), "status": "busy"}])
+    _, journal = close(ctx)
+    assert [f for f in journal.findings if f.kind == "reported"] == []
+
+
+def test_the_held_lines_are_filed_once_the_session_goes_quiet(ctx, monkeypatch):
+    tree(
+        ctx,
+        monkeypatch,
+        friction="- x; fixed on this branch\n",
+        transcript_age=fix_reports.QUIET_AFTER + _dt.timedelta(minutes=1),
+    )
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: False)
+    _, journal = close(ctx)
+    assert [f.settles_with for f in journal.findings if f.kind == "reported"] == [""]
+
+
+@pytest.mark.parametrize(
+    ("friction", "out", "settles"),
+    [
+        ("- no .venv\n", False, [""]),  # nothing claimed: nothing to wait for
+        ("- x; fixed on this branch\n", True, ["agent/x-0919"]),  # the fix already went out
+    ],
+)
+def test_a_live_session_holds_only_a_claim_its_branch_does_not_carry_yet(
+    ctx, monkeypatch, friction, out, settles
+):
+    tree(ctx, monkeypatch, friction=friction, transcript_age=_dt.timedelta(minutes=1))
+    monkeypatch.setattr(fix_loop, "went_out", lambda path: out)
+    _, journal = close(ctx)
+    assert [f.settles_with for f in journal.findings if f.kind == "reported"] == settles
+
+
+def _porcelain(code: int, out: str):
+    seen: list[list[str]] = []
+
+    def run(argv, cwd):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+    return run, seen
+
+
+@pytest.mark.parametrize(
+    ("stage", "code", "porcelain", "expected"),
+    [
+        (fix_loop.ship_intent.SHIPPED, 0, "", True),
+        (fix_loop.ship_intent.SHIPPED, 0, " M scripts/a.py\n", False),
+        (fix_loop.ship_intent.SHIPPED, 128, "", False),
+        (fix_loop.ship_intent.FAILED, 0, "", False),
+        (fix_loop.ship_intent.EMPTY, 0, "", False),
+        (None, 0, "", False),
+    ],
+)
+def test_went_out_is_a_shipped_state_over_a_clean_tree(tmp_path, stage, code, porcelain, expected):
+    if stage:
+        fix_loop.ship_intent.write_state(tmp_path, {"stage": stage})
+    run, seen = _porcelain(code, porcelain)
+    assert fix_loop.went_out(tmp_path, run) is expected
+    assert seen == ([["git", "status", "--porcelain"]] if stage == "shipped" else [])
 
 
 def test_a_detached_tree_settles_nothing_it_has_no_branch_to_merge(ctx, monkeypatch):
@@ -219,11 +397,301 @@ def test_one_launcher_failure_is_one_detail_whichever_branch_it_hit(ctx, monkeyp
     assert details[0] == details[1]
 
 
+def test_a_launch_refused_as_untrusted_is_sent_again_and_awaits_a_person(ctx, monkeypatch):
+    """10a9810d, 18e737b9: productivity-tracker's first fixer was refused with "Workspace
+    not trusted" and filed as a session that never started, naming its fresh tree, for
+    fixers that could only be refused the same way. Trusting a checkout is a person's."""
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW - _dt.timedelta(hours=2))
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=2))
+    said = f"{fix_reports.UNTRUSTED_SAID}. Run `claude` in {path} once and accept the trust prompt"
+    done = subprocess.CompletedProcess(["claude"], 1, "", said)
+    fix_reports.record_launch(path, ["claude", "--bg", "--", "fix it all"], done)
+    closed, journal = close(ctx)
+    assert closed.lines == [
+        f"carameli agent/x-0919 -- {fix_reports.UNTRUSTED}; held until carameli is trusted"
+    ]
+    [found] = journal.findings
+    assert (found.kind, found.project) == (fix_loop.UNTRUSTED_KIND, "carameli")
+    assert found.detail == fix_loop.untrusted_detail(ctx.root / "carameli")
+    assert str(path) not in found.detail, "the checkout, not the tree a re-send replaces"
+    assert found.evidence == str(path / fix_reports.LAUNCH_FILE)
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.UNTRUSTED and fix_ledger.sends(entry) == 0
+    row = triage.parse_line(
+        fix_findings.harness_events.event_line("0", found.event, found.fields())
+    )
+    step = f"run `claude` in {ctx.root / 'carameli'} once and accept the trust prompt"
+    assert triage.person_step(row) == step
+    assert triage.awaiting_person([row]) == {row.signature: step}
+
+
 def test_a_session_gone_quiet_without_an_outcome_is_dead(ctx, monkeypatch):
     tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=5), transcript_age=_dt.timedelta(hours=3))
     _, journal = close(ctx)
     [found] = journal.findings
     assert "ended without an outcome" in found.detail and found.evidence.endswith("s.jsonl")
+
+
+def test_a_session_the_machine_restarted_under_is_sent_again_not_filed(ctx, monkeypatch):
+    """4dc413a1, 9201a08f, e2feebab: the operator powered off at 02:26 on 2026-09-30 with
+    three fixers mid-call, and each was filed as a dead fixer for a devkit session to
+    investigate, while the two resolvers' lost sends escalated #480 and #482 as blind."""
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW - _dt.timedelta(minutes=10))
+    tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=10),
+        transcript_age=_dt.timedelta(minutes=5),
+    )
+    restarted = fix_loop.Context(**{**vars(ctx), "booted": NOW - _dt.timedelta(minutes=2)})
+    closed, journal = close(restarted)
+    assert journal.findings == []
+    assert closed.lines == ["carameli agent/x-0919 -- stopped by a restart; sent again"]
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.INTERRUPTED and fix_ledger.sends(entry) == 0
+
+
+def test_a_session_refused_at_login_is_sent_again_and_filed_once_for_a_person(ctx, monkeypatch):
+    """social-scraper #90 and #91's fixers each ended at their first turn on 2026-10-18 on
+    `Login expired`, were filed as two fixers that ended without an outcome, and their
+    sends spent the day's Dependabot cap. A lapsed login is the machine's, and a person's."""
+    sent = NOW - _dt.timedelta(minutes=10)
+    fix_ledger.record(ctx.ledger_path, KEY, "n", sent, source="dependabot")
+    path = tree(ctx, monkeypatch, sent=sent, transcript_age=_dt.timedelta(minutes=9))
+    log = fix_reports.transcript_dir(path) / "s.jsonl"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f'{{"type": "assistant", "timestamp": "{sent.isoformat()}", '
+            f'"error": "{fix_reports.LOGIN_REFUSED}", "isApiErrorMessage": true}}\n'
+        )
+    closed, journal = close(ctx)
+    assert closed.lines == ["carameli agent/x-0919 -- logged out; sent again"]
+    [found] = journal.findings
+    assert (found.kind, found.project, found.detail) == (
+        "fixer-login-refused",
+        "devkit",
+        fix_loop.LOGIN_DETAIL,
+    )
+    assert found.evidence == str(log)
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.LOGGED_OUT and fix_ledger.sends(entry) == 0
+    assert fix_ledger.sent_since(fix_ledger.read_ledger(ctx.ledger_path), "dependabot", sent) == 0
+
+
+def test_a_session_cut_off_from_the_api_is_sent_again_not_filed(ctx, monkeypatch):
+    """87308413, 9f3365ec, ea559e66, 1f71e4cf: four ledger fixers in a row on 2026-11-12
+    each replied "API Error: Can't reach the API server ... (ENOTFOUND)" and nothing else,
+    a night without DNS, and each was filed as a fixer that ended without an outcome."""
+    sent = NOW - _dt.timedelta(minutes=10)
+    fix_ledger.record(ctx.ledger_path, KEY, "n", sent)
+    path = tree(ctx, monkeypatch, sent=sent, transcript_age=_dt.timedelta(minutes=9))
+    log = fix_reports.transcript_dir(path) / "s.jsonl"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f'{{"type": "assistant", "timestamp": "{sent.isoformat()}", "error": '
+            f'"server_error", "apiError": "{fix_reports.API_UNREACHABLE}", '
+            f'"isApiErrorMessage": true}}\n'
+        )
+    closed, journal = close(ctx)
+    assert journal.findings == []
+    assert closed.lines == ["carameli agent/x-0919 -- cut off from the API; sent again"]
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.OFFLINE and fix_ledger.sends(entry) == 0
+
+
+def test_a_session_whose_login_was_refused_is_one_group_awaiting_a_person(ctx, monkeypatch):
+    """2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40: on 2026-10-18 five fixers in two
+    projects each replied "Login expired" and nothing else. Each was filed as a dead
+    fixer naming its tree, so five groups, and the sweep sent at the first died the same
+    way and became the next. The login is the machine's: one group, which a person owns."""
+    refused = json.dumps(
+        {
+            "type": "assistant",
+            "timestamp": (NOW - _dt.timedelta(hours=3)).isoformat(),
+            "error": fix_reports.LOGIN_REFUSED,
+            "isApiErrorMessage": True,
+        }
+    )
+    found = []
+    for branch in ("agent/fix-harness-ledger-1018-2", "agent/fix-harness-ledger-1018-3"):
+        fix_ledger.record(ctx.ledger_path, KEY, "n", NOW - _dt.timedelta(hours=5))
+        path = tree(
+            ctx,
+            monkeypatch,
+            sent=NOW - _dt.timedelta(hours=5),
+            transcript_age=_dt.timedelta(hours=3),
+            branch=branch,
+        )
+        log = fix_reports.transcript_dir(path) / "s.jsonl"
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(refused + "\n")
+        closed, journal = close(ctx)
+        [one] = journal.findings
+        found.append(one)
+        assert closed.lines == [f"carameli {branch} -- {fix_reports.LOGGED_OUT}; sent again"]
+        entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+        assert entry["dead"] and fix_ledger.sends(entry) == 0, "no attempt spent"
+    assert found[0].detail == found[1].detail and found[0].project == "devkit"
+    assert found[0].kind == "fixer-login-refused" and found[0].evidence == str(log)
+    line = fix_findings.harness_events.event_line("0", found[0].event, found[0].fields())
+    row = triage.parse_line(line)
+    assert triage.person_step(row) == "run `claude auth login` on this machine"
+    assert triage.awaiting_person([row]) == {row.signature: triage.person_step(row)}
+
+
+def login_row(when: _dt.datetime) -> str:
+    """A `fixer-login-refused` ledger row stamped `when`, as `judge_dead` files it."""
+    found = fix_findings.Finding(fix_loop.LOGIN_KIND, "devkit", fix_loop.LOGIN_DETAIL)
+    return fix_findings.harness_events.event_line(when.isoformat(), found.event, found.fields())
+
+
+def seed(ctx, *rows: str) -> None:
+    (ctx.devkit_dir / "logs").mkdir(parents=True, exist_ok=True)
+    text = "".join(row + "\n" for row in rows)
+    (ctx.devkit_dir / "logs" / "harness-events.log").write_text(text, encoding="utf-8")
+
+
+def finished_tree(ctx, monkeypatch, began: _dt.datetime) -> Path:
+    """A stamped tree whose session began at `began` and left a ship intent: `DONE`."""
+    path = tree(ctx, monkeypatch, sent=began - _dt.timedelta(minutes=1), transcript_age=NOW - began)
+    (path / "logs" / "ship-intent.md").write_text("Fix x\n", encoding="utf-8")
+    return path
+
+
+def test_a_fixer_that_reached_an_outcome_retires_an_older_login_refusal(ctx, monkeypatch):
+    """26291670 told the morning toast to run `claude auth login` for three days after
+    fixers were finishing again: nothing retired it but a person, who had nothing to do.
+    A session that began after the row and reached an outcome is the proof it asked for."""
+    began = NOW - _dt.timedelta(minutes=50)
+    old, later = login_row(NOW - _dt.timedelta(hours=3)), login_row(NOW - _dt.timedelta(minutes=5))
+    other = f"{(NOW - _dt.timedelta(hours=4)).isoformat()}\tevent=fix-pass-finding\tproject=devkit\tdetail=x"
+    seed(ctx, other, old, later)
+    finished_tree(ctx, monkeypatch, began)
+    closed, _ = close(ctx)
+    assert closed.signed_in == began.isoformat(timespec="seconds")
+    note = f"the login works again: a fixer session begun at {closed.signed_in} reached an outcome"
+    assert f"retired [{triage.item_id(old)}] -- {note}" in closed.verified
+    still = {i.id for i in triage.open_items(triage.load(ctx.devkit_dir))}
+    assert still == {triage.item_id(other), triage.item_id(later)}, "a later refusal stays"
+
+
+def test_no_finished_fixer_retires_no_login_refusal(ctx, monkeypatch):
+    row = login_row(NOW - _dt.timedelta(hours=3))
+    seed(ctx, row)
+    tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=10),
+        transcript_age=_dt.timedelta(minutes=5),
+    )
+    closed, _ = close(ctx)
+    assert closed.signed_in == ""
+    assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [triage.item_id(row)]
+
+
+def test_retire_login_with_no_sign_in_or_nothing_older_resolves_nothing(ctx):
+    row = login_row(NOW - _dt.timedelta(hours=3))
+    seed(ctx, row)
+    assert fix_loop.retire_login(ctx, "") == []
+    earlier = fix_findings.stamp_of((NOW - _dt.timedelta(hours=4)).isoformat())
+    assert fix_loop.retire_login(ctx, earlier) == [], "a refusal filed after the session"
+    assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [triage.item_id(row)]
+    later = fix_findings.stamp_of(NOW.isoformat())
+    [line] = fix_loop.retire_login(ctx, later)
+    assert line.startswith(f"retired [{triage.item_id(row)}] -- the login works again")
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
+def untrusted_row(ctx, project: str, when: _dt.datetime = NOW) -> str:
+    """A `fixer-workspace-untrusted` ledger row, as `judge_dead` and `fix_send` file it."""
+    detail = fix_loop.untrusted_detail(ctx.root / project)
+    found = fix_findings.Finding(fix_loop.UNTRUSTED_KIND, project, detail)
+    return fix_findings.harness_events.event_line(when.isoformat(), found.event, found.fields())
+
+
+def test_awaiting_trust_names_each_project_with_an_open_refusal(ctx):
+    row = untrusted_row(ctx, "photolab")
+    seed(ctx, row, untrusted_row(ctx, "carameli"), login_row(NOW))
+    history = triage.load(ctx.devkit_dir)
+    assert fix_loop.awaiting_trust(history) == {"photolab", "carameli"}
+    triage.resolve([triage.item_id(row)], "trusted", root=ctx.devkit_dir)
+    assert fix_loop.awaiting_trust(triage.load(ctx.devkit_dir)) == {"carameli"}
+
+
+def test_retire_trusted_retires_only_a_checkout_now_trusted(ctx, monkeypatch):
+    """1d0d0887: photolab's launches stopped being refused by 2026-11-04, and the group
+    stayed open telling the morning toast to trust it. Nothing else retires one."""
+    row = untrusted_row(ctx, "photolab")
+    other = untrusted_row(ctx, "carameli")
+    seed(ctx, row, other)
+    monkeypatch.setattr(fix_reports, "trusted", lambda checkout: checkout.name == "photolab")
+    [line] = fix_loop.retire_trusted(ctx)
+    assert line.startswith(f"retired [{triage.item_id(row)}] -- ")
+    assert "photolab is trusted now" in line
+    left = triage.open_items(triage.load(ctx.devkit_dir))
+    assert [item.id for item in left] == [triage.item_id(other)]
+
+
+def test_retire_trusted_with_nothing_open_reads_nothing(ctx, monkeypatch):
+    def asked(_checkout):
+        raise AssertionError("no row, no read of the login's own file")
+
+    monkeypatch.setattr(fix_reports, "trusted", asked)
+    assert fix_loop.retire_trusted(ctx) == []
+
+
+def test_a_plan_retires_no_login_refusal(ctx, monkeypatch):
+    row = login_row(NOW - _dt.timedelta(hours=3))
+    seed(ctx, row)
+    finished_tree(ctx, monkeypatch, NOW - _dt.timedelta(minutes=50))
+    plan = fix_loop.Context(**{**vars(ctx), "mode": fix_cycle.PLAN})
+    fix_loop.close(plan, fix_findings.Journal(ctx.devkit_dir))
+    assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [triage.item_id(row)]
+
+
+def test_a_tree_with_a_session_at_work_is_named_for_the_record(ctx, monkeypatch):
+    tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=10),
+        transcript_age=_dt.timedelta(minutes=2),
+    )
+    closed, _ = close(ctx)
+    assert closed.at_work == ["carameli agent/x-0919"]
+
+
+def test_person_steps_name_each_awaited_step_and_owed_counts_the_rest(ctx):
+    """The tray's red rows and its fixers row (`tray_state.fix_pass_states`): a person's
+    step is owed to the person, every other open group to a fixer."""
+    row = login_row(NOW - _dt.timedelta(hours=3))
+    seed(ctx, row, f"{NOW.isoformat()}\tevent=fix-pass-finding\tproject=devkit\tdetail=x")
+    assert fix_loop.person_steps(ctx) == [
+        "run `claude auth login` on this machine -- then: python scripts/harness_triage.py "
+        f"--resolve-like {triage.item_id(row)} --note '<the step taken>'"
+    ]
+    assert fix_loop.owed(ctx) == 1
+
+
+def test_an_empty_ledger_owes_nothing_and_awaits_no_one(ctx):
+    assert fix_loop.person_steps(ctx) == [] and fix_loop.owed(ctx) == 0
+
+
+def test_judging_a_dead_session_in_plan_mode_files_it_and_writes_nothing(ctx, monkeypatch):
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW)
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=5))
+    [one] = fix_reports.read_trees(ctx.root, ctx.projects)
+    plan = fix_loop.Context(**{**vars(ctx), "mode": fix_cycle.PLAN})
+    journal = fix_findings.Journal(ctx.devkit_dir)
+    where = "carameli agent/x-0919"
+    assert fix_loop.judge_dead(plan, one, where, fix_reports.NO_OUTCOME, "t.jsonl", journal) == []
+    assert [f.kind for f in journal.findings] == ["fixer-no-outcome"]
+    restart = fix_reports.INTERRUPTED
+    assert fix_loop.judge_dead(plan, one, where, restart, "t.jsonl", journal) == [
+        f"{where} -- {restart}; sent again"
+    ]
+    assert len(journal.findings) == 1, "a restart files nothing"
+    assert "dead" not in fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert "dead" not in fix_reports.read_stamp(path)
 
 
 def test_a_working_devkit_session_is_the_harness_busy(ctx, monkeypatch):
@@ -267,15 +735,15 @@ def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ct
     (path / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
     closed, _ = close(ctx)
     assert closed.busy == {} and closed.harness_busy == "", "idle: finished, holds nothing"
-    listed = [{"kind": "background", "status": "busy", "cwd": str(path)}]
-    monkeypatch.setattr(fix_loop, "working_dirs", lambda: fix_loop.bg_sessions.working(listed))
+    listed = [{"kind": "background", "state": "working", "cwd": str(path)}]
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: listed)
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
     assert closed.harness_busy == str(path)
 
 
 def test_the_session_listing_is_read_from_claude_agents(monkeypatch):
-    rows = '[{"kind": "background", "status": "busy", "cwd": "C:\\\\ws\\\\t"}]'
+    rows = '[{"kind": "background", "state": "working", "cwd": "C:\\\\ws\\\\t"}]'
     seen = []
 
     def runner(argv, **_kwargs):
@@ -283,7 +751,8 @@ def test_the_session_listing_is_read_from_claude_agents(monkeypatch):
         return subprocess.CompletedProcess(argv, 0, rows, "")
 
     monkeypatch.setattr(fix_loop.ship_intent, "run_quiet", runner)
-    assert fix_loop.working_dirs() == frozenset({"c:/ws/t"})
+    listing = fix_loop.session_listing()
+    assert fix_loop.bg_sessions.working(listing) == frozenset({"c:/ws/t"})
     assert seen == [["claude", "agents", "--json"]]
 
 
@@ -360,7 +829,9 @@ def test_verify_reopens_what_did_not_land(ctx, monkeypatch):
     outcome = fix_loop.fix_verify.Outcome(reopen=[(ref, "closed unmerged")])
     monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: outcome)
     closed, _ = close(ctx)
-    assert closed.lines == [f"reopened [{ref}] -- closed unmerged"]
+    assert closed.verified == [f"reopened [{ref}] -- closed unmerged"]
+    # Not a `blocked` row: the record read a verdict on the ledger as a stuck session.
+    assert closed.lines == []
     assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [ref]
 
 
@@ -375,10 +846,30 @@ def test_verify_retires_what_was_filed_while_the_merged_fix_waited(ctx, monkeypa
     outcome = fix_loop.fix_verify.Outcome(covered=[(ref, "filed while #434 waited", "u/434")])
     monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: outcome)
     closed, _ = close(ctx)
-    assert f"retired [{ref}] -- filed while #434 waited" in closed.lines
+    assert f"retired [{ref}] -- filed while #434 waited" in closed.verified
     assert triage.open_items(triage.load(ctx.devkit_dir)) == []
     [resolution] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
     assert resolution.fields["pr"] == "u/434"
+
+
+def test_verify_names_the_merged_pr_that_held_a_fix_its_branch_never_landed(ctx, monkeypatch):
+    """950c4a96: the ledger reads the PR that holds the fix, keeping when it was made."""
+    monkeypatch.setattr(fix_loop.fix_reports, "read_trees", lambda root, projects: [])
+    row = f"{NOW.isoformat()}\tevent=fix-pass-finding\tproject=devkit\tdetail=x"
+    (ctx.devkit_dir / "logs").mkdir(parents=True)
+    (ctx.devkit_dir / "logs" / "harness-events.log").write_text(row + "\n", encoding="utf-8")
+    ref = triage.item_id(row)
+    made = (NOW - _dt.timedelta(days=3)).isoformat()
+    was = fix_loop.fix_verify.Resolution(ref, made, "agent/x-3", "split by cause")
+    fix = fix_loop.fix_verify.Pr(fix_loop.fix_verify.LANDED, NOW.isoformat(), "u/440")
+    outcome = fix_loop.fix_verify.Outcome(found=[(was, fix)])
+    monkeypatch.setattr(fix_loop.fix_verify, "verify", lambda *a, **k: outcome)
+    closed, _ = close(ctx)
+    assert f"settled [{ref}] on u/440 -- agent/x-3 never landed it" in closed.verified
+    [resolution] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    assert resolution.fields["pr"] == "u/440"
+    assert resolution.fields["note"].startswith("split by cause -- merged as u/440")
+    assert triage.resolved_at(resolution) == made
 
 
 def test_a_friction_row_todays_detectors_would_not_file_is_retired(ctx, monkeypatch):
@@ -391,7 +882,7 @@ def test_a_friction_row_todays_detectors_would_not_file_is_retired(ctx, monkeypa
     ref = triage.item_id(row)
     monkeypatch.setattr(fix_loop.session_friction, "outdated", lambda items: [(ref, "gone")])
     closed, _ = close(ctx)
-    assert f"retired [{ref}] -- gone" in closed.lines
+    assert f"retired [{ref}] -- gone" in closed.verified
     assert triage.open_items(triage.load(ctx.devkit_dir)) == []
 
 
@@ -461,6 +952,604 @@ def test_a_plan_harvest_reads_from_the_real_cursor_and_leaves_it_where_it_was(ct
     assert cursor.read_text(encoding="utf-8").startswith('{"t.jsonl"'), "the cursor did not move"
 
 
+def _job(name: str, result: int, ran: _dt.datetime) -> fix_loop.schedule_health.Job:
+    later = ran + _dt.timedelta(minutes=15)
+    return fix_loop.schedule_health.Job(
+        name, True, result, ran.replace(tzinfo=None), later.replace(tzinfo=None)
+    )
+
+
+def test_a_failing_scheduled_job_is_filed_whatever_wraps_it(ctx):
+    """Only `log-wrap.py --always` jobs filed their failures, and eight of twelve ran
+    bare: reconcile exited 1 every 15 minutes over four undeletable husks and six
+    stranded boxes, and no pass ever saw it (2026-09-27)."""
+    ran = NOW - _dt.timedelta(minutes=5)
+    [found] = fix_loop.job_findings(ctx, [_job("devkit-worktree-reconcile", 1, ran)])
+    assert (found.kind, found.project) == (fix_loop.JOB_KIND, "devkit")
+    assert found.detail == "devkit-worktree-reconcile: last run failed (exit 1)", "no time in it"
+    assert found.evidence == "", "no reconcile.log was written, so none is cited"
+    healthy = _job("devkit-worktree-reconcile", 0, ran)
+    assert fix_loop.job_findings(ctx, [healthy]) == []
+
+
+def test_a_job_failure_names_the_failing_runs_kept_copy_as_its_evidence(ctx):
+    """3a8c74a3 named `reconcile.log`, which the next clean pass rewrote before any
+    sweep read it; the run's `.failed.log` copy is what survives."""
+    ran = _dt.datetime.now() - _dt.timedelta(minutes=5)
+    kept = ctx.devkit_dir / "logs" / "reconcile.failed.log"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("# exit=1\n", encoding="utf-8")
+    job = fix_loop.schedule_health.Job("devkit-worktree-reconcile", True, 1, ran, None)
+    [found] = fix_loop.job_findings(ctx, [job])
+    assert "reconcile.failed" in Path(found.evidence).name
+    assert Path(found.evidence).read_text(encoding="utf-8") == "# exit=1\n"
+
+
+def _overlapped(ctx, tasks, ran):
+    job = fix_loop.schedule_health.Job(
+        "social-scraper", True, fix_loop.schedule_health.SCHED_REFUSED_ALREADY_RUNNING, ran, None
+    )
+    [found] = fix_loop.job_findings(ctx, [job], tasks=tasks)
+    return found
+
+
+def test_a_job_findings_evidence_is_a_copy_the_next_run_cannot_overwrite(ctx):
+    """631737a8 cited `logs/collector-social-scraper.log`, which every half-hourly run
+    rewrites: by triage it held a later, passing run and nothing of the overlap."""
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    log = ctx.devkit_dir / tasks["social-scraper"]
+    log.parent.mkdir(parents=True)
+    log.write_text("13:00 run: 54 min, outlived the 13:30 fire\n", encoding="utf-8")
+    found = _overlapped(ctx, tasks, _dt.datetime.now() - _dt.timedelta(minutes=5))
+    log.write_text("14:00 run: passed\n", encoding="utf-8")
+    assert Path(found.evidence) != log
+    assert "outlived the 13:30 fire" in Path(found.evidence).read_text(encoding="utf-8")
+
+
+def test_an_artifact_older_than_the_reported_run_is_not_cited_as_its_evidence(ctx):
+    """631737a8 was filed two minutes after the skipped 13:30 fire, while the 13:00 run
+    that overlapped it was still going: the log on disk was the 12:30 run's."""
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    log = ctx.devkit_dir / tasks["social-scraper"]
+    log.parent.mkdir(parents=True)
+    log.write_text("12:30 run: passed\n", encoding="utf-8")
+    found = _overlapped(ctx, tasks, _dt.datetime.now() + _dt.timedelta(minutes=1))
+    assert found.evidence == ""
+    assert "before this run" in found.command
+
+
+def test_devkit_fixes_are_the_open_prs_and_those_merged_inside_the_hold(ctx):
+    """f9ebcfd4: a merged fix still holds the consumer failures it names until adoption
+    carries it there; one merged before the hold, or closed unmerged, holds nothing."""
+    merged = (NOW - _dt.timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    stale = (NOW - fix_loop.MERGED_FIX_HOLDS - _dt.timedelta(minutes=1)).isoformat()
+    rows = [
+        {"number": 490, "body": "open", "state": "OPEN", "mergedAt": None},
+        {"number": 483, "body": "merged", "state": "MERGED", "mergedAt": merged},
+        {"number": 470, "body": "old", "state": "MERGED", "mergedAt": stale},
+        {"number": 480, "body": "closed", "state": "CLOSED", "mergedAt": None},
+        {"number": "x", "body": "malformed", "state": "OPEN"},
+    ]
+    asked: list[tuple[str, ...]] = []
+
+    def gh_for(_root):
+        def gh(*args):
+            asked.append(args)
+            return subprocess.CompletedProcess(args, 0, fix_loop.json.dumps(rows), "")
+
+        return gh
+
+    assert REAL_DEVKIT_FIXES(ctx, gh_for) == ((490, "open"), (483, "merged"))
+    assert "--state" in asked[0] and "all" in asked[0]
+
+
+def test_devkit_fixes_holds_nothing_when_gh_cannot_say(ctx):
+    def failing(_root):
+        return lambda *a: subprocess.CompletedProcess(a, 1, "", "gh: not logged in")
+
+    def garbled(_root):
+        return lambda *a: subprocess.CompletedProcess(a, 0, "{not json", "")
+
+    assert REAL_DEVKIT_FIXES(ctx, failing) == ()
+    assert REAL_DEVKIT_FIXES(ctx, garbled) == ()
+
+
+def test_a_job_failures_command_reads_the_checkout_the_evidence_names(ctx, monkeypatch, tmp_path):
+    """104d356c: a pass run from a supervisor's tree filed "no logs/reconcile.log" beside
+    evidence naming the checkout's kept copy, because the hint stat'ed the tree's own
+    empty `logs/`. Both halves read `ctx.devkit_dir`."""
+    monkeypatch.setattr(fix_loop.schedule_health, "REPO_ROOT", tmp_path / "a-tree")
+    ran = _dt.datetime.now() - _dt.timedelta(minutes=5)
+    kept = ctx.devkit_dir / "logs" / "reconcile.failed.log"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("# exit=1\n", encoding="utf-8")
+    job = fix_loop.schedule_health.Job("devkit-worktree-reconcile", True, 1, ran, None)
+    [found] = fix_loop.job_findings(ctx, [job])
+    assert found.command.endswith("see logs/reconcile.failed.log"), found.command
+
+
+def test_a_job_failure_resolved_after_that_run_is_not_filed_again_until_it_recurs(ctx):
+    """The scheduler repeats a daily job's last result for a day after its fix lands; a
+    group resolved since that run is not reopened by the same run, only by a later one."""
+    ran = NOW - _dt.timedelta(hours=3)
+    job = _job("devkit-installers", 2, ran)
+    [found] = fix_loop.job_findings(ctx, [job])
+    fix_findings.record_all([found], [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "fixed", root=ctx.devkit_dir)
+    assert fix_loop.job_findings(ctx, [job]) == [], "resolved after the run it reports"
+    again = _job("devkit-installers", 2, _dt.datetime.now(_dt.UTC) + _dt.timedelta(days=1))
+    assert len(fix_loop.job_findings(ctx, [again])) == 1, "it failed again after the fix"
+
+
+def _resolved_job(ctx) -> tuple[fix_loop.schedule_health.Job, float]:
+    """A `devkit-reap-stale` failure filed and resolved, then failing again a minute
+    after the resolution; with the resolution's POSIX time."""
+    [found] = fix_loop.job_findings(ctx, [_job("devkit-reap-stale", 2, NOW)])
+    fix_findings.record_all([found], [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "kept the tree whole", root=ctx.devkit_dir)
+    [made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    ran = _dt.datetime.now() + _dt.timedelta(minutes=1)  # the scheduler's local time
+    return fix_loop.schedule_health.Job("devkit-reap-stale", True, 2, ran, None), (
+        _dt.datetime.fromisoformat(made.stamp).timestamp()
+    )
+
+
+def _git_at(ran: float, head: float, asked: list[str], code: int = 0, stderr: str = ""):
+    """A git whose checkout ran a commit made at `ran` and now has one made at `head`."""
+
+    def git(argv, **_):
+        asked.append(argv[-1])
+        when = head if argv[-1] == "HEAD" else ran
+        return subprocess.CompletedProcess(argv, code, f"{when:.0f}\n", stderr)
+
+    return git
+
+
+def test_a_job_run_on_code_older_than_its_fix_does_not_reopen_it(ctx):
+    """cda106d0: reap-stale fired at 19:00:00 and the checkout fast-forwarded onto the
+    merged fix at 19:00:02, so the run that predated the fix was filed as the fix not
+    holding. The run's code is the checkout's HEAD at the run's start, off its reflog."""
+    job, made = _resolved_job(ctx)
+    asked: list[str] = []
+    git = _git_at(made - 600, made + 60, asked)
+    assert fix_loop.job_findings(ctx, [job], git) == [], "the next run tests the fix"
+    since = job.last_run.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    assert f"HEAD@{{{since}}}" in asked, asked
+
+
+@pytest.mark.parametrize(
+    ("ran", "head", "code", "stderr", "why"),
+    [
+        (60, 120, 0, "", "the run had the fix and failed anyway"),
+        (-600, -300, 0, "", "the checkout never moved past the fix: nothing newer will run"),
+        (-600, 60, 128, "fatal: not a git repository", "git cannot say"),
+        (-600, 60, 0, "warning: log for 'HEAD' only goes back to Tue", "reflog too short"),
+    ],
+)
+def test_a_job_run_that_could_have_held_its_fix_is_filed(ctx, ran, head, code, stderr, why):
+    job, made = _resolved_job(ctx)
+    git = _git_at(made + ran, made + head, [], code, stderr)
+    assert len(fix_loop.job_findings(ctx, [job], git)) == 1, why
+
+
+SCRAPER_TASKS = {"social-scraper": "logs/collector-social-scraper.log"}
+
+
+def _overlap_after_fix(ctx) -> tuple[fix_loop.schedule_health.Job, float, Path]:
+    """social-scraper's overlap filed and resolved, then its fire skipped again 40 min
+    after the resolution; with the resolution's POSIX time and where a fire records its
+    start, which nothing has written yet."""
+    found = _overlapped(ctx, SCRAPER_TASKS, _dt.datetime.now() - _dt.timedelta(hours=2))
+    fix_findings.record_all([found], [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "ended a stuck scrape at its hard deadline", root=ctx.devkit_dir)
+    [made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    skipped = _dt.datetime.now() + _dt.timedelta(minutes=40)  # the scheduler's local time
+    job = fix_loop.schedule_health.Job(
+        "social-scraper", True, fix_loop.schedule_health.SCHED_REFUSED_ALREADY_RUNNING, skipped
+    )
+    marker = ctx.devkit_dir / fix_loop.collector_tasks.start_path("social-scraper")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    return job, _dt.datetime.fromisoformat(made.stamp).timestamp(), marker
+
+
+def test_an_overlap_behind_a_run_begun_before_the_fix_is_judged_by_that_runs_start(ctx):
+    """4933b284: social-scraper's 17:00 fire was skipped behind the 16:30 run, which began
+    four minutes before the hard-deadline fix merged into social-scraper. The pass asked
+    devkit's reflog about 17:00 and filed the fix as not holding. The run that overlapped
+    ran the project's code, as it stood when that run began."""
+    job, made, marker = _overlap_after_fix(ctx)
+    began = job.last_run - _dt.timedelta(minutes=30)  # after the resolution, before the skip
+    marker.write_text(began.astimezone().isoformat(), encoding="utf-8")
+    asked: list[list[str]] = []
+
+    def git(argv, **_):
+        asked.append(argv)
+        when = made + 60 if argv[-1] == "HEAD" else made - 600
+        return subprocess.CompletedProcess(argv, 0, f"{when:.0f}\n", "")
+
+    assert fix_loop.job_findings(ctx, [job], git, SCRAPER_TASKS) == [], "the next run tests it"
+    since = began.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    checkout = str(ctx.root / "social-scraper")
+    assert asked[0] == ["git", "-C", checkout, "log", "-1", "--format=%ct", f"HEAD@{{{since}}}"]
+
+
+@pytest.mark.parametrize("began", [None, 1], ids=["no start recorded", "recorded after the skip"])
+def test_an_overlap_with_no_earlier_recorded_start_is_judged_by_the_skipped_fire(ctx, began):
+    """No start -- a fire from before `collectors.py` recorded one -- or one no earlier
+    than the skip, which cannot be the run that held the task: the skip's own time."""
+    job, made, marker = _overlap_after_fix(ctx)
+    if began is not None:
+        marker.write_text(
+            (job.last_run + _dt.timedelta(minutes=began)).astimezone().isoformat(), "utf-8"
+        )
+    asked: list[str] = []
+    found = fix_loop.job_findings(ctx, [job], _git_at(made + 60, made + 120, asked), SCRAPER_TASKS)
+    assert len(found) == 1, "the run had the fix and overlapped anyway"
+    since = job.last_run.astimezone(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S +0000")
+    assert asked[0] == f"HEAD@{{{since}}}"
+
+
+def _own_refused_fire(ctx, minutes_before_the_pass: int) -> fix_loop.schedule_health.Job:
+    """The pass's own task, refused at a fire that many minutes before this pass began."""
+    fire = ctx.now.astimezone() - _dt.timedelta(minutes=minutes_before_the_pass)
+    return fix_loop.schedule_health.Job(
+        fix_loop.OWN_TASK,
+        True,
+        fix_loop.schedule_health.SCHED_REFUSED_ALREADY_RUNNING,
+        fire.replace(tzinfo=None),
+        (fire + _dt.timedelta(minutes=30)).replace(tzinfo=None),
+    )
+
+
+def test_a_pass_does_not_report_the_fire_it_is_running_under(ctx):
+    """c4192c14: the pass begun at 22:00:58 read its own task as overlapped at 22:00, and
+    its own unfinished record as an earlier run's."""
+    assert fix_loop.job_findings(ctx, [_own_refused_fire(ctx, 1)], tasks={}) == []
+
+
+def test_a_pass_that_outlived_a_fire_of_its_own_is_still_filed(ctx):
+    """Begun before the refused fire: this run is what held the task past it."""
+    [found] = fix_loop.job_findings(ctx, [_own_refused_fire(ctx, -5)], tasks={})
+    assert found.kind == fix_loop.JOB_KIND
+
+
+def test_a_refused_fire_older_than_this_pass_s_half_hour_is_still_filed(ctx):
+    assert len(fix_loop.job_findings(ctx, [_own_refused_fire(ctx, 45)], tasks={})) == 1
+
+
+def test_a_job_failure_never_resolved_asks_git_nothing(ctx):
+    asked: list[str] = []
+    job = _job("devkit-reap-stale", 2, NOW)
+    assert len(fix_loop.job_findings(ctx, [job], _git_at(0, 0, asked))) == 1
+    assert asked == []
+
+
+def _wrapped_failure(ctx, said: str, **fields: str) -> str:
+    """A `log-wrap.py --always` row for a failed Reap Stale run; returns its id."""
+    row = {"project": "devkit", "message": "unattended task 'Scheduled: Reap Stale' failed"}
+    row |= {"cause": "error: the process table could not be read", "said": said, **fields}
+    triage.harness_events.record(fix_loop.FAILED_RUN_EVENT, tuple(row.items()), root=ctx.devkit_dir)
+    [item] = [i for i in triage.load(ctx.devkit_dir) if i.fields.get("said") == said]
+    return item.id
+
+
+def _resolved_then_failed(ctx, **fields: str) -> tuple[str, float]:
+    """A wrapped failure resolved against a branch, then a second one of its group;
+    with the second's id and, as a POSIX time, when that branch's PR merged: an hour
+    after the resolution."""
+    first = _wrapped_failure(ctx, "first")
+    triage.resolve([first], "gave the table read room", pr="agent/x", root=ctx.devkit_dir)
+    [made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    merged = _dt.datetime.fromisoformat(made.stamp) + _dt.timedelta(hours=1)
+    return _wrapped_failure(ctx, "again", **fields), merged.timestamp()
+
+
+def _merged_at(when: float | None, asked: list[tuple[str, str]] | None = None):
+    """A `fix_verify.Lookup` whose one PR merged at `when`, or is still open at None."""
+
+    def lookup(project, what):
+        (asked if asked is not None else []).append((project, what))
+        if when is None:
+            return [fix_loop.fix_verify.Pr("OPEN")]
+        stamp = _dt.datetime.fromtimestamp(when, _dt.UTC).isoformat()
+        return [fix_loop.fix_verify.Pr("MERGED", stamp, "https://github.com/o/devkit/pull/9")]
+
+    return lookup
+
+
+def test_a_wrapped_run_on_code_older_than_its_fix_is_retired_against_that_fix(ctx):
+    """6a65dbe7: reap-stale failed at 19:17 and the checkout fast-forwarded onto the fix,
+    merged at 19:04, only at 19:18. The wrapper filed the row itself, so `job_findings`'
+    check never saw it and the group read "RECURRED ... that fix did not hold". The code
+    that ran was committed *after* the resolution (#565 merged between), so the bound is
+    the merge. Retired against the fix's own PR, made when the fix was, so `fix_verify`
+    lands or reopens it with that fix."""
+    again, merged = _resolved_then_failed(ctx)
+    asked: list[str] = []
+    looked: list[tuple[str, str]] = []
+    git = _git_at(merged - 1800, merged, asked)
+    [line] = fix_loop._predates_fix(ctx, git, _merged_at(merged, looked))
+    assert again in line, line
+    assert looked == [("", "agent/x")]
+    items = triage.load(ctx.devkit_dir)
+    assert triage.open_items(items) == []
+    [mine] = [i for i in items if i.fields.get("ref") == again]
+    assert mine.fields["pr"] == "agent/x"
+    assert triage.resolved_at(mine) == triage.resolved_at(
+        next(i for i in items if i.event == triage.RESOLVED_EVENT)
+    )
+    assert any(rev.startswith("HEAD@{") for rev in asked), asked
+
+
+@pytest.mark.parametrize(
+    ("ran", "head", "fields", "why"),
+    [
+        (0, 60, {}, "the run had the merge and failed anyway"),
+        (-600, -300, {}, "the checkout never moved onto the merge"),
+        (-600, 60, {"host": "the-laptop"}, "another machine's checkout ran it"),
+        (-600, 60, {"project": "carameli"}, "a project's own task ran it"),
+    ],
+)
+def test_a_wrapped_run_that_could_have_held_its_fix_stays_open(ctx, ran, head, fields, why):
+    again, merged = _resolved_then_failed(ctx, **fields)
+    git = _git_at(merged + ran, merged + head, [])
+    assert fix_loop._predates_fix(ctx, git, _merged_at(merged)) == [], why
+    assert [i.id for i in triage.open_items(triage.load(ctx.devkit_dir))] == [again], why
+
+
+def test_a_wrapped_run_whose_fix_has_not_merged_asks_git_nothing(ctx):
+    """In flight, the group is `pending_groups`' to hold, not a run to excuse."""
+    _resolved_then_failed(ctx)
+    asked: list[str] = []
+    assert fix_loop._predates_fix(ctx, _git_at(0, 0, asked), _merged_at(None)) == []
+    assert asked == []
+
+
+def test_a_wrapped_failure_never_resolved_asks_nothing(ctx):
+    _wrapped_failure(ctx, "only")
+    asked: list[str] = []
+    looked: list[tuple[str, str]] = []
+    assert fix_loop._predates_fix(ctx, _git_at(0, 0, asked), _merged_at(0, looked)) == []
+    assert asked == looked == []
+
+
+def test_a_failing_scheduled_collector_is_asked_about_and_filed_against_its_project(
+    ctx, monkeypatch
+):
+    """A host collector's task is named after its project, not `devkit-*`, so the pass's
+    query never returned it while the tray, asking with `also=`, showed it red."""
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    asked = []
+    ran = _dt.datetime.now() - _dt.timedelta(minutes=5)
+    log = ctx.devkit_dir / tasks["social-scraper"]
+    log.parent.mkdir(parents=True)
+    log.write_text("exit 1\n", encoding="utf-8")
+    job = fix_loop.schedule_health.Job("social-scraper", True, 1, ran, None)
+    monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda root: tasks)
+    monkeypatch.setattr(
+        fix_loop.schedule_health, "query", lambda *a, also=frozenset(): asked.append(also) or [job]
+    )
+    [found] = fix_loop.job_findings(ctx)
+    assert asked == [frozenset(tasks)]
+    assert (found.kind, found.project) == (fix_loop.JOB_KIND, "social-scraper")
+    assert found.detail == "social-scraper: last run failed (exit 1)"
+    assert "collector-social-scraper" in Path(found.evidence).name
+
+
+_WRAPPED = 'pythonw.exe "C:\\d\\scripts\\log-wrap.py" --always "Scheduled: Reconcile" -- python x'
+
+
+def test_a_wrapped_jobs_failed_run_is_left_to_its_wrapper(ctx):
+    """`log-wrap.py --always` files every failed run as `scheduled-job-failed`; the
+    snapshot of the same run filed a second, `fix-pass-finding` group beside it, and
+    resolving one left the other open. What only the scheduler can say -- disabled,
+    stale, never ran -- is still the pass's to file."""
+    ran = NOW.astimezone().replace(tzinfo=None) - _dt.timedelta(minutes=5)
+    failed = fix_loop.schedule_health.Job("devkit-worktree-reconcile", True, 1, ran, None, _WRAPPED)
+    assert fix_loop.job_findings(ctx, [failed]) == []
+    off = fix_loop.schedule_health.Job("devkit-worktree-reconcile", False, 0, ran, None, _WRAPPED)
+    [found] = fix_loop.job_findings(ctx, [off])
+    assert "disabled" in found.detail
+
+
+def test_a_collector_this_machine_runs_with_no_task_is_filed(ctx, monkeypatch):
+    """The tray paints a run collector the scheduler has no task for red ("not scheduled
+    on this machine"); the query simply omits it, so the pass had nothing to file."""
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda root: tasks)
+    [found] = fix_loop.job_findings(ctx)  # the fixture's scheduler returns no task at all
+    assert (found.kind, found.project) == (fix_loop.COLLECTOR_KIND, "social-scraper")
+    assert found.detail == "social-scraper: not scheduled on this machine"
+
+
+def test_unscheduled_names_only_the_tasks_the_scheduler_did_not_list(ctx):
+    tasks = {"a": "logs/collector-a.log", "b": "logs/collector-b.log"}
+    assert [f.project for f in fix_loop.unscheduled(ctx, tasks, frozenset({"a"}))] == ["b"]
+    assert fix_loop.unscheduled(ctx, tasks, frozenset(tasks)) == []
+
+
+def test_a_task_the_bulk_query_missed_but_the_scheduler_has_is_not_filed(ctx, monkeypatch):
+    """9f5249cb: social-scraper's task was registered and mid-run when the pass filed it
+    "not scheduled on this machine". `schedule_health.query` reads a failed or timed-out
+    `schtasks /Query /V` as no tasks at all, so absence from it is asked again by name."""
+    asked = []
+
+    def run(argv):
+        asked.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "<Task/>", "")
+
+    monkeypatch.setattr(fix_loop.collector_tasks, "run_argv", run)
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda root: tasks)
+    assert fix_loop.job_findings(ctx) == []  # the fixture's bulk query lists nothing
+    assert [argv[argv.index("/TN") + 1] for argv in asked] == ["social-scraper"]
+
+
+# Verbatim from the tray on 2026-10-03: ibkr_trader's reddit job 39 runs into failing on
+# credentials never set, `devkit-collectors` exiting 0 over it, and no pass ever filing it.
+_IBKR_HEALTH = (
+    "health check failing -- exit 1: health artifact: logs/scheduler-health.json "
+    "(written 2026-10-03T19:47:51.238551+00:00)"
+)
+
+
+def test_a_collector_the_tray_shows_failing_is_filed_against_its_project(ctx):
+    rows = [
+        ("collector: ibkr_trader", fix_loop.collectors.WARN, _IBKR_HEALTH),
+        ("collector: sports_betting", fix_loop.collectors.OK, "running (Up 20 hours)"),
+    ]
+    [found] = fix_loop.collector_findings(ctx, rows)
+    assert (found.kind, found.project) == (fix_loop.COLLECTOR_KIND, "ibkr_trader")
+    assert found.detail == "ibkr_trader: health check failing", "no timestamp in the group key"
+    assert "scheduler-health.json" in found.command, "the particulars ride in the command"
+    assert found.evidence == str(ctx.devkit_dir / "logs" / "collectors.log")
+
+
+def test_each_unhealthy_job_a_collector_names_is_its_own_group(ctx):
+    """6b140f4e: `social` failing on a missing boto3 shared one group with `reddit`'s
+    fixed failure, so the triage log called a new cause "RECURRED ... that fix did not
+    hold". The jobs the project names ride in the detail; the particulars still do not."""
+    social = "health check failing: social -- exit 1: health artifact (written 2026-10-04)"
+    [found] = fix_loop.collector_findings(
+        ctx, [("collector: ibkr_trader", fix_loop.collectors.WARN, social)]
+    )
+    assert found.detail == "ibkr_trader: health check failing: social"
+    _row, made = _resolved_collector(ctx)
+    old = {"ibkr_trader": {"ok": False, fix_loop.collectors.CODE_AT: made - 86400}}
+    named = ("collector: ibkr_trader", fix_loop.collectors.WARN, social)
+    assert len(fix_loop.collector_findings(ctx, [named], old)) == 1, "a job no fix covered"
+    fix_findings.record_all([found], [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "the image installs the archive extra", root=ctx.devkit_dir)
+    [*_, made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    old[found.project][fix_loop.collectors.CODE_AT] = (
+        _dt.datetime.fromisoformat(made.stamp).timestamp() - 86400
+    )
+    assert fix_loop.collector_findings(ctx, [named], old) == [], "weighed against its own fix"
+
+
+@pytest.mark.parametrize(
+    ("detail", "state"),
+    [
+        ("not running (Exited (1) 3 hours ago)", "not running"),
+        ("no container -- see logs/collectors.log", "no container"),
+    ],
+)
+def test_a_collector_findings_detail_survives_its_recurrences(ctx, detail, state):
+    [found] = fix_loop.collector_findings(ctx, [("collector: x", fix_loop.collectors.FAIL, detail)])
+    assert found.detail == f"x: {state}"
+
+
+def test_a_verdict_failing_on_name_lookups_is_held_for_a_grace(ctx):
+    """10e70909, 33ac7b6f, 25193b9f: ibkr_trader's and sports_betting's verdicts from a
+    night without DNS, filed though no session could act on them, and failing on until
+    each daily job's next run. Held for `UNRESOLVED_GRACE`; a container still unable to
+    resolve past it is filed."""
+    row = ("collector: ibkr_trader", fix_loop.collectors.WARN, _IBKR_HEALTH)
+    now = ctx.now.timestamp()
+    lately = {"ibkr_trader": {"ok": False, fix_loop.collectors.UNRESOLVED_SINCE: now - 3600}}
+    assert fix_loop.collector_findings(ctx, [row], lately) == []
+    long_ago = now - fix_loop.collectors.UNRESOLVED_GRACE - 1
+    lasting = {"ibkr_trader": {"ok": False, fix_loop.collectors.UNRESOLVED_SINCE: long_ago}}
+    assert len(fix_loop.collector_findings(ctx, [row], lasting)) == 1
+
+
+def test_a_silent_engine_is_left_to_the_collectors_job_that_files_it_once(ctx):
+    """5cfe1e8a, df8dd4c0: the engine being silent is the machine's, and `collectors.py
+    maintain` fails on it under `log-wrap.py --always` -- once, revive and all. Read off
+    the tray as well, it was one more group per project, filed mid-revive."""
+    silent = [
+        ("collector: ibkr_trader", fix_loop.collectors.FAIL, fix_loop.collectors.NOT_ANSWERING),
+        ("collector: sports_betting", fix_loop.collectors.FAIL, "docker is not answering"),
+    ]
+    assert fix_loop.collector_findings(ctx, silent) == []
+
+
+def _resolved_collector(ctx) -> tuple[tuple[str, str, str], float]:
+    """ibkr_trader's failing health row, filed and resolved; with the resolution's time."""
+    row = ("collector: ibkr_trader", fix_loop.collectors.WARN, _IBKR_HEALTH)
+    fix_findings.record_all(fix_loop.collector_findings(ctx, [row]), [], ctx.devkit_dir)
+    [item] = triage.open_items(triage.load(ctx.devkit_dir))
+    triage.resolve([item.id], "a job not yet due is pending", root=ctx.devkit_dir)
+    [made] = [i for i in triage.load(ctx.devkit_dir) if i.event == triage.RESOLVED_EVENT]
+    return row, _dt.datetime.fromisoformat(made.stamp).timestamp()
+
+
+def test_a_health_verdict_from_code_older_than_its_fix_does_not_reopen_it(ctx):
+    """51cca249: ibkr_trader's fix merged at 22:32 and the pass refiled the group at 22:33,
+    off a verdict its day-old image gave. `collectors.py` redeploys that container onto
+    the fix on its next pass, and the verdict after that is the one that tests it."""
+    row, made = _resolved_collector(ctx)
+    old = {
+        "ibkr_trader": {"ok": False, "container": "c1", fix_loop.collectors.CODE_AT: made - 86400}
+    }
+    assert fix_loop.collector_findings(ctx, [row], old) == []
+    new = {"ibkr_trader": {"ok": False, "container": "c2", fix_loop.collectors.CODE_AT: made + 60}}
+    assert len(fix_loop.collector_findings(ctx, [row], new)) == 1, "the fix ran, and failed"
+
+
+@pytest.mark.parametrize(
+    ("verdict", "late", "why"),
+    [
+        ({"held": "the checkout has uncommitted edits"}, 0, "a held redeploy can last"),
+        ({}, 0, "no code time recorded: nothing to weigh"),
+        ({}, 2, "past the grace: the redeploy never reached it"),
+    ],
+)
+def test_a_health_verdict_the_redeploy_will_not_move_is_filed(ctx, verdict, late, why):
+    row, made = _resolved_collector(ctx)
+    code_at = {fix_loop.collectors.CODE_AT: made - 86400} if late or verdict else {}
+    health = {"ibkr_trader": {"ok": False, **code_at, **verdict}}
+    later = _dt.datetime.fromtimestamp(made, _dt.UTC) + late * fix_loop.REDEPLOY_GRACE
+    now = dataclasses.replace(ctx, now=later)
+    assert len(fix_loop.collector_findings(now, [row], health)) == 1, why
+
+
+def test_only_a_health_row_is_weighed_against_its_verdict(ctx):
+    """A container that is down is down whatever code its last verdict ran."""
+    _row, made = _resolved_collector(ctx)
+    down = ("collector: ibkr_trader", fix_loop.collectors.FAIL, "not running (Exited (1))")
+    old = {"ibkr_trader": {"ok": False, fix_loop.collectors.CODE_AT: made - 86400}}
+    assert len(fix_loop.collector_findings(ctx, [down], old)) == 1
+
+
+def test_the_read_back_reads_the_verdicts_the_rows_were_drawn_from(ctx, monkeypatch):
+    row, made = _resolved_collector(ctx)
+    monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda root: [row])
+    monkeypatch.setenv("DEVKIT_DIR", str(ctx.devkit_dir))
+    record = {"ibkr_trader": {"ok": False, fix_loop.collectors.CODE_AT: made - 86400}}
+    path = ctx.devkit_dir / fix_loop.collectors.HEALTH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert fix_loop.collector_findings(ctx) == []
+
+
+def test_the_read_back_files_a_failing_collector(ctx, monkeypatch):
+    row = ("collector: ibkr_trader", fix_loop.collectors.WARN, _IBKR_HEALTH)
+    monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda root: [row])
+    journal = fix_findings.Journal(ctx.devkit_dir)
+    fix_loop.close(ctx, journal)
+    assert [f.project for f in journal.findings if f.kind == fix_loop.COLLECTOR_KIND] == [
+        "ibkr_trader"
+    ]
+
+
+def test_a_job_the_scheduler_only_remembers_failing_is_not_filed(ctx, monkeypatch):
+    monkeypatch.setattr(
+        fix_loop.schedule_health,
+        "artifact_hint",
+        lambda *a, **k: (
+            " -- x is empty and was rewritten later: a later pass finished clean "
+            "and the scheduler is reporting history"
+        ),
+    )
+    job = _job("devkit-upgrade-projects", 2, NOW - _dt.timedelta(hours=9))
+    assert fix_loop.job_findings(ctx, [job]) == []
+
+
 def test_the_files_sessions_are_told_to_write_are_the_files_the_pass_reads():
     """Prose has no compiler: the channel the ship skill, the engineering rule and every
     fixer prompt name must be the path `fix_reports` reads, or the lines go nowhere."""
@@ -503,6 +1592,30 @@ def test_a_tree_another_session_is_live_in_is_busy_and_the_pass_own_session_is_n
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}
 
 
+def test_a_recent_transcript_whose_session_the_listing_shows_gone_holds_nothing(ctx, monkeypatch):
+    """The 2026-10-11 rehearsal held data-lake #66 and ibkr_trader #116 behind sessions
+    that had ended twenty minutes before: `claude agents` listed none in either tree,
+    and only the transcripts' age said anyone was there."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=20),
+        transcript_age=_dt.timedelta(minutes=10),
+    )
+    resident = fix_reports.transcript_dir(path) / "resident.jsonl"
+    resident.write_text(
+        f'{{"timestamp": "{(NOW - _dt.timedelta(minutes=2)).isoformat()}"}}\n', encoding="utf-8"
+    )
+    elsewhere = {"kind": "interactive", "pid": 1, "cwd": str(ctx.root / "other"), "status": "idle"}
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [elsewhere])
+    closed, _ = close(ctx)
+    assert closed.busy == {}, "nobody listed in the tree: the transcript's session has left"
+    here = {**elsewhere, "cwd": str(path)}
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [elsewhere, here])
+    closed, _ = close(ctx)
+    assert closed.busy == {("carameli", "agent/x-0919"): str(path)}, "idle, but present"
+
+
 def test_the_pass_own_session_that_finished_does_not_hold_its_tree(ctx, monkeypatch):
     """Round four's rehearsal held six branches as "a session is working in" -- each by
     the very fixer whose intent this same pass was shipping. The stamped session is never
@@ -533,3 +1646,91 @@ def test_a_finished_or_dead_sessions_idle_process_is_stopped_and_a_working_one_i
     )
     closed, _ = close(ctx)
     assert closed.finished == [] and closed.stopped == []
+
+
+def test_still_working_is_a_busy_listing_or_a_background_task_still_out(monkeypatch, tmp_path):
+    """8d2f56f5: a fixer that ended its turn to wait on its suite lists idle."""
+    busy = frozenset({str(tmp_path / "listed").replace("\\", "/").lower()})
+    waiting = {str(tmp_path / "waiting")}
+    monkeypatch.setattr(fix_reports, "awaiting_task", lambda tree, now: str(tree) in waiting)
+    assert fix_loop.still_working(busy, tmp_path / "listed", NOW)
+    assert fix_loop.still_working(frozenset(), tmp_path / "waiting", NOW)
+    assert not fix_loop.still_working(busy, tmp_path / "idle", NOW)
+
+
+def _intent_tree(tmp_path, monkeypatch, *, live=True, intent_at=1000.0):
+    """A tree with an intent written at `intent_at`, two changed files, and a session
+    `live` in it or not; the fake `git status` lists both files and a deletion."""
+    root = tmp_path / "tree"
+    (root / "logs").mkdir(parents=True)
+    intent = root / "logs" / "ship-intent.md"
+    intent.write_text("Re-mirror the skill\n\nBody.\n", encoding="utf-8")
+    os.utime(intent, (intent_at, intent_at))
+    for name, when in (("mirror.md", 900.0), ("puddle.ts", 1100.0)):
+        (root / name).write_text("x", encoding="utf-8")
+        os.utime(root / name, (when, when))
+    monkeypatch.setattr(
+        fix_reports, "active_transcript", lambda tree, now: root / "t.jsonl" if live else None
+    )
+    porcelain = " M mirror.md\n?? puddle.ts\n D gone.ts\n"
+    calls = []
+
+    def runner(argv, cwd=None):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=porcelain, stderr="")
+
+    return root, runner, calls
+
+
+def test_an_intent_a_live_session_has_edited_past_is_outrun(tmp_path, monkeypatch):
+    """e89a0224: a devkit fixer's intent in roguelike #81's tree was shipped at 16:00
+    with the half-written files the person's session there had begun at 15:56."""
+    root, runner, calls = _intent_tree(tmp_path, monkeypatch)
+    assert fix_loop.outran_intent(root, NOW, runner) == "puddle.ts"
+    assert "--untracked-files=all" in calls[0], "a new directory is listed file by file"
+
+
+def test_an_intent_is_not_outrun_once_the_session_is_quiet(tmp_path, monkeypatch):
+    root, runner, calls = _intent_tree(tmp_path, monkeypatch, live=False)
+    assert fix_loop.outran_intent(root, NOW, runner) == ""
+    assert calls == [], "no git call for a tree nobody is in"
+
+
+def test_an_intent_written_after_every_edit_is_not_outrun(tmp_path, monkeypatch):
+    """The ordinary ship: the intent is the session's last write, live or not."""
+    root, runner, _ = _intent_tree(tmp_path, monkeypatch, intent_at=1200.0)
+    assert fix_loop.outran_intent(root, NOW, runner) == ""
+
+
+def test_an_intent_the_pass_already_tried_is_not_outrun(tmp_path, monkeypatch):
+    """A refused ship's own fixers rewrote files after the intent was written."""
+    root, runner, _ = _intent_tree(tmp_path, monkeypatch)
+    words = fix_loop.ship_intent.parse_intent("Re-mirror the skill\n\nBody.\n")
+    digest = fix_loop.ship_intent.Intent("", root, "", *words).digest
+    fix_loop.ship_intent.write_state(root, {"stage": "refused", "intent": digest})
+    assert fix_loop.outran_intent(root, NOW, runner) == ""
+    fix_loop.ship_intent.write_state(root, {"stage": "shipped", "intent": "an-older-one"})
+    assert fix_loop.outran_intent(root, NOW, runner) == "puddle.ts"
+
+
+def test_why_held_names_a_busy_session_before_an_outrun_intent(tmp_path, monkeypatch):
+    busy = frozenset({str(tmp_path / "listed").replace("\\", "/").lower()})
+    monkeypatch.setattr(fix_reports, "awaiting_task", lambda tree, now: False)
+    monkeypatch.setattr(fix_loop, "outran_intent", lambda tree, now: "src/puddle.ts")
+    assert fix_loop.why_held(busy, tmp_path / "listed", NOW) == (
+        "its session is still working in the tree"
+    )
+    assert fix_loop.why_held(frozenset(), tmp_path / "other", NOW).startswith("src/puddle.ts ")
+    monkeypatch.setattr(fix_loop, "outran_intent", lambda tree, now: "")
+    assert fix_loop.why_held(frozenset(), tmp_path / "other", NOW) == ""
+
+
+def test_outran_intent_says_nothing_without_an_intent_or_a_readable_tree(tmp_path, monkeypatch):
+    root, runner, _ = _intent_tree(tmp_path, monkeypatch)
+
+    def failing(argv, cwd=None):
+        return subprocess.CompletedProcess(argv, 128, stdout="", stderr="not a repo")
+
+    assert fix_loop.outran_intent(root, NOW, failing) == ""
+    (root / "logs" / "ship-intent.md").unlink()
+    assert fix_loop.outran_intent(root, NOW, runner) == ""

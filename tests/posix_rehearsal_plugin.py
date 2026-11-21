@@ -59,7 +59,12 @@ and the plugin distinct modules.
 
 from __future__ import annotations
 
+import importlib
+import os
+import signal
+import subprocess
 import sys
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -67,6 +72,78 @@ import pytest
 # The value `sys.platform` carries on the runner this suite is gated on. Any non-Windows
 # value would do; the CI one is the honest choice because it is the answer being rehearsed.
 POSIX_PLATFORM = "linux"
+
+# What `windows_exists` asks the kernel, as `preview-ui-host.pid_alive` does.
+SYNCHRONIZE = 0x00100000
+WAIT_TIMEOUT = 0x102
+ERROR_ACCESS_DENIED = 5
+
+
+def windows_exists(pid: int, kernel32: Any = None) -> bool:
+    """Whether `pid` is a running process, asked of the Windows kernel; `PermissionError`
+    for one this user may not open, as POSIX's signal 0 raises it."""
+    if kernel32 is None:
+        # `Any`: `windll` exists only on Windows, which is the only host that asks, and
+        # mypy checks this file as Linux too.
+        ctypes: Any = importlib.import_module("ctypes")
+        kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    if not handle:
+        if kernel32.GetLastError() == ERROR_ACCESS_DENIED:
+            raise PermissionError(pid)
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def signal_zero_probe(
+    kill: Callable[[int, int], None], exists: Callable[[int], bool]
+) -> Callable[[int, int], None]:
+    """`os.kill` for a POSIX branch running on a real Windows host.
+
+    Signal 0 is POSIX's "does it exist"; on Windows it is `CTRL_C_EVENT`, so `os.kill`
+    turns it into `GenerateConsoleCtrlEvent` -- Ctrl+C to every process on the console.
+    `preview-ui-host.pid_alive`'s POSIX branch did exactly that under the rehearsal, and
+    the rehearsal and the shell that started it died a second later with no output. Here
+    signal 0 asks `exists` and sends nothing; any other signal is the real one.
+    """
+
+    def probe(pid: int, sig: int) -> None:
+        if sig != 0:
+            kill(pid, sig)
+        elif not exists(pid):
+            raise ProcessLookupError(pid)
+
+    return probe
+
+
+# What `taskkill` exits with when it finds no such process.
+TASKKILL_NOT_FOUND = 128
+
+
+def windows_killpg(run: Callable[..., Any] = subprocess.run) -> Callable[[int, int], None]:
+    """`os.killpg` for a POSIX branch running on a real Windows host, which has none.
+
+    The bounded spawns in `sweep`, `ship_intent` and the watchdog start their child as a
+    group leader off Windows and end it with `os.killpg(child.pid, SIGKILL)`; under the
+    rehearsal that raised `AttributeError` in nine tests from 2026-10-07 on. The leader's
+    tree is what the group holds, so `taskkill /T` ends that, and a leader already gone
+    is POSIX's `ProcessLookupError`. Whatever the signal: every caller sends `SIGKILL`.
+    """
+
+    def killpg(pgid: int, sig: int) -> None:
+        done = run(
+            ["taskkill", "/F", "/T", "/PID", str(pgid)],
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        if done.returncode == TASKKILL_NOT_FOUND:
+            raise ProcessLookupError(pgid)
+
+    return killpg
 
 
 def windows_constants(modules: dict[str, object]) -> list[str]:
@@ -104,8 +181,14 @@ class PosixRehearsal:
     """
 
     def __init__(self) -> None:
+        # Read once, at configure time, and never again: a test that monkeypatches
+        # `sys.platform` records the *faked* value and its teardown puts that back after
+        # `restore`, so re-reading it per test took "linux" for the host.
         self.real_platform = sys.platform
         self.flipped: list[str] = []
+        self.real_kill: Callable[[int, int], None] | None = None
+        # Each `(module, name)` `add_missing` set, which `restore` takes away again.
+        self.added: list[tuple[object, str]] = []
 
     def apply(self) -> None:
         self.flipped = windows_constants(dict(sys.modules))
@@ -120,12 +203,35 @@ class PosixRehearsal:
             if module is not None and getattr(module, "WINDOWS", None) is True:
                 module.WINDOWS = False
 
+    def honest_platform(self) -> None:
+        """The host's platform back, whatever a previous test's teardown left."""
+        sys.platform = self.real_platform
+
     def fake_platform(self) -> None:
-        self.real_platform = sys.platform
+        if self.real_platform == "win32" and self.real_kill is None:
+            self.real_kill = os.kill
+            os.kill = signal_zero_probe(os.kill, windows_exists)
+            self.add_missing()
         sys.platform = POSIX_PLATFORM
+
+    def add_missing(self) -> None:
+        """What a POSIX branch calls that a Windows host lacks, for the test body only."""
+        for module, name, value in (
+            (os, "killpg", windows_killpg()),
+            (signal, "SIGKILL", 9),
+        ):
+            if not hasattr(module, name):
+                setattr(module, name, value)
+                self.added.append((module, name))
 
     def restore(self) -> None:
         sys.platform = self.real_platform
+        if self.real_kill is not None:
+            os.kill = self.real_kill
+            self.real_kill = None
+        for module, name in self.added:
+            delattr(module, name)
+        self.added = []
 
 
 def pytest_configure(config):
@@ -146,6 +252,7 @@ def pytest_collection_finish(session):
 def pytest_runtest_setup(item):
     rehearsal = getattr(item.config, "_posix_rehearsal", None)
     if rehearsal is not None:
+        rehearsal.honest_platform()
         rehearsal.flip_constants()
 
 

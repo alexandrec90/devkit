@@ -8,14 +8,17 @@ is the thing under test, and a stub would only assert that the stub works.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
-from support import load_script
+from support import REPO_ROOT, load_script, worktree_tiers
 
 wt_env = load_script("scripts/worktree_env.py")
 
@@ -117,7 +120,7 @@ def test_an_absent_env_is_created_with_the_note_and_the_assignment():
 
 def test_an_existing_env_is_appended_to_rather_than_rewritten():
     """The file is the project's, not devkit's. The box tier owns a whole managed block
-    in a `.env` it seeded itself; this hook seeds nothing and adds one line."""
+    in a `.env` it seeded itself; this hook copies a missing one and adds one line."""
     out = wt_env.rendered("DATABASE_URL=postgres://x\n", "carameli-topic")
     assert out.startswith("DATABASE_URL=postgres://x\n")
     assert "COMPOSE_PROJECT_NAME=carameli-topic" in out
@@ -242,6 +245,80 @@ def test_name_compose_project_reports_a_write_and_is_silent_on_a_rerun(tmp_path)
     tree = _worktree(checkout, tmp_path / "wt")
     assert "COMPOSE_PROJECT_NAME=carameli-wt" in wt_env.name_compose_project(tree, checkout)
     assert wt_env.name_compose_project(tree, checkout) == ""
+
+
+def test_a_tree_gets_its_checkouts_env_before_the_compose_name(tmp_path):
+    """481859f1: a productivity-tracker tree held only the managed line, so no
+    `DATABASE_URL`, and every Postgres test errored until a session improvised one."""
+    checkout = _repo(tmp_path / "tracker")
+    (checkout / ".env").write_text("DATABASE_URL=the-checkouts-db\n", "utf-8")
+    tree = _worktree(checkout, tmp_path / "wt")
+    said = wt_env.name_compose_project(tree, checkout)
+    assert "seeded from the checkout's .env" in said
+    written = (tree / ".env").read_text(encoding="utf-8")
+    assert written.startswith("DATABASE_URL=the-checkouts-db\n")
+    assert "COMPOSE_PROJECT_NAME=tracker-wt" in written
+
+
+def test_a_checkout_with_no_env_seeds_the_tree_from_its_example(tmp_path):
+    checkout = _repo(tmp_path / "d2-trader")
+    (checkout / ".env.example").write_text("DATABASE_URL=the-example-db\n", "utf-8")
+    tree = _worktree(checkout, tmp_path / "wt")
+    assert "seeded from the checkout's .env.example" in wt_env.name_compose_project(tree, checkout)
+    assert (tree / ".env").read_text(encoding="utf-8").startswith("DATABASE_URL=")
+
+
+def test_a_trees_own_env_is_never_reseeded(tmp_path):
+    checkout = _repo(tmp_path / "carameli")
+    (checkout / ".env").write_text("DATABASE_URL=checkout\n", "utf-8")
+    tree = _worktree(checkout, tmp_path / "wt")
+    (tree / ".env").write_text("DATABASE_URL=mine\n", encoding="utf-8")
+    assert "seeded" not in wt_env.name_compose_project(tree, checkout)
+    assert (tree / ".env").read_text(encoding="utf-8").startswith("DATABASE_URL=mine\n")
+
+
+def test_a_tree_on_a_pinned_stack_still_gets_the_checkouts_env(tmp_path):
+    """The pin keeps the compose name off, never the database settings: ibkr_trader's
+    trees share its one database, which they can reach only with its `.env`."""
+    checkout = _repo(tmp_path / "ibkr_trader")
+    (checkout / "docker-compose.yml").write_text("name: ibkr_trader\nservices: {}\n", "utf-8")
+    (checkout / ".env").write_text("DATABASE_URL=shared\n", encoding="utf-8")
+    _git(checkout, "commit", "-qam", "pin")
+    tree = _worktree(checkout, tmp_path / "wt")
+    said = wt_env.name_compose_project(tree, checkout)
+    assert "seeded" in said and "shares that stack" in said
+    assert (tree / ".env").read_text(encoding="utf-8") == "DATABASE_URL=shared\n"
+
+
+def test_a_compose_file_that_pins_its_name_keeps_every_worktree_on_one_stack(tmp_path):
+    """244b4d87: ibkr_trader pins `name: ibkr_trader` so every worktree reaches the one
+    database. `COMPOSE_PROJECT_NAME` outranks that pin, so writing it started a second,
+    empty Postgres on the same host port; the tree is left to the project's own name."""
+    checkout = _repo(tmp_path / "ibkr_trader")
+    (checkout / "docker-compose.yml").write_text(
+        "# shared infra\n\nname: ibkr_trader\n\nservices:\n  db:\n    image: x\n",
+        encoding="utf-8",
+    )
+    _git(checkout, "commit", "-qam", "pin")
+    tree = _worktree(checkout, tmp_path / "wt")
+    said = wt_env.name_compose_project(tree, checkout)
+    assert "shares that stack" in said and "ibkr_trader" in said
+    assert not (tree / ".env").exists()
+
+
+@pytest.mark.parametrize(
+    ("text", "pinned"),
+    [
+        ("name: ibkr_trader\nservices: {}\n", "ibkr_trader"),
+        ('name: "quoted"  # why\n', "quoted"),
+        ("name: ${STACK:-x}\n", "${STACK:-x}"),
+        ("services:\n  db:\n    name: not-top-level\n", ""),  # a key inside a service
+        ("services: {}\n# name: commented\n", ""),
+    ],
+)
+def test_only_a_top_level_name_is_a_pin(tmp_path, text, pinned):
+    (tmp_path / "compose.yaml").write_text(text, encoding="utf-8")
+    assert wt_env.pinned_name(tmp_path) == pinned
 
 
 # --- the worktree's own interpreter -------------------------------------------
@@ -453,6 +530,40 @@ def test_a_successful_command_that_made_no_venv_is_not_marked(tmp_path):
     assert not (tree / ".venv").exists()
 
 
+ERESOLVE_TAIL = (
+    "npm error code ERESOLVE\n"
+    "npm error ERESOLVE unable to resolve dependency tree\n"
+    "npm error For a full report see:\n"
+    "npm error C:\\npm-cache\\_logs\\2026-10-11T02_35_18_014Z-eresolve-report.txt\n"
+    "npm error A complete log of this run can be found in: C:\\npm-cache\\_logs\\x-debug-0.log\n"
+)
+
+
+def test_a_tree_whose_own_dependencies_do_not_resolve_leaves_no_harness_friction(tmp_path):
+    """05cedf4b/e155cd23: carameli's test-env branch asked for vitest ^5 beside
+    @vitest/ui ^4, and npm's ERESOLVE became two devkit ledger groups though the PR's own
+    gate failed on that install and its fixer had already fixed it. The manifest is the
+    project's, so the line says so and the friction file is left alone."""
+    checkout, tree = _provisionable(tmp_path)
+    line = wt_env.provision(
+        tree, checkout, runner=_Run(1, stderr=ERESOLVE_TAIL), environ={}, uv="uv"
+    )
+    assert "own dependencies do not resolve" in line
+    assert "npm error code ERESOLVE" in line
+    assert not (tree / wt_env.FRICTION_FILE).exists()
+    assert not (tree / wt_env.PROVISIONED).exists(), "the next update still retries"
+
+
+def test_unresolvable_names_each_resolvers_conflict_and_nothing_else():
+    assert wt_env.unresolvable(ERESOLVE_TAIL) == "npm error code ERESOLVE"
+    assert wt_env.unresolvable(
+        "", "x\n  \N{MULTIPLICATION SIGN} No solution found when resolving dependencies:\n"
+    )
+    assert wt_env.unresolvable(b"ERROR: ResolutionImpossible: for help visit\n")
+    assert wt_env.unresolvable(None, "npm error A complete log ... eresolve-report.txt")
+    assert wt_env.unresolvable("error: no index\n", "npm error code ENOTFOUND", None) == ""
+
+
 def test_a_failure_or_a_gap_is_left_as_the_trees_friction_for_the_pass_to_file(tmp_path):
     """The hook's only report was a line inside `git worktree add`, which `claude
     --worktree` swallows -- so a tree came up with no `.venv` and nothing anywhere said
@@ -487,8 +598,81 @@ def test_a_sync_that_hangs_or_cannot_start_is_named_not_waited_for(tmp_path):
     hang = subprocess.TimeoutExpired(cmd="uv", timeout=1)
     line = wt_env.provision(tree, checkout, runner=_Run(raising=hang), environ={}, uv="uv")
     assert "did not finish" in line and "by hand" in line
+    assert "last said" not in line, "nothing said, nothing quoted"
+    waited = subprocess.TimeoutExpired(
+        cmd="uv", timeout=1, stderr="Resolved 31 packages\nWaiting to acquire lock for `cache`\n"
+    )
+    line = wt_env.provision(tree, checkout, runner=_Run(raising=waited), environ={}, uv="uv")
+    assert "(it last said: Waiting to acquire lock for `cache`)" in line, line
     gone = _Run(raising=FileNotFoundError("uv"))
     assert "could not run" in wt_env.provision(tree, checkout, runner=gone, environ={}, uv="uv")
+
+
+def test_the_sync_runs_at_a_log_level_where_uv_names_the_lock_it_waits_on(tmp_path, monkeypatch):
+    """4cbc6b0e: a sync killed at 600 s twice "last said: Resolved 26 packages", because
+    uv waits on a held lock without a word at its default level -- the quote the last fix
+    added could never name the lock it was added to name."""
+    checkout, tree = _provisionable(tmp_path)
+    monkeypatch.delenv(wt_env.UV_LOG_VAR, raising=False)
+    run = _Run()
+    wt_env.provision(tree, checkout, runner=run, environ={}, uv="uv")
+    assert run.calls[0][1]["env"][wt_env.UV_LOG_VAR] == "info"
+    assert wt_env.uv_env({"RUST_LOG": "debug", "X": "1"}) == {"RUST_LOG": "debug", "X": "1"}
+
+
+def test_a_plain_install_command_keeps_the_inherited_environment(tmp_path, monkeypatch):
+    checkout, tree = _provisionable(tmp_path)
+    monkeypatch.setattr(
+        wt_env, "manifest_python", lambda _here: ("python scripts/bootstrap.py", "")
+    )
+    run = _Run()
+    wt_env.provision(tree, checkout, runner=run, environ={}, uv="uv")
+    assert run.calls and run.calls[0][1]["env"] is None
+
+
+def _hold_lock(handle) -> None:
+    """Take the exclusive lock uv takes on a file: `LockFileEx` on Windows, `flock` elsewhere.
+
+    By `os.name`, the host's own answer: the lock is taken against the real uv on this
+    machine, so a faked `sys.platform` reached for `fcntl` on Windows. `Any`, because
+    mypy narrows only on `sys.platform` and would check each module on the other OS."""
+    if os.name == "nt":
+        msvcrt: Any = importlib.import_module("msvcrt")
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl: Any = importlib.import_module("fcntl")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_uv_at_info_names_a_held_venv_lock(tmp_path):
+    """The premise, against the real uv the gate and this machine both run: silent at its
+    default level while a lock is held, and naming that lock at `info`."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "probe"\nversion = "0"\nrequires-python = ">=3.12"\n', encoding="utf-8"
+    )
+    argv = ["uv", "sync", "--offline", "--no-python-downloads"]
+    assert subprocess.run(argv, cwd=tmp_path, capture_output=True, check=False).returncode == 0
+    env = {k: v for k, v in os.environ.items() if k.upper() not in {"RUST_LOG", "UV_LOCK_TIMEOUT"}}
+    with (tmp_path / ".venv" / ".lock").open("r+b") as held:
+        _hold_lock(held)
+        quiet = subprocess.run(
+            argv,
+            cwd=tmp_path,
+            env={**env, "UV_LOCK_TIMEOUT": "2"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        named = subprocess.run(
+            argv,
+            cwd=tmp_path,
+            env=wt_env.uv_env({**env, "UV_LOCK_TIMEOUT": "2"}),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert "lock" not in quiet.stderr.lower()
+    assert "Waiting to acquire exclusive lock for `.venv`" in named.stderr
 
 
 def test_the_opt_out_runs_nothing(tmp_path):
@@ -511,12 +695,131 @@ def test_a_checkout_without_a_venv_gets_no_sync_at_worktree_time(tmp_path):
     assert run.calls == []
 
 
+def test_the_sync_is_announced_before_it_runs(tmp_path, capsys):
+    """1be306c4: a cold `uv sync` ran 582 s inside `git worktree add` and printed only its
+    result, so nobody watching could tell a slow sync from a hung one. The line naming
+    what runs, and where, is out before the command starts."""
+    checkout, tree = _provisionable(tmp_path)
+    seen: list[str] = []
+
+    class _Watching(_Run):
+        def __call__(self, argv, **kwargs):
+            seen.append(capsys.readouterr().out)
+            return super().__call__(argv, **kwargs)
+
+    wt_env.provision(tree, checkout, runner=_Watching(), environ={}, uv="uv")
+    assert "uv sync --all-extras --all-groups" in seen[0]
+    assert str(tree) in seen[0]
+
+
+def test_a_long_command_says_it_is_still_running_and_keeps_its_output():
+    said: list[str] = []
+    done = wt_env.run_reporting(
+        [sys.executable, "-c", "import time; time.sleep(0.8); print('ok')"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        interval=0.1,
+        say=said.append,
+    )
+    assert done.returncode == 0
+    assert done.stdout.strip() == "ok"
+    assert said, "no heartbeat while the command ran"
+    assert all("still running after" in line for line in said)
+
+
+def test_a_command_past_its_timeout_is_killed_and_raises_as_run_does():
+    """88de458c: and with what it had said by then, which the provision line quotes."""
+    said = (
+        "import sys, time; print('waiting on a lock', file=sys.stderr, flush=True); time.sleep(30)"
+    )
+    with pytest.raises(subprocess.TimeoutExpired) as stopped:
+        wt_env.run_reporting(
+            [sys.executable, "-c", said],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            interval=0.1,
+            say=lambda _line: None,
+        )
+    assert wt_env.last_said(stopped.value.stderr, stopped.value.output) == "waiting on a lock"
+
+
+def test_last_said_is_the_last_line_of_the_first_stream_with_any():
+    assert wt_env.last_said(None, b"a\nb\n\n") == "b"
+    assert wt_env.last_said("x\ny", "z") == "y"
+    assert wt_env.last_said(None, "") == ""
+
+
+def test_a_failed_command_under_check_raises_as_run_does():
+    with pytest.raises(subprocess.CalledProcessError):
+        wt_env.run_reporting([sys.executable, "-c", "raise SystemExit(3)"], check=True)
+
+
+def test_the_hooks_spawn_through_the_heartbeat_runner():
+    """A runner the tests can replace, defaulting to the one that reports while it waits."""
+    for hook in (wt_env.main, wt_env.index_change_main, wt_env.provision):
+        assert inspect.signature(hook).parameters["runner"].default is wt_env.run_reporting
+
+
+# --- only a tree an agent tier cut is provisioned (9d690d5a) ---------------------
+
+
+def _tier_path(tier, anchor: Path, name: str = "topic") -> Path:
+    return anchor.joinpath(*tier.segments, *(["0a1b2c"] * (tier.depth - 1)), name)
+
+
+def test_the_tier_shapes_are_worktree_tiers_own():
+    """Installed alone into `~/.devkit/git-hooks`, the hook cannot import
+    `worktree_tiers`, so it keeps a copy of the shapes and this holds the two equal."""
+    assert wt_env.AGENT_TIERS == tuple(
+        (tier.segments, tier.depth, tier.home_env, tier.home_default)
+        for tier in worktree_tiers.ALL_TIERS
+    )
+
+
+@pytest.mark.parametrize("tier", worktree_tiers.ALL_TIERS, ids=lambda tier: tier.agent)
+def test_a_tree_in_any_agent_tier_is_one_to_provision(tmp_path, tier):
+    anchor = tmp_path / "anchor"
+    env = {tier.home_env: str(anchor)} if tier.home_env else {}
+    assert wt_env.agent_tree(_tier_path(tier, anchor), env) is True
+
+
+def test_a_scratch_tree_matches_no_tier(tmp_path):
+    assert wt_env.agent_tree(tmp_path / "scratch", {}) is False
+    elsewhere = {"CODEX_HOME": str(tmp_path / "codex")}
+    assert wt_env.agent_tree(tmp_path / "worktrees" / "0a1b2c" / "x", elsewhere) is False
+    assert wt_env.agent_tree(tmp_path / "codex" / "worktrees" / "0a1b2c" / "x", elsewhere)
+
+
+def test_a_scratch_worktree_is_named_but_not_provisioned(tmp_path, monkeypatch, capsys):
+    """9d690d5a: a throwaway `git worktree add --detach <tmp> HEAD`, cut for a pre-merge
+    test baseline, ran a 236 s `uv sync` that blew its caller's timeout, and the `.venv`
+    it left made `git worktree remove --force` fail. A tree no agent tier cut is nobody's
+    workplace; its compose name still applies, since that guards the checkout's volumes."""
+    checkout = _repo(tmp_path / "carameli")
+    (checkout / ".venv").mkdir()
+    tree = tmp_path / "scratch"
+    _git(checkout, "worktree", "add", "--quiet", "--detach", str(tree), "HEAD")
+    (tree / "uv.lock").write_text("", encoding="utf-8")
+    monkeypatch.setattr(wt_env.shutil, "which", lambda name: "uv")
+    run = _Run()
+    assert wt_env.main([NULL40, REAL, "1"], root=tree, runner=run, environ={}) == 0
+    assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
+    out = capsys.readouterr().out
+    assert run.calls == []
+    assert "COMPOSE_PROJECT_NAME=carameli-scratch" in out
+    assert "not provisioned" in out and "worktree.py provision" in out
+    assert not (tree / wt_env.FRICTION_FILE).exists()
+
+
 def test_main_provisions_the_tree_alongside_naming_its_stack(tmp_path, monkeypatch, capsys):
     """One hook, two lines: the compose name and the venv, each only when its own
     conditions hold, and neither able to stop the other."""
     checkout = _repo(tmp_path / "carameli")
     (checkout / ".venv").mkdir()
-    tree = _worktree(checkout, tmp_path / "wt")
+    tree = _worktree(checkout, checkout / ".claude" / "worktrees" / "wt")
     (tree / "uv.lock").write_text("", encoding="utf-8")
     monkeypatch.setattr(wt_env.shutil, "which", lambda name: "uv")
     run = _Run()
@@ -638,6 +941,142 @@ def test_a_sibling_tree_already_there_is_moved_to_the_ref_it_was_cut_at(tmp_path
     assert _git(target, "rev-parse", "HEAD").stdout.strip() == new
 
 
+def test_a_sibling_a_run_in_another_tree_holds_at_another_pin_is_not_moved(tmp_path):
+    """d32ffcc2: the #116 fixer's `worktree.py provision` moved the shared data-lake
+    d32d4d5 -> c0aa963 while the #123 fixer was checking its lock against d32d4d5."""
+    lake, checkout, tree, target = _cut_sibling(tmp_path)
+    old = _git(target, "rev-parse", "HEAD").stdout.strip()
+    _advance_lake(lake)
+    pins = wt_env.sibling_pins()
+    # The parent of this test process: alive, and not this run.
+    other = pins.hold(pins.lease_dir(target), old, tmp_path / "tree-123", os.getppid())
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert wt_env.held([line]) and "tree-123" in line, line
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == old
+    pins.release(other)
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert "moved" in line and not wt_env.held([line])
+    mine = pins.lease_dir(target) / f"{os.getpid()}{pins.LEASE_SUFFIX}"
+    assert mine.read_text(encoding="utf-8").splitlines()[1] == str(tree), "leased for the tree"
+
+
+def test_the_lease_module_is_found_in_devkit_and_beside_the_installed_hook(tmp_path, monkeypatch):
+    monkeypatch.delitem(sys.modules, "sibling_pins", raising=False)
+    found = wt_env.sibling_pins()
+    assert found is not None and Path(found.__file__).name == "sibling_pins.py"
+    installed = tmp_path / "hooks"
+    installed.mkdir()
+    shutil.copy(REPO_ROOT / "scripts" / "worktree_env.py", installed / "devkit_worktree_env.py")
+    hook = load_script(str(installed / "devkit_worktree_env.py"))
+    monkeypatch.delitem(sys.modules, "sibling_pins", raising=False)
+    assert hook.sibling_pins() is None, "neither copy: the move runs unguarded, as before"
+    shutil.copy(
+        REPO_ROOT / "scripts" / "hooks" / "sibling_pins.py", installed / "devkit_sibling_pins.py"
+    )
+    assert Path(hook.sibling_pins().__file__) == installed / "devkit_sibling_pins.py"
+    monkeypatch.delitem(sys.modules, "sibling_pins", raising=False)
+
+
+def test_the_hook_does_not_sync_a_tree_whose_sibling_another_run_holds(tmp_path, monkeypatch):
+    held = f"devkit: data-lake {wt_env.HELD} a run in tree-123 (pid 9)"
+    monkeypatch.setattr(wt_env, "checkout_of", lambda here: tmp_path / "main")
+    monkeypatch.setattr(wt_env, "name_compose_project", lambda here, checkout: "")
+    monkeypatch.setattr(wt_env, "agent_tree", lambda here, environ: True)
+    monkeypatch.setattr(wt_env, "link_path_sources", lambda *a, **k: [held])
+    monkeypatch.setattr(wt_env, "provision", lambda *a, **k: pytest.fail("synced"))
+    assert wt_env._set_up(tmp_path / "tree", None, {}) == 0
+
+
+PR_GATE = """\
+jobs:
+  test:
+    steps:
+      - name: Checkout ibkr_trader
+        uses: actions/checkout@v7
+        with:
+          path: ibkr_trader
+      - name: Checkout data-lake
+        uses: actions/checkout@v7
+        with:
+          repository: alexandrec90/data-lake
+          ref: {ref}  # the commit uv.lock was resolved against
+          path: data-lake
+"""
+
+
+def _pin(tree: Path, ref: str, name: str = "pr-gate.yml", text: str = PR_GATE) -> None:
+    workflows = tree / ".github" / "workflows"
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / name).write_text(text.replace("{ref}", ref), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "module",
+    [wt_env, load_script("scripts/hooks/toolchain.py")],
+    ids=["worktree_env-cuts-the-sibling", "vendored-toolchain-re-checks-it"],
+)
+def test_the_pin_is_the_ref_the_trees_own_gate_checks_the_sibling_out_at(tmp_path, module):
+    """Both readers, held to one answer: the git hook cuts the sibling at the pin and is
+    installed alone, so it cannot import the vendored `toolchain.pinned_ref` every runner
+    re-checks the pin with (0db0d931, 941b7470)."""
+    pinned_ref = module.pinned_ref
+    sha = "4305" * 10  # a full commit sha's shape, without the entropy detect-secrets flags
+    assert pinned_ref(tmp_path, "data-lake") == "", "no workflows: no pin"
+    _pin(tmp_path, f'"{sha}"')
+    assert pinned_ref(tmp_path, "data-lake") == sha, "quotes and a comment are not the ref"
+    assert pinned_ref(tmp_path, "Data-Lake") == sha
+    assert pinned_ref(tmp_path, "other") == "", "another repo's step is not its pin"
+    # The PR gate outranks a nightly that tracks the default branch on purpose.
+    _pin(tmp_path, "main", name="nightly.yml")
+    assert pinned_ref(tmp_path, "data-lake") == sha
+    # A step with no `ref:`, or an expression, pins nothing.
+    _pin(tmp_path, "${{ inputs.ref }}")
+    assert pinned_ref(tmp_path, "data-lake") == "main", "the nightly's, now the only one"
+    unpinned = PR_GATE.replace(
+        "          ref: {ref}  # the commit uv.lock was resolved against\n", ""
+    )
+    _pin(tmp_path, "x", text=unpinned)
+    (tmp_path / ".github" / "workflows" / "nightly.yml").unlink()
+    assert pinned_ref(tmp_path, "data-lake") == ""
+
+
+def test_a_sibling_is_cut_and_moved_at_the_ref_the_trees_gate_pins(tmp_path):
+    """b0b2f7d7: ibkr_trader's gate pins data-lake to a commit and the sibling was cut at
+    data-lake's main, which had retired a module the pin still had -- the session's tests
+    failed on an import CI never saw, and `uv sync` relocked ibkr's `uv.lock`."""
+    lake, checkout, tree = _with_sibling_source(tmp_path)
+    pinned = _git(lake, "rev-parse", "HEAD").stdout.strip()
+    _advance_lake(lake)
+    _pin(tree, pinned)
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == pinned, line
+    # A shared sibling that was cut at main is moved back to the pin, and then left there.
+    _git(target, "checkout", "-q", "--detach", "main")
+    [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == pinned, line
+    assert wt_env.link_path_sources(tree, checkout, runner=_hookless) == []
+
+
+def test_a_pin_the_sibling_repo_lacks_is_named_and_the_default_branch_used(tmp_path):
+    lake, checkout, tree = _with_sibling_source(tmp_path)
+    _pin(tree, "f" * 40)
+    lines = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert any(f"pins data-lake to {'f' * 40}" in line for line in lines), lines
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    head = _git(lake, "rev-parse", "HEAD").stdout.strip()
+    assert _git(target, "rev-parse", "HEAD").stdout.strip() == head
+
+
+def test_a_branch_pin_resolves_to_its_remote_tracking_ref_first(tmp_path):
+    lake = _repo(tmp_path / "lake", compose=False)
+    env = wt_env.git_env(os.environ)
+    assert wt_env.resolve_pin(lake, "main", env) == "main", "no remote: the local branch"
+    _git(lake, "update-ref", "refs/remotes/origin/main", "HEAD")
+    assert wt_env.resolve_pin(lake, "main", env) == "origin/main"
+    assert wt_env.resolve_pin(lake, "no-such-ref", env) == ""
+
+
 def test_a_sibling_tree_holding_work_is_never_moved(tmp_path):
     lake, checkout, tree, target = _cut_sibling(tmp_path)
     old = _git(target, "rev-parse", "HEAD").stdout.strip()
@@ -657,6 +1096,59 @@ def test_a_sibling_path_holding_another_repo_is_named_not_moved(tmp_path):
     _repo(checkout / ".claude" / "worktrees" / "data-lake", compose=False)
     [line] = wt_env.link_path_sources(tree, checkout, runner=_hookless)
     assert "is not a worktree of" in line
+
+
+def _dir_link(link: Path, aimed: Path) -> None:
+    """A junction on Windows, as the one d2e29fee found, which needs no privilege there."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(aimed), str(link))
+    else:
+        link.symlink_to(aimed, target_is_directory=True)
+
+
+def test_a_link_to_a_reaped_box_at_the_sibling_path_is_replaced_by_a_cut(tmp_path):
+    """d2e29fee: `.worktrees/data-lake` was a junction to a reaped box, so `exists()`
+    read the sibling as missing and `worktree add` refused the path as already there."""
+    _lake, checkout, tree = _with_sibling_source(tmp_path)
+    reaped = tmp_path / "data-lake--reaped"
+    reaped.mkdir()
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    _dir_link(target, reaped)
+    reaped.rmdir()
+    lines = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert any(line.startswith(f"devkit: removed {target}") for line in lines), lines
+    assert (target / ".gitignore").is_file(), lines
+    assert reaped.exists() is False and tmp_path.exists(), "only the link went"
+
+
+def test_only_a_link_to_nothing_is_cleared(tmp_path):
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "kept.txt").write_text("x\n", encoding="utf-8")
+    assert wt_env.clear_dead_link(live) == "", "a real directory"
+    assert wt_env.clear_dead_link(tmp_path / "absent") == "", "nothing there at all"
+    link = tmp_path / "link"
+    _dir_link(link, live)
+    assert wt_env.clear_dead_link(link) == "", "a link whose target is there"
+    assert (link / "kept.txt").is_file()
+
+
+def test_a_dead_link_that_will_not_go_is_named(tmp_path, monkeypatch):
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    link = tmp_path / "link"
+    _dir_link(link, gone)
+    gone.rmdir()
+
+    def refuse(path):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(wt_env.os, "unlink", refuse)
+    monkeypatch.setattr(wt_env.os, "rmdir", refuse)
+    line = wt_env.clear_dead_link(link)
+    assert "which is gone, and stays (in use)" in line
 
 
 def test_no_sibling_repo_beside_the_checkout_means_nothing_is_cut(tmp_path):
@@ -724,7 +1216,7 @@ def test_a_no_checkout_worktree_filled_by_a_reset_is_provisioned(tmp_path, monke
         f'#!/bin/sh\necho "post-checkout" >> "{fired.as_posix()}"\n', encoding="utf-8"
     )
     (hooks / "post-checkout").chmod(0o755)
-    tree = tmp_path / "wt"
+    tree = checkout / ".claude" / "worktrees" / "wt"
     hooked = ("-c", f"core.hooksPath={hooks.as_posix()}")
     subprocess.run(
         ["git", "-C", str(checkout), *hooked, "worktree", "add", "--no-checkout", "-q", str(tree)],
@@ -755,3 +1247,15 @@ def test_the_index_change_hook_leaves_a_provisioned_tree_and_the_checkout_alone(
     assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
     assert wt_env.index_change_main(["0", "0"], root=tmp_path / "nowhere") == 0
     assert run.calls == []
+
+
+@pytest.mark.parametrize("mark", wt_env.NODE_INSTALL_MARKS)
+def test_node_modules_is_installed_only_once_a_package_manager_says_so(tmp_path, mark):
+    """fcf111b9: an empty `node_modules`, behind a link, read as an install and `vite`
+    was missing. Each package manager's own end-of-install file is the evidence."""
+    node_modules = tmp_path / "node_modules"
+    assert wt_env.node_modules_installed(node_modules) is False
+    (node_modules / ".vite").mkdir(parents=True)
+    assert wt_env.node_modules_installed(node_modules) is False, "a cache is not an install"
+    (node_modules / mark).write_text("", encoding="utf-8")
+    assert wt_env.node_modules_installed(node_modules) is True

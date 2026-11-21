@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import fix_findings
+import fix_verify
 import harness_triage as triage
+import sweep
 
 
 def finding(**fields) -> fix_findings.Finding:
@@ -35,6 +39,29 @@ def test_a_finding_already_open_is_not_filed_again(tmp_path):
         finding(detail="other")
     ]
     assert len(triage.open_items(triage.load(tmp_path))) == 2
+
+
+def _refused(host, port):
+    raise OSError("getaddrinfo failed")
+
+
+def test_a_finding_that_says_a_lookup_failed_is_not_filed_while_offline(tmp_path, monkeypatch):
+    """2026-11-12: a night without DNS filed eleven `regate-failed` rows at 04:01, each
+    "check your internet connection", that no session could act on."""
+    offline = finding(kind="regate-failed", detail="x main -- check your internet connection")
+    other = finding(detail="agent/y: rejected")
+    assert fix_findings.networked([offline, other], lookup=_refused) == [other]
+    answered = fix_findings.networked([offline, other], lookup=lambda host, port: [("a",)])
+    assert answered == [offline, other], "a network: the lookup failing is a finding"
+    monkeypatch.setattr(fix_findings.harness_events, "resolves", lambda **_: False)
+    assert fix_findings.record_all([offline, other], [], tmp_path) == [other]
+
+
+def test_a_batch_naming_no_lookup_asks_no_dns():
+    def never(host, port):
+        raise AssertionError("probed")
+
+    assert fix_findings.networked([finding()], lookup=never) == [finding()]
 
 
 def test_a_resolved_finding_that_recurs_is_filed_again(tmp_path):
@@ -88,6 +115,36 @@ def test_an_interrupt_is_not_swallowed_as_a_finding(tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         journal.step("x", interrupted)
+
+
+def test_a_step_past_the_deadline_is_listed_late_not_run(tmp_path):
+    """The watchdog stopped two passes on 2026-10-08 with their record unwritten. Past
+    the deadline a step returns its default and is named, so the pass reaches its
+    record; one that keeps its own time (`always`) still runs."""
+    left = [60.0]
+    traced: list[str] = []
+    journal = fix_findings.Journal(tmp_path, left=lambda: left[0], trace=traced.append)
+    assert journal.step("collect", lambda: "read", default="none") == "read"
+    left[0] = 0.0
+    assert journal.step("plan", lambda: pytest.fail("ran late"), default="none") == "none"
+    assert journal.step("send", lambda: "held", default="none", always=True) == "held"
+    assert journal.late == ["plan"] and journal.crashed == []
+    assert traced == ["collect", "send"], "only a step that runs is traced"
+    assert fix_findings.Journal(tmp_path).step("x", lambda: 1) == 1, "no deadline, no skip"
+
+
+def test_a_step_started_in_time_has_its_gh_calls_end_by_the_deadline(tmp_path):
+    """2e2e7804: the pass's `verify` and `collect` reads started well inside its deadline
+    and ran on past the watchdog's stop, each `gh` call bounded only by its own 600 s. A
+    step's `sweep.run_bounded` calls now end at the deadline; `always` keeps its own."""
+    journal = fix_findings.Journal(tmp_path, left=lambda: 1.0)
+    hang = [sys.executable, "-c", "import time; time.sleep(60)"]
+    started = time.monotonic()
+    done = journal.step("collect", lambda: sweep.run_bounded(hang, sweep.GH_TIMEOUT))
+    assert time.monotonic() - started < 30
+    assert done.returncode == sweep.TIMED_OUT
+    assert journal.step("send", lambda: sweep._until, always=True) is None
+    assert sweep._until is None, "the bound ends with the step"
 
 
 def test_the_pass_adds_its_own_error_classes(tmp_path):
@@ -164,6 +221,41 @@ def test_file_adds_to_a_journal_and_is_a_no_op_without_one(tmp_path):
     fix_findings.file(None, "merge-failed", "carameli", "#5: conflict")
 
 
+# The details as filed: 936fd498 and 91fa12f2 (two ships), e1463857 (a regate, where only
+# git's hint survived), each quoting its own tree.
+OWNERSHIP_DETAILS = [
+    "roguelike worktree-serialized-squishing-breeze: push: C:/Users/alexa/vs-code/roguelike/"
+    ".claude/worktrees/serialized-squishing-breeze/.git' is owned by: BUILTIN/Administrators "
+    "(S-1-5-32-544) but the current user is: DESKTOP-B9FC8VP/alexa (S-1-5-21",
+    "roguelike worktree-synchronous-marinating-hellman: push: rs/alexa/vs-code/roguelike/"
+    ".claude/worktrees/synchronous-marinating-hellman/.git' is owned by: BUILTIN/Administrators "
+    "(S-1-5-32-544) but the current user is: DESKTOP-B9FC8VP/alexa (S-1-5-21-30",
+    "roguelike main -- FAILED to re-run the gate: git config --global --add safe.directory "
+    "C:/Users/alexa/vs-code/roguelike",
+]
+
+
+def test_one_ownership_refusal_in_many_trees_is_one_ledger_group(tmp_path):
+    """Each elevated tree filed a group of its own while one fix, pending, covered all."""
+    journal = fix_findings.Journal(tmp_path)
+    for detail in OWNERSHIP_DETAILS:
+        fix_findings.file(journal, "ship-failed", "roguelike", detail)
+    assert {f.detail for f in journal.findings} == {f"roguelike: {fix_findings.OWNERSHIP}"}
+    assert len(fix_findings.record_all(journal.findings, [], tmp_path)) == 1
+    kept = [Path(f.evidence).read_text(encoding="utf-8") for f in journal.findings]
+    assert kept == OWNERSHIP_DETAILS, "the tree each one named is kept as its evidence"
+
+
+def test_a_folded_detail_keeps_the_evidence_it_was_given(tmp_path):
+    journal = fix_findings.Journal(tmp_path)
+    fix_findings.file(journal, "ship-failed", "roguelike", OWNERSHIP_DETAILS[0], "C:/tree")
+    assert journal.findings[0].evidence == "C:/tree"
+
+
+def test_any_other_detail_is_filed_as_written():
+    assert fix_findings.by_cause("carameli", "agent/x: rejected") == "agent/x: rejected"
+
+
 def test_a_finding_that_names_a_branch_is_filed_settled_against_it(tmp_path):
     """4806bd8d: a complaint the corrected session fixed on its own branch is resolved
     pending that branch's merge; `fix_verify` reopens it if the branch never lands."""
@@ -177,3 +269,43 @@ def test_a_finding_that_names_a_branch_is_filed_settled_against_it(tmp_path):
     assert settled.fields["pr"] == "agent/y-0926"
     assert "went on to ship agent/y-0926" in settled.fields["note"]
     assert "settles_with" not in dict(complaint.fields()), "not a ledger field"
+
+
+def test_a_settled_finding_is_held_to_merges_since_its_work_not_since_its_filing(tmp_path):
+    """f0308756: the pass filed 1008-2's "fixed on this branch" line five minutes after
+    that branch's #578 merged. Resolved as of the filing, the merge read as an older PR
+    from a reused name (`fix_verify.relevant`), and the group was reopened two days on."""
+    now = _dt.datetime.now(_dt.UTC)
+    worked = (now - _dt.timedelta(hours=6)).isoformat(timespec="seconds")
+    merged = fix_verify.Pr("MERGED", (now - _dt.timedelta(minutes=5)).isoformat(), "u/578")
+    line = finding(kind="reported", detail="flaky", settles_with="agent/x-1008", since=worked)
+    fix_findings.record_all([line], [], tmp_path)
+    items = triage.load(tmp_path)
+    [settled] = [i for i in items if i.event == triage.RESOLVED_EVENT]
+    assert triage.resolved_at(settled) == worked
+    later = now + fix_verify.UNLANDED_AFTER + _dt.timedelta(hours=1)
+    outcome = fix_verify.verify(items, lambda where, what: [merged], tmp_path / "c.json", later)
+    assert outcome.reopen == [], "the merge after the work is the fix"
+    unstated = finding(kind="reported", detail="other", settles_with="agent/x-1008")
+    fix_findings.record_all([unstated], [], tmp_path)
+    assert triage.RESOLVED_FIELD not in triage.load(tmp_path)[-1].fields, "no since, none"
+
+
+def test_stamp_of_is_a_ledger_stamp_or_nothing():
+    assert fix_findings.stamp_of("2026-10-08T13:55:19Z") == "2026-10-08T13:55:19+00:00"
+    assert fix_findings.stamp_of("2026-10-08T13:55:19.512+02:00") == "2026-10-08T11:55:19+00:00"
+    assert fix_findings.stamp_of("2026-10-08T13:55:19") == "2026-10-08T13:55:19+00:00"
+    assert fix_findings.stamp_of("yesterday") == fix_findings.stamp_of("") == ""
+    assert fix_findings.stamp_of(None) == ""
+    assert fix_findings.stamp_of(1_000_000_000.0) == "2001-09-09T01:46:40+00:00", "an mtime"
+
+
+def test_settle_resolves_only_an_open_row_a_branch_names(tmp_path):
+    complaint = finding(kind="user-frustration", detail="why did you")
+    fix_findings.record_all([complaint, finding()], [], tmp_path)
+    assert fix_findings.settle([complaint, finding()], tmp_path) == [], "no branch named"
+    shipped = fix_findings.Finding(**{**vars(complaint), "settles_with": "agent/y-0926"})
+    elsewhere = finding(detail="never filed", settles_with="agent/z-0926")
+    assert len(fix_findings.settle([shipped, elsewhere], tmp_path)) == 1
+    [still_open] = triage.open_items(triage.load(tmp_path))
+    assert still_open.detail == "push-failed: agent/x: rejected"

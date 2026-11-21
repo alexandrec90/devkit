@@ -30,6 +30,12 @@ different owner of record:
   it running. Harmless in memory, not in effect: two such held pytest's shared temp root
   and failed every other run's teardown with `WinError 5`. It is matched as a dev server
   is, image first, so one classification and one setting cover both.
+- **An orphaned docker CLI** -- `docker` or `docker-compose`, the same shape again. On
+  2026-10-08 a `docker compose up -d --wait db` whose parent had died spun 650
+  CPU-seconds against a wedged engine and never exited. Matched by image alone, since
+  every docker CLI is a candidate, and kept until `DOCKER_CLI_MIN_AGE_SECONDS` old: one
+  whose owner is alive -- a harness's `compose down`, Docker Desktop's own `docker
+  stats` -- is never in scope, however many pile up behind a wedged engine.
 
 **Unknown is busy**, as in `rc_machine`: a table that cannot be read is `None` and the
 pass reaps nothing; a transcript store that cannot be read makes every session active;
@@ -53,13 +59,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_clis
 import rc_machine
+import win_process_table
 
 WINDOWS = os.name == "nt"
 
-# Reading the whole process table through PowerShell takes a few seconds on a loaded
-# machine; `tasklist` would be quicker but reports neither parent pids nor command lines,
-# and both are the whole question here.
+# `tasklist` would be quicker than PowerShell but reports neither parent pids nor command
+# lines, and both are the whole question here.
 QUICK_TIMEOUT = 60
+
+# The PowerShell lister's own bound, now only the fallback behind `win_process_table`: on
+# 2026-10-07 the WMI query ran past 60 s four passes in a row on a loaded 16 GB desk
+# (ba883e41), and past this 240 s twice more (6114e177), which is why it is no longer
+# what a Windows pass asks first. Four minutes still leaves the pass most of the reap
+# task's ten-minute limit (`install-reap-schedule.task_document`).
+TABLE_TIMEOUT = 240
 
 # Process names that mean "a person is on the other end of this": a chain that reaches
 # one of them alive is owned, whatever it is doing and however old it is. Shells are
@@ -100,9 +113,38 @@ DEV_SERVER_PATTERN = (
     r"|(^|\s)-m\s+pytest\b|(^\"?|[\\/])pytest(\.exe)?\"?(\s|$)"
 )
 
+# The docker CLI images. `docker compose` runs the `docker-compose` plugin as a child of
+# `docker`, so only the top of such a pair is ever returned.
+DOCKER_CLI_NAMES = frozenset({"docker", "docker-compose"})
+
+# Docker Desktop's own processes own the CLIs they run (`docker stats` for the dashboard).
+# They are hosts for a docker CLI and for nothing else: Docker Desktop started by a
+# scheduled restart has a dead parent itself, so `HOSTS` alone would read its children
+# as orphans.
+DOCKER_HOSTS = HOSTS | {
+    "docker desktop",
+    "com.docker.backend",
+    "com.docker.build",
+    "com.docker.service",
+}
+
+# How old an unowned docker CLI must be before it is reaped. Its owner is gone, so
+# nobody is reading what it prints, but a `compose up --wait` or a `build` legitimately
+# runs for minutes, and a pid whose parent exited a moment ago is the one row a table
+# snapshot can get wrong. Twice the reap interval: an orphan lives at most three passes.
+DOCKER_CLI_MIN_AGE_SECONDS = 30 * 60
+
 # Seconds between the polite `taskkill` and the `/F`. Shorter than `rc_machine`'s: a
 # leftover has, by definition, nobody waiting on what it writes on the way out.
 STOP_GRACE_SECONDS = 5
+
+# `taskkill /T /F` exits non-zero when any pid in the tree could not be ended, and that
+# includes a child that exited on its own first ("There is no running instance") or was
+# already tearing down ("The operation attempted is not supported"). Its exit code is
+# therefore not the verdict: what is still running a moment later is. Every pid its
+# errors name is probed, the root included, so a real survivor is still reported.
+FORCE_SETTLE_SECONDS = 2
+_TASKKILL_PID = re.compile(r"\bPID (\d+)")
 
 PS_QUERY = (
     "Get-CimInstance Win32_Process | "
@@ -144,15 +186,22 @@ class Session:
     project: str
 
 
-def run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def run_command(
+    argv: Sequence[str], timeout: float = QUICK_TIMEOUT
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
         capture_output=True,
         text=True,
         check=False,
-        timeout=QUICK_TIMEOUT,
+        timeout=timeout,
         creationflags=rc_machine.NO_WINDOW,
     )
+
+
+def run_table_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """`run_command` under `TABLE_TIMEOUT`, the table lister's own bound."""
+    return run_command(argv, timeout=TABLE_TIMEOUT)
 
 
 # --- the table -----------------------------------------------------------------
@@ -227,21 +276,77 @@ def parse_posix_table(text: str) -> list[Process]:
     return table
 
 
-def process_table(run: Runner = run_command, windows: bool = WINDOWS) -> list[Process] | None:
-    """Every process on the machine, or `None` when the machine could not be asked.
+NativeReader = Callable[[], tuple[list[win_process_table.Row] | None, str]]
 
-    An empty table is reported as `None` too: this process is in any table that was
-    actually read, so empty means the lister answered with something the parser could
-    not use, and a pass that trusted it would find nothing owned and reap everything.
+
+def native_table(read: NativeReader = win_process_table.read) -> tuple[list[Process] | None, str]:
+    """The Windows table read in-process (`win_process_table`), as `Process` rows."""
+    rows, why = read()
+    if not rows:
+        return None, why or "the native table held no process"
+    return [
+        Process(
+            row.pid,
+            row.ppid,
+            agent_clis.normalise_process(row.image),
+            row.cmdline,
+            private=row.private,
+            rss=row.rss,
+            created=row.created,
+        )
+        for row in rows
+    ], ""
+
+
+def read_table(
+    run: Runner = run_table_command,
+    windows: bool = WINDOWS,
+    native: NativeReader = win_process_table.read,
+) -> tuple[list[Process] | None, str]:
+    """`(every process on the machine, "")`, or `(None, why the machine could not be asked)`.
+
+    On Windows the table is read in-process first, and the PowerShell lister is asked
+    only when that fails -- it is the read that stalled past every bound it was given
+    (`TABLE_TIMEOUT`). An empty table is reported as `None` too: this process is in any
+    table that was actually read, so empty means the lister answered with something the
+    parser could not use, and a pass that trusted it would find nothing owned and reap
+    everything. The reason names the kind -- a timeout, an exit code, an answer nothing
+    parsed -- because the four failures that set `TABLE_TIMEOUT` said only "could not be
+    read", and the timeout had to be inferred from how long each run took.
     """
+    if not windows:
+        return _listed_table(run, windows)
+    table, native_why = native_table(native)
+    if table is not None:
+        return table, ""
+    table, why = _listed_table(run, windows)
+    return table, (f"{native_why}, and {why}" if why else "")
+
+
+def _listed_table(run: Runner, windows: bool) -> tuple[list[Process] | None, str]:
+    """The table as the platform's lister reports it: PowerShell's WMI query, or `ps`."""
     try:
         result = run(table_argv(windows))
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except subprocess.TimeoutExpired as error:
+        return None, f"the lister did not answer within {error.timeout:g} s"
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, f"the lister could not run: {error}"
     if result.returncode != 0:
-        return None
+        said = (result.stderr or "").strip().splitlines()
+        return None, f"the lister exited {result.returncode}" + (f": {said[-1]}" if said else "")
     table = parse_windows_table(result.stdout) if windows else parse_posix_table(result.stdout)
-    return table or None
+    if not table:
+        return None, "the lister's answer held no process"
+    return table, ""
+
+
+def process_table(
+    run: Runner = run_table_command,
+    windows: bool = WINDOWS,
+    native: NativeReader = win_process_table.read,
+) -> list[Process] | None:
+    """Every process on the machine, or `None` when the machine could not be asked."""
+    return read_table(run, windows, native)[0]
 
 
 def argv_of(cmdline: str) -> list[str]:
@@ -410,6 +515,31 @@ def dev_servers(
     return sorted(orphans, key=lambda row: row.pid)
 
 
+def docker_clis(
+    table: Sequence[Process],
+    now: float,
+    min_age: float = DOCKER_CLI_MIN_AGE_SECONDS,
+    hosts: frozenset[str] = DOCKER_HOSTS,
+) -> list[Process]:
+    """Docker CLIs with no living owner, at least `min_age` seconds old -- tops only.
+
+    An unknown start time (`created` 0.0, as on every POSIX row) is too young to reap:
+    unknown is busy. The age is the top's own, so a young `docker` over an old
+    `docker-compose` is still young.
+    """
+    matched = {row.pid: row for row in table if row.name in DOCKER_CLI_NAMES}
+    orphans = []
+    for row in matched.values():
+        if is_hosted(table, row.pid, hosts):
+            continue
+        if any(parent.pid in matched for parent in ancestors(table, row.pid)):
+            continue
+        if row.created <= 0 or now - row.created < min_age:
+            continue
+        orphans.append(row)
+    return sorted(orphans, key=lambda row: row.pid)
+
+
 # --- stopping ------------------------------------------------------------------
 
 
@@ -443,8 +573,9 @@ def stop_tree(
 
     `rc_machine.stop_argv`'s `/T`, for its reason: a session spawns MCP servers and a
     dev server spawns workers, and leaving those behind leaks the memory the reap was
-    for. Polite first, `/F` only for what is still there after the grace. Off Windows
-    this reports rather than pretends: the pass is read-only there.
+    for. Polite first, `/F` only for what is still there after the grace, and a failed
+    `/F` is judged by what survives it (`FORCE_SETTLE_SECONDS`), not by its exit code.
+    Off Windows this reports rather than pretends: the pass is read-only there.
     """
     if not windows:
         return "stopping processes is only implemented on Windows"
@@ -454,8 +585,14 @@ def stop_tree(
         if not pid_alive(pid, run, windows):
             return ""
         result = run(rc_machine.stop_argv(pid, force=True))
+        if result.returncode == 0:
+            return ""
+        complaint = (result.stderr or result.stdout or "taskkill failed").strip()
+        sleep(FORCE_SETTLE_SECONDS)
+        named = dict.fromkeys([pid, *(int(found) for found in _TASKKILL_PID.findall(complaint))])
+        survivors = [each for each in named if pid_alive(each, run, windows)]
     except (OSError, subprocess.SubprocessError) as error:
         return str(error)
-    if result.returncode != 0:
-        return (result.stderr or result.stdout or "taskkill failed").strip()
-    return ""
+    if not survivors:
+        return ""
+    return f"still running: pid {', '.join(map(str, survivors))} -- {complaint}"

@@ -18,16 +18,58 @@ Stdlib only, no `gh`. Tested in `tests/test_fix_prompts.py`.
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
-from fix_plan import COMMIT, CONFLICT, EVIDENCE_DIR, LEDGER, PR, Failure, describe, name_of
+from e2e_results import CONTRACT as E2E_CONTRACT
+from e2e_results import MEDIUM_CONTRACT, is_missing
+from fix_plan import (
+    ALERT_ENTRY,
+    COMMIT,
+    CONFLICT,
+    DEPENDABOT_EVIDENCE,
+    EVIDENCE_DIR,
+    LEDGER,
+    LOCAL,
+    MEDIUM_TIER,
+    PR,
+    PROJECT_OWNED,
+    UNFETCHABLE_ENTRY,
+    Failure,
+    describe,
+    is_runner_side,
+    is_unstarted,
+    name_of,
+)
 from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
 from harness_triage import ARTIFACT as _TRIAGE_ARTIFACT
 from junit_report import READABLE
 from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_state
+
+# What FINISH says of `run-tests.py` run bare, true of a tree whose runner picks the tests
+# for what changed (devkit's) and conditional for any other tree the session cuts.
+RUNNER_SENTENCE = (
+    "python scripts/run-tests.py with no arguments picks the "
+    "tests for what changed where its --help says so, as devkit's does, adding the "
+    "contract tests that read every module, which no changed file names. A runner that "
+    "runs the whole suite bare is given the test files for what you changed instead: "
+    "a whole suite or a whole test directory is the gate's to run, not yours. "
+)
+
+# What replaces it in a tree whose runner runs the whole suite bare (`for_runner`). The
+# conditional alone did not hold: carameli's fixer read --help and ran the runner bare
+# in one call, its prompt's "where its --help says so" taken for "run it" (028caaaf).
+# The call is spelled out: data-lake's fixer read its runner's --help, which listed no
+# test paths, and ran pytest by hand instead (b8b42ded).
+SUITE_RUNNER_SENTENCE = (
+    "In this tree python scripts/run-tests.py with no arguments runs the whole suite, so "
+    "never run it bare or on a whole test directory: give it the test files for what "
+    "you changed as its arguments, python scripts/run-tests.py tests/test_a.py "
+    "tests/test_b.py, whatever its --help lists, and the contract tests that read every "
+    "module, which no changed file names -- a whole suite is the gate's to run, not yours. "
+)
 
 # How every prompt's body ends. The ship skill is the finish line and the blocked file
 # is the only other way out, for the blockers `STOP` names right after it; both are
@@ -35,11 +77,20 @@ from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_sta
 # intent (`ship_intent.EMPTY`): a fixer whose nightly was green at the tip left neither
 # file, and the pass filed it as a dead session (79ce2440).
 FINISH = (
-    "When it is done, run the targeted tests with this tree's own .venv interpreter, the "
-    "linter and the ratchets the gate "
+    "When it is done, run each of these with this tree's own .venv interpreter, not the "
+    "python on PATH, which can lack ruff and mypy, and a project's older lint runner then "
+    "skips both and still says clean: the targeted tests, the "
+    "linter -- python scripts/lint-all.py over every file you changed, the tests "
+    "included: python scripts/lint-all.py --changed, which takes the whole working-tree "
+    "diff, so no changed file is left out of its scope; --paths with every changed file "
+    "only where it has no --changed. It lints only the kinds it has a linter for, and "
+    "names the changed files it has none for (workflow YAML, Markdown): those are the "
+    "commit hooks' and the gate's, not a gap to fill by hand -- and the ratchets the gate "
     "runs -- python scripts/hooks/structure_check.py, python scripts/hooks/untested_symbols.py "
     "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
-    "-- in every tree you changed, then ship it with the ship skill and stop: the fix pass "
+    "-- in every tree you changed. "
+    f"{RUNNER_SENTENCE}"
+    "Then ship it with the ship skill and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. A failure "
     "already fixed where this tree was cut, with nothing left to change, ships the same "
     f"way: {INTENT_FILE.as_posix()} saying what fixed it, which the pass sets aside and "
@@ -59,7 +110,9 @@ FINISH = (
     "the file's last lines with themselves plus the new text. "
     f"Either way, if the harness cost you turns -- a refusal, a missing tool, evidence "
     f"that was wrong or absent, an instruction that sent you the wrong way -- put one line "
-    f"per thing in {FRICTION_FILE.as_posix()}: the pass files each for the devkit session, "
+    f"per thing in {FRICTION_FILE.as_posix()}, and quote the harness words you saw, not "
+    f"your paraphrase of them, since the line is filed as written and the session sent "
+    f"at it has nothing else: the pass files each for the devkit session, "
     f"which fixes it at the cause, and a cause that lives outside this repository is "
     f"fixed there, not worked around here. End a line whose cause you fixed yourself "
     f"with fixed on this branch: the pass then files it as settled by this branch, not "
@@ -75,9 +128,17 @@ LEDGER_STEPS = (
     "once the fix is in your intent; the pass reopens a group whose branch never merges. "
     "Work the groups this prompt names: one filed after this session started is the next "
     "session's, however the log reads when you look again. "
+    "A group is on this ledger because the harness saw it fail, which does not put its "
+    "cause in devkit: a scheduled job that ran a project's own code -- collectors.py fire "
+    "PROJECT runs that project's scrape -- fails on that project or on the machine under "
+    "it as often as on the harness, so find where the cause is before fixing, and fix "
+    "it in that tree. "
     "A fixers-exhausted, blind-evidence or fixer-blocked group is a problem fixers could "
     "not move: fix what in the harness failed them, and fix the problem itself in the "
-    "tree its evidence names, leaving an intent there too. Cut any tree this work needs "
+    "tree its evidence names, leaving an intent there too. A left-to-do group is a session "
+    "that ended by handing the person a job, quoted in the row: do that job in the "
+    "project it names, or queue it there in .devkit-queue, and retire the group; a session "
+    "must leave no job to anyone. Cut any tree this work needs "
     "with python scripts/agent-worktree.py new from this tree: it carries over this "
     "tree's logs/fix-origin, so that PR merges once green too. Leave its intent in that "
     "tree's logs/ship-intent.md exactly as here, and pass that tree's branch as --pr -- "
@@ -97,7 +158,9 @@ STOP = (
     "is not one of them: adding a worktree on another branch, fetching or merging a ref, "
     "reproducing the failure, reading code outside the diff, reshaping code to fit a "
     f"limit. If you write {BLOCKED_FILE.as_posix()}, name which of the three it is and "
-    "what you tried first."
+    "what you tried first. A fix that waits on another open PR, in any repository, is "
+    "none of the three and not yours to merge: put a line Waits on: and the full "
+    "github.com URL of that PR in the same file, and the pass holds this until it closes."
 )
 
 # Every prompt's first sentence: the role, declared by the one thing that starts a
@@ -119,6 +182,14 @@ def _framed(body: str) -> str:
     return f"{ROLE} {body} {STOP}"
 
 
+def for_runner(prompt: str, suite_bare: bool) -> str:
+    """`prompt` for a tree whose runner runs the whole suite bare (`suite_bare`): the
+    runner sentence said as a fact of that tree, not as a condition its session checks."""
+    if not suite_bare:
+        return prompt
+    return prompt.replace(RUNNER_SENTENCE.strip(), SUITE_RUNNER_SENTENCE.strip())
+
+
 def _ids(sig: tuple[str, ...]) -> str:
     return ", ".join(entry for entry in sig if entry != CONFLICT) or "see the run"
 
@@ -128,13 +199,32 @@ def _logs(failure: Failure) -> str:
 
     Two sessions were told the logs were under `logs/gate/` and spent turns finding the
     directory absent: the run had aged out, or uploaded nothing. Saying so is cheaper.
+    A run whose jobs never started a step has no log to read at all, and "no artifact
+    came down" gave its fixer no hint of that (carameli PR Gate run 37363944090).
     """
+    if failure.kind == LOCAL:
+        return _local_logs(failure)
     if failure.evidence:
         return (
             f"The gate's own logs are in {EVIDENCE_DIR}/ in this worktree -- read "
             f"{_first_read(Path(failure.evidence))} there first. {LINUX}"
         )
     where = failure.url or "the run"
+    if is_unstarted(failure.signature):
+        return (
+            "No job that failed ever started a step, so there is no log: a runner was "
+            "never acquired, or the job's `runs-on` or `if:` never let it start. The pass "
+            f"re-runs such a run once before sending anyone; read the run's annotations at "
+            f"{where} first, and fix the workflow if they name it. {LINUX}"
+        )
+    if is_runner_side(failure.signature):
+        return (
+            "Every job that failed did so in a step of the runner's own (`Set up job`, "
+            "`Initialize containers`), before any step of the workflow ran: an action or a "
+            "service image it could not fetch. The pass re-runs such a run once before "
+            f"sending anyone, so this one failed twice; read its log at {where} first, and "
+            f"fix the workflow if a reference in it is wrong. {LINUX}"
+        )
     return f"No artifact came down from the run; read it at {where} first. {LINUX}"
 
 
@@ -148,6 +238,82 @@ def _first_read(evidence: Path) -> str:
         return f"{READABLE} (each failing test with its message and traceback), then the .log files"
     logs = sorted(p.relative_to(evidence).as_posix() for p in evidence.rglob("*.log"))
     return ", ".join(logs) if logs else "whatever is there"
+
+
+def _local_logs(failure: Failure) -> str:
+    """Where a local end-to-end run's output is, and how to run it again.
+
+    The inverse of `LINUX`: this red was seen on this very machine, so a fixer can and
+    must reproduce it -- and no PR gate will run these tests, so a green gate on the fix
+    says nothing about them. The scheduled job re-tests once the fix merges.
+    """
+    where = (
+        f"Its output is in {EVIDENCE_DIR}/ in this worktree -- read "
+        f"{_first_read(Path(failure.evidence))} there first."
+        if failure.evidence
+        else "Its output did not come down."
+    )
+    return f"{where}{_rerun(failure)}"
+
+
+def _rerun(failure: Failure) -> str:
+    """How this `LOCAL` red is reproduced, by the tier it came from."""
+    return MEDIUM_RERUN if failure.workflow == MEDIUM_TIER else LOCAL_RERUN
+
+
+# What a scheduled tier's tests ran with that an agent shell lacks. Both tiers run under
+# `log-wrap.py --always`, whose `COLOR_ENV` reaches every child, and each runner adds its
+# own `RUN_ENV`; the shell has `PY_COLORS=0` instead (`project_settings.AGENT_ENV`). A
+# fixer told to run a red test "the same way" without these saw it pass: ruff's fix block
+# is coloured only under `FORCE_COLOR` (d789e104). Hyphenated scripts are not importable,
+# so these are spelled here and `tests/test_fix_prompts.py` holds them to the sources.
+WRAPPER_ENV = {
+    "FORCE_COLOR": "1",
+    "PY_COLORS": "1",
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONUNBUFFERED": "1",
+}
+MEDIUM_ENV = WRAPPER_ENV | {
+    "DEVKIT_MEDIUM_TIER": "1",
+    "PYTHONUTF8": "1",
+    "PYTEST_XDIST_AUTO_NUM_WORKERS": "2",
+}
+LOCAL_ENV = WRAPPER_ENV | {"DEVKIT_E2E": "1", "PYTHONUTF8": "1"}
+
+
+def env_said(env: dict[str, str]) -> str:
+    """The sentence telling a fixer the environment a tier ran in, as one `env` prefix."""
+    prefix = " ".join(f"{key}={value}" for key, value in env.items())
+    return (
+        " The environment of that run had variables your shell lacks, so start each run "
+        f"with env {prefix} in front of it: a test that reads coloured or buffered output "
+        "passes without them and fails there."
+    )
+
+
+# How a local end-to-end red is reproduced, said once wherever one is sent, the upstream
+# session included -- whose shared sentence otherwise sends it to a run URL there is none of.
+LOCAL_RERUN = (
+    f" A Local E2E run happened on this machine, from the static checkout, as python "
+    f"{E2E_CONTRACT}; run that same command in the worktree you fix it in, before changing "
+    "anything and again after, and say in the intent what it printed."
+    f"{env_said(LOCAL_ENV)} devkit's takes the "
+    "failing test ids as arguments: name them, since its whole tier holds this machine for "
+    "over half an hour while the scheduled jobs run. The PR gate does not run these tests, "
+    "so its green is no evidence about them; the scheduled local run re-tests once the fix "
+    "merges."
+)
+
+# The medium tier's: the same tests the gate runs, on the machine the gate does not.
+MEDIUM_RERUN = (
+    " A Medium Tier run happened on this machine, on Windows, in a disposable tree at that "
+    f"commit, as python {MEDIUM_CONTRACT} over its whole suite, or as the medium_tier command "
+    "in the [delivery] table of .devkit.toml where that is set; run the failing tests the "
+    "same way in the worktree you fix it in, before changing anything and again after, and "
+    f"say in the intent what it printed.{env_said(MEDIUM_ENV)} The PR gate runs on Linux, "
+    "so its green is no "
+    "evidence about a failure on Windows; the scheduled tier re-tests once the fix merges."
+)
 
 
 # The gate runs on Linux and a fixer on this machine: one shipped a fix whose only real
@@ -184,26 +350,84 @@ def _refused_too(refusal: str) -> str:
     )
 
 
-def pr_prompt(failure: Failure, refusal: str = "", left: str = "") -> str:
+def _locked_too(locked: dict[str, str] | None) -> str:
+    """What to set instead of opening each cache an elevated session locked
+    (`fix_trees.locked_caches`): sports_betting #48's fixer found its `.pytest_cache`
+    by `WinError 5`, and worked out `-p no:cacheprovider` for itself."""
+    if not locked:
+        return ""
+    names = ", ".join(locked)
+    settings = " and ".join(locked.values())
+    return (
+        f" An elevated session left {names} in this tree owner-only, so neither you nor "
+        f"the fix pass can open, move or delete it: set {settings} in the environment "
+        "of every command that runs the tool, and spend no turns on the directory."
+    )
+
+
+def _described(number: int) -> str:
+    """Where a PR's own account of itself is. ibkr_trader #98's body said it needed an
+    unmerged data-lake branch; its resolver was told nothing of it, and found out from
+    its targeted tests failing to import (42482fc1)."""
+    return (
+        f" Read the PR's description first (gh pr view {number}): a dependency it names -- "
+        "an unmerged branch of another repository, say -- is one the pinned or shared copy "
+        "here lacks."
+    )
+
+
+def _squashed_too(squashed: str, base: str) -> str:
+    """`fix_trees.squashed_base`'s finding, said as what it does to the merge, or ""."""
+    if not squashed:
+        return ""
+    return (
+        f" origin/{base} holds PR {squashed} as one commit, while this branch still carries "
+        "the commits it squashed: their merge base predates them, so git calls every file "
+        "they added add/add. Resolve against the squash commit as the true base (git "
+        "merge-file per file), not against git's merge base."
+    )
+
+
+@dataclass(frozen=True)
+class TreeNotes:
+    """What `fix-prs.dispatch_pr` read off a PR's tree before its session opened.
+
+    `refusal` is the tree's `standing_refusal`, which the commit shape already is,
+    `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`),
+    `locked` is the tree's `fix_trees.locked_caches`, `made` is who made a reused
+    tree (`fix_trees.provenance`), `squashed` is a conflict's
+    `fix_trees.squashed_base`, and `lag` is a red PR's `fix_trees.base_lag`.
+    """
+
+    refusal: str = ""
+    left: str = ""
+    locked: dict[str, str] | None = None
+    made: str = ""
+    squashed: str = ""
+    lag: str = ""
+
+
+def pr_prompt(failure: Failure, tree: TreeNotes | None = None) -> str:
     """One branch, in its own worktree: a conflict to resolve, a refused commit, or a red PR.
 
     Three shapes, one function, because the worktree and the finish line are the same
     and only the middle differs. The conflict prompt names no failure on purpose: the
     gate cannot have run, and a resolver told "also fix the tests" fixes the wrong thing.
-    `refusal` is the tree's `standing_refusal`, which the commit shape already is, and
-    `left` is why the tree was not brought to origin's head (`fix-prs.refresh_head`).
+    `tree` is what the dispatch found in the worktree (`TreeNotes`).
     """
+    tree = tree or TreeNotes()
+    tree_notes = tree.made + _refused_too(tree.refusal) + _locked_too(tree.locked)
     if CONFLICT in failure.signature:
         return _framed(
             f"PR #{failure.number} in {failure.project} has a merge conflict with "
             f"origin/{failure.base}. This worktree is checked out on its head branch "
-            f"{failure.head}.{_left_as_is(left, failure.head)} Merge origin/{failure.base} in and resolve "
-            "the conflicts so "
+            f"{failure.head}.{_left_as_is(tree.left, failure.head)}{_described(failure.number)} "
+            f"Merge origin/{failure.base} in and resolve the conflicts so "
             "that both sides' intent survives -- git diff --check must find no conflict "
             "marker in any file, not only the code -- and leave the merge uncommitted: the fix "
             "pass concludes it with the hooks running, and whatever the gate says after "
-            f"that is the next pass's business, not this session's.{_refused_too(refusal)} "
-            f"{FINISH}"
+            f"that is the next pass's business, not this session's."
+            f"{_squashed_too(tree.squashed, failure.base)}{tree_notes} {FINISH}"
         )
     if failure.kind == COMMIT:
         return _framed(
@@ -211,15 +435,16 @@ def pr_prompt(failure: Failure, refusal: str = "", left: str = "") -> str:
             f"{_ids(failure.signature)}. The pre-commit output is in {EVIDENCE_DIR}/ in this "
             "worktree, which is the worktree the change was made in, and the message it "
             f"was being shipped with is in {REFUSED_FILE.as_posix()} -- reuse it when it "
-            f"still fits. Fix what the output reports. {FINISH}"
+            f"still fits. Fix what the output reports.{tree.made}{_locked_too(tree.locked)} {FINISH}"
         )
     return _framed(
         f"PR #{failure.number} in {failure.project} against origin/{failure.base} is stuck: "
         f"{failure.reason}. Failing: {_ids(failure.signature)}. {_logs(failure)} "
         f"This worktree is checked out on the PR head branch {failure.head}"
-        + (f".{_left_as_is(left, failure.head)}" if left else ", already up to date with its base.")
+        + _head_state(tree, failure)
+        + _described(failure.number)
         + " Fix what the gate is failing on, and nothing else about "
-        f"the PR.{_refused_too(refusal)} {FINISH}"
+        f"the PR.{tree_notes} {FINISH}"
     )
 
 
@@ -235,11 +460,31 @@ def _ledger_log(failure: Failure) -> str:
     return f" The ledger groups are in {where}{TRIAGE_LOG} in this worktree."
 
 
+def _head_state(tree: TreeNotes, failure: Failure) -> str:
+    """What a red PR's tree holds against origin: left as is, behind its base, or neither.
+
+    "Already up to date with its base" is said only when nothing contradicts it: carameli
+    #474's fixer was told so while master held the very bump its gate wanted (8316e54f).
+    """
+    said = f".{_left_as_is(tree.left, failure.head)}" if tree.left else ""
+    if not tree.lag:
+        return said or ", already up to date with its base."
+    return (
+        f"{said or '.'} Its base has moved: {tree.lag}. git fetch origin {failure.base} and "
+        f"git merge origin/{failure.base} before anything else, then see whether the "
+        "failure still reproduces: a fix the base already carries is shipped as that "
+        "merge, not written a second time."
+    )
+
+
 def _left_as_is(left: str, head: str) -> str:
     """What a reused tree holds that the session did not put there, or "".
 
     #422's resolver was sent into a tree holding an earlier session's half-done merge --
-    21 files unstaged, no MERGE_HEAD -- and was told nothing about it (f7167792).
+    21 files unstaged, no MERGE_HEAD -- and was told nothing about it (f7167792). And
+    the other direction: origin's head moves on too (the pass updates a behind PR through
+    GitHub), and a fixer that never took it in fixed and tested a base three merges
+    stale (5f5c4b3c).
     """
     if not left:
         return ""
@@ -248,7 +493,8 @@ def _left_as_is(left: str, head: str) -> str:
         f"git log origin/{head}..HEAD first: what origin does not have was left by an "
         "earlier session, not by you. Read it before "
         "anything else, keep what serves this fix, and restore only what you have read "
-        "and judged wrong."
+        f"and judged wrong. Then git fetch origin {head} and git merge origin/{head}, "
+        "so you fix and test the head the PR has now, not the one this tree was left on."
     )
 
 
@@ -264,14 +510,26 @@ def upstream_prompt(failures: tuple[Failure, ...], branch: str) -> str:
     projects = sorted({f.project for f in ordered})
     rows = "; ".join(f"{f.project} {name_of(f)} -- {describe(f)}" for f in ordered)
     urls = ", ".join(f"{f.project} {name_of(f)} {f.url}".rstrip() + _held(f) for f in ordered)
+    # A gate's failure is devkit's when it was routed here; a ledger group says only
+    # where the harness saw something fail (e0301529), and `LEDGER_STEPS` says so.
+    vendored = any(f.kind != LEDGER for f in ordered)
     return _framed(
         f"The harness is red in {len(projects)} checkout(s) ({', '.join(projects)}): "
-        f"{rows}. The fix belongs here in devkit, once -- in the vendored file, the "
-        "test, or the template that generates the project-owned file it names -- not in "
-        f"each consumer. Each failure's gate logs are under {EVIDENCE_DIR}/ in this "
+        f"{rows}."
+        + (
+            " The fix belongs here in devkit, once -- in the vendored file, the "
+            "test, or the template that generates the project-owned file it names -- not in "
+            "each consumer. A template reaches no project already generated, though: where "
+            "the test is right and checks a consumer's own "
+            f"{', '.join(PROJECT_OWNED)}, that copy is fixed on its PR's branch."
+            if vendored
+            else ""
+        )
+        + f" Each failure's gate logs are under {EVIDENCE_DIR}/ in this "
         "worktree, one directory per failure that uploaded any; for the rest, read the "
         "run at its URL."
         + "".join(_ledger_log(f) + LEDGER_STEPS for f in ordered if f.kind == LEDGER)
+        + "".join(dict.fromkeys(_rerun(f) for f in ordered if f.kind == LOCAL))
         + f" This worktree is on the fresh branch {branch} off the default branch. Say in "
         f"the intent which of these the fix unblocks: {urls}. {OWN_DIFF} {FINISH}"
     )
@@ -326,6 +584,179 @@ def branch_prompt(failure: Failure, branch: str) -> str:
         f"This worktree is on the fresh branch {branch} off origin/{failure.base}, "
         "so the failure reproduces here. Fix it; every PR against this base is red until "
         f"the fix lands. {FINISH}"
+    )
+
+
+def local_prompt(failure: Failure, branch: str) -> str:
+    """A default branch red in the scheduled local end-to-end run: fix on a fresh branch.
+
+    `fix_plan.is_stale_local` holds a run older than the tip, so the run was at the tip
+    this tree was cut from, and the failure reproduces here. A project with no tier at
+    all (`e2e_results.MISSING`) is sent to write one instead. The medium tier's own red
+    has its own shape (`medium_body`).
+    """
+    medium = failure.workflow == MEDIUM_TIER
+    if is_missing(failure.signature):
+        return _framed(missing_medium(failure, branch) if medium else missing_tier(failure, branch))
+    if medium:
+        return _framed(medium_body(failure, branch))
+    return _framed(
+        f"The {failure.workflow} run in {failure.project} -- the tests no hosted runner can "
+        f"run, run on this machine -- is red on origin/{failure.base} at "
+        f"{failure.sha[:12] or 'its head'}. Failing: {_ids(failure.signature)}. "
+        f"{_logs(failure)} This worktree is on the fresh branch {branch} off "
+        f"origin/{failure.base}. Fix what the run is failing on. {FINISH}"
+    )
+
+
+def medium_body(failure: Failure, branch: str) -> str:
+    """The body of a fixer's prompt for a medium tier red: it spans many merges, so bisect.
+
+    The tier tests only the tip, so nothing says which of the merges since its last green
+    broke this. No quotes or backticks, for `_unfetchable_note`'s reason.
+    """
+    red = (failure.first_seen or failure.sha)[:12] or "its head"
+    good = failure.green_sha[:12]
+    start = (
+        f"git bisect start {red} {good}, the two ends of what the tier has seen"
+        if good
+        else "git bisect, from a commit you have shown is good, since the tier has judged "
+        "none green yet"
+    )
+    return (
+        f"The {failure.workflow} run in {failure.project} -- the tests of this project, run "
+        f"on this Windows machine every 15 minutes at the tip of origin/{failure.base} -- is "
+        f"red, first seen at {red}. Failing: {_ids(failure.signature)}. {_logs(failure)} "
+        "This tier tests only the tip, so one red spans every merge since the last commit "
+        f"it judged green, many of them on a busy day: bisect with {start}, running only the "
+        "failing tests at each step, and name the merge that broke it before you change anything. "
+        "Where every step fails, the cause is Windows and no one merge; say so in the "
+        f"intent. This worktree is on the fresh branch {branch} off origin/{failure.base}, "
+        f"which may be ahead of that commit. Fix what the run is failing on. {FINISH}"
+    )
+
+
+def missing_medium(failure: Failure, branch: str) -> str:
+    """The body of a fixer's prompt for a project with nothing for the medium tier to run.
+
+    No quotes or backticks, for `_unfetchable_note`'s reason.
+    """
+    return (
+        f"{failure.project} has nothing for the medium tier to run: origin/{failure.base} at "
+        f"{failure.sha[:12] or 'its head'} carries no {MEDIUM_CONTRACT} and sets no "
+        "medium_tier command in the [delivery] table of .devkit.toml, so the tests of this "
+        "project run only on Linux, in CI, and nothing checks them on Windows. Every project "
+        f"owes the script. Write {MEDIUM_CONTRACT}: exit 0 green, anything else red, each "
+        "failure printed as a pytest FAILED line, the failing ids also in "
+        "logs/test-failures.log, and the whole suite run under --all. Then run it here and "
+        "say in the intent what it printed; a red it finds that is not a mistake in the "
+        "script itself is for the next run of the tier to send a fixer at, not for this "
+        f"change. This worktree is on the fresh branch {branch} off origin/{failure.base}. "
+        f"{FINISH}"
+    )
+
+
+LOCAL_E2E_RULE = ".claude/rules/local-e2e.md"
+
+
+def missing_tier(failure: Failure, branch: str) -> str:
+    """The body of a fixer's prompt for a project that owes a local end-to-end tier.
+
+    No quotes or backticks, for `_unfetchable_note`'s reason: the prompt crosses a `wt`
+    command line.
+    """
+    return (
+        f"{failure.project} has no local end-to-end tier: origin/{failure.base} at "
+        f"{failure.sha[:12] or 'its head'} carries no {E2E_CONTRACT}, so the tests no hosted "
+        "runner can run -- a browser, the Docker stack, a credential, a GUI, live services "
+        "-- run nowhere, and every project owes them. Write the tier as "
+        f"{LOCAL_E2E_RULE} says; if that rule is not in this tree, run python "
+        "scripts/sync-devkit.py --pull first. Put the tests that need this machine behind "
+        "a marker the default run deselects, add a real end-to-end test where there is "
+        f"none, and write {E2E_CONTRACT} to run exactly that tier. Then run python "
+        f"{E2E_CONTRACT} here and say in the intent what it printed; a red it finds that "
+        "is not a mistake in the tier itself is for the next night to send a fixer at, "
+        f"not for this change. This worktree is on the fresh branch {branch} off "
+        f"origin/{failure.base}. {FINISH}"
+    )
+
+
+def _unfetchable_note(names: list[str]) -> str:
+    """Why Dependabot cannot do it here, and the only two fixes, when a path dependency
+    is what stops it. No quotes or backticks: the prompt crosses a `wt` command line."""
+    if not names:
+        return ""
+    which = ", ".join(names)
+    return (
+        f" Every Dependabot job here dies on the path dependency {which}: its runner "
+        "clones only this repository, so a [tool.uv.sources] path to a sibling checkout "
+        "is never there, and re-running or retrying Dependabot changes nothing -- do "
+        "neither. The fix is one of two: bump the packages by hand in this repository, "
+        f"or give {which} a source Dependabot can fetch, a git URL or a published package. "
+        "Take the first unless the second fits how this project builds, and say which in "
+        "the intent. A relock resolves against the sibling as it is on disk, so if this "
+        "repository's CI checks the sibling out at a pinned ref (the evidence names it), "
+        "move that ref to the sibling commit you locked against in the same change."
+    )
+
+
+# What a handled error's kind says about the cause, for the kinds whose cause is a
+# spelling in this repository rather than the version Dependabot was moving to.
+_RUN_CAUSES = {
+    "dependency_file_content_not_changed": (
+        "dependency_file_content_not_changed means Dependabot found nothing to rewrite: "
+        "its uv and pip updaters find a declaration by a case-sensitive match on the "
+        "lowercase package name, so a declaration spelled SQLAlchemy is never rewritten "
+        "-- spell it lowercase in the manifest."
+    ),
+}
+
+
+def _runs_note(runs: list[str]) -> str:
+    """Why a failing update job wants its cause fixed, not only the bump it was making.
+
+    data-lake's job failed on sqlalchemy five weeks running: one fixer bumped the lock
+    by hand, which answered a week, and the next found nothing to bump (dd07a7ab). The
+    cause was the manifest spelling SQLAlchemy. No quotes or backticks: the prompt
+    crosses a `wt` command line.
+    """
+    if not runs:
+        return ""
+    kinds = [cause for kind, cause in _RUN_CAUSES.items() if any(kind in r for r in runs)]
+    return (
+        " A failing update job is Dependabot failing to write an update itself, so a bump "
+        "by hand answers one run and the next scheduled run fails the same way -- the "
+        "evidence says how many runs in a row each job has failed. Find what in this "
+        "repository stops Dependabot and fix that, with a test, as well as the bump."
+        + "".join(f" {cause}" for cause in kinds)
+    )
+
+
+def dependabot_prompt(failure: Failure, branch: str) -> str:
+    """What Dependabot cannot do for a project: alerts no PR answers, update jobs failing.
+
+    The prompt is about the outcome, not the bot: every package named reaches its patched
+    version in this repository's lock, whoever does the bump.
+    """
+    sig = failure.signature
+    bumps = [e.removeprefix(ALERT_ENTRY) for e in sig if e.startswith(ALERT_ENTRY)]
+    runs = [e for e in sig if not e.startswith((ALERT_ENTRY, UNFETCHABLE_ENTRY))]
+    unfetchable = [
+        e.removeprefix(UNFETCHABLE_ENTRY) for e in sig if e.startswith(UNFETCHABLE_ENTRY)
+    ]
+    wanted = (
+        f" Bump each of these to at least the version named: {'; '.join(bumps)}." if bumps else ""
+    )
+    failing = f" Update jobs also fail on: {'; '.join(runs)}.{_runs_note(runs)}" if runs else ""
+    return _framed(
+        f"{failure.title} ({failure.url}).{wanted}{failing} Every alert, with its advisory, "
+        f"and every failing job with its error, is in {EVIDENCE_DIR}/{DEPENDABOT_EVIDENCE} "
+        f"in this worktree -- read it first.{_unfetchable_note(unfetchable)} This worktree is "
+        f"on the fresh branch {branch} off origin/{failure.base}. Bump only what is named, "
+        "in the lock (uv lock --upgrade-package NAME, or the project's own equivalent), "
+        "then run the tests that touch those packages. Name every package you bumped in "
+        "the intent's subject or body: the pass reads an alert as answered by any open PR "
+        f"that names its package, and sends again at one that none does. {FINISH}"
     )
 
 

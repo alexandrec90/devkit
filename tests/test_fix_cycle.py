@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import e2e_results
 import fix_cycle
 import fix_ledger
 import fix_plan
@@ -126,6 +127,38 @@ def test_a_ratchet_shared_adopted_or_beside_a_vendored_test_is_still_the_harness
     assert fix_cycle.classify(mixed, set(), PREFIXES) == fix_cycle.HARNESS
 
 
+OWN_FILE = (
+    "scripts/hooks/tests/test_repo_contract.py::"
+    "test_the_lint_runner_reruns_under_the_tree_venv_rather_than_skip_its_linters",
+)
+
+
+def test_a_vendored_test_of_a_projects_own_file_is_fixed_on_its_own_branch():
+    """sports_betting #67, adopting v0.11.58, failed the vendored lint-runner contract on
+    its own `scripts/lint-all.py`. Classed as the harness it went to a devkit session
+    told the fix belonged upstream; the only fix was on the adoption branch."""
+    head = "agent/auto/devkit-upgrade-v0-11-58-1011"
+    red = failure(project="sports_betting", number=67, head=head, signature=OWN_FILE)
+    assert fix_cycle.checks_own_files(red, set())
+    assert fix_cycle.is_projects_own(red, set(), PREFIXES)
+    assert fix_cycle.classify(red, set(), PREFIXES) == fix_cycle.PROJECT
+    classes = fix_cycle.classify_all([red], PREFIXES)
+    harness = fix_cycle.harness_state(classes, True, ["sports_betting"])
+    go, held = fix_cycle.phase([decision(fix_plan.DISPATCH, red)], classes, harness, PREFIXES)
+    assert harness.clean and held == []
+    assert [(d.action, d.failures) for d in go] == [(fix_plan.DISPATCH, (red,))]
+
+
+def test_a_vendored_test_of_own_files_shared_or_beside_another_is_still_the_harness():
+    both = [failure(signature=OWN_FILE), failure(project="roguelike", number=9, signature=OWN_FILE)]
+    shared = fix_cycle.shared_signatures(both)
+    assert all(fix_cycle.classify(f, shared, PREFIXES) == fix_cycle.HARNESS for f in both)
+    mixed = failure(signature=(*OWN_FILE, *VENDORED))
+    assert not fix_cycle.checks_own_files(mixed, set())
+    assert fix_cycle.classify(mixed, set(), PREFIXES) == fix_cycle.HARNESS
+    assert not fix_cycle.checks_own_files(failure(signature=(fix_plan.CONFLICT,)), set())
+
+
 def test_a_ratchet_is_the_projects_own_only_alone_and_off_an_adoption():
     own = failure(head="agent/secrets-baseline-lf-0926", signature=RATCHET)
     assert fix_cycle.is_own_ratchet(own, set(), PREFIXES)
@@ -178,6 +211,90 @@ def test_a_commit_refused_by_the_toolchain_is_the_harness_and_by_the_change_is_n
 def test_no_evidence_is_unknown_and_a_conflict_alone_is_unknown():
     assert fix_cycle.classify(failure(signature=()), set()) == fix_cycle.UNKNOWN
     assert fix_cycle.classify(failure(signature=(fix_plan.CONFLICT,)), set()) == fix_cycle.UNKNOWN
+
+
+def test_what_dependabot_cannot_do_is_the_projects_even_when_two_share_it():
+    """Two consumers of data-lake both say `"data-lake" is unfetchable`: a shared
+    signature, which would fold into the devkit session -- which can bump neither lock."""
+    unfetchable = (f"{fix_plan.UNFETCHABLE_ENTRY}data-lake",)
+    red = [
+        failure(kind=fix_plan.DEPENDABOT, project=p, number=0, signature=unfetchable)
+        for p in ("ibkr_trader", "sports_betting")
+    ]
+    shared = fix_cycle.shared_signatures(red)
+    assert unfetchable in shared
+    assert {fix_cycle.classify(f, shared) for f in red} == {fix_cycle.PROJECT}
+
+
+def test_a_gate_refused_over_billing_is_not_the_harness_even_when_shared():
+    """productivity-tracker #3 and social-scraper #108 shared four unstarted jobs, were
+    folded into a devkit session as harness, and held every project fixer behind it."""
+    billed = (f"Lint / {fix_plan.NO_BILLING}", f"Tests / {fix_plan.NO_BILLING}")
+    red = [
+        failure(project=p, number=n, signature=billed)
+        for p, n in (("productivity-tracker", 3), ("social-scraper", 108))
+    ]
+    shared = fix_cycle.shared_signatures(red)
+    assert billed in shared
+    assert {fix_cycle.classify(f, shared) for f in red} == {fix_cycle.PROJECT}
+    assert fix_cycle.harness_state(fix_cycle.classify_all(red), True, []).clean
+
+
+def _missing_tier(project: str) -> fix_plan.Failure:
+    return failure(
+        kind=fix_plan.LOCAL,
+        project=project,
+        number=0,
+        head="",
+        workflow=e2e_results.WORKFLOW,
+        signature=(e2e_results.MISSING,),
+    )
+
+
+def test_a_missing_tier_is_each_projects_own_even_when_every_project_shares_it():
+    """2026-11-06: eleven projects without `scripts/e2e.py` shared the one `MISSING` line,
+    so they read as one cause and were folded into a devkit session. A signature that
+    says a project's own file is absent names no cause to share, and no devkit change
+    writes any project's tests."""
+    red = [_missing_tier(p) for p in ("carameli", "roguelike", "skinamp")]
+    shared = fix_cycle.shared_signatures(red)
+    assert (e2e_results.MISSING,) in shared
+    assert {fix_cycle.classify(f, shared) for f in red} == {fix_cycle.PROJECT}
+    assert fix_cycle.harness_state(fix_cycle.classify_all(red), True, []).clean
+
+
+def test_a_missing_tier_goes_to_a_fixer_in_each_project_through_the_whole_cycle():
+    """`fix_plan.plan` had always made these one dispatch each, and its test passed while
+    `phase` folded them back together: what goes out is what this pins."""
+    names = ("carameli", "roguelike", "skinamp")
+    red = [_missing_tier(p) for p in names]
+    classes = fix_cycle.classify_all(red)
+    go, held = fix_cycle.phase(
+        fix_plan.plan(red, "v0-11-83", PREFIXES),
+        classes,
+        fix_cycle.harness_state(classes, True, []),
+    )
+    assert [(d.action, [f.project for f in d.failures]) for d in go] == [
+        (fix_plan.DISPATCH, [name]) for name in names
+    ]
+    assert held == []
+
+
+def test_a_missing_tier_waits_behind_a_red_harness_like_any_project_fixer():
+    """Being the project's own is what makes it holdable: the one devkit session goes
+    alone, and a harness failure beside these does not drag them into it."""
+    vendored = failure(
+        project="devkit", kind=fix_plan.BRANCH, number=0, head="", signature=VENDORED
+    )
+    red = [vendored, _missing_tier("carameli"), _missing_tier("roguelike")]
+    classes = fix_cycle.classify_all(red)
+    go, held = fix_cycle.phase(
+        fix_plan.plan(red, "v0-11-83", PREFIXES),
+        classes,
+        fix_cycle.harness_state(classes, True, []),
+    )
+    assert [f.project for d in go for f in d.failures] == ["devkit"]
+    assert [d.failures[0].project for d, _ in held] == ["carameli", "roguelike"]
 
 
 def test_classify_all_is_keyed_like_the_ledger():
@@ -497,6 +614,25 @@ def test_the_history_line_says_why_nothing_went():
     assert line["capped"] == ["carameli #412 -- 2 session(s) sent -- needs a human"]
 
 
+def test_the_history_line_carries_what_the_tray_shows():
+    """`tray_state.fix_pass_states` reads only this line: the fixers at work, the steps
+    awaiting a person, and the groups still owed a fixer."""
+    account = fix_cycle.Account(
+        fix_cycle.DISPATCH,
+        fix_cycle.harness_state({}, True, []),
+        working=("devkit agent/fix-x",),
+        person=("run `claude auth login` on this machine",),
+        owed=2,
+    )
+    line = json.loads(fix_cycle.history_line(account, NOW))
+    assert line["working"] == ["devkit agent/fix-x"]
+    assert line["person"] == ["run `claude auth login` on this machine"]
+    assert line["owed"] == 2
+    text = fix_cycle.render(account)
+    assert "working  devkit agent/fix-x" in text
+    assert "you      run `claude auth login` on this machine" in text
+
+
 def test_the_record_names_the_adoptions_still_open():
     harness = fix_cycle.harness_state({}, True, ["carameli"])
     text = fix_cycle.render(fix_cycle.Account(fix_cycle.DISPATCH, harness))
@@ -522,6 +658,24 @@ def test_the_ledger_backlog_rides_along_without_holding_anyone():
     classes = fix_cycle.classify_all([backlog])
     assert classes[fix_ledger.failure_key(backlog)] == fix_cycle.HARNESS
     assert fix_cycle.harness_state(classes, True, []).clean
+
+
+def test_a_devkit_local_e2e_red_gets_its_session_and_holds_no_project_fixer():
+    """devkit's local tier judges its workstation tooling -- a picker over its budget, a
+    task VS Code cannot resolve -- not the harness a project fixer runs under, so it is
+    devkit's to fix and no reason to stop every other repository's fixes behind it."""
+    local = failure(
+        kind=fix_plan.LOCAL, project="devkit", number=0, head="", url="", workflow="Local E2E"
+    )
+    project = failure(project="carameli", signature=("tests/test_x.py::test_y",))
+    classes = fix_cycle.classify_all([local, project])
+    assert classes[fix_ledger.failure_key(local)] == fix_cycle.HARNESS
+    harness = fix_cycle.harness_state(classes, True, [])
+    assert harness.clean
+    decisions = fix_plan.plan([local, project], "v0-11-23", ())
+    go, held = fix_cycle.phase(decisions, classes, harness)
+    assert held == []
+    assert {f.kind for d in go for f in d.failures} == {fix_plan.LOCAL, fix_plan.PR}
 
 
 def test_a_gate_running_at_the_tip_is_not_a_reason_to_hold():
@@ -564,6 +718,27 @@ def test_the_record_names_the_regated_branches_and_the_blocked_reports():
     assert lines[3] == "blocked  carameli agent/x -- needs a database the runner lacks"
 
 
+def test_the_record_says_what_the_ledger_verdicts_were_apart_from_the_blocked():
+    """2026-10-03: a row `fix_verify` retired read "blocked  retired [a8b29f18] ...", the
+    label for a session that could not do its work, in a record read for exactly that."""
+    account = fix_cycle.Account(
+        fix_cycle.DISPATCH,
+        fix_cycle.harness_state({}, True, []),
+        blocked=("carameli agent/x -- needs a database",),
+        verified=("retired [a8b29f18] -- filed while the fix was in flight",),
+    )
+    lines = fix_cycle.render(account).splitlines()
+    assert "blocked  carameli agent/x -- needs a database" in lines
+    assert "verified retired [a8b29f18] -- filed while the fix was in flight" in lines
+    assert not any(line.startswith("blocked  retired") for line in lines)
+
+
+def test_labelled_pads_every_label_to_one_column():
+    assert fix_cycle.labelled("sent", ["a", "b"]) == ["sent     a", "sent     b"]
+    assert fix_cycle.labelled("verified", ["x"]) == ["verified x"]
+    assert fix_cycle.labelled("filed", []) == []
+
+
 def test_when_planning_raises_only_the_backlog_goes_to_the_devkit_session():
     """The crash is on that backlog by then, so the devkit session is what fixes the plan."""
     backlog = failure(kind=fix_plan.LEDGER, project="devkit", number=0, head="", signature=("x",))
@@ -572,6 +747,8 @@ def test_when_planning_raises_only_the_backlog_goes_to_the_devkit_session():
     assert [d.action for d in go] == [fix_plan.UPSTREAM] and go[0].failures == (backlog,)
     assert held == [] and skipped == []
     assert fix_cycle.only_the_harness(None)[1] == []
+    late = fix_cycle.only_the_harness(backlog, fix_cycle.PLAN_LATE)[0]
+    assert "raised" not in late.reasons[0] and fix_cycle.PLAN_LATE in late.reasons[0]
 
 
 def test_a_devkit_commit_the_commit_stage_refused_is_fixed_in_its_own_tree():

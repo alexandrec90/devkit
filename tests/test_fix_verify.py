@@ -36,6 +36,23 @@ def test_the_pr_field_names_a_number_a_url_a_branch_or_nothing():
     assert fix_verify.target("see the note") == ("", "")
 
 
+def test_a_claude_worktree_branch_is_a_branch_though_it_has_no_slash(tmp_path):
+    """Supervision 2026-10-01: four groups resolved onto `worktree-proud-greeting-pinwheel`
+    were never in flight -- the branch pattern wanted a slash -- so the next reap-stale row
+    sent a fixer that rewrote the supervisor's fix as #488, and a branch that never merged
+    would have left them retired for good. 17 resolutions on the ledger named one."""
+    assert fix_verify.target("worktree-proud-greeting-pinwheel") == (
+        "",
+        "worktree-proud-greeting-pinwheel",
+    )
+    assert fix_verify.target("worktree-shimmying-nibbling-bee-2")[1]
+    assert fix_verify.target("-") == ("", ""), "still the no-fix verdict"
+    lines = items(resolution("worktree-proud-greeting-pinwheel", ref="33333333"))
+    assert fix_verify.in_flight(lines, tmp_path / "v.json", NOW) == {
+        "33333333": "worktree-proud-greeting-pinwheel"
+    }
+
+
 def at(hours_ago: float) -> str:
     return (NOW - _dt.timedelta(hours=hours_ago)).isoformat(timespec="seconds")
 
@@ -107,6 +124,71 @@ def test_rows_filed_while_the_fix_was_in_flight_retire_when_it_merges(tmp_path):
     assert row == triage.item_id(waiting), "the row after the merge is a real recurrence"
     assert pr == merge.url and f"[{head}]" in note and at(3) in note
     assert row in triage.load_settled(cache), "merged by construction: never in flight"
+
+
+def test_a_resolution_carried_to_a_new_branch_covers_from_when_it_was_first_made(tmp_path):
+    """#456 merged at 02:34, a minute after data-lake filed the group again at 02:33;
+    the resolution naming it was written at 02:06 and re-pointed after the carry. Measured
+    from the re-point, that row read as a fix that did not hold."""
+    first, waiting = finding(10), finding(6)
+    head = triage.item_id(first)
+    carried = (
+        f"{at(4)}\tevent=triage-resolved\tref={head}\tpr=agent/x-2\tnote=fixed\tresolved={at(8)}"
+    )
+    lines = items(first, resolution("agent/x", days_ago=8 / 24, ref=head), waiting, carried)
+    merge = fix_verify.Pr(fix_verify.LANDED, at(2), "https://github.com/o/devkit/pull/456")
+    asked = []
+    outcome = fix_verify.verify(
+        lines, lambda _, what: asked.append(what) or [merge], tmp_path / "v", NOW
+    )
+    assert asked == ["agent/x-2"]
+    assert [row for row, _, _ in outcome.covered] == [triage.item_id(waiting)]
+
+
+def test_a_run_begun_before_the_merge_is_covered_though_filed_after_it(tmp_path):
+    """1fad5675: social-scraper #68 merged at 04:04Z, four minutes into a scrape that failed
+    on the old code at 04:13Z. Filed after the merge, it read as the fix not holding, and
+    the pass sent a session to re-prove it. Its `started=` says which code it ran."""
+    first = finding(10)
+    head = triage.item_id(first)
+    spanning = f"{finding(1)}\tstarted={at(3.5)}"
+    later = f"{finding(1 / 2)}\tstarted={at(2)}"
+    lines = items(first, resolution("agent/x", days_ago=8 / 24, ref=head), spanning, later)
+    merge = fix_verify.Pr(fix_verify.LANDED, at(3), "https://github.com/o/s/pull/68")
+    [(row, note, _)] = fix_verify.verify(lines, lambda *_: [merge], tmp_path / "v", NOW).covered
+    assert row == triage.item_id(spanning), "a run begun after the merge is a recurrence"
+    assert "after this row's run began" in note
+
+
+def test_a_run_from_a_checkout_without_the_merge_is_covered_though_begun_after_it(tmp_path):
+    """d7b9c8c4: devkit #659 merged at 05:10Z; the Worktree Reconcile begun at 05:15Z ran
+    from a devkit checkout two commits behind it and failed as #659 had stopped it
+    failing. Its `head_at=` says the code predates the merge -- for devkit's merge only."""
+    first = finding(10)
+    head = triage.item_id(first)
+    behind = f"{finding(1)}\tstarted={at(2.5)}\thead_at={at(6)}"
+    pulled = f"{finding(1 / 2)}\tstarted={at(2)}\thead_at={at(3)}"
+    lines = items(first, resolution("agent/x", days_ago=8 / 24, ref=head), behind, pulled)
+    merge = fix_verify.Pr(fix_verify.LANDED, at(3), "https://github.com/o/devkit/pull/659")
+    [(row, _, _)] = fix_verify.verify(lines, lambda *_: [merge], tmp_path / "a", NOW).covered
+    assert row == triage.item_id(behind), "a checkout at the merge commit has the fix"
+    elsewhere = fix_verify.Pr(fix_verify.LANDED, at(3), "https://github.com/o/carameli/pull/9")
+    assert fix_verify.verify(lines, lambda *_: [elsewhere], tmp_path / "b", NOW).covered == []
+    assert fix_verify.ran_from(lines[2]) == _dt.datetime.fromisoformat(at(2.5)), "no repo"
+    assert fix_verify.ran_from(lines[2], "carameli") == _dt.datetime.fromisoformat(at(2.5))
+    assert fix_verify.ran_from(lines[2], "devkit") == _dt.datetime.fromisoformat(at(6))
+    unreadable = items(f"{finding(1)}\tstarted={at(2.5)}\thead_at=never")[0]
+    assert fix_verify.ran_from(unreadable, "devkit") == _dt.datetime.fromisoformat(at(2.5))
+
+
+def test_an_unreadable_start_falls_back_to_when_the_row_was_filed(tmp_path):
+    first = finding(10)
+    garbled = f"{finding(1)}\tstarted=not a time"
+    lines = items(first, resolution("agent/x", days_ago=8 / 24, ref=triage.item_id(first)))
+    lines += items(garbled)
+    merge = fix_verify.Pr(fix_verify.LANDED, at(3))
+    assert fix_verify.ran_from(lines[-1]) == _dt.datetime.fromisoformat(at(1))
+    assert fix_verify.verify(lines, lambda *_: [merge], tmp_path / "v", NOW).covered == []
 
 
 def test_nothing_is_covered_without_a_readable_merge_time_or_by_another_group(tmp_path):
@@ -199,6 +281,95 @@ def test_a_gh_that_cannot_answer_answers_nothing(tmp_path):
     (tmp_path / "devkit").mkdir()
     failing = lambda _d: lambda *a: subprocess.CompletedProcess(a, 1, "", "HTTP 401")
     assert fix_verify.gh_lookup(tmp_path, ["devkit"], failing)("devkit", "1") == []
+
+
+def test_a_merged_pr_naming_the_group_settles_a_branch_that_never_landed(tmp_path):
+    """950c4a96: the resolution named `agent/fix-harness-ledger-0927-3`, whose only PR
+    (#429) merged that morning; the fix went out from `-0927-19` as #440, whose body names
+    the group. Reopening it sent a fixer to find #440 by hand."""
+    first, waiting = finding(80), finding(60)
+    head = triage.item_id(first)
+    lines = items(first, resolution("agent/fix-harness-ledger-0927-3", days_ago=3, ref=head))
+    lines += items(waiting)
+    old = fix_verify.Pr(fix_verify.LANDED, at(90), "https://github.com/o/devkit/pull/429")
+    fix = fix_verify.Pr(fix_verify.LANDED, at(50), "https://github.com/o/devkit/pull/440")
+    asked = []
+    mentions = lambda ref: asked.append(ref) or [fix]
+    cache = tmp_path / "v.json"
+    outcome = fix_verify.verify(lines, lambda *_: [old], cache, NOW, mentions)
+    assert asked == [head] and outcome.reopen == []
+    [(was, pr)] = outcome.found
+    assert (was.ref, was.pr, pr) == (head, "agent/fix-harness-ledger-0927-3", fix)
+    assert [row for row, _, url in outcome.covered] == [triage.item_id(waiting)]
+    assert outcome.covered[0][2] == fix.url, "retired against the PR that held the fix"
+    assert head in triage.load_settled(cache)
+
+
+def test_a_pr_naming_the_group_that_merged_before_the_resolution_does_not_settle_it(tmp_path):
+    earlier = fix_verify.Pr(fix_verify.LANDED, at(90), "u/12")
+    outcome = fix_verify.verify(
+        items(resolution("agent/x", days_ago=3)),
+        lambda *_: [],
+        tmp_path / "v",
+        NOW,
+        lambda _ref: [earlier, CLOSED, OPEN],
+    )
+    assert [ref for ref, _ in outcome.reopen] == ["aaaabbbb"] and outcome.found == []
+
+
+def test_mentions_are_asked_only_of_a_resolution_about_to_be_reopened(tmp_path):
+    asked = []
+    mentions = lambda ref: asked.append(ref) or []
+    for prs, days in (([OPEN], 3), ([], 1), ([MERGED], 3)):
+        fix_verify.verify(
+            items(resolution("agent/x", days_ago=days)),
+            lambda *_, p=prs: p,
+            tmp_path / f"v{days}{len(prs)}",
+            NOW,
+            mentions,
+        )
+    assert asked == []
+    fix_verify.verify(items(resolution("#7")), lambda *_: [CLOSED], tmp_path / "c", NOW, mentions)
+    assert asked == ["aaaabbbb"], "closed unmerged: the fix may have gone out elsewhere"
+
+
+def test_named_by_is_the_first_merge_since_the_resolution():
+    written = fix_verify.Resolution("r", at(10), "agent/x", "n")
+    first, later = fix_verify.Pr(fix_verify.LANDED, at(8)), fix_verify.Pr(fix_verify.LANDED, at(2))
+    stale, junk = fix_verify.Pr(fix_verify.LANDED, at(20)), fix_verify.Pr(fix_verify.LANDED, "?")
+    assert fix_verify.named_by(written, [later, stale, junk, OPEN, first]) == first
+    assert fix_verify.named_by(written, [stale, junk, CLOSED]) is None
+    unreadable = fix_verify.Resolution("r", "junk", "agent/x", "n")
+    assert fix_verify.named_by(unreadable, [first]) is None
+
+
+def test_the_mentions_search_asks_every_project_for_merged_prs_naming_the_id(tmp_path):
+    for name in ("devkit", "carameli"):
+        (tmp_path / name).mkdir()
+    calls = []
+
+    def gh_for(project_dir):
+        def gh(*args):
+            calls.append((project_dir.name, args))
+            row = {"state": "MERGED", "mergedAt": "2026-09-26T06:00:00Z", "url": "u/440"}
+            code = 0 if project_dir.name == "devkit" else 1
+            return subprocess.CompletedProcess(args, code, json.dumps([row, "junk"]), "")
+
+        return gh
+
+    mentions = fix_verify.gh_mentions(tmp_path, ["devkit", "carameli", "gone"], gh_for)
+    assert mentions("950c4a96") == [fix_verify.Pr("MERGED", "2026-09-26T06:00:00Z", "u/440")]
+    search = (
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--search",
+        "950c4a96",
+        "--json",
+        "state,mergedAt,url",
+    )
+    assert calls == [("devkit", search), ("carameli", search)]
 
 
 def test_judge_is_landed_open_closed_or_unlanded():

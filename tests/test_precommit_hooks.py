@@ -187,6 +187,17 @@ def test_stdlib_hook_passes_on_the_real_harness():
         assert check_stdlib.check(script, allowed) == [], f"{script.name} broke stdlib-only"
 
 
+def test_stdlib_hook_main_fails_on_any_bad_file_and_skips_non_python(tmp_path, capsys):
+    bad, good = tmp_path / "bad.py", tmp_path / "good.py"
+    bad.write_text("import requests\n", encoding="utf-8")
+    good.write_text("import json\n", encoding="utf-8")
+    assert check_stdlib.main([str(good), str(tmp_path / "notes.md")]) == 0
+    assert check_stdlib.main([]) == 0, "nothing staged is nothing to check"
+    assert check_stdlib.main([str(good), str(bad)]) == 1
+    out = capsys.readouterr().out
+    assert f"{bad}: " in out and "stdlib" in out and f"{good}: " not in out
+
+
 # --- devkit-drift -------------------------------------------------------------
 
 
@@ -272,6 +283,20 @@ def test_drift_hook_skips_inside_devkit_itself():
     result = _run_drift(REPO_ROOT)
     assert result.returncode == 0
     assert "this IS devkit" in result.stdout
+
+
+def test_drift_hook_main_reads_the_repo_it_runs_in(tmp_path, monkeypatch, capsys):
+    """In process, the way pre-commit's cwd reaches it: devkit skips, a consumer compares."""
+    drift = load_script("scripts/precommit/check_harness_drift.py")
+    monkeypatch.chdir(REPO_ROOT)
+    assert drift.main() == 0
+    assert "this IS devkit" in capsys.readouterr().out
+    root = _fake_consumer(tmp_path)
+    monkeypatch.chdir(root)
+    assert drift.main() == 0
+    (root / "scripts" / "hooks" / "harness_config.py").unlink()
+    assert drift.main() == 1
+    assert "absent here" in capsys.readouterr().out
 
 
 # --- the pin the generator hands to new projects --------------------------------

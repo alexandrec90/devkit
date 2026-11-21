@@ -16,7 +16,7 @@ Three sources feed the list, because a project can be in any two of them:
 | --- | --- | --- | --- |
 | yes | yes | no  | registers it |
 | no  | yes | no  | clones it first |
-| yes | no  | no  | creates the private repo and pushes first |
+| yes | no  | no  | creates the public repo and pushes first |
 | no  | yes | yes | clones it onto this PC; the registry is untouched |
 | yes | yes | yes | nothing — it is already checked |
 
@@ -38,15 +38,18 @@ orphaning them.
 The write goes to devkit's **canonical** `workspace.jsonc` and is then rendered over
 the live file by `publish_workspace`, per `.claude/rules/vscode-tasks.md`: the live file
 has no branch dimension, so a hand edit there is globally live before anyone reviews it.
-`edit_verdict` is the gate on that, and the canonical edit is deliberately left
-uncommitted for a task branch — the same shape `--adopt-workspace` has.
+`edit_verdict` is the gate on that. The canonical edit then goes onto a task branch in a
+worktree of its own, with a ship intent (`hand_off_registry`), and the static checkout's
+copy is put back: the fix pass runs from that checkout, and an edit left there for
+someone to commit was committed on a branch in it, which the pass then ran (a5ec492b).
 
 **The checkboxes live in VS Code, not in this terminal.** `--rows` scans the three
 sources and prints the quick-pick, `plugSelection` draws it, and `--picks` reads the
 answer back. The terminal loop below is what a bare `python scripts/plug-projects.py`
-still gets, and the task never reaches it. The task stays unwrapped by `log-wrap.py` all
-the same: this script writes `logs/plug-projects.log` itself, and that artifact names the
-registry it ended with rather than transcribing what scrolled past.
+still gets, and the task never reaches it -- which is what lets the task run inside
+`log-wrap.py`, whose pipe could not carry that loop's prompt. The wrapper keeps the run
+and files a failed one on the harness-events ledger; this script's own
+`logs/plug-projects.log` names the registry it ended with.
 
 **A tick is a toggle, and that is a deliberate break from the checklist it replaced.**
 That list came from `logs/plug-menu.json`, which only `worktree.py reconcile` rewrote —
@@ -73,6 +76,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import canonical_handoff
 import devkit_jsonc
 import devkit_project
 import picker_rows
@@ -335,7 +339,7 @@ def toggle_detail(candidate: Candidate, owner: str) -> str:
     """What ticking this row will do, as the sentence under its label.
 
     The pick is the confirmation: the task runs `--picks ... --yes`, so this string is
-    the last thing anyone reads before a private GitHub repo is created. Every row says
+    the last thing anyone reads before a public GitHub repo is created. Every row says
     what its *own* tick does, because a tick now means "flip this" and the two
     directions cost wildly different things -- retiring a registry entry is reversible
     and touches no disk, while plugging one can clone, or create and push, a repository.
@@ -359,7 +363,7 @@ def toggle_detail(candidate: Candidate, owner: str) -> str:
     if not candidate.on_disk:
         return f"not on disk -- ticking clones {owner}/{candidate.name} first"
     if not candidate.on_github:
-        return f"no repo -- ticking CREATES the private {owner}/{candidate.name} and pushes it"
+        return f"no repo -- ticking CREATES the public {owner}/{candidate.name} and pushes it"
     return "on disk and on GitHub -- ticking registers it, and nothing else"
 
 
@@ -461,21 +465,21 @@ def scripted_selection(
     return (checked | set(plug)) - set(unplug), set(plug)
 
 
-def after_apply_notes(steps: list[Step]) -> list[str]:
+def after_apply_notes(steps: list[Step], handed: bool = False) -> list[str]:
     """What still needs a human once the steps have run; empty for a clone-only run.
 
     A clone edits nothing in the registry -- the project was registered already, from
     another workstation -- so there is nothing to commit and the note would send
-    someone to ship a `workspace.jsonc` that has not changed.
+    someone to ship a `workspace.jsonc` that has not changed. Nor does an edit `_apply`
+    handed off onto a task branch: the fix pass ships that one. The note that remains is
+    for a cut that failed, and says where the branch goes, since "commit it on a task
+    branch" in the static checkout is how the pass came to run one (a5ec492b).
     """
     notes = []
-    if any(s.action != CLONE for s in steps):
-        notes.append(
-            f"  commit {devkit_project.CANONICAL_WORKSPACE.name} on a task branch -- it is devkit's"
-        )
-        notes.append(
-            "  copy of the registry, and an uncommitted one stops the session-start publish."
-        )
+    if any(s.action != CLONE for s in steps) and not handed:
+        name = devkit_project.CANONICAL_WORKSPACE.name
+        notes.append(f"  ship {name} from a worktree, never a branch in devkit's own checkout:")
+        notes.append("  the fix pass runs from that checkout, on whatever branch it is on.")
     if any(s.action == PLUG for s in steps):
         notes.append("  a project with a stack also needs a slot in ports.toml; add it by hand.")
     return notes
@@ -571,7 +575,7 @@ def describe(step: Step) -> str:
     if step.init_git:
         extra.append("git init + initial commit")
     if step.create_repo:
-        extra.append("create the PRIVATE GitHub repo and push")
+        extra.append("create the PUBLIC GitHub repo and push")
     detail = ", ".join(extra) if extra else "registry only"
     return f"  plug    {step.name}   {detail}"
 
@@ -687,7 +691,8 @@ def clone_repo(owner: str, name: str, root: Path, runner) -> None:
 
 
 def create_repo(owner: str, name: str, path: Path, runner, *, init: bool) -> None:
-    """Create the PRIVATE GitHub repo for an existing folder and push it.
+    """Create the public GitHub repo for an existing folder and push it
+    (`devkit_project.CREATE_VISIBILITY`).
 
     `gh repo create --source` needs a commit to push, so a folder that is not a repo at
     all — or is one with nothing committed — gets `git init` and one commit first. This
@@ -706,7 +711,7 @@ def create_repo(owner: str, name: str, path: Path, runner, *, init: bool) -> Non
         "repo",
         "create",
         f"{owner}/{name}",
-        "--private",
+        devkit_project.CREATE_VISIBILITY,
         "--source=.",
         "--remote=origin",
         "--push",
@@ -791,21 +796,74 @@ def gather() -> tuple[list[Candidate], list[str]]:
     return inventory(registry, disk, repos, git_dirs=git_dirs, harnessed=harnessed), warnings
 
 
-def _apply(steps: list[Step], owner: str, out) -> None:
-    """Run every step's disk half, then write and publish the registry."""
+REGISTRY_INTENT = """{subject}
+
+`scripts/plug-projects.py` {what} on a confirmed pick and published the live workspace
+file from it. This is devkit's canonical `workspace.jsonc`, the registry every machine
+shares.
+
+The script cut this branch itself. It used to leave the edit uncommitted in devkit's
+static checkout and say to commit it on a task branch, and a session did, in that
+checkout: the fix pass runs from it, so the pass ran the task branch's code and filed
+`pass-stale` (a5ec492b).
+
+It merges once green, as every unheld PR does: the pick was the decision, and until it
+lands the nightly render of the canonical copy (`scripts/e2e.py`) would undo it in the
+live file.
+"""
+
+
+def registry_change(steps: list[Step]) -> tuple[str, str]:
+    """`(slug, intent)` for the registry edit `steps` make; ("", "") for a clone-only run."""
+    plugged = sorted(s.name for s in steps if s.action == PLUG)
+    unplugged = sorted(s.name for s in steps if s.action == UNPLUG)
+    verbs = [(PLUG, plugged), (UNPLUG, unplugged)]
+    parts = [f"{verb} {', '.join(names)}" for verb, names in verbs if names]
+    if not parts:
+        return "", ""
+    subject = " and ".join(parts).capitalize() + " in the workspace registry"
+    what = " and ".join(f"{verb}ged {', '.join(names)}" for verb, names in verbs if names)
+    slug = "-".join(f"{verb}-{'-'.join(names)}" for verb, names in verbs if names)
+    return slug, REGISTRY_INTENT.format(subject=subject, what=what)
+
+
+def hand_off_registry(steps: list[Step], canonical: Path, runner=subprocess.run) -> str:
+    """Put the registry edit on a task branch off the static checkout: the line to print,
+    or "" when nothing was handed off and the person still has to commit it."""
+    slug, intent = registry_change(steps)
+    if not slug:
+        return ""
+    cut = canonical_handoff.hand_off(canonical, slug, intent, runner)
+    if cut.said:
+        return f"  WARNING {cut.said}"
+    if cut.tree is None:
+        return ""
+    return (
+        f"  branch  {cut.branch}: {canonical.name}, for the fix pass to ship and merge once "
+        f"green\n          {cut.tree}"
+    )
+
+
+def _apply(steps: list[Step], owner: str, out) -> bool:
+    """Run every step's disk half, then write and publish the registry; whether its
+    edit was handed off onto a task branch (`hand_off_registry`)."""
     for step in steps:
         if step.clone:
             out(f"  clone   {owner}/{step.name}")
             clone_repo(owner, step.name, WORKSPACE_ROOT, _run)
         if step.create_repo:
-            out(f"  create  {owner}/{step.name} (private)")
+            out(f"  create  {owner}/{step.name} (public)")
             create_repo(owner, step.name, WORKSPACE_ROOT / step.name, _run, init=step.init_git)
 
     # A clone-only run edits nothing in the registry -- the project was registered
     # already -- and still publishes: the live file is this machine's view, and the
     # checkout that just appeared is what puts the folder into it.
     canonical = devkit_project.CANONICAL_WORKSPACE
-    if any(s.action != CLONE for s in steps):
+    edits = any(s.action != CLONE for s in steps)
+    # Asked before the write, so an edit already sitting there is never carried off onto
+    # a branch under this pick's name.
+    clean_before = edits and not canonical_handoff.dirty(canonical)
+    if edits:
         canonical.write_text(
             apply_registry(canonical.read_text(encoding="utf-8"), steps),
             encoding="utf-8",
@@ -820,6 +878,10 @@ def _apply(steps: list[Step], owner: str, out) -> None:
             "wrote and was not published -- `--render-workspace --force` discards it"
         )
     out(f"  publish {LIVE_WORKSPACE.name} ({len(changes)} change(s)) -- reload the window")
+    handed = hand_off_registry(steps, canonical) if clean_before else ""
+    if handed:
+        out(handed)
+    return handed.startswith("  branch")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -996,14 +1058,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     try:
-        _apply(steps, args.owner, print)
+        handed = _apply(steps, args.owner, print)
     except (PlugError, devkit_project.RegistryEditError, OSError) as exc:
         print(f"ERROR   {exc}", file=sys.stderr)
         write_artifact([str(exc)])
         return 1
 
     print("")
-    for line in after_apply_notes(steps):
+    for line in after_apply_notes(steps, handed):
         print(line)
     write_artifact([])
     return 0

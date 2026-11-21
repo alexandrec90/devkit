@@ -17,6 +17,7 @@ import pytest
 from support import load_script
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import e2e_results as fix_plan_e2e
 import fix_ledger
 import fix_plan
 
@@ -61,6 +62,163 @@ def failure(**fields) -> fix_plan.Failure:
 # --- the signature ------------------------------------------------------------------
 
 
+# --- the direct flow ----------------------------------------------------------------
+
+RED_BASE = {"kind": fix_plan.BRANCH, "number": 0, "head": "", "workflow": "PR Gate"}
+PRE_COMMIT_JOB = "Pre-commit gate"
+PRE_COMMIT_STEP = f"{PRE_COMMIT_JOB} / Run every hook over the whole repo"
+
+
+def moves(*direct: str, red: list) -> list[str]:
+    """What the plan does with `red`, with `direct` named as the direct-flow projects."""
+    return [decision.action for decision in fix_plan.plan(red, "", PREFIXES, direct)]
+
+
+def test_a_red_base_holds_no_conflict_resolver_in_the_direct_flow():
+    """Nothing waits on the base being green, and a conflicted PR is the one thing the
+    drain skips."""
+    red = [
+        failure(project="roguelike", signature=("tests/test_a.py::t",), **RED_BASE),
+        failure(project="roguelike", number=2, head="agent/b", signature=(fix_plan.CONFLICT,)),
+    ]
+    assert fix_plan.RESOLVE in moves("roguelike", red=red)
+    assert fix_plan.RESOLVE not in moves(red=red)
+
+
+def test_a_direct_flow_pr_red_on_its_own_stays_held_by_a_red_base():
+    """Only the conflict is special: a failing PR against a red base inherits its red."""
+    red = [
+        failure(project="roguelike", signature=("tests/test_a.py::t",), **RED_BASE),
+        failure(project="roguelike", number=2, head="agent/b", signature=("tests/test_b.py::t",)),
+    ]
+    assert fix_plan.HOLD in moves("roguelike", red=red)
+
+
+def test_another_projects_flow_changes_nothing_here():
+    red = [
+        failure(project="carameli", signature=("tests/test_a.py::t",), **RED_BASE),
+        failure(project="carameli", number=2, head="agent/b", signature=(fix_plan.CONFLICT,)),
+    ]
+    assert fix_plan.RESOLVE not in moves("roguelike", red=red)
+
+
+@pytest.mark.parametrize(
+    ("sig", "hooks"),
+    [
+        (("Lint + hook-script tests / Format",), ()),
+        ((fix_plan.MIRROR_TEST,), ()),
+        ((fix_plan.MIRROR_TEST, "Lint + hook-script tests / Format"), ()),
+        ((PRE_COMMIT_STEP,), ((PRE_COMMIT_JOB, "ruff-format"),)),
+        (
+            (PRE_COMMIT_STEP, "Lint / Lint"),
+            ((PRE_COMMIT_JOB, "end-of-file-fixer"), ("Lint", "ruff-format")),
+        ),
+        (
+            (PRE_COMMIT_STEP,),
+            ((PRE_COMMIT_JOB, "codex-skill-mirror"), (PRE_COMMIT_JOB, "trailing-whitespace")),
+        ),
+    ],
+)
+def test_formatting_and_the_codex_mirror_are_tidys(sig, hooks):
+    assert fix_plan.is_tidy_owned(sig, hooks)
+
+
+@pytest.mark.parametrize(
+    ("sig", "hooks"),
+    [
+        ((), ()),
+        (("tests/test_a.py::t",), ()),
+        ((fix_plan.MIRROR_TEST, "tests/test_a.py::t"), ()),
+        (("lint scripts/a.py",), ()),
+        ((PRE_COMMIT_STEP,), ()),  # a log that names no hook says nothing either way
+        ((PRE_COMMIT_STEP,), ((PRE_COMMIT_JOB, "ruff-format"), (PRE_COMMIT_JOB, "detect-secrets"))),
+        (("Tests / Application suite",), (("Tests", "ruff-format"),)),
+        ((f"{fix_plan.MIRROR_TEST.split('::')[0]}::test_mirror_tree_removes_x",), ()),
+    ],
+)
+def test_anything_else_is_not(sig, hooks):
+    assert not fix_plan.is_tidy_owned(sig, hooks)
+
+
+def test_a_hook_named_by_one_job_excuses_no_other():
+    """D6: `Lint / Lint` red for its own reason, beside a formatting hook in the pre-commit
+    job, was read as tidy's."""
+    sig = (PRE_COMMIT_STEP, "Lint / Lint")
+    assert not fix_plan.is_tidy_owned(sig, ((PRE_COMMIT_JOB, "ruff-format"),))
+
+
+def test_the_hooks_a_failed_log_names_are_read_past_a_job_logs_prefix():
+    prefix = "Pre-commit gate\tRun every hook\t2026-11-06T09:00:00.0000000Z "
+    log = (
+        f"{prefix}ruff format.....Failed\n{prefix}- hook id: ruff-format\n"
+        f"{prefix}- files were modified by this hook\n"
+        f"{prefix}\x1b[1m- hook id: detect-secrets\x1b[0m\n"
+    )
+    assert fix_plan.failed_hooks([log]) == (
+        ("Pre-commit gate", "detect-secrets"),
+        ("Pre-commit gate", "ruff-format"),
+    )
+    assert fix_plan.failed_hooks(["FAILED tests/a.py::t\n"]) == ()
+
+
+def test_a_hook_with_no_log_prefix_belongs_to_no_job_unless_lint_all_wrote_it():
+    """`lint-all.py` keeps the terminal to a status line, so a generated gate's `Would
+    reformat` is in its artifact, whose header says whose it is."""
+    assert fix_plan.failed_hooks(["Would reformat: a.py\n"]) == (("", "ruff-format"),)
+    lint = f"{fix_plan.LINT_ARTIFACT}\n# ruff\nWould reformat: a.py\n"
+    assert fix_plan.failed_hooks([lint]) == (("Lint", "ruff-format"),)
+    assert fix_plan.is_tidy_owned(("Lint / Lint",), fix_plan.failed_hooks([lint]))
+
+
+def test_a_default_branch_only_tidy_owes_sends_no_fixer_and_holds_no_pr():
+    """Tidy runs on every merge; a fixer would race it, and a PR held behind this base
+    would wait on no one."""
+    red = [
+        failure(
+            project="roguelike",
+            signature=(PRE_COMMIT_STEP,),
+            hooks=((PRE_COMMIT_JOB, "ruff-format"),),
+            **RED_BASE,
+        ),
+        failure(project="roguelike", number=2, head="agent/b", signature=("tests/test_b.py::t",)),
+    ]
+    assert moves("roguelike", red=red) == [fix_plan.SKIP, fix_plan.DISPATCH]
+
+
+def test_a_tidy_red_past_its_grace_gets_a_fixer_and_holds_prs_like_any_other():
+    """D5: `.github/workflows` whitespace is one input tidy can never land, so the skip
+    cannot be forever."""
+    assert fix_plan.TIDY_GRACE == _dt.timedelta(hours=1)
+    red = [
+        failure(project="roguelike", signature=("Job / Format",), tidy_lapsed=True, **RED_BASE),
+        failure(project="roguelike", number=2, head="agent/b", signature=("tests/test_b.py::t",)),
+    ]
+    assert moves("roguelike", red=red) == [fix_plan.HOLD, fix_plan.DISPATCH]
+
+
+def test_only_a_direct_default_branch_is_owned_by_tidy():
+    formatting = failure(project="roguelike", signature=("Job / Format",), **RED_BASE)
+    assert fix_plan.owned_by_tidy(formatting, frozenset({"roguelike"}))
+    assert not fix_plan.owned_by_tidy(formatting, frozenset())
+    a_pr = failure(project="roguelike", signature=("Job / Format",))
+    assert not fix_plan.owned_by_tidy(a_pr, frozenset({"roguelike"}))
+    assert "Job / Format" in fix_plan.tidy_note(formatting) and "tidy" in (
+        fix_plan.tidy_note(formatting)
+    )
+
+
+def test_a_gated_default_branch_red_on_formatting_still_gets_its_fixer():
+    """Inert for a gated project: nothing tidies it."""
+    red = [failure(signature=("Lint + hook-script tests / Format",), **RED_BASE)]
+    assert moves(red=red) == [fix_plan.DISPATCH]
+
+
+def test_a_formatting_red_with_anything_else_in_it_still_gets_its_fixer():
+    sig = ("Lint + hook-script tests / Format", "tests/test_a.py::t")
+    red = [failure(project="roguelike", signature=sig, **RED_BASE)]
+    assert moves("roguelike", red=red) == [fix_plan.DISPATCH]
+
+
 def test_the_signature_is_the_failed_ids_sorted_and_deduped():
     assert fix_plan.signature_from_logs([SUMMARY]) == (
         "scripts/hooks/tests/test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
@@ -95,13 +253,98 @@ def test_without_an_artifact_the_failed_steps_are_the_signature():
             ],
         },
         {"name": "Lint", "conclusion": "success", "steps": []},
-        {"name": "Drift", "conclusion": "failure", "steps": []},
+        {"name": "Drift", "conclusion": "failure", "steps": [SET_UP]},
     ]
     assert fix_plan.signature_from_jobs(jobs) == ("Drift", "Tests / Application suite")
 
 
+SET_UP = {"name": "Set up job", "conclusion": "success"}
+# carameli PR Gate run 37363944090, as `gh run view --json jobs` gave it: the run failed,
+# and its only non-green job was one no hosted runner ever picked up.
+UNACQUIRED = [
+    {"name": "Backend unit + integration", "conclusion": "cancelled", "steps": []},
+    {"name": "Lint", "conclusion": "success", "steps": [SET_UP]},
+]
+UNACQUIRED_SIG = ("Backend unit + integration (never started a step)",)
+
+
+def test_a_job_that_never_started_a_step_is_named_as_one():
+    """The run's signature was empty -- a cancelled job was not a failure -- so its fixer
+    was told "see the run" and that no artifact came down, with no hint the job never ran."""
+    assert fix_plan.signature_from_jobs(UNACQUIRED) == UNACQUIRED_SIG
+    assert fix_plan.is_unstarted(UNACQUIRED_SIG)
+    failed = [{"name": "Drift", "conclusion": "failure", "steps": []}]
+    assert fix_plan.signature_from_jobs(failed) == ("Drift (never started a step)",)
+
+
+def test_a_cancelled_job_beside_a_real_failure_is_its_collateral():
+    """A matrix's fail-fast cancels the queued siblings; naming them would make the
+    signature of one failure depend on how far the others got."""
+    jobs = [
+        {
+            "name": "Tests",
+            "conclusion": "failure",
+            "steps": [{"name": "Suite", "conclusion": "failure"}],
+        },
+        *UNACQUIRED,
+    ]
+    assert fix_plan.signature_from_jobs(jobs) == ("Tests / Suite",)
+    assert not fix_plan.is_unstarted(("Tests / Suite", *UNACQUIRED_SIG))
+    assert not fix_plan.is_unstarted(())
+
+
+def test_a_first_attempt_no_runner_started_is_re_run_in_place_not_fixed():
+    unstarted = failure(signature=UNACQUIRED_SIG, run_id="37363944090", attempt=1)
+    [decision] = fix_plan.plan([unstarted], "v0-11-21", PREFIXES)
+    assert decision.action == fix_plan.RERUN
+    assert "run 37363944090's failed jobs are re-run once" in decision.note
+    assert fix_plan.reruns_in_place(unstarted)
+
+
+def test_a_second_attempt_no_runner_started_gets_its_fixer():
+    """Once is luck; the same twice is a workflow whose job cannot start, and that is
+    code. An unread attempt (0) or no run to re-run is not re-run either."""
+    for unstarted in (
+        failure(signature=UNACQUIRED_SIG, run_id="7", attempt=2),
+        failure(signature=UNACQUIRED_SIG, run_id="7", attempt=0),
+        failure(signature=UNACQUIRED_SIG, run_id="", attempt=1),
+    ):
+        [decision] = fix_plan.plan([unstarted], "v0-11-21", PREFIXES)
+        assert decision.action == fix_plan.DISPATCH, unstarted
+    assert not fix_plan.reruns_in_place(failure(signature=UNACQUIRED_SIG, run_id=""))
+
+
+# social-scraper #90's PR Gate run 39137365237: public ECR answered the postgres service
+# image's pull with `toomanyrequests`, so `Tests` failed before any step of the workflow.
+SERVICE_PULL_SIG = ("Tests / Initialize containers",)
+
+
+def test_a_job_red_in_the_runners_own_setup_ran_no_workflow_step():
+    assert fix_plan.is_runner_side(SERVICE_PULL_SIG)
+    assert fix_plan.is_runner_side(("Drift / Set up job", *UNACQUIRED_SIG))
+    assert all(fix_plan.is_runner_side((f"x / {step}",)) for step in fix_plan.RUNNER_STEPS)
+    assert not fix_plan.is_unstarted(SERVICE_PULL_SIG), "it did start a step: the runner's"
+    assert not fix_plan.is_runner_side(("Tests / Initialize containers", "Lint / Ruff"))
+    assert not fix_plan.is_runner_side(("Tests",)), "a job with no step named is not known"
+    assert not fix_plan.is_runner_side(())
+
+
+def test_a_first_attempt_red_in_the_runners_setup_is_re_run_in_place_not_fixed():
+    """#90 and #91 were each sent a fixer, which could only have found the registry's
+    refusal; `gh run rerun --failed` asks the registry again and costs no session."""
+    pulled = failure(signature=SERVICE_PULL_SIG, run_id="39137365237", attempt=1)
+    [decision] = fix_plan.plan([pulled], "v0-11-21", PREFIXES)
+    assert decision.action == fix_plan.RERUN and fix_plan.reruns_in_place(pulled)
+    assert "the runner never set it up, so run 39137365237's failed jobs are re-run once" in (
+        decision.note
+    )
+    again = failure(signature=SERVICE_PULL_SIG, run_id="39137365237", attempt=2)
+    [decision] = fix_plan.plan([again], "v0-11-21", PREFIXES)
+    assert decision.action == fix_plan.DISPATCH, "twice is a workflow naming what cannot be had"
+
+
 def test_the_artifact_wins_over_the_steps_and_a_conflict_comes_first():
-    jobs = [{"name": "Tests", "conclusion": "failure", "steps": []}]
+    jobs = [{"name": "Tests", "conclusion": "failure", "steps": [SET_UP]}]
     assert fix_plan.signature(True, [SUMMARY], jobs) == (
         fix_plan.CONFLICT,
         "scripts/hooks/tests/test_untested_symbols.py::test_every_public_symbol_is_named_by_a_test",
@@ -127,6 +370,63 @@ def test_a_projects_own_test_beside_the_vendored_ones_is_not_vendored():
     assert not fix_plan.in_vendored_tier(f"lint {fix_plan.entry_path(own)}", ("scripts/hooks/",))
     assert fix_plan.in_vendored_tier("lint scripts/hooks/stop.py", ("scripts/hooks/",))
     assert fix_plan.in_vendored_tier(".pre-commit-config.yaml", (".pre-commit-config.yaml",))
+
+
+VENDORED_FILE = "scripts/hooks/tests/test_repo_contract.py"
+FIXTURE_TESTS = '''
+def test_whole():
+    assert (ROOT / "scripts/run-tests.py").is_file()
+
+
+def test_segments(case):
+    """Checks scripts/run-tests.py only in words: the code below is what decides."""
+    assert (ROOT / ".claude" / "settings.json").is_file()
+
+
+def test_mentions_only():
+    """Mirrors scripts/lint-all.py, as the runner does."""
+    assert toolchain.rerun_in_venv
+
+
+class TestNested:
+    def test_inner(self):
+        assert ".devkit.toml"
+'''
+
+
+def test_a_vendored_test_is_read_for_the_project_owned_file_it_checks(tmp_path):
+    """sports_betting #67 was red on the vendored lint-runner contract, which reads the
+    project's own `scripts/lint-all.py` -- the one thing a devkit session cannot fix."""
+    (tmp_path / VENDORED_FILE).parent.mkdir(parents=True)
+    (tmp_path / VENDORED_FILE).write_text(FIXTURE_TESTS, encoding="utf-8")
+
+    def subject(name: str) -> str:
+        return fix_plan.project_owned_subject(f"{VENDORED_FILE}::{name}", tmp_path)
+
+    assert subject("test_whole") == "scripts/run-tests.py"
+    assert subject("test_segments[a-b]") == ".claude/settings.json"
+    assert subject("TestNested::test_inner") == ".devkit.toml"
+    # Named in the docstring alone, it is a test of something else.
+    assert subject("test_mentions_only") == ""
+    assert subject("test_gone") == ""
+    assert subject("") == ""
+
+
+def test_an_unreadable_or_project_owned_test_names_no_subject(tmp_path):
+    assert fix_plan.project_owned_subject(f"{VENDORED_FILE}::test_whole", tmp_path) == ""
+    own = tmp_path / "tests" / "test_x.py"
+    own.parent.mkdir()
+    own.write_text(FIXTURE_TESTS, encoding="utf-8")
+    assert fix_plan.project_owned_subject("tests/test_x.py::test_whole", tmp_path) == ""
+
+
+def test_the_lint_runner_contract_is_read_as_a_check_of_the_projects_runner():
+    """The live test the sports_betting #67 report named, read off devkit's own copy."""
+    entry = (
+        f"{VENDORED_FILE}::"
+        "test_the_lint_runner_reruns_under_the_tree_venv_rather_than_skip_its_linters"
+    )
+    assert fix_plan.project_owned_subject(entry) == "scripts/lint-all.py"
 
 
 def test_the_vendored_paths_are_sync_devkits_manifest():
@@ -320,6 +620,24 @@ def test_a_pr_behind_its_base_is_updated_not_fixed_unless_it_conflicts():
     assert fix_ledger.render(decisions, {}).splitlines()[0].startswith("update   carameli #1")
 
 
+def test_a_conflict_only_github_reports_is_an_update_that_says_so():
+    """#538: GitHub said `CONFLICTING`, git merged it with origin/main cleanly, and the
+    resolver sent at it had nothing to do but record the merge parent."""
+    phantom = failure(
+        number=538,
+        head="agent/fix-x",
+        reason="merge conflict",
+        signature=(),
+        behind=True,
+        merges_clean=True,
+    )
+    decisions = fix_plan.plan([phantom], "v0-11-23", PREFIXES)
+    assert actions(decisions) == [(fix_plan.UPDATE, ["carameli#538"])]
+    assert decisions[0].note.endswith(
+        "GitHub says conflicting, git merges it with origin/main cleanly"
+    )
+
+
 def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
     assert fix_plan.name_of(failure()) == "#412"
     assert fix_plan.name_of(failure(kind=fix_plan.NIGHTLY, number=7)) == "#7"
@@ -330,6 +648,25 @@ def test_a_failure_is_named_by_its_pr_its_branch_or_its_default_branch():
     assert fix_plan.describe(backlog) == (
         "2 open group(s) on the harness-defect ledger: agent-report devkit [a] x2, b"
     )
+
+
+def test_dependabots_red_is_named_described_and_told_from_any_other_pr():
+    found = failure(
+        kind=fix_plan.DEPENDABOT,
+        number=0,
+        title="Dependabot in carameli: 1 update job(s) failing",
+        signature=("run sqlalchemy: dependency_file_content_not_changed",),
+    )
+    assert fix_plan.name_of(found) == "dependabot"
+    assert fix_plan.describe(found) == (
+        "Dependabot in carameli: 1 update job(s) failing: "
+        "run sqlalchemy: dependency_file_content_not_changed"
+    )
+    assert fix_plan.is_dependabot(found)
+    assert fix_plan.is_dependabot(failure(head="dependabot/uv/urllib3-2.8.0"))
+    assert not fix_plan.is_dependabot(failure(head="agent/dependabot-config"))
+    [placed] = fix_plan.plan([found], "", ())
+    assert placed.action == fix_plan.DISPATCH, "a fresh branch off its base, like a nightly"
 
 
 def test_the_release_test_is_the_one_the_pipeline_expects_red():
@@ -360,6 +697,27 @@ def test_a_release_commits_red_is_skipped_out_loud_and_any_other_red_main_is_sen
     assert fix_plan.describe(decisions[1].failures[0]).startswith(
         "PR Gate workflow failing on origin/main: tests/t.py::other"
     )
+
+
+def test_an_unread_red_branch_is_skipped_out_loud_and_still_holds_its_prs():
+    """6a7d386f: carameli's master was red on `Lint / Lint`, every `gh` read of the run
+    failed, and the empty signature was escalated as blind-evidence with no session
+    sent. Unread is skipped, so nothing is spent, and its base is still red."""
+    unread = red_main(project="carameli", base="master", signature=(), unread=True)
+    held = failure(number=1, head="agent/a", base="master", signature=("tests/t.py::a",))
+    decisions = fix_plan.plan([unread, held], "v0-11-23", PREFIXES)
+    assert actions(decisions) == [
+        (fix_plan.SKIP, ["carameli#0"]),
+        (fix_plan.HOLD, ["carameli#1"]),
+    ]
+    assert decisions[0].note.startswith("unread: ") and "next pass" in decisions[0].note
+
+
+def test_a_signature_names_nothing_when_it_is_empty_or_a_conflict_alone():
+    assert fix_plan.names_nothing(())
+    assert fix_plan.names_nothing((fix_plan.CONFLICT,))
+    assert not fix_plan.names_nothing((fix_plan.CONFLICT, "Lint / Lint"))
+    assert not fix_plan.names_nothing(("Lint / Lint",))
 
 
 # --- a red default branch holds its own PRs -------------------------------------------
@@ -438,12 +796,160 @@ def test_a_nightly_red_at_the_tip_or_unreadable_or_not_dispatchable_gets_its_fix
         assert decision.action == fix_plan.DISPATCH, nightly
 
 
+def test_a_nightly_whose_jobs_never_started_is_re_run_at_the_tip_when_it_predates_it():
+    """Running the workflow at the tip answers both questions at once; re-running the
+    old run in place would only say whether a runner turns up for an old commit."""
+    stale = _nightly(signature=UNACQUIRED_SIG, run_id="55", attempt=1)
+    assert fix_plan.reruns_at_tip(stale) and not fix_plan.reruns_in_place(stale)
+    [decision] = fix_plan.plan([stale], "v0-11-23", PREFIXES)
+    assert decision.note.endswith("re-running it there")
+    at_tip = _nightly(signature=UNACQUIRED_SIG, run_id="55", attempt=1, sha="b31b60cbbbbb")
+    assert fix_plan.reruns_in_place(at_tip)
+    [decision] = fix_plan.plan([at_tip], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.RERUN and "re-run once" in decision.note
+
+
+def _local(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "kind": fix_plan.LOCAL,
+        "project": "carameli",
+        "number": 0,
+        "head": "",
+        "url": "",
+        "reason": "",
+        "workflow": "Local E2E",
+        "signature": ("tests/test_tasks_live.py::test_every_picker_draws",),
+        "sha": "59a4ef5aaaaa",
+        "tip": "59a4ef5aaaaa",
+    }
+    return failure(**(base | fields))
+
+
+def test_a_local_e2e_red_at_the_tip_gets_its_fixer_on_a_fresh_branch():
+    [decision] = fix_plan.plan([_local()], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.DISPATCH
+    assert decision.note.startswith("Local E2E failing on origin/main on this machine: ")
+    assert fix_plan.name_of(_local()) == "origin/main (local e2e)"
+
+
+def test_a_local_e2e_red_the_tip_has_moved_past_is_held_for_the_next_local_run():
+    """No run can be dispatched at the tip, so a stale local red waits for the night's
+    re-test: a fixer's own merged PR moves the tip, and a session sent at the red it
+    fixed would be re-sent every RESEND_AFTER until the scheduled job ran again."""
+    stale = _local(tip="b31b60cbbbbb")
+    assert fix_plan.is_stale_local(stale)
+    [decision] = fix_plan.plan([stale], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.HOLD
+    assert decision.note.endswith(
+        "its red run is at 59a4ef5aa, origin/main at b31b60cbb: "
+        "the next scheduled local run re-tests the tip"
+    )
+
+
+def test_a_local_e2e_red_whose_tip_git_cannot_read_is_still_dispatched():
+    """An unknown tip is not a moved one: holding it would hold it forever."""
+    assert not fix_plan.is_stale_local(_local(tip=""))
+    [decision] = fix_plan.plan([_local(tip="")], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.DISPATCH
+
+
+def test_a_missing_tier_in_many_projects_is_one_fixer_each_not_one_upstream_session():
+    """Each project writes its own tier: the shared signature names no vendored test, so
+    the fold that sends one shared vendored red to devkit must not take it."""
+    missing = (fix_plan_e2e.MISSING,)
+    reds = [_local(project=name, signature=missing) for name in ("carameli", "roguelike")]
+    decisions = fix_plan.plan(reds, "v0-11-23", PREFIXES)
+    assert [(d.action, d.failures[0].project) for d in decisions] == [
+        (fix_plan.DISPATCH, "carameli"),
+        (fix_plan.DISPATCH, "roguelike"),
+    ]
+
+
+def test_a_local_e2e_red_against_a_red_gate_waits_for_the_gates_fixer():
+    """The gate's red is on the same commit; its fixer goes alone, as for a nightly."""
+    gate = failure(kind=fix_plan.BRANCH, number=0, head="", workflow="PR Gate", url="u")
+    decisions = fix_plan.plan([gate, _local()], "v0-11-23", PREFIXES)
+    actions = {d.failures[0].kind: d.action for d in decisions}
+    assert actions == {fix_plan.BRANCH: fix_plan.DISPATCH, fix_plan.LOCAL: fix_plan.HOLD}
+
+
 def test_the_tip_note_names_both_commits_and_what_the_pass_does():
     note = fix_plan.tip_note(_nightly(), "re-running it there")
     assert note.endswith(
         "its red run is at 59a4ef5aa, origin/main at b31b60cbb: re-running it there"
     )
     assert "at an older commit," in fix_plan.tip_note(_nightly(sha=""), "x")
+
+
+def _lost(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "head": "agent/x",
+        "signature": (f"Tests / {fix_plan.NO_RUNNER}",),
+        "lost_runs": ("37364441127",),
+    }
+    return failure(**(base | fields))
+
+
+def test_a_gate_whose_red_jobs_never_got_a_runner_is_re_run_not_fixed():
+    """c354f451, 27327483: roguelike's and social-scraper's gates lost every red job to
+    "not acquired by Runner", and the pass sent a fixer at each -- at no log at all."""
+    for lost in (_lost(), _lost(kind=fix_plan.BRANCH, number=0, head=""), _lost(attempt=2)):
+        # Unlike an unstarted job the annotation names nothing in the code, so a second
+        # attempt lost the same way is still re-run, not sent a fixer.
+        [decision] = fix_plan.plan([lost], "v0-11-23", PREFIXES)
+        assert decision.action == fix_plan.RERUN, lost.kind
+        assert decision.note.endswith("GitHub never gave its red jobs a runner: re-running them")
+        assert f"Tests / {fix_plan.NO_RUNNER}" in decision.note
+        assert fix_plan.runner_rerun(lost) == decision
+    assert fix_plan.runner_rerun(failure(head="agent/x", signature=("tests/t.py::a",))) is None
+
+
+def test_a_lost_runner_under_a_red_base_or_a_conflict_is_not_re_run():
+    """Under a red base the re-run would only say the base's red, so the hold stands;
+    a conflict has no merge ref to run against, so the resolver still goes."""
+    red_base = failure(kind=fix_plan.BRANCH, number=0, head="", signature=("Tests / Pytest",))
+    decisions = fix_plan.plan([_lost(), red_base], "v0-11-23", PREFIXES)
+    assert {d.failures[0].kind: d.action for d in decisions}[fix_plan.PR] == fix_plan.HOLD
+    conflicted = _lost(signature=(fix_plan.CONFLICT,))
+    assert fix_plan.plan([conflicted], "v0-11-23", PREFIXES)[0].action == fix_plan.RESOLVE
+
+
+BILLED = (f"Lint / {fix_plan.NO_BILLING}", f"Tests / {fix_plan.NO_BILLING}")
+
+
+def test_a_gate_refused_over_billing_is_skipped_as_a_persons_step_at_any_attempt():
+    """productivity-tracker #3, social-scraper #108: GitHub started no job, "recent
+    account payments have failed", and a devkit fixer was sent at it. A re-run is
+    refused the same way, so neither a re-run nor a session goes."""
+    assert fix_plan.is_billing_refused(BILLED)
+    assert not fix_plan.is_billing_refused((*BILLED, "tests/t.py::a"))
+    assert not fix_plan.is_billing_refused(())
+    for refused in (
+        failure(head="agent/x", signature=BILLED, run_id="1", attempt=1),
+        failure(head="agent/x", signature=BILLED, run_id="1", attempt=2),
+        failure(kind=fix_plan.BRANCH, number=0, head="", signature=BILLED),
+    ):
+        [decision] = fix_plan.plan([refused], "v0-11-23", PREFIXES)
+        assert decision.action == fix_plan.SKIP, refused.kind
+        assert decision.note == fix_plan.billing_note(refused)
+        assert decision.note.endswith(
+            f"over the account's billing -- {fix_plan.harness_triage.PERSON_STEP} "
+            f"{fix_plan.BILLING_STEP}"
+        )
+
+
+def test_a_base_refused_over_billing_holds_no_pr_behind_it():
+    """Its PRs are refused alike, and each is skipped on its own signature; one with a
+    failure of its own still goes."""
+    decisions = fix_plan.plan(
+        [red_main(project="carameli", signature=BILLED), failure(number=1, head="agent/a")],
+        "v0-11-23",
+        PREFIXES,
+    )
+    assert actions(decisions) == [
+        (fix_plan.SKIP, ["carameli#0"]),
+        (fix_plan.DISPATCH, ["carameli#1"]),
+    ]
 
 
 def test_a_nightly_with_a_run_going_at_the_tip_waits_for_that_run():
@@ -502,3 +1008,39 @@ def test_a_job_log_line_is_read_past_its_prefix_and_colour():
 def test_a_vitest_entry_names_its_file():
     assert fix_plan.entry_path("src/a.test.ts > suite > case") == "src/a.test.ts"
     assert fix_plan.entry_path("tests/test_a.py::test_b") == "tests/test_a.py"
+
+
+def test_a_fixture_failure_is_signed_by_its_test():
+    """pytest prints a fixture failure as `ERROR`, so a run with no other failure named
+    nothing and every project's read the same."""
+    log = (
+        "ERROR tests/test_a.py::test_x - RuntimeError: DATABASE_URL is not set\n"
+        "ERROR tests/test_b.py - ImportError: no module\n"
+        "FAILED tests/test_c.py::test_y - assert 1 == 2\n"
+    )
+    assert fix_plan.signature_from_logs([log]) == (
+        "tests/test_a.py::test_x",
+        "tests/test_b.py",
+        "tests/test_c.py::test_y",
+    )
+
+
+def test_a_log_line_that_merely_says_error_is_no_test():
+    log = "ERROR: could not connect\nERROR Connection refused\nERROR 500 at /api\n"
+    assert fix_plan.signature_from_logs([log]) == ()
+
+
+def test_a_medium_tier_red_is_named_for_its_tier_and_gets_a_fixer():
+    medium = _local(workflow=fix_plan.MEDIUM_TIER)
+    assert fix_plan.name_of(medium) == "origin/main (medium tier)"
+    assert fix_plan.local_name(_local()) == "local e2e"
+    [decision] = fix_plan.plan([medium], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.DISPATCH
+    assert decision.note.startswith("Medium Tier failing on origin/main on this machine: ")
+
+
+def test_a_medium_tier_red_the_tip_has_moved_past_is_held_like_a_local_one():
+    stale = _local(workflow=fix_plan.MEDIUM_TIER, tip="ffffffffffff")
+    [decision] = fix_plan.plan([stale], "v0-11-23", PREFIXES)
+    assert decision.action == fix_plan.HOLD
+    assert "the next scheduled local run re-tests the tip" in decision.note

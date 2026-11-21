@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -39,8 +40,35 @@ def test_the_backlog_becomes_one_failure_with_its_groups_as_evidence(monkeypatch
     assert fix_plan.describe(backlog).startswith("2 open group(s) on the harness-defect ledger")
 
 
+def test_a_recurrence_in_an_open_group_sends_no_second_session(monkeypatch, tmp_path):
+    """Every scheduled job now files each failed run, and a 15-minute job failing all
+    day is ~96 rows in one group. Keyed on every open id, each row changed the sha and
+    sent a devkit session at a defect one already had (2026-10-03). Keyed on the groups,
+    only a new group -- or a retired one -- is a new dispatch."""
+    devkit = tmp_path / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    row = "\tevent=scheduled-job-failed\tagent=claude\thost=h\tproject=devkit\tmessage=job failed"
+    shard.write_text("2026-10-03T10:00:00+00:00" + row + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    first = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    with shard.open("a", encoding="utf-8") as handle:
+        handle.write("2026-10-03T10:15:00+00:00" + row + "\n")
+    again = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert first is not None and again is not None
+    assert again.signature[0].endswith(" x2"), "the recurrence is still shown"
+    assert again.sha == first.sha, "and sends nobody"
+    other = "2026-10-03T10:30:00+00:00\tevent=agent-report\tagent=claude\thost=h\tproject=devkit\tmessage=m"
+    with shard.open("a", encoding="utf-8") as handle:
+        handle.write(other + "\n")
+    newer = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert newer is not None and newer.sha != first.sha, "a new group is a new dispatch"
+
+
 def test_a_retired_group_changes_the_key_and_an_empty_ledger_is_no_failure(monkeypatch, tmp_path):
-    """The dispatch ledger keys on the sha, so a resolution -- or a new item -- is a new
+    """The dispatch ledger keys on the sha, so a resolution -- or a new group -- is a new
     dispatch, and the same backlog twice is not."""
     devkit = tmp_path / "devkit"
     shard = fix_backlog.triage.ledger_file(devkit)
@@ -90,3 +118,259 @@ def test_a_group_whose_fix_is_in_flight_is_shown_but_sends_no_session(monkeypatc
     log = (Path(backlog.evidence) / "harness-triage.log").read_text(encoding="utf-8")
     assert "PENDING on 410" in log
     assert len(fix_backlog.ledger_failure(devkit, tmp_path / "ev").signature) == 2, "landed"
+
+
+def test_a_group_awaiting_a_person_is_shown_but_sends_no_fixer(monkeypatch, tmp_path):
+    """aa6a9022, 28a97046: `collectors.py maintain` failed on a hung `WslService` and said
+    only an elevated prompt or a reboot would reach it; the pass sent a fixer anyway, whose
+    unelevated `Restart-Service` was refused, and it could only re-check and stop."""
+    devkit = tmp_path / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    step = fix_backlog.triage.PERSON_STEP
+    hung = (
+        "2026-10-13T06:01:04+00:00\tevent=scheduled-job-failed\tagent=claude\thost=h"
+        "\tproject=devkit\tmessage=unattended task 'Scheduled: Collectors' failed"
+        "\tcause=error: docker is not answering: WSL itself does not answer"
+        f"\tsaid=error: docker is not answering -- {step} restart WslService, or reboot"
+    )
+    shard.write_text(hung + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    assert fix_backlog.ledger_failure(devkit, tmp_path / "ev") is None
+    other = "2026-10-13T06:30:00+00:00\tevent=agent-report\tagent=claude\thost=h\tproject=devkit\tmessage=m"
+    with shard.open("a", encoding="utf-8") as handle:
+        handle.write(other + "\n")
+    backlog = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert backlog is not None and len(backlog.signature) == 1
+    assert backlog.signature[0].startswith("agent-report devkit [")
+    log = (Path(backlog.evidence) / "harness-triage.log").read_text(encoding="utf-8")
+    assert "AWAITS A PERSON -- restart WslService, or reboot" in log
+
+
+def failed_job_row(project: str, artifact: str, stamp: str = "2026-10-07T21:00:00+00:00") -> str:
+    return (
+        f"{stamp}\tevent=scheduled-job-failed\tagent=claude\thost=h\tproject={project}"
+        f"\tartifact={artifact}\texit=1\tmessage=unattended task '{project}' failed"
+    )
+
+
+def test_a_failed_jobs_kept_output_rides_beside_the_backlog(monkeypatch, tmp_path):
+    """8751095b: a scheduled job's group reached its session as the triage text alone; the
+    failed run's `.failed.log`, which named the 240 s timeout, was found only by searching
+    the devkit checkout's `logs/`. The copy is taken now, because the job's next failure
+    rewrites the file, and the triage text names both the path and the copy."""
+    devkit = tmp_path / "work" / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    (devkit / "logs" / "scheduled-reap-stale.failed.log").write_text(
+        "timed out after 240 s\n", encoding="utf-8"
+    )
+    project = tmp_path / "work" / "social-scraper" / "logs"
+    project.mkdir(parents=True)
+    (project / "collector.failed.log").write_text("x: empty\n", encoding="utf-8")
+    rows = [
+        failed_job_row("devkit", "logs/scheduled-reap-stale.failed.log"),
+        failed_job_row("social-scraper", "logs/collector.failed.log"),
+        failed_job_row("devkit", "logs/gone.failed.log").replace("'devkit'", "'gone'"),
+    ]
+    shard.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    backlog = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert backlog is not None
+    slot = Path(backlog.evidence)
+    ids = {
+        row.split("project=")[1].split("\t")[0] + row.split("artifact=")[1].split("\t")[0]: (
+            fix_backlog.triage.item_id(row)
+        )
+        for row in rows
+    }
+    reap = ids["devkitlogs/scheduled-reap-stale.failed.log"]
+    scraper = ids["social-scraperlogs/collector.failed.log"]
+    assert (slot / f"{reap}-scheduled-reap-stale.failed.log").read_text(
+        encoding="utf-8"
+    ) == "timed out after 240 s\n"
+    assert (slot / f"{scraper}-collector.failed.log").read_text(encoding="utf-8") == "x: empty\n"
+    log = (slot / "harness-triage.log").read_text(encoding="utf-8")
+    assert "artifact logs/scheduled-reap-stale.failed.log" in log
+    assert f"[{reap}] {reap}-scheduled-reap-stale.failed.log <- " in log
+    assert "gone.failed.log <-" not in log, "a file that is not there is not claimed"
+    assert sorted(p.name for p in slot.iterdir()) == sorted(
+        [
+            "harness-triage.log",
+            f"{reap}-scheduled-reap-stale.failed.log",
+            f"{scraper}-collector.failed.log",
+        ]
+    )
+
+
+def test_a_row_naming_no_artifact_adds_nothing_to_the_evidence(monkeypatch, tmp_path):
+    devkit = tmp_path / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    row = "2026-10-07T21:00:00+00:00\tevent=agent-report\tagent=claude\thost=h\tproject=devkit\tmessage=m"
+    shard.write_text(row + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    backlog = fix_backlog.ledger_failure(devkit, tmp_path / "ev")
+    assert backlog is not None
+    assert [p.name for p in Path(backlog.evidence).iterdir()] == ["harness-triage.log"]
+    assert "copied beside" not in (Path(backlog.evidence) / "harness-triage.log").read_text(
+        encoding="utf-8"
+    )
+
+
+def _local(stamp: str) -> str:
+    """`stamp` (UTC ISO) as `log-wrap.py` writes `# when:`, in this machine's local time."""
+    return fix_backlog._dt.datetime.fromisoformat(stamp).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_a_later_failures_copy_is_not_handed_over_as_this_groups(tmp_path):
+    """96d2638e / e711daa0: a row naming the job's `.failed.log` was copied as its own
+    evidence when the file held the job's newest failure, hours after the row was filed.
+    A copy whose `# when:` is the row's is still taken."""
+    devkit = tmp_path / "devkit"
+    (devkit / "logs").mkdir(parents=True)
+    kept = devkit / "logs" / "job.failed.log"
+    kept.write_text(
+        f"# source: x\n# task: Job\n# when: {_local('2026-10-08T16:30:33+00:00')}\n# exit: 2\nnewest\n",
+        encoding="utf-8",
+    )
+    older = fix_backlog.triage.parse_line(
+        failed_job_row("devkit", "logs/job.failed.log", "2026-10-08T15:24:18+00:00")
+    )
+    own = fix_backlog.triage.parse_line(
+        failed_job_row("devkit", "logs/job.failed.log", "2026-10-08T16:30:34+00:00")
+    )
+    assert older is not None and own is not None
+
+    line = fix_backlog.copy_artifact(older, devkit, tmp_path)
+    assert "not copied: it holds the failure of" in line and "cause/said" in line
+    assert not (tmp_path / f"{older.id}-job.failed.log").exists()
+    assert "<-" in fix_backlog.copy_artifact(own, devkit, tmp_path)
+    assert (tmp_path / f"{own.id}-job.failed.log").exists()
+
+
+def test_an_artifact_with_no_stamp_is_not_judged(tmp_path):
+    source = tmp_path / "plain.log"
+    source.write_text("no header\n", encoding="utf-8")
+    assert fix_backlog.later_failure(source, "2026-10-08T15:24:18+00:00") is None
+    stamped = tmp_path / "bad.log"
+    stamped.write_text("# when: yesterday\n", encoding="utf-8")
+    assert fix_backlog.later_failure(stamped, "2026-10-08T15:24:18+00:00") is None
+    assert fix_backlog.later_failure(source, "not a stamp") is None
+    assert fix_backlog.later_failure(tmp_path / "missing.log", "2026-10-08T15:24:18") is None
+
+
+def test_an_artifact_that_cannot_be_copied_is_said_not_raised(monkeypatch, tmp_path):
+    devkit = tmp_path / "devkit"
+    (devkit / "logs").mkdir(parents=True)
+    (devkit / "logs" / "job.failed.log").write_text("boom\n", encoding="utf-8")
+    item = fix_backlog.triage.parse_line(failed_job_row("devkit", "logs/job.failed.log"))
+    assert item is not None
+
+    def refuse(src, dst):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(fix_backlog.shutil, "copyfile", refuse)
+    line = fix_backlog.copy_artifact(item, devkit, tmp_path)
+    assert line.startswith(f"[{item.id}] ") and "could not be copied: in use" in line
+
+
+def test_an_absolute_artifact_is_read_where_it_says(tmp_path):
+    kept = tmp_path / "elsewhere" / "run.log"
+    kept.parent.mkdir()
+    kept.write_text("r\n", encoding="utf-8")
+    item = fix_backlog.triage.parse_line(failed_job_row("carameli", str(kept)))
+    assert item is not None
+    assert fix_backlog.artifact_path(item, tmp_path / "devkit") == kept
+
+
+class _Done:
+    def __init__(self, stdout: str, returncode: int = 0):
+        self.stdout, self.returncode = stdout, returncode
+
+
+def _gh_answering(answers: dict[tuple[str, str], _Done], asked: list):
+    """A `gh_for` whose `gh pr list --head <branch>` answers per `(checkout, branch)`."""
+
+    def gh_for(home):
+        def gh(*args):
+            branch = args[args.index("--head") + 1]
+            asked.append((home.name, branch))
+            return answers.get((home.name, branch), _Done("[]"))
+
+        return gh
+
+    return gh_for
+
+
+def test_the_handed_backlog_names_the_open_pr_a_group_names(monkeypatch, tmp_path):
+    """e3d8cb27: d32ffcc2 named `agent/fix-harness-ledger-1011-9`, whose #629 was open and
+    red on its own diff; the session handed the group found that only after several calls."""
+    devkit = tmp_path / "devkit"
+    shard = fix_backlog.triage.ledger_file(devkit)
+    shard.parent.mkdir(parents=True)
+    shard.write_text(
+        "2026-10-11T23:20:41+00:00\tevent=agent-report\tagent=claude\thost=h\tproject=devkit"
+        "\tmessage=align_path_sources (agent/fix-harness-ledger-1011-9) closes one case\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        fix_backlog.tb, "detect_default_branch", lambda git, fallback="main": "main"
+    )
+    rollup = [{"conclusion": "FAILURE"}, {"conclusion": "SUCCESS"}]
+    row = {
+        "number": 629,
+        "url": "https://github.com/o/devkit/pull/629",
+        "statusCheckRollup": rollup,
+    }
+    asked: list = []
+    gh_for = _gh_answering(
+        {("devkit", "agent/fix-harness-ledger-1011-9"): _Done(json.dumps([row]))}, asked
+    )
+    backlog = fix_backlog.ledger_failure(devkit, tmp_path / "ev", gh_for=gh_for)
+    assert backlog is not None
+    text = (Path(backlog.evidence) / "harness-triage.log").read_text(encoding="utf-8")
+    assert (
+        "OPEN PR  #629 https://github.com/o/devkit/pull/629 -- its gate is red (1 failing) "
+        "on agent/fix-harness-ledger-1011-9"
+    ) in text
+    assert asked == [("devkit", "agent/fix-harness-ledger-1011-9")], "asked once, found"
+
+
+def test_open_prs_asks_the_groups_own_project_too_and_survives_a_gh_that_cannot_answer(tmp_path):
+    devkit, carameli = tmp_path / "devkit", tmp_path / "carameli"
+    devkit.mkdir()
+    carameli.mkdir()
+    rows = [
+        "2026-10-11T10:00:00+00:00\tevent=agent-report\tproject=carameli\tmessage=on agent/x-1",
+        "2026-10-11T10:00:01+00:00\tevent=agent-report\tproject=carameli\tmessage=on agent/gone",
+        "2026-10-11T10:00:02+00:00\tevent=agent-report\tproject=carameli\tmessage=nothing named",
+    ]
+    grouped = fix_backlog.triage.groups(fix_backlog.triage.read_items("\n".join(rows)))
+    asked: list = []
+    answers = {
+        ("carameli", "agent/x-1"): _Done(json.dumps([{"number": 7, "statusCheckRollup": []}])),
+        ("devkit", "agent/gone"): _Done("", returncode=1),
+        ("carameli", "agent/gone"): _Done("not json"),
+    }
+    found = fix_backlog.open_prs(devkit, grouped, _gh_answering(answers, asked))
+    assert found == {"agent/x-1": "#7 -- no failing check"}
+    assert ("carameli", "agent/x-1") in asked and ("devkit", "agent/x-1") in asked
+    assert len(asked) == 4, "a backlog line naming no branch costs no gh call"
+
+
+def test_open_pr_reads_nothing_out_of_an_answer_with_no_pr():
+    assert fix_backlog.open_pr(lambda *a: _Done("[]"), "agent/x") == ""
+    assert fix_backlog.open_pr(lambda *a: _Done('[{"url": "u"}]'), "agent/x") == ""
+    assert fix_backlog.open_pr(lambda *a: _Done('{"number": 1}'), "agent/x") == ""
+
+    def no_gh(*args):
+        raise FileNotFoundError("gh")
+
+    assert fix_backlog.open_pr(no_gh, "agent/x") == "", "a missing gh names no PR"

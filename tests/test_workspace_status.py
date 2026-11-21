@@ -15,11 +15,22 @@ reaches a person.
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from support import LIVE_WORKSPACE, REPO_ROOT, load_script, needs_live_workspace, sweep
 
 ws = load_script("scripts/workspace-status.py")
 harness_triage = load_script("scripts/harness_triage.py")
+log_wrap = load_script("scripts/log-wrap.py")
+status_installer = load_script("scripts/install-workspace-status.py")
+
+
+@pytest.fixture(autouse=True)
+def _machine_long_up(monkeypatch):
+    """`main --notify` waits out a fresh boot (`catch_up_wait`), and a CI runner is
+    always one: no test here may depend on how long the machine running it has been up."""
+    monkeypatch.setattr(ws.machine_clock, "awake_since", lambda now=None: None)
 
 
 def result(name: str, verdict: str) -> sweep.Result:
@@ -139,14 +150,37 @@ def test_an_absent_workspace_is_silent_and_successful(tmp_path, monkeypatch, cap
     assert capsys.readouterr().out == ""
 
 
-def test_a_failure_anywhere_still_exits_zero(tmp_path, monkeypatch):
-    """A status line that can fail the job running it gets removed the first time it
-    is wrong -- and then nothing is watching again."""
+def _crashing(monkeypatch, tmp_path) -> None:
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
-    assert ws.main([]) == 0
+
+
+def test_a_crash_fails_the_job_and_says_why(tmp_path, monkeypatch, capsys):
+    """Findings are not a job failure and exit 0. A crash is one: it exited 0 too, with
+    the exception's type name and nothing else, so the scheduled pass's `Last Result` read
+    as a pass, `log-wrap.py` had no failure to file, and a pass that checked nothing was
+    indistinguishable from a healthy workspace."""
+    _crashing(monkeypatch, tmp_path)
+    assert ws.main([]) == ws.CRASHED != 0
+    err = capsys.readouterr().err
+    assert "Traceback (most recent call last)" in err
+    assert "OSError: boom" in err
+
+
+def test_a_crash_reaches_the_ledger_through_the_scheduled_wrapper(tmp_path, monkeypatch, capsys):
+    """The scheduled job runs this under `log-wrap.py --always`, which files a failed run
+    as `scheduled-job-failed` with the exception as its `cause` -- so the crash is filed
+    by the wrapper rather than by a second writer here, which would make it two groups."""
+    _crashing(monkeypatch, tmp_path)
+    code = ws.main(["--notify"])
+    output = capsys.readouterr().err
+    ledger = tmp_path / "devkit"
+    argv = ["--always", status_installer.LABEL, "--", "python", "workspace-status.py"]
+    assert log_wrap.main(argv, run=lambda _command: (code, output), root=ledger) == code
+    rows = [item for item in harness_triage.load(ledger) if item.event == log_wrap.FAILED_EVENT]
+    assert [row.fields["cause"] for row in rows] == ["OSError: boom"]
 
 
 # --- the toast the unattended pass reaches a person with ---------------------
@@ -618,6 +652,8 @@ def toolchain(**over):
         "git": lambda *a: "someone",
         "extensions": list,
         "codex": list,
+        "terminal": list,
+        "launchers": list,
     }
     return ws.toolchain_lines(**{**args, **over})
 
@@ -659,14 +695,42 @@ def test_the_injected_reporters_default_to_the_real_ones():
     assert ws.vscode_extensions.report_lines is not None
     assert ws.codex_context.report_lines is not None
     assert ws.toolchain_lines(which=lambda _n: "/usr/bin/uv", git=lambda *a: "someone") == (
-        ws.vscode_extensions.report_lines() + ws.codex_context.report_lines()
+        ws.vscode_extensions.report_lines()
+        + ws.codex_context.report_lines()
+        + ws.wt_profile.status_lines()
+        + ws.launcher_lines()
     )
+
+
+def test_a_dead_launcher_in_any_checkout_is_named_with_the_checkout_and_its_fix(
+    tmp_path, monkeypatch
+):
+    """513c55e5: `.venv/Scripts/mypy` dead for 26 days, and nothing said so until a session
+    tried it. No gate runs a launcher, so a check somebody has to run would never fire."""
+    workspace = tmp_path / "ws.code-workspace"
+    workspace.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(ws.sweep, "parse_workspace", lambda _text: ["fine", "broken"])
+    gaps = {"broken": ws.toolchain.Gap("8 console scripts dead", "uv sync --reinstall")}
+    monkeypatch.setattr(ws.toolchain, "launcher_gap", lambda root: gaps.get(root.name))
+    assert ws.launcher_lines(workspace) == [
+        "broken: 8 console scripts dead (fix: uv sync --reinstall)"
+    ]
+    assert ws.launcher_lines(tmp_path / "gone.code-workspace") == [], "no workspace to read"
+    assert toolchain(launchers=lambda: ["broken: x"]) == ["broken: x"]
 
 
 def test_a_codex_that_cannot_read_the_rules_joins_the_other_prerequisites():
     """Same category and the same reason as the three above -- no symptom at the moment
     it is wrong. `codex_context.py` owns which files decide it; this is the wiring."""
     assert toolchain(codex=lambda: ["no rule bridge"]) == ["no rule bridge"]
+
+
+def test_a_default_terminal_profile_that_elevates_joins_the_other_prerequisites():
+    """1ee03f0f: an operator's own `claude --worktree`, typed into an elevated window,
+    cut Administrators-owned trees, and nothing told them why. `wt_profile.py` owns
+    what counts; this is the wiring."""
+    line = ws.wt_profile.ELEVATED_DEFAULT_LINE
+    assert toolchain(terminal=lambda: [line]) == [line]
 
 
 # --- the unattended pass, when it has stopped --------------------------------
@@ -704,6 +768,43 @@ def test_a_workstation_that_never_installed_the_task_is_left_alone(tmp_path):
     Windows-only convenience is a line you learn to skim, which is the failure this one
     is trying to fix rather than repeat."""
     assert ws.scheduler_line(tmp_path, now=1_800_000_000.0) == ""
+
+
+def test_a_machine_just_up_gives_reconcile_its_catch_up_fire(tmp_path):
+    """87bae129: off overnight, the daily pass's catch-up fire read a fourteen-hour-old
+    log sixteen seconds before reconcile's own catch-up fire rewrote it."""
+    _logged(tmp_path, 14)
+    assert ws.scheduler_line(tmp_path, now=NOW, resumed=NOW - 7 * 60) == ""
+    after = ws.scheduler_line(tmp_path, now=NOW, resumed=NOW - ws.RECONCILE_GRACE)
+    assert ws.failure_kind(after) == "reconcile-stopped", "a window, not an amnesty"
+    assert ws.failure_kind(ws.scheduler_line(tmp_path, now=NOW, resumed=None)) == (
+        "reconcile-stopped"
+    )
+
+
+def test_the_unattended_run_waits_out_the_window_only_when_it_is_what_keeps_quiet(tmp_path):
+    """Silence alone would hide a stopped reconcile from a daily pass that always fires
+    just after a wake, so the scheduled run waits and asks again."""
+    just_up = NOW - 7 * 60
+    assert ws.catch_up_wait(tmp_path, NOW, just_up) == 0.0, "no log: nothing to wait for"
+    _logged(tmp_path, 14)
+    assert ws.catch_up_wait(tmp_path, NOW, just_up) == ws.RECONCILE_GRACE - 7 * 60
+    assert ws.catch_up_wait(tmp_path, NOW, NOW - ws.RECONCILE_GRACE) == 0.0
+    assert ws.catch_up_wait(tmp_path, NOW, None) == 0.0
+    _logged(tmp_path, 0.1)
+    assert ws.catch_up_wait(tmp_path, NOW, just_up) == 0.0, "a fresh log: nothing to wait for"
+
+
+def test_only_the_notify_run_waits(monkeypatch, tmp_path):
+    waits = []
+    monkeypatch.setattr(ws, "catch_up_wait", lambda *a: 42.0)
+    monkeypatch.setattr(ws, "_time", SimpleNamespace(sleep=waits.append, time=lambda: NOW))
+    monkeypatch.setattr(ws._notify, "notify", lambda title, body: True)
+    _workspace_reporting(monkeypatch, tmp_path, "")
+    assert ws.main([]) == 0
+    assert waits == []
+    assert ws.main(["--notify"]) == 0
+    assert waits == [42.0]
 
 
 def test_the_age_is_coarse_because_the_question_is_days_not_minutes():
@@ -898,6 +999,28 @@ def test_no_ledger_file_is_silence(tmp_path):
     assert ws.events_line(source=tmp_path) == ""
 
 
+def test_an_unreachable_ledger_pool_is_said(tmp_path):
+    """While the shared folder is away, this machine's rows reach no other machine."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "ledger-pool").write_text(f"{tmp_path / 'offline'}\n", encoding="utf-8")
+    line = ws.events_line(source=tmp_path)
+    assert "unreachable" in line
+    assert "ledger-pool.py" in line
+    assert ws.failure_kind(line) == ""
+
+
+def test_a_reachable_ledger_pool_is_silence(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "logs" / "ledger-pool").write_text(f"{tmp_path / 'shared'}\n", encoding="utf-8")
+    assert ws.events_line(source=tmp_path) == ""
+
+
+def test_render_prefixes_every_line_of_a_two_line_half():
+    report = ws.render([], {}, "", events="one\ntwo")
+    assert report.splitlines() == ["[workspace] one", "[workspace] two"]
+
+
 def test_an_agent_report_is_surfaced_with_the_command_to_run(tmp_path):
     _ledger(tmp_path, (3600, "agent-report"))
     line = ws.events_line(source=tmp_path)
@@ -919,6 +1042,26 @@ def test_an_old_event_still_counts_until_someone_retires_it(tmp_path):
     """
     _ledger(tmp_path, (400 * 86400, "agent-report"))
     assert "1 harness defect(s) open" in ws.events_line(source=tmp_path)
+
+
+def test_a_group_awaiting_a_person_is_named_with_its_step_not_counted(tmp_path):
+    """aa6a9022, 28a97046: the fix pass sends no fixer at a step only a person can take,
+    so this line, and the morning toast it rides in, is what reaches that person."""
+    step = harness_triage.PERSON_STEP
+    written = _ledger(
+        tmp_path,
+        (3600, "scheduled-job-failed", f"said=error: hung -- {step} reboot"),
+        (7200, "agent-report"),
+    )
+    line = ws.events_line(source=tmp_path)
+    ref = harness_triage.item_id(written[0])
+    assert line.splitlines()[0] == (
+        "a person's step is owed: reboot -- then retire it: python devkit/scripts/"
+        f"harness_triage.py --resolve-like {ref} --note '<the step taken>'"
+    )
+    assert "1 harness defect(s) open" in line, "the person's group is not a fixer's count"
+    assert ws.failure_kind(line.splitlines()[0]) == "", "never re-filed as a failure"
+    assert ws.toast_text(line)[1].startswith("a person's step is owed: reboot")
 
 
 def test_a_resolved_event_leaves_the_line(tmp_path):
@@ -1013,7 +1156,8 @@ def test_a_publishable_difference_is_published_not_merely_reported(tmp_path, mon
     line = ws.workspace_sync_line(live)
 
     assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
-    assert "published 1 change(s) from devkit" in line
+    # Two: settings are compared per key, and `a` went while `c` arrived.
+    assert "published 2 change(s) from devkit" in line
     assert "reload the window" in line
 
 
@@ -1053,6 +1197,45 @@ def test_a_live_edit_devkit_never_wrote_is_refused_rather_than_overwritten(tmp_p
     assert live.read_text(encoding="utf-8") == before
     assert "carries edits devkit never wrote" in line
     assert "--adopt-workspace" in line
+
+
+def test_a_live_edit_already_on_a_pushed_branch_is_a_merge_awaited_not_a_failure(
+    tmp_path, monkeypatch
+):
+    """4ea2781c: `new-project.py` registered photolab in the live file and opened #704 for
+    `workspace.jsonc`, and until it merged every daily publish refused and was filed as a
+    failure asking for `--adopt-workspace` or `--force`. git held the edit all along."""
+    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
+    _checkout(monkeypatch)
+    live = _live(tmp_path, {"a": "b", "c": "d"})
+    before = live.read_text(encoding="utf-8")
+    branch = {"folders": [{"path": "devkit"}], "settings": {"a": "b", "c": "d"}}
+    monkeypatch.setattr(
+        ws.devkit_project, "pending_copies", lambda _live: iter([("origin/agent/reg", branch)])
+    )
+
+    line = ws.workspace_sync_line(live)
+
+    assert live.read_text(encoding="utf-8") == before, "the edit is not dropped meanwhile"
+    assert "on unmerged origin/agent/reg, so it publishes once that merges" in line
+    assert ws.failure_kind(line) == ""
+
+
+def test_a_live_edit_no_branch_holds_is_still_the_refusal(tmp_path, monkeypatch):
+    """One held edit beside one nobody holds is still a decision owed."""
+    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
+    _checkout(monkeypatch)
+    live = _live(tmp_path, {"a": "b", "e": "f"})
+    branch = {"folders": [{"path": "devkit"}], "settings": {"a": "b", "c": "d"}}
+    monkeypatch.setattr(
+        ws.devkit_project, "pending_copies", lambda _live: iter([("origin/agent/reg", branch)])
+    )
+
+    line = ws.workspace_sync_line(live)
+
+    assert ws.failure_kind(line) == "workspace-publish-refused"
+    ahead_only = ["setting missing from the workspace: c"]
+    assert ws.held_line(live, branch, ahead_only) == "", "nothing of the live file's to hold"
 
 
 def test_a_task_branch_checkout_reports_the_drift_and_publishes_nothing(tmp_path, monkeypatch):
@@ -1253,3 +1436,166 @@ def test_commit_status_answers_on_this_machine_without_raising():
     """`_commit_status` is the one call here that leaves Python; it must never throw."""
     phys, limit, avail = ws._commit_status()
     assert (phys, limit, avail) == (0, 0, 0) or (phys > 0 and limit >= phys >= 0 and avail >= 0)
+
+
+# --- a finding that is a failure goes on the ledger --------------------------------
+#
+# The report ended at a toast, so a broken workstation was reported to whoever happened
+# to read the Action Center that morning and to nothing that fixes things. A *failure*
+# -- something broken -- is filed for the fix pass; a *report* of ordinary state
+# (stranded work, a box, a release not yet adopted, disk) stays a line and a toast.
+
+
+def test_a_drifted_policy_is_a_failure_and_a_release_behind_is_not(tmp_path):
+    modified = installed(tmp_path / "modified")
+    (modified / "devkit_git_policy.py").write_text("# tampered\n", encoding="utf-8")
+    assert ws.failure_kind(ws.policy_line(REPO_ROOT, modified, latest="v0.5.3")) == (
+        "branch-policy-drift"
+    )
+    behind = installed(tmp_path / "behind")
+    line = ws.policy_line(REPO_ROOT, behind, latest="v0.6.0")
+    assert line and ws.failure_kind(line) == ""
+
+
+def test_a_retired_hook_still_wired_is_a_failure(tmp_path):
+    _wire(tmp_path, "carameli", 'python3 "x/scripts/hooks/branch-on-write.py"')
+    assert ws.failure_kind(ws.retired_hooks_line(tmp_path, ["carameli"])) == "retired-hooks"
+
+
+def _gate(root: Path, name: str, text: str) -> None:
+    path = root / name / ws.GATE_FILE
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_a_gate_that_runs_a_runner_and_uploads_no_log_is_a_failure(tmp_path):
+    """669db913: data-lake's gate ran both runners and uploaded neither log, so the
+    pass's evidence ended at "details in logs/test-failures.log" with no test named."""
+    _gate(
+        tmp_path,
+        "data-lake",
+        "run: uv run python scripts/lint-all.py\nrun: uv run python scripts/run-tests.py\n",
+    )
+    line = ws.gate_uploads_line(tmp_path, ["data-lake"])
+    assert "data-lake (logs/test-failures.log, logs/lint-errors.log)" in line
+    assert ws.failure_kind(line) == "gate-uploads-no-log"
+
+
+def test_a_gate_uploading_its_logs_or_running_no_runner_is_not_reported(tmp_path):
+    _gate(
+        tmp_path, "uploads", "run: python scripts/run-tests.py\npath: |\n  logs/test-failures.log\n"
+    )
+    _gate(tmp_path, "no-runner", "run: npm test\n")
+    names = ["uploads", "no-runner", "no-gate", "missing-checkout"]
+    (tmp_path / "no-gate").mkdir()
+    assert ws.gate_uploads_line(tmp_path, names) == ""
+
+
+def test_only_the_runner_whose_log_is_missing_is_named(tmp_path):
+    _gate(tmp_path, "half", "scripts/run-tests.py logs/test-failures.log scripts/lint-all.py\n")
+    assert ws.gate_uploads_line(tmp_path, ["half"]).startswith(
+        f"{ws.GATE_UNREAD}half (logs/lint-errors.log) "
+    )
+
+
+def test_checkout_config_line_carries_both_kinds_one_per_line(tmp_path):
+    _wire(tmp_path, "carameli", 'python3 "x/scripts/hooks/branch-on-write.py"')
+    _gate(tmp_path, "data-lake", "run: python scripts/run-tests.py\n")
+    lines = ws.checkout_config_line(tmp_path, ["carameli", "data-lake"]).splitlines()
+    assert [ws.failure_kind(line) for line in lines] == ["retired-hooks", "gate-uploads-no-log"]
+    assert ws.checkout_config_line(tmp_path, ["neither"]) == ""
+
+
+def test_this_checkouts_own_gate_and_the_templates_upload_every_log():
+    assert ws.gate_uploads_line(REPO_ROOT.parent, [REPO_ROOT.name]) == ""
+    template = REPO_ROOT / "templates/core/dot-github/workflows/pr-gate.yml.tmpl"
+    text = template.read_text(encoding="utf-8")
+    assert all(runner in text and log in text for runner, log in ws.GATE_LOGS)
+
+
+def test_a_stopped_reconcile_pass_is_a_failure(tmp_path):
+    _logged(tmp_path, 24 * 5)
+    assert ws.failure_kind(ws.scheduler_line(tmp_path, now=NOW)) == "reconcile-stopped"
+
+
+def test_a_refused_publish_is_a_failure_and_a_held_one_is_not(tmp_path, monkeypatch):
+    """Refused: the live file carries edits nobody will reconcile unless told. Held: devkit
+    is on a task branch, and the next pass on the default branch publishes."""
+    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
+    _checkout(monkeypatch)
+    refused = ws.workspace_sync_line(_live(tmp_path, {"a": "b"}))
+    assert ws.failure_kind(refused) == "workspace-publish-refused"
+    _checkout(monkeypatch, branch="agent/whatever-0823")
+    held = ws.workspace_sync_line(_live(tmp_path, {"a": "b"}))
+    assert held and ws.failure_kind(held) == ""
+
+
+def test_a_report_of_ordinary_state_is_not_a_failure():
+    reports = [
+        ws.stranded_line([result("carameli", sweep.READY)]),
+        ws.behind_line({"carameli": "v0.5.2"}, "v0.5.3"),
+        ws.boxes_line([{"box": "b", "reapable": True, "verdict": "x"}]),
+        "3 harness defect(s) open -- agent reports or failed box spawns nobody has retired",
+        "headroom: 20 GB free (fix: close idle dev servers)",
+    ]
+    assert all(reports)
+    assert [ws.failure_kind(line) for line in reports] == [""] * len(reports)
+
+
+def test_every_toolchain_line_is_a_failure_and_a_report_line_only_when_named_one():
+    report = "[workspace] settings wire retired hooks: a (b.py)\n[workspace] 2 box(es)"
+    assert ws.failures(["uv is not on PATH"], report) == [
+        ("toolchain", "uv is not on PATH"),
+        ("retired-hooks", "settings wire retired hooks: a (b.py)"),
+    ]
+    assert ws.failures([], "") == []
+
+
+def _filed(root):
+    return [item for item in harness_triage.load(root) if item.event == ws.FAILURE_EVENT]
+
+
+def test_a_failure_is_filed_once_while_it_stays_open(tmp_path):
+    """Daily, a standing fault would otherwise file a row a day; one open row says it."""
+    faults = [("toolchain", "uv is not on PATH -- install uv")]
+    assert len(ws.record_failures(faults, tmp_path)) == 1
+    assert ws.record_failures(faults, tmp_path) == []
+    rows = _filed(tmp_path)
+    assert [row.fields["message"] for row in rows] == ["toolchain: uv is not on PATH -- install uv"]
+    assert rows[0].fields["evidence"] == status_installer.ARTIFACT
+
+    harness_triage.resolve([rows[0].id], "installed uv", root=tmp_path)
+    assert len(ws.record_failures(faults, tmp_path)) == 1, "a fault still there reopens"
+
+
+def test_a_count_in_the_line_does_not_split_one_failure_into_two(tmp_path):
+    """The signature groups by the message, so it has to be stable across recurrences:
+    "3 difference(s)" today and "4" tomorrow is one refused publish, not two."""
+    line = "w.code-workspace: {} difference(s), and the live file carries edits devkit never wrote"
+    ws.record_failures([("workspace-publish-refused", line.format(3))], tmp_path)
+    ws.record_failures([("workspace-publish-refused", line.format(4))], tmp_path)
+    rows = _filed(tmp_path)
+    assert len(rows) == 1
+    assert "N difference(s)" in rows[0].fields["message"]
+    assert "3 difference(s)" in rows[0].fields["said"]
+
+
+def test_the_fix_pass_reads_these_failures_as_backlog():
+    assert ws.FAILURE_EVENT in harness_triage.TRIAGE_EVENTS
+
+
+def test_the_pass_files_its_failures_and_still_exits_zero(monkeypatch, tmp_path):
+    """End to end through `main`: the toolchain gap and the failing line are filed, the
+    ordinary report beside them is not, and findings stay exit 0 -- `Last Result` is the
+    job's health, which reporting a broken workstation does not change."""
+    retired = "settings wire retired hooks: carameli (branch-on-write.py) (fix: --pull)"
+    _workspace_reporting(
+        monkeypatch, tmp_path, f"[workspace] {retired}\n[workspace] 2 ephemeral box(es): ..."
+    )
+    monkeypatch.setattr(ws, "toolchain_lines", lambda *a, **k: ["uv is not on PATH -- x"])
+    monkeypatch.setattr(ws, "SOURCE_ROOT", tmp_path)
+    assert ws.main([]) == 0
+    assert sorted(row.fields["message"] for row in _filed(tmp_path)) == [
+        f"retired-hooks: {retired}",
+        "toolchain: uv is not on PATH -- x",
+    ]

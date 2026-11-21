@@ -23,29 +23,41 @@ Steps, in order:
   2. render `templates/` into the new directory
   3. `git init` + initial commit
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
-  5. register the project in the shared `alex-projects.code-workspace`
-     (the one step that writes OUTSIDE the new directory; `--no-register` skips it)
-  6. create the private GitHub repo and push          <- outward-facing
+  5. register the project in the shared `alex-projects.code-workspace` and, on a task
+     branch with a ship intent, in devkit's `workspace.jsonc` (the one step that writes
+     OUTSIDE the new directory; `--no-register` skips it)
+  6. create the public GitHub repo and push           <- outward-facing
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import tomllib
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 
+import canonical_handoff
 import devkit_ports
 import devkit_project
 from devkit_render import TemplateError, render
-from project_env import lock_dependencies, missing_commit_tooling, provision_environment
+from project_env import (
+    lock_dependencies,
+    lock_node_dependencies,
+    missing_commit_tooling,
+    provision_environment,
+)
 
 DEVKIT_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = DEVKIT_ROOT / "templates"
@@ -64,19 +76,45 @@ SERVICE_BY_FEATURE = {
     "frontend": "frontend",
 }
 
-FEATURES = ("docker", "app_service", "postgres", "redis", "alembic", "frontend", "archive")
+STACK_FEATURES = ("docker", "app_service", "postgres", "redis", "alembic", "frontend", "archive")
+# A C#/WPF app shipped to users as a self-updating installer. Mutually exclusive with the
+# stack: an executable on a stranger's PC cannot depend on a compose stack, and skinamp
+# was generated as a `service` -- Postgres and all -- because no shape here fit it.
+DESKTOP_FEATURES = ("desktop", "updater")
+# The other way to ship an installer: a TypeScript app on Electron, for a project whose
+# work is its UI rather than the Windows API. Playwright drives the real app, so an agent
+# can see what it drew, which WPF offers no equivalent of. Excludes the C# shape and the
+# stack alike.
+ELECTRON_FEATURES = ("electron",)
+FEATURES = STACK_FEATURES + DESKTOP_FEATURES + ELECTRON_FEATURES
 
 # Named feature bundles. These exist for the VS Code task: a task picker passes one
 # string, and VS Code cannot build a variable-length argument list from it. They are
 # also the honest answer to "what shapes do we actually build here" — the two
-# existing projects are `fullstack` (carameli) and `data` (ibkr_trader).
+# existing projects are `fullstack` (carameli) and `data` (ibkr_trader). The two desktop
+# shapes differ only in the updater, which is why that choice is a preset rather than a
+# second prompt every other shape would be asked too.
 PRESETS: dict[str, tuple[str, ...]] = {
     "bare": (),
     "service": ("docker", "app_service", "postgres", "alembic"),
     "service-redis": ("docker", "app_service", "postgres", "alembic", "redis"),
     "data": ("docker", "postgres", "archive"),
     "fullstack": ("docker", "app_service", "postgres", "alembic", "redis", "frontend"),
+    "desktop": ("desktop", "updater"),
+    "desktop-static": ("desktop",),
+    "desktop-web": ("electron",),
 }
+
+# Core templates a feature replaces. A shipped app's tests are in its own language, so the
+# Python smoke test -- which imports a package those shapes do not have -- stays behind.
+REPLACED_BY: dict[str, tuple[str, ...]] = {
+    "desktop": ("tests/test_smoke.py.tmpl",),
+    "electron": ("tests/test_smoke.py.tmpl",),
+}
+
+# A template path segment spelled `__<name>__` takes that context value, so a C# project
+# file can carry the project's name: `src/__desktop_name__/__desktop_name__.csproj`.
+PATH_PLACEHOLDER = re.compile(r"__([a-z][a-z0-9_]*?)__")
 
 
 # Fallback when git cannot answer (no tags, not a checkout, git absent). Only used
@@ -85,7 +123,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
 # users who cannot hit the fast path. So it must track the newest tag, and
 # `test_fallback_devkit_ref_tracks_the_newest_tag` fails at release time if a tag
 # lands without it being bumped. Bump it in the same commit as the tag.
-FALLBACK_DEVKIT_REF = "v0.11.32"
+FALLBACK_DEVKIT_REF = "v0.11.91"
 
 
 class GeneratorError(RuntimeError):
@@ -138,10 +176,10 @@ def latest_devkit_tag(root: Path = DEVKIT_ROOT) -> str | None:
 def harness_files_matching_ref(ref: str, root: Path = DEVKIT_ROOT) -> list[str] | None:
     """MANIFEST paths whose working-tree bytes differ from those at `ref`.
 
-    This is the exact condition the generated project's `devkit-drift` job checks: it
-    vendors from the working tree but drift-checks against the pinned tag. If they
-    disagree, that job fails on the very first PR — so warn at generation time, when
-    the fix (tag devkit, or pass --devkit-ref) is still cheap.
+    This is the exact condition the generated project's `devkit-drift` job checks: a
+    project drift-checks against the tag it pins, so if this tree differs from that tag
+    a project vendoring it fails on its first commit. `harness_source` vendors the tag
+    instead wherever that is so; a rehearsal keeps this tree and is warned.
 
     None means the comparison could not be made (unknown ref, no git).
     """
@@ -232,6 +270,9 @@ class Plan:
     files: list[tuple[Path, Path, bool]] = field(default_factory=list)
     remote: bool = True
     register: bool = True
+    # Set once the registration branch carries the slot too, so the closing hint does
+    # not ask a person to add it a second time.
+    slot_on_branch: bool = False
 
 
 def slugify_package(name: str) -> str:
@@ -250,14 +291,64 @@ def validate_name(name: str) -> str:
     return name
 
 
+def pascal_case(name: str) -> str:
+    """`sports-betting` -> `SportsBetting`: the project's C# namespace and assembly name.
+
+    A C# identifier cannot open with a digit, which a project name may, so such a name
+    is prefixed rather than rejected.
+    """
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", name) if w]
+    joined = "".join(w[:1].upper() + w[1:] for w in words)
+    return f"App{joined}" if joined[:1].isdigit() else joined
+
+
+def electron_app_id(owner: str, package: str) -> str:
+    """`io.github.<owner>.<name>`, in the reverse-domain form `electron-builder` asks for.
+
+    Underscores are out because an app id is a bundle identifier on every platform but
+    Windows, and this id cannot be corrected later: an install only accepts updates
+    carrying it.
+    """
+    return f"io.github.{owner.lower()}.{package.replace('_', '-')}"
+
+
+def resolve_features(args: argparse.Namespace) -> None:
+    """Turn on what the chosen features imply, and refuse a shape that cannot work.
+
+    Resolved once, here, so templates never re-derive them -- and so the test helper that
+    renders a tree resolves them exactly as `main` does.
+    """
+    if args.updater:
+        args.desktop = True
+    if args.alembic:
+        args.postgres = True
+    if args.app_service or args.postgres or args.redis or args.frontend:
+        args.docker = True
+    stack = [f for f in STACK_FEATURES if getattr(args, f)]
+    if args.desktop and args.electron:
+        raise GeneratorError(
+            "pick one desktop stack: `desktop` is C#/WPF and `electron` is TypeScript, and "
+            "each owns the app's source tree, its installer and its release workflow."
+        )
+    if (args.desktop or args.electron) and stack:
+        raise GeneratorError(
+            f"the desktop shape cannot carry {', '.join(stack)}: it ships an executable to "
+            f"other people's machines, which has no compose stack to talk to. Keep its "
+            f"data local (a file, SQLite) or behind an HTTP API another project serves."
+        )
+
+
 def iter_template_files(features: dict[str, bool]) -> list[tuple[Path, Path]]:
     """`(source, relative destination)` for every template the feature set selects.
 
-    Selection is by directory: `templates/core/**` always, and
-    `templates/features/<f>/**` only when `<f>` is on. Inline `{{#flag}}` blocks
-    then handle the cross-cutting bits inside the files that survive.
+    Selection is by directory: `templates/core/**` always, minus what an enabled
+    feature replaces (`REPLACED_BY`), and `templates/features/<f>/**` only when `<f>`
+    is on. Inline `{{#flag}}` blocks then handle the cross-cutting bits inside the files
+    that survive.
     """
-    roots = [TEMPLATES / "core"]
+    core = TEMPLATES / "core"
+    replaced = {rel for f, on in features.items() if on for rel in REPLACED_BY.get(f, ())}
+    roots = [core]
     roots += [
         TEMPLATES / "features" / feature
         for feature, on in features.items()
@@ -267,11 +358,38 @@ def iter_template_files(features: dict[str, bool]) -> list[tuple[Path, Path]]:
     pairs: list[tuple[Path, Path]] = []
     for root in roots:
         for source in sorted(root.rglob("*")):
-            if source.is_dir():
-                continue
             relative = source.relative_to(root)
+            if source.is_dir() or _debris(relative):
+                continue
+            if root == core and relative.as_posix() in replaced:
+                continue
             pairs.append((source, Path(_destination_name(relative))))
     return pairs
+
+
+def substitute_path(relative: Path, context: dict[str, object]) -> Path:
+    """`relative` with every `__<name>__` segment part replaced by its context value.
+
+    Only names the context defines are placeholders, so a Python dunder such as
+    `__init__.py` passes through untouched.
+    """
+
+    def value(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return str(context[key]) if key in context else match.group(0)
+
+    return Path(*(PATH_PLACEHOLDER.sub(value, part) for part in relative.parts))
+
+
+# What running a template leaves beside it, which is no template: 0929-8 loaded
+# `run-tests.py.tmpl` in a test and its `__pycache__/*.pyc` shipped into every project
+# generated after, where a text-file check failed on it.
+DEBRIS_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+DEBRIS_SUFFIXES = frozenset({".pyc", ".pyo"})
+
+
+def _debris(relative: Path) -> bool:
+    return bool(DEBRIS_DIRS.intersection(relative.parts)) or relative.suffix in DEBRIS_SUFFIXES
 
 
 def _destination_name(relative: Path) -> str:
@@ -298,6 +416,15 @@ def build_context(
     """The full template namespace. Flags and values share it deliberately."""
     package = slugify_package(args.name)
     features = {f: bool(getattr(args, f)) for f in FEATURES}
+    desktop_name = pascal_case(args.name)
+    if features["desktop"]:
+        # The app is the C# project; there is no Python package to point the harness at.
+        app_dir = f"src/{desktop_name}/"
+    elif features["electron"]:
+        # Likewise the Electron app, which is also what the `[frontend]` tier points at.
+        app_dir = "frontend/src/"
+    else:
+        app_dir = f"src/{package}/" if args.src_layout else f"{package}/"
 
     context: dict[str, object] = {
         "name": args.name,
@@ -313,7 +440,14 @@ def build_context(
         "devkit_ref": args.devkit_ref,
         "slot": slot,
         "src_root": "src" if args.src_layout else ".",
-        "app_dir": f"src/{package}/" if args.src_layout else f"{package}/",
+        "app_dir": app_dir,
+        "desktop_name": desktop_name,
+        "desktop_solution": f"{desktop_name}.slnx",
+        "desktop_project": f"src/{desktop_name}/{desktop_name}.csproj",
+        # An app shipped to other people's machines in its own language, so the project
+        # has no Python package, no compose stack and no pytest suite of its own.
+        "shipped": features["desktop"] or features["electron"],
+        "electron_app_id": electron_app_id(args.github_owner, package),
         "tests_dir": "tests/",
         # The layout this generator actually produces is flat -- `tests/test_smoke.py`,
         # no unit/integration split -- so this must be `tests`, not `tests/unit`.
@@ -356,7 +490,10 @@ def build_context(
 def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
     """Decide everything. Touches nothing."""
     validate_name(args.name)
-    root = Path(args.parent).expanduser().resolve() / args.name
+    # Beside the workspace file by default: it registers a project by bare name, so a
+    # project anywhere else is registered as a folder that does not exist (8448080a).
+    parent = args.parent or devkit_project.DEFAULT_WORKSPACE.parent
+    root = Path(parent).expanduser().resolve() / args.name
     if root.exists() and any(root.iterdir()):
         raise GeneratorError(
             f"{root} already exists and is not empty. Generating into it would "
@@ -369,7 +506,7 @@ def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
 
     features = {f: bool(context[f]) for f in FEATURES}
     files = [
-        (source, root / relative, source.name.endswith(TEMPLATE_SUFFIX))
+        (source, root / substitute_path(relative, context), source.name.endswith(TEMPLATE_SUFFIX))
         for source, relative in iter_template_files(features)
     ]
 
@@ -444,18 +581,24 @@ def _render_or_die(source: Path, context: dict[str, object]) -> str:
 
 
 def write_package(plan: Plan, dry_run: bool) -> None:
-    """The importable package stub the smoke test and the Dockerfile CMD expect."""
+    """The importable package stub the smoke test and the Dockerfile CMD expect.
+
+    A shipped app gets none: its app is the source tree the templates render, and a
+    Python package beside it would be a second "app" for an agent to edit.
+    """
     app_dir = plan.root / str(plan.context["app_dir"])
-    init = app_dir / "__init__.py"
+    init = None if plan.context["shipped"] else app_dir / "__init__.py"
     body = f'"""{plan.context["display_name"]}."""\n\n__version__ = "0.1.0"\n'
     unit_tests = plan.root / str(plan.context["unit_tests"])
     if dry_run:
-        print(f"  write   {init.relative_to(plan.root)}")
+        if init is not None:
+            print(f"  write   {init.relative_to(plan.root)}")
         print(f"  write   {plan.context['unit_tests']}/.gitkeep")
         print("  write   logs/.gitkeep")
         return
     app_dir.mkdir(parents=True, exist_ok=True)
-    init.write_text(body, encoding="utf-8", newline="\n")
+    if init is not None:
+        init.write_text(body, encoding="utf-8", newline="\n")
     # The rendered manifest names this as `[paths] unit_tests`, and the Stop hook's
     # DB tier resolves an app/ change straight to it (`host_test_targets` returns
     # [CFG.unit_tests]). Generated without it, the tier ran `pytest tests/unit` against
@@ -477,7 +620,7 @@ def scripted_setup_env() -> dict[str, str]:
     The generator seeds a repo and pushes its default branch, which is precisely the
     "scripted repo setup" case that policy's `DEVKIT_SKIP_BRANCH_POLICY` exists for.
     Without it, the policy's pre-push hook blocks `gh repo create --push` and the
-    generator dies *after* creating the private GitHub repo — leaving an empty repo
+    generator dies *after* creating the GitHub repo — leaving an empty repo
     upstream and a local checkout that has to be pushed by hand.
 
     The hatch waives the branch checks only. The project's own pre-commit gate still
@@ -497,6 +640,52 @@ def run(cmd: list[str], cwd: Path, dry_run: bool, check: bool = True) -> int:
     return result.returncode
 
 
+def lands_in_the_workspace(plan: Plan) -> bool:
+    """A project being made to be kept, not a rehearsal: beside the live workspace file.
+
+    The generated-project gate and every test render under a temporary parent, and there
+    vendoring this tree is the point: it is the change under test."""
+    return plan.root.parent == devkit_project.DEFAULT_WORKSPACE.parent.resolve()
+
+
+@contextlib.contextmanager
+def harness_source(plan: Plan, dry_run: bool) -> Iterator[Path]:
+    """The devkit the project vendors from: a clone at its pin wherever this tree differs.
+
+    Vendoring this tree and pinning a tag agree only until a MANIFEST file changes past
+    that tag. From then on every new project died in `git_init`, its own `devkit-drift`
+    comparing what was just vendored with the release it pins: "1 vendored file(s) differ
+    from devkit", and no registration and no `gh repo create` behind it (ebe2fa33, homelab).
+    A project that arrives holding the release it pins is green whatever `main` is doing.
+
+    Hooks are off for the clone: it is read and thrown away, and the machine's
+    `post-checkout` would provision it first. A clone that fails leaves this tree as the
+    source, which is `_warn_if_pin_is_stale`'s old warning and no worse than before."""
+    ref = str(plan.context["devkit_ref"])
+    behind = not dry_run and lands_in_the_workspace(plan)
+    if not behind or not harness_files_matching_ref(ref, DEVKIT_ROOT):
+        yield DEVKIT_ROOT
+        return
+    with tempfile.TemporaryDirectory(prefix="devkit-pin-", ignore_cleanup_errors=True) as held:
+        clone = Path(held) / "devkit"
+        command = ["git", "-c", "core.hooksPath=/dev/null", "clone", "--quiet", "--shared"]
+        done = subprocess.run(
+            [*command, "--branch", ref, str(DEVKIT_ROOT), str(clone)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if done.returncode != 0:
+            print(f"  WARNING could not clone {ref}: vendoring this tree instead")
+            print(f"          {done.stderr.strip()[-200:]}")
+            yield DEVKIT_ROOT
+            return
+        print(f"  vendor  from {ref}, which this project pins")
+        yield clone
+
+
 def vendor_harness(plan: Plan, dry_run: bool) -> None:
     """Copy devkit's MANIFEST into the new repo and stamp DEVKIT_VERSION.
 
@@ -504,19 +693,19 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
     reimplementing the copy — so the generator can never disagree with the tool that
     drift-checks the result.
     """
-    for name in ("sync-devkit.py", "devkit_manifest.py"):  # the tool, and the list it reads
-        if not dry_run:
-            (plan.root / "scripts").mkdir(parents=True, exist_ok=True)
-            shutil.copy2(DEVKIT_ROOT / "scripts" / name, plan.root / "scripts" / name)
-        else:
-            print(f"  write   scripts/{name}    (bootstrap copy)")
-    run(
-        [
+    with harness_source(plan, dry_run) as source:
+        for name in ("sync-devkit.py", "devkit_manifest.py"):  # the tool, and the list it reads
+            if not dry_run:
+                (plan.root / "scripts").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source / "scripts" / name, plan.root / "scripts" / name)
+            else:
+                print(f"  write   scripts/{name}    (bootstrap copy)")
+        pull = [
             sys.executable,
             "scripts/sync-devkit.py",
             "--pull",
             "--src",
-            str(DEVKIT_ROOT),
+            str(source),
             # Generating is not adopting a release, so `--pull`'s release guards do
             # not apply here. They exist to stop an *existing* consumer vendoring
             # from an unreleased revision it can never pin. This project has no pins
@@ -526,10 +715,13 @@ def vendor_harness(plan: Plan, dry_run: bool) -> None:
             # while it had uncommitted work — which is most of the time.
             "--allow-dirty",
             "--allow-untagged",
-        ],
-        plan.root,
-        dry_run,
-    )
+        ]
+        run(pull, plan.root, dry_run)
+        # The gated tier is read through the consumer's `harness_config.py`, which the
+        # pull above is what delivers, so that pull answered "off" for every gate. These
+        # are the shapes that render a gate on; `scripts/CLAUDE.md` has the rest.
+        if plan.context["shipped"]:
+            run(pull, plan.root, dry_run)
     # Codex reads project instructions from CLAUDE.md through its configured fallback,
     # but repository skills and hooks still use Codex-specific paths. Runs after the
     # pull because the compatibility script arrives with the vendored harness.
@@ -551,7 +743,8 @@ def announce(plan: Plan, dry_run: bool) -> None:
     print(f"  remote    {'yes' if plan.remote else 'no'}")
     print(f"  devkit    {ref} (pinned by the generated PR gate)")
     print()
-    _warn_if_pin_is_stale(ref)
+    if not lands_in_the_workspace(plan):  # one that does vendors the pin (`harness_source`)
+        _warn_if_pin_is_stale(ref)
     _warn_if_pre_commit_channel_is_unpublished(ref)
     missing = missing_commit_tooling()
     if missing and not dry_run:
@@ -571,7 +764,7 @@ def git_init(plan: Plan, dry_run: bool) -> None:
 
 
 def register_in_workspace(plan: Plan, dry_run: bool) -> None:
-    """Add the project to `alex-projects.code-workspace`.
+    """Add the project to `workspace.jsonc` and `alex-projects.code-workspace`.
 
     This used to write a *new* `<name>.code-workspace` per project, to keep the task
     quick-pick free of every other repo's tasks. Two things made that wrong. The task
@@ -594,27 +787,180 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     file: it lands in `folders` and in every scope picker, which puts a directory
     under a temp path into `sweep.py`'s registry, and it survives the `rm -rf` that
     ends the acceptance test.
+
+    **Both copies, canonical first.** The live file is rendered from devkit's
+    `workspace.jsonc` (`.claude/rules/vscode-tasks.md`), so registering in the live file
+    alone left `devkit_project.py --check-workspace` reporting the new project as
+    `folder in the workspace but not in devkit` until someone adopted it by hand on a
+    branch (8a1c0927). The canonical edit is a registry change every machine shares, so
+    it goes through a branch and a review like any other: `hand_off_registration` puts it
+    on a task branch with a ship intent and restores devkit's static checkout, which the
+    fix pass runs from and will not update while it is dirty (851308ef). The live write
+    stays too, because a render only lands on the next scheduled pass and the project
+    should be in the sweep's registry from the moment it exists -- and a render of the
+    canonical copy without it refuses rather than dropping it, the live file carrying an
+    edit no stamp covers.
     """
     if not plan.register:
         print("  skip    workspace registration (--no-register)")
         return
-    path = devkit_project.DEFAULT_WORKSPACE
     names = [plan.name]
+    live = devkit_project.DEFAULT_WORKSPACE
+    # The registry names each folder relative to the live file's directory, and the
+    # canonical copy renders into it. A project generated anywhere else would be
+    # registered in both as a folder that does not exist, and every reader of the
+    # registry -- `rc-servers.py`, the fix pass's collect step -- then fails on it rather
+    # than skipping it (b42a921e, 79505f2b).
+    if plan.root.parent != live.parent.resolve():
+        print(f"  WARNING {plan.root} is not beside {live}: not registered")
+        print(f"          move it to {live.parent} and add {plan.name} to its folders by hand")
+        return
+    canonical = devkit_project.CANONICAL_WORKSPACE
+    # Asked before the write, so a hand edit already sitting there is never carried off
+    # onto a branch under this project's name.
+    clean_before = not dry_run and not canonical_handoff.dirty(canonical)
+    for path in (canonical, live):
+        shown = path.name if path == canonical else f"../{path.name}"
+        if dry_run:
+            print(f"  update  {shown} (folders + project picker: {', '.join(names)})")
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            path.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
+        except (OSError, devkit_project.RegistryEditError) as exc:
+            print(f"  WARNING could not register in {path.name}: {exc}")
+            print(
+                f"          add {', '.join(names)} to its folders list and project picker by hand"
+            )
+            continue
+        print(f"  update  {shown} (folders + project picker)")
     if dry_run:
-        print(f"  update  ../{path.name} (folders + project picker: {', '.join(names)})")
         return
+    slot = plan.context.get("slot")
+    handed = hand_off_registration(plan.name, canonical, slot=slot) if clean_before else Handoff()
+    plan.slot_on_branch = handed.slot
+    print(handed.said or f"          commit devkit's {canonical.name} on a branch and ship it")
+
+
+REGISTRATION_INTENT = """Register {name} in the workspace registry
+
+`scripts/new-project.py` generated `{name}` and registered it in the live workspace file
+and in devkit's canonical `workspace.jsonc`. The live half is in effect already; this is
+the canonical half, which every machine shares and so goes through a PR.
+
+The generator cut this branch itself rather than leave the edit uncommitted in devkit's
+static checkout: the fix pass runs from that checkout and will not fast-forward a dirty
+one, so the uncommitted registration held the pass on stale code (851308ef).
+"""
+
+SLOT_INTENT = """
+It also registers `{name} = {slot}` in `ports.toml`'s `[slots]`: the slot the generated
+`.env` and compose defaults already publish. A workspace folder with neither a slot nor a
+`SLOTLESS` reason fails `tests/test_devkit_ports.py`, so the two halves ship together.
+"""
+
+
+@dataclass(frozen=True)
+class Handoff:
+    """What `hand_off_registration` did: the line to print, and whether the slot went too."""
+
+    said: str = ""
+    slot: bool = False
+
+
+def register_slot(text: str, name: str, slot: int) -> str | None:
+    """`ports.toml` with `name = slot` appended to `[slots]`; None when it cannot be.
+
+    None for a file with no `[slots]` table, one that already names the checkout, or one
+    the result would fail `devkit_ports.validate` on (a slot already taken, past the
+    ceiling): the caller then leaves the registry alone and says to register by hand,
+    since a guessed slot is how two stacks end up on one port.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if line.strip() == "[slots]"), None)
+    if start is None:
+        return None
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")),
+        len(lines),
+    )
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    if not lines[end - 1].endswith("\n"):
+        lines[end - 1] += "\n"
+    lines.insert(end, f"{name} = {slot}\n")
+    edited = "".join(lines)
     try:
-        text = path.read_text(encoding="utf-8")
-        path.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
-    except (OSError, devkit_project.RegistryEditError) as exc:
-        print(f"  WARNING could not register in {path.name}: {exc}")
-        print(f"          add {', '.join(names)} to its folders list and project picker by hand")
-        return
-    print(f"  update  ../{path.name} (folders + project picker)")
+        if name in tomllib.loads(text).get("slots", {}):
+            return None
+        devkit_ports.from_dict(tomllib.loads(edited))
+    except (tomllib.TOMLDecodeError, devkit_ports.RegistryError):
+        return None
+    return edited
+
+
+def hand_off_registration(
+    name: str, canonical: Path, runner=subprocess.run, slot: object = None
+) -> Handoff:
+    """Move the registry edit off devkit's static checkout onto a task branch: what was done.
+
+    The canonical edit used to be left uncommitted where it was written, for someone to
+    commit on a branch -- in the checkout the scheduled fix pass runs from. Its watchdog
+    fast-forwards that checkout before every fire and refuses a dirty one, so skinamp's
+    registration, left there on 2026-11-02, held the pass on stale code and filed a
+    `pass-stale` finding (851308ef). Here the edit goes onto `agent/register-<name>-<mmdd>`
+    in a `.claude/worktrees/` tree off the checkout's `HEAD` -- the commit the edit was
+    made against -- with a ship intent the pass ships like any other, and the static
+    checkout's copy is put back.
+
+    The branch carries the project's `ports.toml` slot as well, when `slot` is given and
+    `register_slot` can place it. Without it every registration branch was red on
+    `test_every_checkout_either_holds_a_slot_or_says_why_not` -- skinamp's was, on the PR
+    that introduced this hand-off -- because the slot was only ever a printed hint.
+
+    An empty `said` when there is nothing to hand off, and the caller says to commit by
+    hand: a linked worktree or a task branch (the edit is already on a branch), a checkout
+    git cannot read, or a cut that failed (said as a WARNING, with the file left as it was).
+    The cut itself is `canonical_handoff.hand_off`, which `plug-projects.py` shares.
+    """
+    carried: list[bool] = []
+
+    def carry(tree: Path) -> str:
+        carried.append(_carry_slot(tree / devkit_ports.REGISTRY_NAME, name, slot))
+        return SLOT_INTENT.format(name=name, slot=slot) if carried[-1] else ""
+
+    intent = REGISTRATION_INTENT.format(name=name)
+    cut = canonical_handoff.hand_off(canonical, f"register-{name}", intent, runner, carry)
+    if cut.said:
+        return Handoff(
+            f"  WARNING {cut.said}\n          commit devkit's {canonical.name} on a branch and ship it"
+        )
+    if cut.tree is None:
+        return Handoff()
+    went = any(carried)
+    what = f"{canonical.name}'s registration" + (
+        f" and {devkit_ports.REGISTRY_NAME} slot {slot}" if went else ""
+    )
+    return Handoff(
+        f"  branch  {cut.branch}: {what}, for the fix pass to ship\n          {cut.tree}", went
+    )
+
+
+def _carry_slot(registry: Path, name: str, slot: object) -> bool:
+    """Write `name = slot` into the branch's `ports.toml`; whether it was written. A slot
+    that is not an int (a plan built without one) carries nothing."""
+    if not isinstance(slot, int) or not registry.is_file():
+        return False
+    edited = register_slot(registry.read_text(encoding="utf-8"), name, slot)
+    if edited is None:
+        return False
+    registry.write_text(edited, encoding="utf-8", newline="\n")
+    return True
 
 
 def create_remote(plan: Plan, dry_run: bool) -> None:
-    """Create the PRIVATE GitHub repo and push. The only outward-facing step."""
+    """Create the public GitHub repo and push (`devkit_project.CREATE_VISIBILITY`). The
+    only outward-facing step."""
     if not plan.remote:
         print("  skip    GitHub repo (--no-remote)")
         return
@@ -625,7 +971,7 @@ def create_remote(plan: Plan, dry_run: bool) -> None:
             "repo",
             "create",
             f"{owner}/{plan.name}",
-            "--private",
+            devkit_project.CREATE_VISIBILITY,
             "--source=.",
             "--remote=origin",
             "--push",
@@ -710,14 +1056,64 @@ def _warn_if_pin_is_stale(ref: str) -> None:
 
 
 def register_slot_hint(plan: Plan) -> None:
-    """Tell the user what to add to ports.toml. Deliberately not automatic.
+    """Tell the user what to add to ports.toml, unless the registration branch has it.
 
-    The generator does not edit devkit's registry itself: devkit is a git repo with
-    its own PR gate, and a tool that silently commits to its own source of truth is
-    how two projects end up claiming one slot from two different sessions.
+    The generator never commits to devkit's registry itself: a tool that silently
+    commits to its own source of truth is how two projects end up claiming one slot from
+    two different sessions. A slot on the registration branch is not that -- it goes
+    through a PR, where two branches claiming one slot conflict on the same line and
+    `test_no_two_shipped_checkouts_share_a_port` fails the second -- so only a project
+    whose registration was not handed off is left to this hint.
     """
+    if plan.slot_on_branch:
+        return
     print("\nNext: register the slot in devkit's ports.toml [slots] table:")
     print(f"  {plan.name} = {plan.context['slot']}")
+
+
+def trust_hint(plan: Plan) -> None:
+    """Tell the user to trust the checkout in Claude Code. Deliberately not automatic.
+
+    `claude --bg` refuses to start in a checkout nobody has trusted, and a trusted folder
+    above it does not count, so the fix pass's first fixer here is refused until a person
+    accepts the prompt (10a9810d, 18e737b9). The prompt is a person's consent to the
+    project's own settings and hooks running; a generator that wrote it into Claude
+    Code's state would be consenting on their behalf.
+    """
+    print("\nNext: trust the checkout in Claude Code, or the fix pass cannot work in it:")
+    print(f"  run `claude` in {plan.root} once and accept the trust prompt")
+
+
+def desktop_hint(plan: Plan) -> None:
+    """The two things a shipped app cannot do for itself before its first release."""
+    if not plan.context["shipped"]:
+        return
+    signing = "a VPK_SIGN_PARAMS repo secret" if plan.context["desktop"] else "the CSC_LINK secret"
+    print("\nNext: ship it — a tag is a release:")
+    print("  git tag v0.1.0 && git push origin v0.1.0   (release.yml publishes the installer)")
+    print(f"  add {signing} once you have a code-signing certificate;")
+    print("  until then SmartScreen warns on every download")
+
+
+def next_steps(plan: Plan) -> None:
+    """What the person who ran the generator still has to do, which it will not."""
+    register_slot_hint(plan)
+    trust_hint(plan)
+    desktop_hint(plan)
+
+
+FEATURE_FLAGS = (
+    ("docker", "docker-compose stack + Dockerfile + .dockerignore"),
+    ("app-service", "an `app` service in the compose stack (implies --with-docker)"),
+    ("postgres", "a Postgres service, DATABASE_URL, and the harness DB test tier"),
+    ("redis", "a Redis service and REDIS_URL"),
+    ("alembic", "alembic.ini and the migration tasks (implies --with-postgres)"),
+    ("frontend", "a Vite frontend service and its npm tasks"),
+    ("archive", "the data-lake archive seam and its rule file"),
+    ("desktop", "a C#/WPF app shipped as an installer (excludes every stack feature)"),
+    ("updater", "Velopack self-update from GitHub Releases (implies --with-desktop)"),
+    ("electron", "a TypeScript Electron app and installer (excludes desktop and the stack)"),
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -729,8 +1125,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--display-name", default="", help="human title (default: from name)")
     parser.add_argument(
         "--parent",
-        default=str(Path.home() / "Desktop" / "vs_code"),
-        help="directory to create the project in",
+        default="",
+        help="directory to create the project in (default: the shared workspace file's)",
     )
     parser.add_argument("--github-owner", default="alexandrec90")
     parser.add_argument("--python-version", default="3.12")
@@ -750,15 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
         help="a named feature bundle; individual --with-* flags are added on top",
     )
 
-    for feature, help_text in [
-        ("docker", "docker-compose stack + Dockerfile + .dockerignore"),
-        ("app-service", "an `app` service in the compose stack (implies --with-docker)"),
-        ("postgres", "a Postgres service, DATABASE_URL, and the harness DB test tier"),
-        ("redis", "a Redis service and REDIS_URL"),
-        ("alembic", "alembic.ini and the migration tasks (implies --with-postgres)"),
-        ("frontend", "a Vite frontend service and its npm tasks"),
-        ("archive", "the data-lake archive seam and its rule file"),
-    ]:
+    for feature, help_text in FEATURE_FLAGS:
         parser.add_argument(
             f"--with-{feature}",
             dest=feature.replace("-", "_"),
@@ -821,13 +1209,8 @@ def main(argv: list[str] | None = None) -> int:
         for feature in PRESETS[args.preset]:
             setattr(args, feature, True)
 
-    # Implied features, resolved once so templates never re-derive them.
-    if args.alembic:
-        args.postgres = True
-    if args.app_service or args.postgres or args.redis or args.frontend:
-        args.docker = True
-
     try:
+        resolve_features(args)
         registry = devkit_ports.load(DEVKIT_ROOT)
         the_plan = plan(args, registry)
 
@@ -838,6 +1221,8 @@ def main(argv: list[str] | None = None) -> int:
         write_package(the_plan, args.dry_run)
         vendor_harness(the_plan, args.dry_run)
         lock_dependencies(the_plan.root, args.dry_run)
+        if the_plan.context["electron"]:
+            lock_node_dependencies(the_plan.root / "frontend", args.dry_run)
         provision_environment(the_plan.root, args.dry_run)
         git_init(the_plan, args.dry_run)
         register_in_workspace(the_plan, args.dry_run)
@@ -850,7 +1235,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\nDry run complete. Re-run with --yes to apply.")
     else:
         print(f"\nDone: {the_plan.root}")
-    register_slot_hint(the_plan)
+    next_steps(the_plan)
     return 0
 
 

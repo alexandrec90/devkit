@@ -47,6 +47,14 @@ def test_one_missed_run_is_not_reported():
 # --- the four ways a scheduled job goes quiet -----------------------------------
 
 
+def test_job_problem_is_one_jobs_line_or_none():
+    """`problems` is this over every job, in name order, keeping the lines."""
+    assert health.job_problem(job(), NOW, frozenset(), None, None) is None
+    off = job(enabled=False)
+    assert "disabled" in health.job_problem(off, NOW, frozenset(), None, None)
+    assert health.job_problem(off, NOW, frozenset({off.name}), None, None) is None
+
+
 def test_a_disabled_job_is_reported():
     """Lived: reconcile was disabled 26 minutes after it was created and stayed off for
     five days. 471 missed runs, nothing red anywhere, 26 leaked boxes and 5 GB."""
@@ -60,6 +68,29 @@ def test_a_job_that_has_never_run_is_reported():
     registered an hour ago and due tonight is correctly silent."""
     overdue = job(last_run=None, next_run=NOW - dt.timedelta(minutes=30))
     assert "never run" in health.problems([overdue], NOW)[0]
+
+
+def test_a_job_that_fires_on_logon_has_not_missed_anything_before_the_next_logon():
+    """`devkit-tray` was re-registered on 2026-09-27 and read "registered but has never
+    run" from then until the next logon, with its tray process alive since the 26th: a
+    logon trigger has no next run time, so the rule for a missed first run always fired."""
+    tray = job(name="devkit-tray", last_run=None, next_run=None, event_only=True)
+    assert health.problems([tray], NOW) == []
+    timed = job(last_run=None, next_run=None)
+    assert "never run" in health.problems([timed], NOW)[0]
+
+
+def test_only_a_task_whose_every_trigger_is_an_event_is_event_only():
+    header = '"TaskName","Scheduled Task State","Last Result","Last Run Time","Next Run Time","Task To Run","Schedule Type"\n'
+    logon = '"\\devkit-tray","Enabled","267011","N/A","N/A","pythonw tray.py","At logon time"\n'
+    both = (
+        '"\\devkit-rc","Enabled","0","N/A","N/A","py rc.py","At system start up"\n'
+        '"\\devkit-rc","Enabled","0","N/A","N/A","py rc.py","Daily"\n'
+    )
+    jobs = {j.name: j for j in health.parse_tasks(header + logon + both)}
+    assert jobs["devkit-tray"].event_only and not jobs["devkit-rc"].event_only
+    boot = job(event_only=True, next_run=None)
+    assert not health.merge_triggers(boot, job(event_only=False)).event_only
 
 
 def test_a_failed_run_is_reported_with_its_exit_code():
@@ -151,6 +182,104 @@ def test_an_empty_artifact_no_newer_than_the_run_says_the_run_recorded_nothing(
     assert "history" not in line
 
 
+def kept_copy(tmp_path, name, age):
+    """`name`'s `.failed.log` copy, written at `age`."""
+    path = tmp_path / health.ARTIFACTS[name].replace(".log", ".failed.log")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# exit=1\nRuntimeError: it broke\n", encoding="utf-8")
+    stamp = age.timestamp()
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_a_failure_is_read_from_its_kept_copy_not_from_the_pass_that_overwrote_it(
+    tmp_path, monkeypatch
+):
+    """3a8c74a3: reconcile failed at 22:30, and the pointer named `reconcile.log`, which
+    the clean 22:45 pass had already rewritten. The failing run's own copy is the one
+    to read."""
+    name = "devkit-worktree-reconcile"
+    written(tmp_path, name, body="# exit=0\nNothing to reconcile.\n")
+    kept_copy(tmp_path, name, NOW - dt.timedelta(hours=1))
+    monkeypatch.setattr(health, "REPO_ROOT", tmp_path)
+    ran = NOW - dt.timedelta(hours=1, minutes=1)
+    assert health.failure_artifact(name, since=ran) == "logs/reconcile.failed.log"
+    line = health.problems([job(name=name, last_result=1, last_run=ran)], NOW)[0]
+    assert line.endswith("see logs/reconcile.failed.log")
+
+
+def test_a_failure_is_read_from_the_root_it_is_given_not_from_this_copy(tmp_path, monkeypatch):
+    """104d356c: the fix pass ran from a tree cut off the checkout, whose `logs/` holds
+    no reconcile log, and filed "no logs/reconcile.log" while the checkout held both."""
+    name = "devkit-worktree-reconcile"
+    checkout = tmp_path / "checkout"
+    kept_copy(checkout, name, NOW - dt.timedelta(minutes=30))
+    monkeypatch.setattr(health, "REPO_ROOT", tmp_path / "a-tree")
+    ran = NOW - dt.timedelta(hours=1)
+    failed = [job(name=name, last_result=1, last_run=ran)]
+    assert health.problems(failed, NOW)[0].endswith(
+        "the run predates it, or died before writing one"
+    )
+    assert health.problems(failed, NOW, root=checkout)[0].endswith("see logs/reconcile.failed.log")
+
+
+def test_a_kept_copy_older_than_the_run_is_an_earlier_failure_and_is_not_cited(tmp_path):
+    name = "devkit-worktree-reconcile"
+    kept_copy(tmp_path, name, NOW - dt.timedelta(days=3))
+    ran = NOW - dt.timedelta(hours=1)
+    assert health.failure_artifact(name, root=tmp_path, since=ran) == health.ARTIFACTS[name]
+    assert health.failure_artifact(name, root=tmp_path / "none") == health.ARTIFACTS[name]
+    assert health.failure_artifact("devkit-something-new", root=tmp_path) == ""
+
+
+def test_a_full_artifact_older_than_the_run_is_named_as_an_earlier_runs(tmp_path):
+    """631737a8: the 13:30 fire was skipped while the 13:00 run went on, and `see` named
+    the log the 12:30 run had left, which the 13:00 run would only rewrite as it ended."""
+    name = "devkit-worktree-reconcile"
+    written(tmp_path, name, body="# exit=0\n", age=NOW - dt.timedelta(minutes=30))
+    ran = NOW - dt.timedelta(minutes=2)
+    overlapped = job(name=name, last_result=health.SCHED_REFUSED_ALREADY_RUNNING, last_run=ran)
+    (line,) = health.problems([overlapped], NOW, root=tmp_path)
+    assert "see" not in line
+    assert "before this run" in line
+    assert health.run_artifact(name, root=tmp_path, since=ran) == ""
+
+
+def test_an_earlier_runs_account_points_at_the_marker_of_the_run_in_flight(tmp_path):
+    """1f44005c: "an earlier run's account" was all the 00:30 pass's sweep had, while
+    the pass itself kept the step it was in on disk all along."""
+    name = "devkit-worktree-reconcile"
+    written(tmp_path, name, body="# exit=0\n", age=NOW - dt.timedelta(minutes=30))
+    marker = tmp_path / health.IN_FLIGHT[name]
+    marker.write_text('{"step": "sync checkouts"}', encoding="utf-8")
+    since = NOW - dt.timedelta(minutes=2)
+    hint = health.artifact_hint(name, root=tmp_path, since=since)
+    assert "before this run" in hint and f"see {health.IN_FLIGHT[name]}" in hint
+    marker.unlink()
+    assert "see" not in health.artifact_hint(name, root=tmp_path, since=since)
+
+
+def test_the_in_flight_marker_is_the_one_the_journal_writes(tmp_path):
+    journal = load_script("scripts/reconcile_journal.py")
+    assert health.IN_FLIGHT["devkit-worktree-reconcile"] == journal.RUNNING
+    assert health.in_flight_hint("devkit-docker-prune", tmp_path) == ""
+    assert health.in_flight_hint("x", tmp_path, in_flight={"x": "logs/none.json"}) == ""
+
+
+def test_a_run_artifact_is_only_a_present_full_file_no_older_than_the_run(tmp_path):
+    name = "devkit-worktree-reconcile"
+    ran = NOW - dt.timedelta(hours=1)
+    assert health.run_artifact(name, root=tmp_path, since=ran) == "", "missing"
+    written(tmp_path, name, body="", age=NOW)
+    assert health.run_artifact(name, root=tmp_path, since=ran) == "", "empty"
+    written(tmp_path, name, body="# exit=1\n", age=NOW)
+    assert health.run_artifact(name, root=tmp_path, since=ran) == health.ARTIFACTS[name]
+    assert health.run_artifact(name, root=tmp_path) == health.ARTIFACTS[name], "no run time"
+    kept_copy(tmp_path, name, NOW)
+    assert health.run_artifact(name, root=tmp_path, since=ran) == "logs/reconcile.failed.log"
+    assert health.run_artifact("devkit-something-new", root=tmp_path) == ""
+
+
 def test_a_job_with_no_artifact_is_not_sent_to_an_invented_one():
     """An absent file reads as "the job never ran", which is a different diagnosis --
     so a job outside the table gets no pointer rather than a plausible path."""
@@ -238,6 +367,25 @@ def test_only_devkit_jobs_are_read():
     updater on the machine out of a devkit status line."""
     names = [item.name for item in health.parse_tasks(CSV)]
     assert names == ["devkit-upgrade-projects", "devkit-worktree-reconcile"]
+
+
+def test_a_named_task_outside_the_prefix_is_read_only_when_asked_for():
+    """The tray's scheduled collectors are named after their project, not `devkit-`;
+    asked for by name, and never by `report`, which the fix pass reads."""
+    names = [item.name for item in health.parse_tasks(CSV, also=frozenset({"SomeVendorUpdate"}))]
+    assert names == ["devkit-upgrade-projects", "devkit-worktree-reconcile", "SomeVendorUpdate"]
+
+
+def test_a_failure_line_points_at_the_artifact_it_is_handed(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "collector-x.log").write_text("exit 1\n", encoding="utf-8")
+    failing = job(name="x", last_result=1)
+    (line,) = health.problems(
+        [failing], NOW, root=tmp_path, artifacts={"x": "logs/collector-x.log"}
+    )
+    assert line.endswith("see logs/collector-x.log")
+    (bare,) = health.problems([failing], NOW, root=tmp_path)
+    assert "see" not in bare
 
 
 def test_the_leading_backslash_is_stripped():
@@ -395,6 +543,22 @@ def test_overlapping_runs_are_reported_as_an_overrun_not_a_failure():
     line = health.problems([job(last_result=health.SCHED_REFUSED_ALREADY_RUNNING)], NOW)[0]
     assert "overlapping" in line
     assert "devkit-upgrade-projects" in line
+
+
+def test_the_ship_task_outliving_a_fire_is_the_schedule_working():
+    """Two minutes is shorter than a slow ship, and the fire it skips loses nothing."""
+    ship = job(name="devkit-ship", last_result=health.SCHED_REFUSED_ALREADY_RUNNING)
+    assert not [line for line in health.problems([ship], NOW) if "overlapping" in line]
+
+
+def test_the_medium_tier_outliving_a_fire_is_the_schedule_working():
+    """Its pass may run far past its own interval by design, so the skip is expected; the
+    reason is read off the two scripts, so it stops holding the day either changes."""
+    tier = load_script("scripts/tier-pass.py")
+    installer = load_script("scripts/install-tier-schedule.py")
+    assert tier.DEFAULT_PASS_MINUTES > installer.EVERY_MINUTES
+    medium = job(name=installer.TASK_NAME, last_result=health.SCHED_REFUSED_ALREADY_RUNNING)
+    assert not [line for line in health.problems([medium], NOW) if "overlapping" in line]
 
 
 def test_both_spellings_of_the_refusal_code_are_recognised():

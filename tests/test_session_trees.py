@@ -8,15 +8,17 @@ tree could hold the only copy of something, and so must be kept.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from support import load_script
 
 st = load_script("scripts/session_trees.py")
 
 QUIET = st.QUIET_HOURS * 3600 + 1
+NOW = _dt.datetime(2026, 11, 5, tzinfo=_dt.UTC)
 
 
 def done(code: int = 0, out: str = "", err: str = "") -> subprocess.CompletedProcess[str]:
@@ -86,6 +88,105 @@ def test_a_clean_quiet_tree_whose_pr_merged_at_its_head_is_reaped(tmp_path):
     assert st.verdict(one, tmp_path / "carameli", False, {one.branch: "abc"}, QUIET) == ""
 
 
+def stamped(tmp_path: Path, dead: str, sent: str = "2026-11-01T00:00:00+00:00", **kw):
+    """A tree carrying the stamp the pass leaves on a session it judged dead."""
+    one = tree(tmp_path, **kw)
+    (one.path / "logs").mkdir(parents=True, exist_ok=True)
+    (one.path / "logs" / "fix-dispatch.json").write_text(
+        json.dumps({"agent": "claude-bg", "dead": dead, "when": sent}), encoding="utf-8"
+    )
+    return one
+
+
+def on_origin(argv):
+    """git answering that every commit of the HEAD asked about is on a remote."""
+    return done(out="0\n" if "rev-list" in argv else "")
+
+
+def test_a_session_that_never_got_a_word_in_left_nothing_to_keep(tmp_path):
+    """94 of photolab's 96 trees: one a half hour for three days, each cut for a session
+    its launcher refused or never started, then kept for good, because no merged PR will
+    ever name them. Over the machine that was 150 of 272 trees, and every delete dropdown
+    and every reap pass read each one; worktreeRow went past its budget on them."""
+    assert len(st.STILLBORN) == 3
+    for dead in st.STILLBORN:
+        assert st.stillborn(stamped(tmp_path, dead), on_origin, NOW)
+
+
+def test_only_a_stale_stamp_on_a_session_that_never_spoke_is_stillborn(tmp_path):
+    no_stamp = tree(tmp_path, name="no-stamp")
+    assert not st.stillborn(no_stamp, on_origin, NOW), "a person's tree carries none"
+    spoke = stamped(tmp_path, st.fix_reports.NO_OUTCOME, name="spoke")
+    assert not st.stillborn(spoke, on_origin, NOW), "a session that worked may have left work"
+    alive = tree(tmp_path, name="alive")
+    (alive.path / "logs").mkdir(parents=True)
+    (alive.path / "logs" / "fix-dispatch.json").write_text("{}", encoding="utf-8")
+    assert not st.stillborn(alive, on_origin, NOW), "not judged dead"
+    untrusted = st.fix_reports.UNTRUSTED
+    recent = stamped(tmp_path, untrusted, sent=NOW.isoformat(), name="recent")
+    assert not st.stillborn(recent, on_origin, NOW), "the pass may send it again"
+    odd = stamped(tmp_path, untrusted, sent="soon", name="odd")
+    assert not st.stillborn(odd, on_origin, NOW), "an unreadable stamp keeps the tree"
+    naive = stamped(tmp_path, untrusted, sent="2026-11-01T00:00:00", name="naive")
+    assert not st.stillborn(naive, on_origin, NOW), "so does one with no offset"
+
+
+def test_a_commit_only_this_tree_holds_keeps_it_whatever_the_stamp_says(tmp_path):
+    """A resent session reuses a PR's tree, so the stamp alone does not prove it empty."""
+    one = stamped(tmp_path, st.fix_reports.NEVER_STARTED)
+    assert not st.stillborn(one, lambda argv: done(out="2\n"), NOW)
+    assert not st.stillborn(one, lambda argv: done(128), NOW), "git could not say"
+
+
+def test_a_stillborn_tree_needs_no_merged_pr_and_no_transcript(tmp_path):
+    one = tree(tmp_path)
+    checkout = tmp_path / "carameli"
+    assert st.verdict(one, checkout, False, {}, None, stillborn=True) == ""
+    assert st.verdict(one, checkout, False, {}, QUIET, stillborn=True) == ""
+    assert "within" in st.verdict(one, checkout, False, {}, 60, stillborn=True), "someone is in it"
+    assert "uncommitted" in st.verdict(one, checkout, True, {}, None, stillborn=True)
+    assert st.verdict(one, checkout, None, {}, None, stillborn=True), "status unreadable"
+    locked = tree(tmp_path, locked=True)
+    assert "locked" in st.verdict(locked, checkout, False, {}, None, stillborn=True)
+
+
+def _stillborn_checkout(tmp_path, count: int):
+    """A checkout with `count` stillborn trees, and the `run` that stands for its git."""
+    checkout = tmp_path / "carameli"
+    trees = [stamped(tmp_path, st.fix_reports.UNTRUSTED, name=f"t{n}") for n in range(count)]
+    listing = porcelain(
+        (str(checkout), "master", "000", False),
+        *((str(one.path), one.branch, one.head, False) for one in trees),
+    )
+    calls: list[list[str]] = []
+
+    def run(argv):
+        calls.append(argv)
+        if argv[-2:] == ["list", "--porcelain"]:
+            return done(out=listing)
+        return on_origin(argv)
+
+    return checkout, run, (lambda path: lambda *args: done(out="[]")), calls
+
+
+def test_a_pass_reaps_a_stillborn_tree_and_says_why(tmp_path):
+    checkout, run, gh, calls = _stillborn_checkout(tmp_path, 1)
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: None) == 0
+    assert said == ["session tree carameli:t0: its session never started at this HEAD -- reaped"]
+    assert any(argv[-3:-1] == ["worktree", "remove"] for argv in calls)
+
+
+def test_a_backlog_of_stillborn_trees_drains_over_passes(tmp_path):
+    """Each removal deletes a whole tree, and the first pass after this shipped found 150.
+    The scheduled job must still finish before its next fire."""
+    extra = st.STILLBORN_PER_PASS + 3
+    checkout, run, gh, _calls = _stillborn_checkout(tmp_path, extra)
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, False, said.append, run, gh, lambda p: None) == 0
+    assert len(said) == st.STILLBORN_PER_PASS
+
+
 def test_every_reason_to_keep_a_tree_keeps_it(tmp_path):
     checkout = tmp_path / "carameli"
     one = tree(tmp_path)
@@ -149,6 +250,336 @@ def test_a_refused_removal_is_reported_with_gits_words(tmp_path):
     assert "refused" in error and "contains modified" in error
 
 
+def _remover(error: str = ""):
+    removed: list[Path] = []
+
+    def remove(path: Path) -> tuple[str, list[str]]:
+        removed.append(path)
+        return error, []
+
+    return removed, remove
+
+
+def test_a_removal_the_filesystem_refused_partway_is_finished(tmp_path):
+    """devkit, 2026-09-29: git dropped the `.git` link and the registration, then a
+    `.venv` file failed with `Invalid argument` -- a husk no later pass would name."""
+    one = tree(tmp_path)
+    (one.path / ".venv").mkdir(parents=True)
+    calls: list[list[str]] = []
+    said = "error: failed to delete 'C:/x/fix-0928': Invalid argument"
+    removed, remove = _remover()
+
+    def run(argv):
+        calls.append(argv)
+        return done(255, err=said) if "remove" in argv else done()
+
+    assert st.reap(one, tmp_path / "carameli", run, remove=remove) == ""
+    assert removed == [one.path]
+    assert calls[-1][-2:] == ["worktree", "prune"]
+
+
+def test_a_tree_gone_after_a_filesystem_refusal_is_reaped(tmp_path):
+    """ad9e1a06: git's delete was refused (`Permission denied`) on a directory it had
+    already marked for deletion, and the directory went when the last handle closed.
+    Nothing is left to finish, so the registration is pruned and the reap succeeded --
+    it is not "git worktree remove refused"."""
+    one = tree(tmp_path)  # never created: gone by the time git's refusal returns
+    calls: list[list[str]] = []
+    said = "error: failed to delete 'C:/x/fix-1007-4': Permission denied"
+    removed, remove = _remover("should not be asked")
+
+    def run(argv):
+        calls.append(argv)
+        return done(255, err=said) if "remove" in argv else done()
+
+    assert st.reap(one, tmp_path / "carameli", run, remove=remove) == ""
+    assert removed == []
+    assert calls[-1][-2:] == ["worktree", "prune"]
+
+
+def test_a_finish_that_fails_too_names_both_failures(tmp_path):
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+    _removed, remove = _remover("x.pyd: Access is denied")
+    run = lambda argv: done(255, err="Invalid argument") if "remove" in argv else done()
+    error = st.reap(one, tmp_path / "carameli", run, remove=remove)
+    assert "Invalid argument" in error and "x.pyd: Access is denied" in error
+
+
+def test_a_dirty_tree_refusal_is_never_finished_by_hand(tmp_path):
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+    (one.path / ".git").write_text("gitdir: elsewhere", "utf-8")
+    removed, remove = _remover()
+    run = lambda argv: done(128, err="contains modified or untracked files, use --force")
+    error = st.reap(one, tmp_path / "carameli", run, remove=remove)
+    assert "refused" in error and removed == []
+
+
+def _husks(tmp_path):
+    checkout = tmp_path / "carameli"
+    root = checkout / ".claude" / "worktrees"
+    (root / "husk-0928" / ".venv").mkdir(parents=True)
+    (root / "busy-0929").mkdir()
+    (root / "fix-nightly-0919").mkdir()  # registered: its own reap decides it
+    (root / "hand-cut").mkdir()
+    (root / "hand-cut" / ".git").write_text("gitdir: elsewhere", "utf-8")
+    listed = [st.Tree(checkout, "master", "000", False), tree(tmp_path)]
+    return checkout, root, listed
+
+
+def test_a_husk_is_an_unregistered_tier_directory_with_no_git_link(tmp_path):
+    checkout, root, listed = _husks(tmp_path)
+    assert st.husks(checkout, listed) == [root / "busy-0929", root / "husk-0928"]
+    assert st.husks(tmp_path / "no-tier-here", []) == []
+
+
+def test_sweep_husks_removes_a_quiet_husk_and_keeps_a_busy_one(tmp_path):
+    checkout, root, listed = _husks(tmp_path)
+    idle = lambda path: 60 if path.name == "busy-0929" else QUIET
+    said: list[str] = []
+    removed, remove = _remover()
+    assert st.sweep_husks(checkout, listed, False, said.append, idle, remove) == 0
+    assert said == ["session tree carameli:husk-0928: a husk a removal left behind -- would remove"]
+    assert removed == []
+    said.clear()
+    assert st.sweep_husks(checkout, listed, True, said.append, idle, remove) == 0
+    assert removed == [root / "husk-0928"]
+    assert said == ["session tree carameli:husk-0928: a husk a removal left behind -- removed"]
+    _removed, refused = _remover("Access is denied")
+    said.clear()
+    assert st.sweep_husks(checkout, listed, True, said.append, lambda p: None, refused) == 0
+    assert st.sweep_husks(checkout, listed, True, said.append, idle, refused) == 1
+    assert said == ["session tree carameli:husk-0928: could not remove its husk: Access is denied"]
+
+
+def test_the_checkout_sweep_counts_husks_even_with_no_session_tree(tmp_path, monkeypatch):
+    checkout = tmp_path / "carameli"
+    (checkout / ".claude" / "worktrees" / "husk").mkdir(parents=True)
+    monkeypatch.setattr(st.box_teardown, "force_remove_box", lambda path: ("denied", []))
+    run = lambda argv: done(out=porcelain((str(checkout), "master", "000", False)))
+    said: list[str] = []
+    gh = lambda path: lambda *args: done(1)
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 1
+    assert said == ["session tree carameli:husk: could not remove its husk: denied"]
+
+
+def _admin_only(monkeypatch, elevated: bool = False) -> None:
+    """The carameli husk of 2026-09-29: a `.pytest_cache` only Administrators may open."""
+    monkeypatch.setattr(st.wt_profile, "is_elevated", lambda: elevated)
+    monkeypatch.setattr(st.box_teardown, "unopenable", lambda path: [str(path / ".pytest_cache")])
+    monkeypatch.setattr(
+        st.box_teardown, "force_remove_box", lambda path: (".pytest_cache: Access is denied", [])
+    )
+
+
+def test_admin_only_answers_only_an_unelevated_pass_over_an_unopenable_entry(tmp_path, monkeypatch):
+    husk = tmp_path / "husk"
+    husk.mkdir()
+    _admin_only(monkeypatch)
+    assert st.admin_only(tmp_path / "gone") == ""
+    why = st.admin_only(husk)
+    assert why.startswith("only an administrator can remove it") and str(husk) in why
+    monkeypatch.setattr(st.box_teardown, "unopenable", lambda path: ["a", "b", "c"])
+    assert "left a (+2 more)" in st.admin_only(husk)
+    monkeypatch.setattr(st.box_teardown, "unopenable", lambda path: [])
+    assert st.admin_only(husk) == ""
+    _admin_only(monkeypatch, elevated=True)
+    assert st.admin_only(husk) == ""
+
+
+def test_a_husk_only_an_administrator_can_delete_is_named_not_failed(tmp_path, monkeypatch):
+    """carameli, 2026-09-29: an elevated session's pytest left a `.pytest_cache` whose ACL
+    grants Administrators alone. The unelevated reap failed on it every run, so the ledger
+    sent a fixer after it every run, and no fixer -- unelevated by design -- could act.
+    The line now names the one command that clears it and who must run it."""
+    checkout = tmp_path / "carameli"
+    husk = checkout / ".claude" / "worktrees" / "declarative-finding-sky"
+    husk.mkdir(parents=True)
+    _admin_only(monkeypatch)
+    run = lambda argv: done(out=porcelain((str(checkout), "master", "000", False)))
+    said: list[str] = []
+    gh = lambda path: lambda *args: done(1)
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert len(said) == 1
+    assert "only an administrator can remove it" in said[0]
+    assert "elevated shell" in said[0] and str(husk) in said[0]
+    assert str(husk / ".pytest_cache") in said[0]
+
+
+def test_an_elevated_pass_that_still_fails_is_a_failure(tmp_path, monkeypatch):
+    checkout = tmp_path / "carameli"
+    (checkout / ".claude" / "worktrees" / "husk").mkdir(parents=True)
+    _admin_only(monkeypatch, elevated=True)
+    run = lambda argv: done(out=porcelain((str(checkout), "master", "000", False)))
+    said: list[str] = []
+    gh = lambda path: lambda *args: done(1)
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 1
+    assert "could not remove its husk" in said[0]
+
+
+def test_a_reap_only_an_administrator_can_finish_is_named_not_failed(tmp_path, monkeypatch):
+    checkout, _run, gh, _calls = _checkout(tmp_path)
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+
+    def run(argv):
+        if argv[-2:] == ["list", "--porcelain"]:
+            return _run(argv)
+        return done(255, err="Access is denied") if "remove" in argv else done()
+
+    _admin_only(monkeypatch)
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert len(said) == 1 and "only an administrator can remove it" in said[0]
+
+
+# What `compose down` said on every tree with a stack while Docker Desktop was stopped
+# (3dfd297d, reap-stale at 2026-10-01 18:30).
+ENGINE_STOPPED = (
+    "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; "
+    "check if the path is correct and if the daemon is running: "
+    "open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified."
+)
+
+
+def _stacked_checkout(
+    tmp_path,
+    down: subprocess.CompletedProcess[str],
+    probe: subprocess.CompletedProcess[str] | None = None,
+):
+    """A merged tree with a stack of its own, whose `compose down` answers `down` and
+    whose engine answers `st.ENGINE_PROBE` with `probe` -- by default, it answers."""
+    checkout, listed, gh, calls = _checkout(tmp_path)
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+    env = "COMPOSE_PROJECT_NAME=carameli-fix-pr-gate-0929\n"  # pragma: allowlist secret - a compose project name, not a credential
+    (one.path / ".env").write_text(env, "utf-8")
+
+    def run(argv):
+        if argv == st.ENGINE_PROBE:
+            return probe or done()
+        return down if argv[0] == "docker" else listed(argv)
+
+    return checkout, one, run, gh, calls
+
+
+def test_a_stopped_docker_engine_keeps_the_tree_and_is_not_a_failure(tmp_path):
+    """Reaping anyway would strand the stack's volumes with nothing left to name them,
+    and failing sent a fixer after every run of the scheduled reap that nobody but
+    Docker Desktop could act on."""
+    checkout, one, run, gh, calls = _stacked_checkout(tmp_path, done(1, err=ENGINE_STOPPED))
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert said == [f"session tree carameli:fix-nightly-0919: {st.ENGINE_DOWN}"]
+    assert one.path.is_dir()
+    assert not any("remove" in argv for argv in calls)
+
+
+def test_the_default_runner_ends_a_wedged_compose_at_its_bound(monkeypatch):
+    """bd12e216: a `compose down` on a wedged engine outlived `subprocess.run`'s timeout
+    in the compose plugin that held its pipes. `_run` ends the whole tree instead, and a
+    timeout reads as the failure it is; a missing docker is one too, never a raise."""
+    seen = []
+
+    def wedged(argv, timeout, **kwargs):
+        seen.append((argv, timeout))
+        return subprocess.CompletedProcess(argv, st.sweep.TIMED_OUT, "", "timed out after 300s")
+
+    monkeypatch.setattr(st.sweep, "run_bounded", wedged)
+    result = st._run(("docker", "compose", "-p", "x", "down"))
+    assert (result.returncode, result.stderr) == (1, "timed out after 300s")
+    assert seen == [(["docker", "compose", "-p", "x", "down"], 300)]
+
+    monkeypatch.setattr(st.sweep, "run_bounded", lambda *a, **k: done(0, out="ok"))
+    assert st._run(("git", "status")).stdout == "ok"
+
+    def missing(*_a, **_k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(st.sweep, "run_bounded", missing)
+    assert st._run(("docker", "info")).returncode == 1
+
+
+def test_any_other_compose_down_failure_is_still_a_failure(tmp_path):
+    checkout, _one, run, gh, _calls = _stacked_checkout(
+        tmp_path, done(1, err="Error response from daemon: volume is in use")
+    )
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 1
+    assert len(said) == 1 and "could not reap: compose down -p" in said[0]
+    assert "volume is in use" in said[0]
+
+
+# The tail of what `compose down` said at 2026-10-09 17:00 (41383e56), while collectors.py
+# held a restart of a wedged engine for a live scrape: a 500 on the container listing,
+# in no spelling `box_teardown.DAEMON_DOWN_SIGNS` names.
+ENGINE_WEDGED = (
+    "request returned 500 Internal Server Error for API route and version http://%2F%2F.%2F"
+    "pipe%2FdockerDesktopLinuxEngine/v1.51/containers/json?all=1&filters=%7B%22label%22%3A"
+    "%7B%22com.docker.compose.oneoff%3DFalse%22%3Atrue%2C%22com.docker.compose.project%3D"
+    "carameli-fix-pr-gate-0929%22%3Atrue%7D%7D, check if the server supports the requested "
+    "API version"
+)
+
+
+def test_an_engine_that_cannot_list_containers_keeps_the_tree_whatever_compose_said(tmp_path):
+    """The engine is asked, not only read: a wedged one fails in spellings no list of
+    signs keeps up with, and 41383e56 failed the scheduled reap on one of them."""
+    checkout, one, run, gh, calls = _stacked_checkout(
+        tmp_path, done(1, err=ENGINE_WEDGED), probe=done(1, err=ENGINE_WEDGED)
+    )
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert said == [f"session tree carameli:fix-nightly-0919: {st.ENGINE_DOWN}"]
+    assert one.path.is_dir()
+    assert not any("remove" in argv for argv in calls)
+
+
+def test_an_engine_that_lists_containers_makes_the_same_words_a_failure(tmp_path):
+    checkout, _one, run, gh, _calls = _stacked_checkout(tmp_path, done(1, err=ENGINE_WEDGED))
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 1
+    assert "could not reap: compose down -p" in said[0]
+
+
+def test_the_engine_is_asked_only_after_compose_down_failed_in_unknown_words(tmp_path):
+    asked: list[list[str]] = []
+    for name, down, expected in [
+        ("downed", done(), ""),
+        ("stopped", done(1, err=ENGINE_STOPPED), st.ENGINE_DOWN),
+    ]:
+        checkout, one, run, _gh, _calls = _stacked_checkout(tmp_path / name, down)
+        assert st.down_stack(one, checkout, lambda a, run=run: asked.append(a) or run(a)) == (
+            expected
+        )
+    assert asked and st.ENGINE_PROBE not in asked
+
+
+def test_down_stack_answers_before_the_tree_is_touched(tmp_path):
+    """A tree kept for a stopped engine is kept whole: its generated files too."""
+    _checkout_path, one, run, _gh, _calls = _stacked_checkout(tmp_path, done(1, err=ENGINE_STOPPED))
+    (one.path / "AGENTS.md").write_text("generated", "utf-8")
+    assert st.down_stack(one, tmp_path / "carameli", run) == st.ENGINE_DOWN
+    assert st.reap(one, tmp_path / "carameli", run, ["AGENTS.md"]) == st.ENGINE_DOWN
+    assert (one.path / "AGENTS.md").exists()
+    assert st.down_stack(one, tmp_path / "carameli", lambda argv: done()) == ""
+    assert st.down_stack(tree(tmp_path, "no-stack"), tmp_path / "carameli", pytest_fail) == ""
+
+
+def pytest_fail(*_args):
+    raise AssertionError("must not run")
+
+
+def test_reap_outcome_reads_each_answer_of_a_reap(tmp_path, monkeypatch):
+    assert st.reap_outcome(tmp_path, "") == ("its PR merged at this HEAD -- reaped", False)
+    assert st.reap_outcome(tmp_path, st.ENGINE_DOWN) == (st.ENGINE_DOWN, False)
+    assert st.reap_outcome(tmp_path, "denied") == ("could not reap: denied", True)
+    _admin_only(monkeypatch)
+    line, failed = st.reap_outcome(tmp_path, "denied")
+    assert line.startswith("only an administrator can remove it") and not failed
+
+
 def _checkout(tmp_path, head: str = "abc"):
     checkout = tmp_path / "carameli"
     one = tree(tmp_path, head=head)
@@ -189,6 +620,106 @@ def test_apply_reaps_and_a_kept_tree_is_not_mentioned(tmp_path):
     said.clear()
     assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
     assert said == []
+
+
+def _serving(checkout, one, listing_stacks: str, ps_code: int = 0):
+    """`run` for a checkout whose engine lists `listing_stacks` as running."""
+    listing = porcelain(
+        (str(checkout), "master", "000", False), (str(one.path), one.branch, "abc", False)
+    )
+    calls: list[list[str]] = []
+
+    def run(argv):
+        calls.append(argv)
+        if argv[-2:] == ["list", "--porcelain"]:
+            return done(out=listing)
+        if argv[:2] == ["docker", "ps"]:
+            return done(ps_code, out=listing_stacks)
+        return done()
+
+    return run, calls
+
+
+def _gh(one):
+    return lambda path: (
+        lambda *args: done(out=json.dumps([{"headRefName": one.branch, "headRefOid": "abc"}]))
+    )
+
+
+def test_a_stack_under_the_projects_own_name_keeps_its_merged_tree(tmp_path):
+    """74eb1164: productivity-tracker's long-lived stack was brought up from a session
+    tree, under the project's own name, so `down_stack` rightly never downs it -- and the
+    reap then removed the tree and the bind mount from under the running containers."""
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    stacks = f"carameli\t{one.path}\n"
+    run, calls = _serving(checkout, one, stacks)
+    said: list[str] = []
+
+    failures = st.sweep_checkout(checkout, True, said.append, run, _gh(one), lambda _: QUIET)
+
+    assert failures == 0
+    assert not [c for c in calls if "remove" in c or "down" in c], "tree and stack both stand"
+    assert len(said) == 1 and "kept" in said[0] and "carameli" in said[0]
+    assert st.running_stacks(one, checkout, run) == ["carameli"]
+
+
+def test_the_trees_own_stack_still_comes_down_with_it(tmp_path):
+    """The tree's own `COMPOSE_PROJECT_NAME` is the throwaway copy the reap exists to
+    remove (`carameli-fix-nightly-0919`, 1.3 GB for days), and running does not save it."""
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    one.path.mkdir(parents=True)
+    own = "carameli-fix"
+    (one.path / ".env").write_text(f"COMPOSE_PROJECT_NAME={own}\n", encoding="utf-8")
+    run, calls = _serving(checkout, one, f"{own}\t{one.path}\n")
+
+    failures = st.sweep_checkout(checkout, True, lambda _: None, run, _gh(one), lambda _: QUIET)
+
+    assert failures == 0
+    assert ["docker", "compose", "-p", own, "down", "-v"] in calls
+    assert any("remove" in call for call in calls)
+
+
+def test_only_a_stack_working_from_the_tree_holds_it(tmp_path):
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    elsewhere = f"carameli\t{checkout}\nother\t{one.path}-2\n\n"
+    run, _ = _serving(checkout, one, elsewhere)
+    assert st.running_stacks(one, checkout, run) == []
+    spelled = f"carameli\t{str(one.path).upper()}\\deploy\n"
+    run, _ = _serving(checkout, one, spelled)
+    assert st.running_stacks(one, checkout, run) == ["carameli"], "any case, or a subdirectory"
+
+
+def test_a_backslash_in_the_engines_path_separates_on_a_posix_host_too(monkeypatch):
+    """The label is the engine's spelling, not this host's, so `Path` cannot read it: on
+    POSIX a backslash is a filename character and the subdirectory never matched."""
+    monkeypatch.setattr(st, "Path", PurePosixPath)
+    monkeypatch.setattr(st, "compose_name", lambda _: "")
+    one = st.Tree(path=PurePosixPath("/w/.claude/worktrees/x"), branch="b", head="h", locked=False)
+    listed = "carameli\t/w/.claude/worktrees/x\\deploy\n"
+    assert st.running_stacks(one, PurePosixPath("/w"), lambda _: done(out=listed)) == ["carameli"]
+
+
+def test_an_engine_that_cannot_list_containers_runs_no_stack(tmp_path):
+    """A stopped engine serves nothing, and asking that of every machine with no Docker
+    would otherwise keep each merged tree there for good."""
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    run, calls = _serving(checkout, one, "", ps_code=1)
+    assert st.running_stacks(one, checkout, run) == []
+    assert st.sweep_checkout(checkout, True, lambda _: None, run, _gh(one), lambda _: QUIET) == 0
+    assert any("remove" in call for call in calls)
+
+
+def test_a_status_pass_names_the_tree_a_stack_keeps(tmp_path):
+    checkout = tmp_path / "carameli"
+    one = tree(tmp_path)
+    run, _ = _serving(checkout, one, f"carameli\t{one.path}\n")
+    said: list[str] = []
+    st.sweep_checkout(checkout, False, said.append, run, _gh(one), lambda _: QUIET)
+    assert len(said) == 1 and "would reap" not in said[0] and "kept" in said[0]
 
 
 def test_an_unreadable_pr_list_keeps_everything_and_says_so(tmp_path):

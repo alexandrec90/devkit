@@ -38,14 +38,18 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 # For `project_settings.py`, which the three functions below import **on use** rather
 # than here. A project's very first pull runs the copy of this script the generator
@@ -191,7 +195,27 @@ MANIFEST: tuple[str, ...] = _lists.MANIFEST
 RETIRED_PATHS: tuple[str, ...] = _lists.RETIRED_PATHS
 FRONTEND_GATE: str = _lists.FRONTEND_GATE
 DEFAULT_FRONTEND_SRC: str = _lists.DEFAULT_FRONTEND_SRC
+# `getattr`, because the list a consumer's first pull loads may predate the gate; the
+# spelling is the gate's `.devkit.toml` table either way.
+DESKTOP_GATE: str = getattr(_lists, "DESKTOP_GATE", "desktop")
 GATED_MANIFEST: dict[str, tuple[str, ...]] = _lists.GATED_MANIFEST
+# Where devkit keeps each gate's files. A gate missing here is named from the repo root.
+DEFAULT_GATE_PREFIX: dict[str, str] = {FRONTEND_GATE: DEFAULT_FRONTEND_SRC, DESKTOP_GATE: ""}
+
+
+def _consumer_config(root: Path) -> Any | None:
+    """The consumer's parsed `.devkit.toml`, read through its own vendored helper; None
+    when the helper is not there (the bootstrap pull) or cannot read the file."""
+    module = _load_by_path(
+        "_sync_devkit_harness_config",
+        Path(__file__).resolve().parent / "hooks" / "harness_config.py",
+    )
+    if module is None:
+        return None
+    try:
+        return module.load(root)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
 
 
 def frontend_src(root: Path) -> str:
@@ -201,27 +225,36 @@ def frontend_src(root: Path) -> str:
     Normalised to a forward-slash prefix ending in `/`, which is how every path in the
     manifest is spelled, so a gated entry joins onto it without a second spelling.
     """
-    module = _load_by_path(
-        "_sync_devkit_harness_config",
-        Path(__file__).resolve().parent / "hooks" / "harness_config.py",
-    )
-    if module is None:
-        return ""
-    try:
-        frontend = module.load(root).frontend
-    except (OSError, ValueError, AttributeError, TypeError):
-        return ""
-    if not frontend.enabled:
+    frontend = getattr(_consumer_config(root), "frontend", None)
+    if frontend is None or not frontend.enabled:
         return ""
     return str(frontend.src).replace("\\", "/").rstrip("/") + "/"
 
 
+def desktop_on(root: Path) -> bool:
+    """Whether the consumer at `root` turns the `[desktop]` tier on. False where the tier
+    is off, and where the helper reading it predates the tier or is not there yet."""
+    desktop = getattr(_consumer_config(root), "desktop", None)
+    return bool(getattr(desktop, "enabled", False))
+
+
+def gate_prefixes(root: Path) -> dict[str, str]:
+    """`{gate: prefix}` for every gate the consumer at `root` turns on, at its layout."""
+    prefixes: dict[str, str] = {}
+    if src := frontend_src(root):
+        prefixes[FRONTEND_GATE] = src
+    if desktop_on(root):
+        prefixes[DESKTOP_GATE] = DEFAULT_GATE_PREFIX[DESKTOP_GATE]
+    return prefixes
+
+
 def gated_paths(root: Path) -> tuple[str, ...]:
     """The gated entries the consumer at `root` should hold, at that project's layout."""
-    src = frontend_src(root)
-    if not src:
-        return ()
-    return tuple(src + name for name in GATED_MANIFEST[FRONTEND_GATE])
+    return tuple(
+        prefix + name
+        for gate, prefix in gate_prefixes(root).items()
+        for name in GATED_MANIFEST.get(gate, ())
+    )
 
 
 def source_map(root: Path) -> dict[str, str]:
@@ -254,11 +287,27 @@ def gated_source_paths() -> tuple[str, ...]:
 
     For the readers that ask "which files does devkit vendor" about devkit itself --
     the unreleased-change check in `new-project.py` and `upgrade-project.py` -- rather
-    than about a consumer. devkit's own `.devkit.toml` keeps the frontend tier off, so
+    than about a consumer. devkit's own `.devkit.toml` keeps every gated tier off, so
     `manifest_for(devkit)` would answer without these and the release check would wave
     an unreleased edit to them through.
     """
-    return tuple(DEFAULT_FRONTEND_SRC + name for name in GATED_MANIFEST[FRONTEND_GATE])
+    return tuple(
+        DEFAULT_GATE_PREFIX.get(gate, "") + name
+        for gate, names in GATED_MANIFEST.items()
+        for name in names
+    )
+
+
+def gated_source_paths_off(root: Path) -> tuple[str, ...]:
+    """devkit's paths for every gate the consumer at `root` keeps off: where a file the
+    gate should have withheld would have landed, so a leak is looked for there."""
+    on = gate_prefixes(root)
+    return tuple(
+        DEFAULT_GATE_PREFIX.get(gate, "") + name
+        for gate, names in GATED_MANIFEST.items()
+        if gate not in on
+        for name in names
+    )
 
 
 def manifest_for(root: Path) -> tuple[str, ...]:
@@ -894,6 +943,41 @@ def regenerate_codex_hooks(root: Path) -> bool:
         return False
 
 
+CODEX_SKILLS_DIR = ".agents/skills"
+CODEX_CONTEXT_SCRIPT = "scripts/sync-codex-context.py"
+
+
+def remirror_codex_skills(root: Path) -> list[str]:
+    """Re-mirror `.claude/skills/` into `.agents/skills/`; the mirror paths it changed.
+
+    The skills mirror is the other Codex artifact a vendored script generates, and it
+    went stale exactly the way `.codex/hooks.json` did: v0.11.38 changed the vendored
+    `ship` and `go-nuts` skills, the pull copied them into `.claude/skills/`, and
+    social-scraper's adoption PR went red on the vendored mirror test because nothing
+    rewrote `.agents/skills/` -- only a project with its own pre-commit `sync-codex`
+    hook (carameli) ever got it refreshed.
+
+    Only for a project that already has the mirror, for the reason
+    `regenerate_codex_hooks` gives. In-process via the pulled `sync-codex-context.py`,
+    whose `mirror_tree` is the one definition of the mirror; absent or unloadable, this
+    does nothing, and the vendored test names the stale files in the project's gate.
+    """
+    mirror = root / CODEX_SKILLS_DIR
+    if not mirror.is_dir():
+        return []
+    context = _load_by_path("sync_codex_context", root / CODEX_CONTEXT_SCRIPT)
+    if context is None:
+        return []
+    source = root / ".claude" / "skills"
+    wanted, held = context.relative_files(source), context.relative_files(mirror)
+    changed = (wanted ^ held) | {
+        rel for rel in wanted & held if (mirror / rel).read_bytes() != (source / rel).read_bytes()
+    }
+    if changed:
+        context.mirror_tree(source, mirror)
+    return sorted(f"{CODEX_SKILLS_DIR}/{rel.as_posix()}" for rel in changed)
+
+
 # Not in MANIFEST, and it never will be: the file's content is a fact about one repo.
 # The name is shared so a pull can tell "already adopted" from "adopting now".
 UNTESTED_BASELINE_FILE = ".devkit-untested.txt"
@@ -933,6 +1017,109 @@ def seed_untested_baseline(root: Path) -> int | None:
     if result.returncode != 0:
         return None
     return len(read_untested_baseline(root))
+
+
+def reconcile_untested_baseline(root: Path, manifest: tuple[str, ...]) -> tuple[int, int] | None:
+    """Carry an adopted untested baseline across this pull. `(dropped, recorded)`, or `None`.
+
+    The seed's mirror for every later pull, as `tighten_structure_baseline` is for the
+    structure ratchet. A release moves the gaps under a project that did nothing: a new
+    vendored test covers a baselined symbol, which the vendored gate then demands be
+    deleted as "now covered"; or the scanner stops counting a reference that never
+    exercised the symbol it named, and a function the project has never tested reads as
+    new debt. #464 did both at once, and the upgrade rehearsal went red on files the
+    project had not touched.
+
+    The scanner drops the covered lines, and records a gap only if HEAD's own scanner,
+    run on HEAD's own tree (`pre_pull_gaps`), did not report it and the project has no
+    uncommitted edit to its file: what is left is exactly what the pull did. Anything
+    unknowable -- no git, no HEAD, a HEAD predating `--list` -- records nothing and only
+    drops, so the gate still reports every symbol the project itself left untested.
+    """
+    script = root / "scripts/hooks/untested_symbols.py"
+    if not script.is_file() or not (root / UNTESTED_BASELINE_FILE).is_file():
+        return None
+    before = pre_pull_gaps(root)
+    held = sorted(uncommitted_paths(root) - set(manifest)) if before is not None else []
+    recorded = set(read_untested_baseline(root))
+    with tempfile.TemporaryDirectory(prefix="devkit-reconcile-") as tmp:
+        spec = Path(tmp) / "reconcile.json"
+        payload = {"before": None if before is None else sorted(before), "held": held}
+        spec.write_text(json.dumps(payload), encoding="utf-8")
+        try:
+            result = subprocess.run(
+                [console_python(), str(script), "--reconcile", str(spec)],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                creationflags=NO_WINDOW,
+            )
+        except OSError:
+            return None
+    if result.returncode != 0:
+        return None
+    after = set(read_untested_baseline(root))
+    return len(recorded - after), len(after - recorded)
+
+
+def pre_pull_gaps(root: Path) -> set[str] | None:
+    """The gaps HEAD's own scanner reports on HEAD's own tree, or `None` if unknowable.
+
+    HEAD, not the working tree, because by the pull that runs this the tree is already
+    the release's: `sync-devkit.py` is in the MANIFEST, so the first pull ran the old
+    copy and this one runs the copy it delivered. A consumer commits its adoption after
+    both, which leaves HEAD as the last state the project's own gate judged. Extracted
+    with `git archive`, so nothing is registered in the project's repo.
+
+    Only at the repo's top: nested in a larger repo, HEAD's tree is the outer one, whose
+    paths match no entry here -- every gap would then read as the pull's to record.
+    """
+    if _git_out(root, "rev-parse", "--show-prefix"):
+        return None
+    try:
+        archive = subprocess.run(
+            ["git", "-C", str(root), "archive", "--format=tar", "HEAD"],
+            capture_output=True,
+            timeout=120,
+            creationflags=NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if archive.returncode != 0:
+        return None
+    with tempfile.TemporaryDirectory(prefix="devkit-pre-pull-") as tmp:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+                tar.extractall(tmp, filter="data")
+        except (tarfile.TarError, OSError):
+            return None
+        script = Path(tmp) / "scripts/hooks/untested_symbols.py"
+        if not script.is_file():
+            return None
+        try:
+            listed = subprocess.run(
+                [console_python(), str(script), "--list"],
+                cwd=tmp,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env={**os.environ, "PYTHONUTF8": "1"},
+                timeout=600,
+                creationflags=NO_WINDOW,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    if listed.returncode != 0:
+        return None
+    return {line.strip() for line in listed.stdout.splitlines() if line.strip()}
+
+
+def uncommitted_paths(root: Path) -> set[str]:
+    """Every path with an uncommitted change or untracked, posix and repo-relative."""
+    changed = _git_out(root, "diff", "--name-only", "-z", "HEAD") or ""
+    untracked = _git_out(root, "ls-files", "--others", "--exclude-standard", "-z") or ""
+    return {path for path in (changed + "\0" + untracked).split("\0") if path}
 
 
 # The structural ratchet's twin of the file above, on the same terms: never vendored,
@@ -1253,7 +1440,8 @@ def pull_refusal(src: Path, allow_dirty: bool, allow_untagged: bool) -> int:
             f"sync-harness: {src} HEAD is not tagged. A consumer pins devkit by "
             f"tag, so an untagged pull can never be pinned to what it vendored. "
             f"Tag the release first, or pass --allow-untagged to pull anyway "
-            f"(leaving {PRECOMMIT_FILE} stale -- and the drift gate red).",
+            f"(leaving {PRECOMMIT_FILE} stale -- and the drift gate red). To adopt a tag "
+            f"this checkout has moved past, pass --src <a clean clone at that tag>.",
             file=sys.stderr,
         )
         return 2
@@ -1285,6 +1473,8 @@ class SyncOutcome:
     seeded_structure: int | None
     tightened: tuple[int, int] | None
     pull: bool
+    reconciled: tuple[int, int] | None = None
+    codex_mirrored: tuple[str, ...] = ()
 
 
 def copy_manifest(
@@ -1328,6 +1518,26 @@ def apply_push(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     )
 
 
+def as_the_source_lists_it(src: Path, manifest: tuple[str, ...]) -> tuple[str, ...]:
+    """`manifest` without what this running copy lists and the source's own list does not.
+
+    A pull from a release older than the running copy delivers that release's shorter
+    list, so a path only the newer list named was printed as `(absent)`, left in the tree,
+    and read by no later `--check`: homelab's `.claude/rules/local-e2e.md`, still loaded by
+    Claude Code and removed by hand (ba73e7c3). Dropped here, it is a receipt entry out
+    of the MANIFEST: deleted if untouched, kept if edited, like any retired file.
+
+    Only the source's own list decides. A path merely missing from the source is what a
+    wrong `--src` looks like, and a source with no such list says nothing; both keep the
+    `(absent)` report. Keyed on `MANIFEST`, since a gated path is the consumer's own."""
+    lists = _load_by_path("devkit_manifest_of_source", src / "scripts" / "devkit_manifest.py")
+    listed = getattr(lists, "MANIFEST", None)
+    if not listed:
+        return manifest
+    unlisted = set(MANIFEST) - set(listed)
+    return tuple(rel for rel in manifest if rel not in unlisted)
+
+
 def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     """`--pull`: copy upstream's files down, then every side effect adoption needs.
 
@@ -1337,6 +1547,9 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     ordering constraints past the eye and cost complexity 32 in a function whose
     sequence is the only thing a reader is here for.
     """
+    # First: every step below, the deletions above all, has to read the release being
+    # adopted rather than the newer one this running copy came from.
+    manifest = as_the_source_lists_it(src, manifest)
     managed_removed, preserved, unvendored = remove_receipt_retired(REPO_ROOT, manifest, src)
     copied, blocks_written, blocks_failed = copy_manifest(src, manifest, pull=True)
     removed = remove_retired(REPO_ROOT) + managed_removed
@@ -1348,6 +1561,8 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     # those settings, so regenerating first would bake back in whatever the prune
     # is about to remove.
     codex_regenerated = regenerate_codex_hooks(REPO_ROOT)
+    # After the copy and the deletions: the mirror is of the skills this pull left.
+    codex_mirrored = tuple(remirror_codex_skills(REPO_ROOT))
     # Before the seeds: `structure_check.vendored_paths` keys off this file, so a
     # baseline seeded while the stamp is absent grandfathers every vendored module
     # into the consumer's numbers -- and once the stamp lands the gate stops scanning
@@ -1361,6 +1576,7 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
     # After the seed, on every pull that did not just seed: a fresh baseline is exact
     # by construction, and an adopted one holds whatever the last release earned.
     tightened = tighten_structure_baseline(REPO_ROOT) if seeded_structure is None else None
+    reconciled = reconcile_untested_baseline(REPO_ROOT, manifest) if seeded is None else None
     finalise_pull(src, manifest)
     return SyncOutcome(
         copied=copied,
@@ -1376,6 +1592,8 @@ def apply_pull(src: Path, manifest: tuple[str, ...]) -> SyncOutcome:
         seeded_structure=seeded_structure,
         tightened=tightened,
         pull=True,
+        reconciled=reconciled,
+        codex_mirrored=codex_mirrored,
     )
 
 
@@ -1431,6 +1649,8 @@ def report_sync(outcome: SyncOutcome) -> None:
         # Named, because it is the one file the pull rewrote that was never copied
         # from the source: it is generated here, from this project's own settings.
         print(f"  (regenerated from {SETTINGS_FILE}) {CODEX_HOOKS_FILE}")
+    for rel in outcome.codex_mirrored:
+        print(f"  (re-mirrored from .claude/skills/) {rel}")
     if outcome.seeded is not None:
         # Only on the pull that adopts the gate. Named because it is a claim about
         # this repo that nobody wrote by hand, and because the number is the debt
@@ -1451,6 +1671,14 @@ def report_sync(outcome: SyncOutcome) -> None:
             f"  (tightened the structure ratchet) {STRUCTURE_BASELINE_FILE}: dropped "
             f"{outcome.tightened[0]} line(s) the code no longer earns, lowered "
             f"{outcome.tightened[1]}"
+        )
+    if outcome.reconciled and any(outcome.reconciled):
+        # Named for the tighten's reason, and because a recorded gap is debt the pull
+        # wrote down on the project's behalf: the adoption diff is where to question it.
+        print(
+            f"  (reconciled the untested-symbol ratchet) {UNTESTED_BASELINE_FILE}: dropped "
+            f"{outcome.reconciled[0]} line(s) now covered, recorded "
+            f"{outcome.reconciled[1]} gap(s) this pull revealed"
         )
 
 

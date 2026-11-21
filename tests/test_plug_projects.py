@@ -6,7 +6,7 @@ The **inventory** merges sources that disagree, and a project missing from one o
 is the whole reason the script exists — so every combination of on-disk/on-GitHub is
 asserted, including the one that reads as "nothing to do" and is not.
 
-The **plan** decides an outward-facing act (creating a private GitHub repo) from a
+The **plan** decides an outward-facing act (creating a public GitHub repo) from a
 ticked checkbox, so it is pure and every step is asserted before anything can run it.
 
 And `edit_verdict` is the gate between this script and the file every window on the
@@ -268,7 +268,7 @@ def test_an_error_does_not_end_the_loop():
             "ticking clones acme/zeta here",
         ),
         (Candidate("gamma", plugged=False, on_disk=False, on_github=True), "clones acme/gamma"),
-        (Candidate("delta", plugged=False, on_disk=True, on_github=False), "CREATES the private"),
+        (Candidate("delta", plugged=False, on_disk=True, on_github=False), "CREATES the public"),
         (
             Candidate("eps", plugged=False, on_disk=True, on_github=True),
             "registers it, and nothing",
@@ -277,7 +277,7 @@ def test_an_error_does_not_end_the_loop():
 )
 def test_each_row_says_what_its_own_tick_costs(candidate, expected):
     """The task runs `--picks ... --yes`, so the quick-pick *is* the confirmation and
-    this line is the last thing anyone reads before a private GitHub repo is created.
+    this line is the last thing anyone reads before a public GitHub repo is created.
     A tick flips the row, so the two directions cost wildly different things and the
     sentence has to name the one THIS row is offering."""
     assert expected in toggle_detail(candidate, "acme")
@@ -422,11 +422,72 @@ def test_after_apply_notes_send_nobody_to_commit_after_a_clone_only_run():
     notes = plug_projects.after_apply_notes
     assert notes([Step(plug_projects.CLONE, "beta", clone=True)]) == []
     assert any(
-        "commit workspace.jsonc" in line for line in notes([Step(plug_projects.UNPLUG, "a")])
+        "ship workspace.jsonc from a worktree" in line
+        for line in notes([Step(plug_projects.UNPLUG, "a")])
     )
     plugged = notes([Step(plug_projects.PLUG, "a")])
-    assert any("commit workspace.jsonc" in line for line in plugged)
+    assert any("ship workspace.jsonc from a worktree" in line for line in plugged)
     assert any("ports.toml" in line for line in plugged)
+
+
+def test_a_handed_off_edit_sends_nobody_to_commit_it():
+    """a5ec492b: "commit workspace.jsonc on a task branch" was done in devkit's own
+    checkout, which the fix pass runs from, so the pass ran that branch."""
+    notes = plug_projects.after_apply_notes([Step(plug_projects.UNPLUG, "a")], handed=True)
+    assert not any("workspace.jsonc" in line for line in notes)
+    assert not any(
+        "task branch" in line
+        for line in plug_projects.after_apply_notes([Step(plug_projects.UNPLUG, "a")])
+    ), "the note left for a failed cut never says to branch in the checkout"
+
+
+def test_the_registry_change_names_every_flip_and_merges_once_green():
+    change = plug_projects.registry_change
+    assert change([Step(plug_projects.CLONE, "beta", clone=True)]) == ("", "")
+    slug, intent = change(
+        [Step(plug_projects.UNPLUG, "carameli"), Step(plug_projects.PLUG, "skinamp")]
+    )
+    assert slug == "plug-skinamp-unplug-carameli"
+    assert intent.startswith("Plug skinamp and unplug carameli in the workspace registry\n\n")
+    assert "plugged skinamp and unplugged carameli" in intent
+    assert "Hold: yes" not in intent, "the pick was the decision: it merges once green"
+
+
+def test_an_unplug_leaves_the_static_checkout_on_main_and_clean(tmp_path):
+    """a5ec492b, end to end against a real checkout: the edit lands on a task branch in a
+    worktree with its intent, and the checkout the pass runs from is left as it was."""
+    path = tmp_path / "devkit"
+    path.mkdir()
+    canonical = path / "workspace.jsonc"
+    canonical.write_text(REGISTRY, encoding="utf-8", newline="\n")
+    for args in (
+        ("init", "--quiet", "-b", "main"),
+        ("config", "core.hooksPath", str(path / ".nohooks")),
+        ("config", "user.email", "t@e.st"),
+        ("config", "user.name", "t"),
+        ("add", "-A"),
+        ("commit", "--quiet", "-m", "init"),
+    ):
+        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+    steps = [Step(plug_projects.UNPLUG, "alpha")]
+    canonical.write_text('{"folders": [{"path": "beta"}]}', encoding="utf-8", newline="\n")
+
+    said = plug_projects.hand_off_registry(steps, canonical)
+
+    # What `fix-pass-watchdog.self_update` asks before it fast-forwards.
+    status = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == "" and canonical.read_text(encoding="utf-8") == REGISTRY
+    assert said.startswith("  branch  agent/unplug-alpha-")
+    (tree,) = (path / ".claude" / "worktrees").iterdir()
+    assert "alpha" not in devkit_project.known_projects(
+        (tree / "workspace.jsonc").read_text(encoding="utf-8")
+    )
+    intent = (tree / "logs" / "ship-intent.md").read_text(encoding="utf-8")
+    assert intent.startswith("Unplug alpha in the workspace registry\n")
 
 
 def test_toggling_is_its_own_inverse():
@@ -556,11 +617,11 @@ def test_hazards_ride_on_the_unplug_step():
 
 
 def test_the_preview_names_every_outward_facing_act():
-    """Creating a private GitHub repo is the only step here anyone outside can see, so
+    """Creating a public GitHub repo is the only step here anyone outside can see, so
     it must be legible in the line printed before the confirmation."""
     candidates = inventory(REGISTRY, ["alpha", "beta", "gamma"], [])
     line = describe(plan(candidates, {"alpha", "beta", "gamma"})[0])
-    assert "create the PRIVATE GitHub repo" in line and "git init" in line
+    assert "create the PUBLIC GitHub repo" in line and "git init" in line
 
 
 # --- the gate ---------------------------------------------------------------
@@ -724,7 +785,8 @@ def test_creating_a_repo_initialises_commits_and_pushes(tmp_path):
     assert calls[0] == ["git", "init", "-b", "main"]
     assert ["git", "commit", "-m", "Initial commit"] in calls
     assert calls[-1][:4] == ["gh", "repo", "create", "owner/gamma"]
-    assert "--private" in calls[-1] and "--push" in calls[-1]
+    assert "--public" in calls[-1] and "--push" in calls[-1]
+    assert "--private" not in calls[-1], "a private repo's Actions minutes run out"
 
 
 def test_an_existing_repo_with_commits_is_only_pushed(tmp_path):

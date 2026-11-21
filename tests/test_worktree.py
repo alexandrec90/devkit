@@ -473,10 +473,42 @@ def test_a_project_with_no_templates_gets_exactly_what_it_got_before():
 
 
 def test_render_env_appends_so_the_managed_keys_win():
-    """Compose's dotenv parser takes the last assignment, which is why nothing above is edited."""
     rendered = worktree.render_env("DB_HOST_PORT=5432\nSECRET=keepme\n", {"DB_HOST_PORT": "5435"})
     assert rendered.index("SECRET=keepme") < rendered.index("DB_HOST_PORT=5435")
-    assert "DB_HOST_PORT=5432" in rendered
+    assert f"{worktree.OVERRIDDEN}DB_HOST_PORT=5432" in rendered
+
+
+def _assigned_keys(text: str) -> list[str]:
+    return [
+        line.split("=", 1)[0].removeprefix("export ").strip()
+        for line in text.splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    ]
+
+
+def test_render_env_assigns_no_key_twice():
+    """5f01977b: a social-scraper box's seeded `.env` set COMPOSE_PROJECT_NAME,
+    DATABASE_URL and DB_HOST_PORT, the block set them again, and dotenv-linter's
+    DuplicatedKey failed `lint-all` in every box cut that way."""
+    source = (
+        "COMPOSE_PROJECT_NAME=social-scraper\nexport DB_HOST_PORT=5432\n"
+        "DATABASE_URL=postgresql://u@127.0.0.1:5432/db\n# DB_HOST_PORT=1 is a comment\n"
+        "SECRET=keepme\n"
+    )
+    managed = {
+        "COMPOSE_PROJECT_NAME": "social-scraper--handoff-1018",
+        "DB_HOST_PORT": "5435",
+        "DATABASE_URL": "postgresql://u@127.0.0.1:5435/db",
+    }
+    rendered = worktree.render_env(source, managed)
+    keys = _assigned_keys(rendered)
+    assert sorted(keys) == sorted({*managed, "SECRET"}), keys
+    assert "# DB_HOST_PORT=1 is a comment" in rendered, "a comment is left as it was"
+    assert worktree.dotenv_assignments(rendered)["DB_HOST_PORT"] == "5432", "the seeded value"
+    # A re-render once the block no longer sets a key gives the seeded line back.
+    again = worktree.render_env(rendered, {"COMPOSE_PROJECT_NAME": "x"})
+    assert "export DB_HOST_PORT=5432\n" in again and worktree.OVERRIDDEN + "export" not in again
+    assert worktree.render_env(rendered, managed) == rendered
 
 
 def test_render_env_is_idempotent():
@@ -516,6 +548,150 @@ def test_render_env_handles_an_empty_source():
         worktree.MANAGED_BEGIN
     )
     assert "COMPOSE_PROJECT_NAME=x" in rendered
+
+
+# The source checkout's `.env` as ibkr_trader had it: a URL derived from the db's port.
+IBKR_ENV = "DATABASE_URL=postgresql+psycopg://trader@127.0.0.1:5433/ibkr_trader\nSECRET=x\n"
+BOX_DB_URL = "postgresql+psycopg://trader@127.0.0.1:5435/ibkr_trader"
+
+
+def test_a_seeded_url_on_the_sources_port_is_moved_onto_the_boxs():
+    """Regression (ibkr_trader, 2026-10-11): the box got `DB_HOST_PORT=5435`, but its
+    seeded `DATABASE_URL` still named 5433 -- the static checkout's long-lived database --
+    so a bare `alembic upgrade head` in the box migrated that one."""
+    managed = worktree.managed_env("ibkr_trader--x-1011", registry(ibkr_trader=1), 3)
+    published = worktree.checkout_ports(registry(ibkr_trader=1), "ibkr_trader")
+
+    rebased = worktree.rebase_seeded_ports(IBKR_ENV, published, managed)
+
+    assert rebased == {"DATABASE_URL": BOX_DB_URL}
+
+
+def test_a_checkout_with_no_env_seeds_the_box_from_its_example(tmp_path):
+    """d2-trader, 2026-11-11: its checkout had no `.env`, so its box got the port lines
+    and no `DATABASE_URL`, and every database test in the push gate failed. The example
+    is what the project says a working `.env` holds, ports rebased like any other."""
+    (tmp_path / ".env.example").write_text(
+        "DB_HOST_PORT=5442\nDATABASE_URL=postgresql+psycopg://u:p@127.0.0.1:5442/d\n",
+        encoding="utf-8",
+    )
+
+    rebased = worktree.seed_env(tmp_path / ".env", tmp_path / "box.env", {"DB_HOST_PORT": "5443"})
+
+    written = (tmp_path / "box.env").read_text(encoding="utf-8")
+    assert rebased == {"DATABASE_URL": "postgresql+psycopg://u:p@127.0.0.1:5443/d"}
+    assert "DATABASE_URL=postgresql+psycopg://u:p@127.0.0.1:5443/d" in written
+
+
+def test_a_checkout_env_wins_over_its_example(tmp_path):
+    (tmp_path / ".env").write_text("SECRET=real\n", encoding="utf-8")
+    (tmp_path / ".env.example").write_text("SECRET=placeholder\n", encoding="utf-8")
+
+    worktree.seed_env(tmp_path / ".env", tmp_path / "box.env", {})
+
+    written = (tmp_path / "box.env").read_text(encoding="utf-8")
+    assert "SECRET=real" in written
+    assert "placeholder" not in written
+
+
+def test_the_rebased_value_wins_in_the_written_env(tmp_path):
+    (tmp_path / "src.env").write_text(IBKR_ENV, encoding="utf-8")
+    managed = worktree.managed_env("ibkr_trader--x-1011", registry(ibkr_trader=1), 3)
+
+    rebased = worktree.seed_env(
+        tmp_path / "src.env",
+        tmp_path / "box.env",
+        managed,
+        worktree.checkout_ports(registry(ibkr_trader=1), "ibkr_trader"),
+    )
+
+    written = (tmp_path / "box.env").read_text(encoding="utf-8")
+    assert set(rebased) == {"DATABASE_URL"}
+    # The source's line is kept above the managed block; the last assignment is what wins.
+    assert written.rsplit("DATABASE_URL=", 1)[1].startswith(f"{BOX_DB_URL}\n")
+    assert "SECRET=x" in written
+
+
+def test_a_port_the_sources_env_sets_beats_its_registry_slot():
+    """The source's own `.env` is what its compose run actually publishes on."""
+    seeded = "DB_HOST_PORT=5440\nURL=http://localhost:5440/x\nOLD=http://localhost:5433/x\n"
+    managed = worktree.managed_env("p--x-1011", registry(p=1), 3)
+
+    rebased = worktree.rebase_seeded_ports(
+        seeded, worktree.checkout_ports(registry(p=1), "p"), managed
+    )
+
+    assert rebased == {"URL": "http://localhost:5435/x"}
+
+
+def test_only_local_hosts_and_whole_port_numbers_are_rebased():
+    """A remote host on the same number is somebody else's service, and 54330 is not 5433."""
+    seeded = (
+        "REMOTE=postgres://u@db.example.com:5433/x\n"
+        "LONGER=http://127.0.0.1:54330\n"
+        "IP=http://10.0.0.1:5433\n"
+        "COMPOSE=postgres://u@db:5432/x\n"
+        "LOCAL=http://[::1]:5433\n"
+    )
+    managed = worktree.managed_env("p--x-1011", registry(p=1), 3)
+
+    rebased = worktree.rebase_seeded_ports(
+        seeded, worktree.checkout_ports(registry(p=1), "p"), managed
+    )
+
+    assert rebased == {"LOCAL": "http://[::1]:5435"}
+
+
+def test_a_key_the_managed_env_sets_is_left_to_the_template():
+    """An explicit `[worktree] env` template knows better than the generic rewrite."""
+    managed = worktree.managed_env(
+        "p--x-1011", registry(p=1), 3, {"DATABASE_URL": "sqlite:///${DB_HOST_PORT}"}
+    )
+    published = worktree.checkout_ports(registry(p=1), "p")
+
+    assert worktree.rebase_seeded_ports(IBKR_ENV, published, managed) == {}
+
+
+def test_a_port_that_did_not_move_is_not_rebased():
+    """A UI-only box keeps the donor's backend ports, so its backend URLs must stay put."""
+    managed = worktree.managed_env(
+        "p--ui-1011", registry(p=1), 3, donor_slot=1, own_services=("app",)
+    )
+
+    assert (
+        worktree.rebase_seeded_ports(IBKR_ENV, worktree.checkout_ports(registry(p=1), "p"), managed)
+        == {}
+    )
+
+
+def test_nothing_is_rebased_without_a_registry_or_for_an_unregistered_project():
+    managed = worktree.managed_env("p--x-1011", registry(p=1), 3)
+    assert worktree.checkout_ports(None, "p") == {}
+    assert worktree.checkout_ports(registry(p=1), "q") == {}
+    assert worktree.rebase_seeded_ports(IBKR_ENV, {}, managed) == {}
+
+
+def test_seed_box_env_warns_rather_than_seeding_a_tracked_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "is_tracked", lambda path, name: True)
+    managed = {"COMPOSE_PROJECT_NAME": "p--x-1011", "DB_HOST_PORT": "5435"}
+
+    notes = worktree.seed_box_env(tmp_path, tmp_path / "box", box(project="p"), managed, True)
+
+    assert len(notes) == 1 and notes[0].startswith("[warn] .env is tracked in p")
+    assert "DB_HOST_PORT=5435" in notes[0]
+    assert not (tmp_path / "box" / ".env").exists()
+
+
+def test_seed_box_env_says_nothing_for_a_box_with_no_stack(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "is_tracked", lambda path, name: False)
+    assert worktree.seed_box_env(tmp_path, tmp_path / "box", box(), {}, False) == []
+
+
+def test_comments_and_a_stale_managed_block_are_not_assignments():
+    text = worktree.render_env(
+        "# URL=http://localhost:5433\nexport A = 1\nA=2\n", {"URL": "http://localhost:5439"}
+    )
+    assert worktree.dotenv_assignments(text) == {"A": "2"}
 
 
 # --- spawn ------------------------------------------------------------------
@@ -1409,6 +1585,59 @@ def test_branch_delete_defers_to_git_when_commits_are_only_local():
     )
 
 
+def _linked_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """A checkout that ignores `.env`, has a stack and a `.env`, and a tree cut from it."""
+    checkout = tmp_path / "productivity-tracker"
+    checkout.mkdir()
+
+    def git(*args: str) -> None:
+        hooks = f"core.hooksPath={tmp_path / 'no-hooks'}"
+        subprocess.run(["git", "-c", hooks, *args], cwd=checkout, capture_output=True, check=True)
+
+    git("init", "-q", "-b", "main")
+    (checkout / ".gitignore").write_text(".env\n", encoding="utf-8")
+    (checkout / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    git("add", "-A")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "seed")
+    (checkout / ".env").write_text("DATABASE_URL=the-checkouts-db\n", "utf-8")
+    tree = tmp_path / "wt"
+    git("worktree", "add", "--quiet", str(tree), "-b", "topic")
+    return checkout, tree
+
+
+def test_provision_seeds_a_tree_no_hook_reached(tmp_path):
+    """481859f1: Claude Code cuts `claude --worktree` trees with hooks off, so the
+    `post-checkout` that seeds `.env` never ran there; `provision` is what reaches it."""
+    _checkout, tree = _linked_tree(tmp_path)
+    said = worktree.seed_tree_env(tree)
+    assert any("seeded from the checkout's .env" in line for line in said)
+    assert (tree / ".env").read_text(encoding="utf-8").startswith("DATABASE_URL=")
+    assert worktree.seed_tree_env(tree) == [], "a tree with a .env is left as it is"
+
+
+def test_provision_seeds_nothing_in_a_checkout(tmp_path):
+    checkout, _tree = _linked_tree(tmp_path)
+    assert worktree.seed_tree_env(checkout) == []
+
+
+def test_a_box_whose_tree_landed_deletes_its_never_pushed_branch_with_capital_D():
+    """agent-terminal's `fix-pr8-1111` (c70da35f): `ready`, five commits never pushed,
+    its tree already on the default branch under another PR. `reapable` freed it, the
+    tree went, and `-d` then refused the squashed commits: the reap ended `FAILED at
+    git branch -d`, exit 1, on a box that held nothing."""
+    landed = state(upstream="", ahead=5, unpushed=-1)
+    plan = reap(sweep.READY, state=landed, reason="5 commit(s), never pushed", work_is_landed=True)
+    assert not plan.refusal
+    assert [step for step in plan.steps if step[0] == "branch"] == [
+        ("branch", "-D", "claude/voicemail-0806")
+    ]
+
+
+def test_landed_evidence_never_licenses_capital_D_on_a_dirty_or_unreadable_state():
+    for unsafe in (state(ahead=5, unpushed=-1, dirty=1), state(is_git=False, ahead=5)):
+        assert worktree.branch_delete_flag(unsafe, pr_merged=False, work_is_landed=True) == "-d"
+
+
 def test_branch_delete_defers_to_git_when_there_is_no_upstream():
     """`unpushed` is -1 for a branch that was never pushed -- not 0, which would read
     as "nothing outstanding" and force-delete the only copy."""
@@ -2018,6 +2247,88 @@ def test_the_ladder_marks_a_tree_provisioned_only_when_every_step_succeeded(tmp_
     assert not mark.exists()
 
 
+def _link_dir(link, target):
+    """`link` -> `target` as a directory symlink, or a junction where Windows refuses an
+    unprivileged symlink -- the two shapes `worktree.symlinkDirectories` leaves."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+
+
+def test_an_install_into_a_linked_venv_writes_the_checkouts_paths(tmp_path, monkeypatch):
+    """A `claude --worktree` tree of devkit links the checkout's `.venv`, and a `uv sync`
+    run in the tree writes the *tree's* path into every console script it installs. When
+    that tree was deleted, every launcher in the checkout's venv died with `uv trampoline
+    failed to canonicalize script path` -- `pre-commit.exe` with them, so every devkit
+    commit was refused. uv is pointed at the link's real directory instead."""
+    checkout_venv = tmp_path / "checkout" / ".venv"
+    checkout_venv.mkdir(parents=True)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    _link_dir(tree / ".venv", checkout_venv)
+    seen: list[dict | None] = []
+    monkeypatch.setattr(
+        worktree.subprocess, "run", lambda *a, **k: (seen.append(k.get("env")), _completed())[1]
+    )
+    assert worktree.run_provision(tree, (worktree.ProvisionStep("uv sync", ("uv", "sync")),))[0]
+    assert seen[0] is not None
+    assert Path(seen[0][worktree.UV_ENVIRONMENT_VAR]) == checkout_venv.resolve()
+
+    own = tmp_path / "own"
+    (own / ".venv").mkdir(parents=True)
+    assert worktree.install_env(own) is None, "a tree's own venv needs no redirect"
+    assert worktree.install_env(tmp_path / "bare") is None, "nor does a tree with none yet"
+
+
+def _frontend_tree(tmp_path, installed: bool):
+    """A checkout whose root is its npm project, and a tree whose `node_modules` links to
+    the checkout's, which is how `worktree.symlinkDirectories` leaves roguelike's."""
+    checkout = tmp_path / "checkout"
+    (checkout / "node_modules").mkdir(parents=True)
+    (checkout / "package-lock.json").write_text("{}", encoding="utf-8")
+    if installed:
+        (checkout / "node_modules" / ".package-lock.json").write_text("{}", encoding="utf-8")
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "package-lock.json").write_text("{}", encoding="utf-8")
+    _link_dir(tree / "node_modules", checkout / "node_modules")
+    return checkout, tree
+
+
+def test_a_borrowed_node_modules_is_never_reinstalled_from_the_tree(tmp_path):
+    """fcf111b9: `npm ci` in a tree whose `node_modules` links to its checkout's empties
+    the checkout's first, under every session using it, and one that fails leaves it
+    empty. A link to a finished install gets no step."""
+    checkout, tree = _frontend_tree(tmp_path, installed=True)
+    assert (
+        worktree.worktree_env.borrowed(tree / "node_modules")
+        == (checkout / "node_modules").resolve()
+    )
+    assert worktree.npm_target(tree, ".") == ""
+
+
+def test_a_borrowed_empty_node_modules_is_installed_where_it_points(tmp_path):
+    """The roguelike session's own repair was `npm ci --prefix <checkout>`: the link's
+    target, installed from the lockfile that sits beside it."""
+    checkout, tree = _frontend_tree(tmp_path, installed=False)
+    assert Path(worktree.npm_target(tree, ".")) == checkout.resolve()
+    (tree / ".devkit.toml").write_text('[frontend]\nenabled = true\ndir = "."\n', encoding="utf-8")
+    step = worktree.plan_provision(tree, windows=False, quiet=True)[-1]
+    assert step.argv[1:4] == ("ci", "--prefix", str(checkout.resolve()))
+
+
+def test_a_trees_own_node_modules_installs_in_place(tmp_path):
+    (tmp_path / "web" / "node_modules").mkdir(parents=True)
+    assert worktree.npm_target(tmp_path, "web") == "web"
+    assert worktree.npm_target(tmp_path, "other") == "other", "none yet: install it there"
+    assert worktree.npm_target(tmp_path, "") == ""
+    assert worktree.worktree_env.borrowed(tmp_path / "web" / "node_modules") is None
+    assert worktree.worktree_env.borrowed(tmp_path / "absent") is None
+
+
 def test_a_timed_out_install_is_reported_rather_than_raised(tmp_path, monkeypatch):
     def fake_run(*args, **kwargs):
         raise worktree.subprocess.TimeoutExpired(cmd="uv", timeout=900)
@@ -2150,6 +2461,63 @@ def test_a_spawn_lock_someone_else_holds_reports_that_it_was_not_had(tmp_path):
     with worktree.spawn_lock(tmp_path, "devkit--s1", wait=0.2, stale=60.0) as held:
         assert held is False
     assert _spawn_lock_dir(tmp_path).is_dir()  # the other holder's, left untouched
+
+
+DUBIOUS = (
+    "fatal: detected dubious ownership in repository at 'C:/ws/social-scraper'\n"
+    "'C:/ws/social-scraper' is owned by:\n\tBUILTIN/Administrators (S-1-5-32-544)\n"
+)
+
+
+def _probe(code: int, stderr: str = ""):
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(["git", *args], code, "", stderr)
+
+    return git
+
+
+def test_git_refusal_names_why_git_will_not_read_the_checkout():
+    """100bf14f: social-scraper, cloned elevated, reached the release job as "cannot
+    resolve origin/HEAD", which named nothing that was wrong."""
+    said = worktree.git_refusal(_probe(128, DUBIOUS))
+    assert said == (
+        "; git refuses the checkout: fatal: detected dubious ownership in repository at "
+        "'C:/ws/social-scraper'"
+    )
+    assert worktree.git_refusal(_probe(0)) == ""
+    assert worktree.git_refusal(_probe(1)) == "; git refuses the checkout: exit 1"
+
+
+def test_a_checkout_git_refuses_is_named_in_the_no_base_branch_error(tmp_path, monkeypatch):
+    workspace = tmp_path / "alex.code-workspace"
+    workspace.write_text('{"folders": [{"path": "social-scraper"}]}', encoding="utf-8")
+    (tmp_path / "social-scraper").mkdir()
+    monkeypatch.setattr(worktree.sweep, "git_for", lambda path: _probe(128, DUBIOUS))
+    with pytest.raises(worktree.WorktreeError, match="dubious ownership"):
+        worktree.plan_new("social-scraper", workspace, slug="x", fetch=False)
+
+
+def test_a_named_lock_says_whether_it_was_had_and_leaves_another_holders_alone(tmp_path):
+    """The fix pass's one-at-a-time guard: the flag, plus the directory still standing,
+    is how a second pass tells another pass from a lock it could not make."""
+    lock = worktree.boxes_root(tmp_path) / "fix-pass.lock"
+    with worktree.named_lock(tmp_path, "fix-pass.lock", wait=0.2, stale=60.0) as held:
+        assert held is True
+        assert lock.is_dir()
+        with worktree.named_lock(tmp_path, "fix-pass.lock", wait=0.2, stale=60.0) as second:
+            assert second is False
+        assert lock.is_dir()
+    assert not lock.exists()
+
+
+def test_a_lock_whose_parent_is_a_file_is_not_had_and_does_not_spin(tmp_path):
+    """`parent.mkdir(exist_ok=True)` raises FileExistsError over a file, which the loop
+    read as a held lock; its stat then failed and it retried forever, deadline unread."""
+    worktree.boxes_root(tmp_path).write_text("a file, not a directory", encoding="utf-8")
+    started = worktree.time.monotonic()
+    with worktree.named_lock(tmp_path, "fix-pass.lock", wait=30.0, stale=60.0) as held:
+        assert held is False
+    assert worktree.time.monotonic() - started < 5
 
 
 def test_spawns_for_different_sessions_do_not_wait_on_each_other(tmp_path):
@@ -2446,6 +2814,26 @@ def _root() -> Path:
     return Path("C:/ws") if worktree.os.name == "nt" else Path("/ws")
 
 
+REAL_AGENT_SESSIONS = worktree.agent_sessions
+
+
+@pytest.fixture(autouse=True)
+def no_agent_sessions(monkeypatch):
+    """No test asks this machine's `claude agents`, which every reconcile that reaps does:
+    a live session there would decide a test's box."""
+    monkeypatch.setattr(worktree, "agent_sessions", list)
+
+
+REAL_DOCKER_ENGINE_DOWN = worktree.docker_engine_down
+
+
+@pytest.fixture(autouse=True)
+def docker_engine_up(monkeypatch):
+    """No test asks this machine's Docker engine, which a reconcile reaping a stack does:
+    whether Docker Desktop happens to be running would decide a test's box."""
+    monkeypatch.setattr(worktree, "docker_engine_down", str)
+
+
 @pytest.fixture
 def workspace(tmp_path):
     """A workspace file whose parent holds the checkouts, as on a real workstation."""
@@ -2481,6 +2869,92 @@ def test_a_box_is_provisioned_when_it_is_created(workspace, monkeypatch):
     ok, _ = worktree.apply_new(plan, workspace)
     assert ok is True
     assert ran == [plan.provision]
+
+
+def test_a_new_box_reports_its_sibling_links_before_the_sync_they_feed(workspace, monkeypatch):
+    """d2e29fee: the hook's failed sibling cut was swallowed with the `worktree add`
+    output, so `new` reported only the `uv sync` it broke."""
+    order: list[str] = []
+    refused = "devkit: could not cut .worktrees/data-lake (fatal: already exists)"
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    monkeypatch.setattr(worktree, "link_siblings", lambda path: order.append("link") or [refused])
+    monkeypatch.setattr(
+        worktree, "run_provision", lambda path, steps: (order.append("sync"), (False, ["uv"]))[1]
+    )
+    plan = _spawned(workspace, provision=(worktree.ProvisionStep("uv sync", ("uv", "sync")),))
+
+    ok, notes = worktree.apply_new(plan, workspace)
+    assert ok is True and order == ["link", "sync"]
+    assert notes.index(refused) < notes.index("uv")
+
+
+def test_provision_new_box_links_nothing_it_will_not_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "link_siblings", lambda path: pytest.fail("linked"))
+    monkeypatch.setattr(worktree, "run_provision", lambda *a: pytest.fail("installed"))
+    step = (worktree.ProvisionStep("uv sync", ("uv", "sync")),)
+    assert worktree.provision_new_box(tmp_path, "demo--x", (), True) == [], "nothing to install"
+    [note] = worktree.provision_new_box(tmp_path, "demo--x", step, False)
+    assert note.startswith("not provisioned") and "provision demo--x --yes" in note
+
+
+def test_the_cut_leaves_provisioning_to_the_box_not_the_checkout_hook(workspace, monkeypatch):
+    """4a9086cf / 77a810f7: the `post-checkout` hook ran carameli's 600 s-bounded
+    `scripts/bootstrap.py` inside a `worktree add` bounded at 300 s, so the adoption's
+    box was never cut. The box provisions itself after the cut, so the hook is told to
+    skip -- for every step, the fetch-failed retry included."""
+    envs: list[dict] = []
+
+    def fake_run_steps(cwd, steps, timeout=300.0, env=None):
+        envs.append(dict(env or {}))
+        return ([], "git fetch origin", "offline") if len(envs) == 1 else ([], "", "")
+
+    monkeypatch.setattr(worktree, "run_steps", fake_run_steps)
+    monkeypatch.setattr(worktree, "has_stack", lambda path: False)
+    monkeypatch.setattr(worktree, "run_provision", lambda *a, **k: (True, []))
+    plan = _spawned(workspace, provision=(worktree.ProvisionStep("uv sync", ("uv", "sync")),))
+
+    ok, _ = worktree.apply_new(plan, workspace)
+    assert ok is True and len(envs) == 2
+    assert all(env.get(worktree.worktree_env.SKIP_PROVISION_VAR) == "1" for env in envs)
+
+
+def test_cut_worktree_retries_past_a_failed_fetch_and_reports_any_other_failure(monkeypatch):
+    seen: list[tuple[tuple[str, ...], ...]] = []
+    fetch = ("fetch", "origin")
+    add = ("worktree", "add", "x")
+
+    def fails_at(*failing: str):
+        def fake_run_steps(cwd, steps, timeout=300.0, env=None):
+            seen.append(steps)
+            rendered = "git " + " ".join(steps[0])
+            return ([], rendered, "boom\nmore") if rendered in failing else ([], "", "")
+
+        return fake_run_steps
+
+    monkeypatch.setattr(worktree, "run_steps", fails_at("git fetch origin"))
+    ok, notes = worktree.cut_worktree(Path("."), (fetch, add), 5.0)
+    assert ok and seen == [(fetch, add), (add,)]
+    assert notes == ["fetch failed (boom) — the box is cut from a possibly stale origin/<default>"]
+    monkeypatch.setattr(worktree, "run_steps", fails_at("git worktree add x"))
+    ok, notes = worktree.cut_worktree(Path("."), (add,), 5.0)
+    assert not ok and notes == ["FAILED at `git worktree add x`: boom\nmore"]
+
+
+def test_run_steps_hands_git_the_environment_it_is_given(tmp_path):
+    """The hook reads `SKIP_PROVISION_VAR` from the environment `git` passes it."""
+    import os as _os
+
+    env = {**_os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "devkit.probe"}
+    env["GIT_CONFIG_VALUE_0"] = "set"
+    step = (("config", "--get", "devkit.probe"),)
+    assert worktree.run_steps(tmp_path, step, env=env) == (
+        ["git config --get devkit.probe"],
+        "",
+        "",
+    )
+    _, failed, _ = worktree.run_steps(tmp_path, step)
+    assert failed == "git config --get devkit.probe", "without it, git has no such key"
 
 
 def test_a_box_cut_by_the_hook_names_the_install_it_skipped(workspace, monkeypatch):
@@ -2971,6 +3445,67 @@ def test_provision_acts_by_default_and_plans_only_on_dry_run(workspace, monkeypa
     assert len(ran) == 2
 
 
+def test_provision_re_aims_path_source_siblings_before_the_sync(workspace, monkeypatch, capsys):
+    """916daf9b: ibkr's shared `../data-lake` stayed at the PR-gate pin the tree was cut
+    at after a session moved that pin, so the prescribed relock read the old data-lake.
+    Re-provisioning re-reads the pin, before the sync that resolves against the sibling."""
+    root = workspace.parent
+    (root / "demo" / ".git").mkdir(parents=True)
+    step = worktree.ProvisionStep(label="uv sync", argv=("uv", "sync"))
+    monkeypatch.setattr(worktree, "plan_provision", lambda path: (step,))
+    order: list[str] = []
+    monkeypatch.setattr(
+        worktree,
+        "link_siblings",
+        lambda path, wait: (
+            order.append(f"link {wait:.0f}") or ["devkit: data-lake moved from c14c6be"]
+        ),
+    )
+    monkeypatch.setattr(
+        worktree, "run_provision", lambda path, steps: (order.append("sync"), (True, []))[1]
+    )
+
+    assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 0
+    assert order == [f"link {worktree.worktree_env.SESSION_WAIT:.0f}", "sync"], "a session waits"
+    assert "data-lake moved from c14c6be" in capsys.readouterr().out
+
+    assert worktree.main(["provision", "demo", "--dry-run", "--workspace", str(workspace)]) == 0
+    assert len(order) == 2
+
+
+def test_provision_never_syncs_against_a_sibling_another_run_holds(workspace, monkeypatch, capsys):
+    """d32ffcc2: a sync against another run's pin relocks `uv.lock` against it."""
+    root = workspace.parent
+    (root / "demo" / ".git").mkdir(parents=True)
+    step = worktree.ProvisionStep(label="uv sync", argv=("uv", "sync"))
+    monkeypatch.setattr(worktree, "plan_provision", lambda path: (step,))
+    held = f"devkit: data-lake {worktree.worktree_env.HELD} a run in tree-123 (pid 9)"
+    monkeypatch.setattr(worktree, "link_siblings", lambda path, wait=0.0: [held])
+    monkeypatch.setattr(worktree, "run_provision", lambda *a: pytest.fail("synced"))
+
+    assert worktree.main(["provision", "demo", "--workspace", str(workspace)]) == 1
+    out = capsys.readouterr().out
+    assert held in out and "not synced" in out
+    [linked, note] = worktree.provision_new_box(root / "demo", "demo", (step,), True)
+    assert linked == held and note.startswith("not provisioned")
+
+
+def test_link_siblings_leaves_a_static_checkout_alone(tmp_path, monkeypatch):
+    """A static checkout's `..` is the sibling's own checkout; moving it is never wanted."""
+    calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        worktree.worktree_env,
+        "link_path_sources",
+        lambda here, checkout, wait: calls.append((here, checkout)) or ["cut"],
+    )
+    monkeypatch.setattr(worktree.worktree_env, "checkout_of", lambda path: None)
+    assert worktree.link_siblings(tmp_path) == [] and calls == []
+
+    monkeypatch.setattr(worktree.worktree_env, "checkout_of", lambda path: tmp_path / "main")
+    assert worktree.link_siblings(tmp_path / "tree") == ["cut"]
+    assert calls == [(tmp_path / "tree", tmp_path / "main")]
+
+
 def test_a_failed_provision_does_not_print_provisioned(workspace, monkeypatch, capsys):
     """carameli #395's tree: `npm ci` died with `[WinError 2]`, the command exited 1, and
     the headline still read "Provisioned" -- which is what hid a dead step for weeks."""
@@ -3000,6 +3535,25 @@ def test_a_failed_install_step_says_failed_not_warn(tmp_path, monkeypatch):
     assert notes[0].startswith("FAILED provision: npm ci") and "[warn]" not in notes[0]
     rendered = worktree.render_provision("demo", (worktree.ProvisionStep("x", ("x",)),), True, [])
     assert rendered.startswith("Provisioned demo")
+
+
+def test_a_failed_install_step_names_a_dependency_conflict_over_npms_last_line(
+    tmp_path, monkeypatch
+):
+    """npm ends a refusal on "A complete log of this run can be found in", which is all
+    the note said; the ERESOLVE line above it is what says the manifest is the cause."""
+    stderr = (
+        "npm error code ERESOLVE\nnpm error ERESOLVE unable to resolve dependency tree\n"
+        "npm error A complete log of this run can be found in: x-debug-0.log\n"
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", stderr)
+
+    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    ok, notes = worktree.run_provision(tmp_path, (worktree.ProvisionStep("npm ci", ("npm", "ci")),))
+    assert ok is False
+    assert notes == ["FAILED provision: npm ci failed: npm error code ERESOLVE"]
 
 
 def test_the_verbs_that_change_the_workspace_still_plan_by_default():
@@ -3668,6 +4222,318 @@ def test_reconcile_reaps_a_merged_box_end_to_end(workspace, monkeypatch):
     assert worktree.read_leases(root) == {}
 
 
+def test_reconcile_waits_for_a_session_still_working_in_a_merged_box(workspace, monkeypatch):
+    """94e52397: a merged box's fixer was still alive in it; the reap deleted every file,
+    died on the root the session stood in, and reddened the scheduled pass three times."""
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
+    )
+    path = str(root / worktree.BOXES_DIR_NAME / "demo--done-0806")
+    live = {"kind": "background", "state": "working", "cwd": path, "id": "2b4a8c0e", "pid": 1}
+    monkeypatch.setattr(worktree, "agent_sessions", lambda: [live])
+    monkeypatch.setattr(
+        worktree, "run_steps", lambda *a, **k: pytest.fail("reaped under a live session")
+    )
+    monkeypatch.setattr(
+        worktree.bg_sessions, "stop", lambda *a: pytest.fail("stopped a working session")
+    )
+
+    code, report = worktree.reconcile(workspace, apply=True)
+
+    assert code == 0
+    [row] = report["boxes"]
+    assert row["action"] == worktree.WAIT
+    assert any("background session 2b4a8c0e (working)" in note for note in row["notes"])
+    assert "demo--done-0806" in worktree.read_leases(root)
+
+
+def test_reconcile_stops_a_finished_fixer_idling_in_the_box_then_reaps_it(workspace, monkeypatch):
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
+    )
+    path = str(root / worktree.BOXES_DIR_NAME / "demo--done-0806").replace("/", "\\")
+    idle = {"kind": "background", "state": "done", "cwd": path, "id": "2b4a8c0e", "pid": 1}
+    elsewhere = {"kind": "interactive", "status": "busy", "cwd": str(root / "demo"), "id": None}
+    monkeypatch.setattr(worktree, "agent_sessions", lambda: [idle, elsewhere])
+    stopped: list[str] = []
+    monkeypatch.setattr(
+        worktree.bg_sessions, "stop", lambda ident, run: stopped.append(ident) or True
+    )
+    monkeypatch.setattr(worktree.box_teardown, "HOLDER_RELEASE_SECONDS", 0)
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: (["ok"], "", ""))
+
+    code, report = worktree.reconcile(workspace, apply=True)
+
+    assert code == 0 and stopped == ["2b4a8c0e"]
+    assert report["boxes"][0]["action"] == worktree.REAP
+    assert worktree.read_leases(root) == {}
+
+
+def test_reconcile_asks_for_the_sessions_only_when_it_reaps(workspace, monkeypatch):
+    _reconcilable(workspace, monkeypatch, "demo--busy-0806", sweep.READY, "2 uncommitted", "MERGED")
+    monkeypatch.setattr(worktree, "agent_sessions", lambda: pytest.fail("asked for nothing"))
+    assert worktree.reconcile(workspace, apply=True)[0] == 0
+
+
+def test_agent_sessions_is_what_claude_agents_lists_under_a_tree_ending_bound(monkeypatch):
+    """`claude agents` ran with no timeout at all, on the reap path a7efb9b3 stalled in."""
+    asked: list[tuple[list[str], float]] = []
+
+    def bounded(argv, timeout, **_kwargs):
+        asked.append((argv, timeout))
+        return subprocess.CompletedProcess(argv, 0, '[{"id": "a1", "cwd": "C:/ws/x"}]', "")
+
+    monkeypatch.setattr(worktree.sweep, "run_bounded", bounded)
+    assert REAL_AGENT_SESSIONS() == [{"id": "a1", "cwd": "C:/ws/x"}]
+    assert asked == [(["claude", "agents", "--json"], worktree.PROBE_TIMEOUT)]
+
+
+def test_a_claude_agents_that_did_not_answer_is_unknown_not_empty(monkeypatch):
+    """Empty would read as "nobody in the box" and reap over a live session."""
+    ended = subprocess.CompletedProcess([], worktree.sweep.TIMED_OUT, "", "timed out")
+    monkeypatch.setattr(worktree.sweep, "run_bounded", lambda argv, timeout, **_k: ended)
+    assert REAL_AGENT_SESSIONS() is None
+
+
+def test_a_reap_whose_sessions_are_unknown_waits(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "apply_reap", lambda *_a: pytest.fail("reaped blind"))
+    doomed = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "x"))
+    action, ok, notes = worktree.reap_vacated(doomed, tmp_path, None, engine_down=str)
+    assert (action, ok) == (worktree.WAIT, True)
+    assert "claude agents" in notes[0]
+
+
+def test_claude_stop_is_bounded_too(tmp_path, monkeypatch):
+    """`vacate`'s stop goes through the same runner, so it cannot outlast the pass."""
+    seen = {}
+
+    def vacate(path, sessions, run):
+        seen["run"] = run
+        return [], []
+
+    monkeypatch.setattr(worktree.box_teardown, "vacate", vacate)
+    monkeypatch.setattr(worktree, "apply_reap", lambda *_a: (True, []))
+    doomed = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "x"))
+    assert worktree.reap_vacated(doomed, tmp_path, [], engine_down=str)[0] == worktree.REAP
+    assert seen["run"] is worktree.bounded_cli
+
+
+def test_settle_reap_asks_for_the_sessions_only_to_apply_a_reap_it_may_make(tmp_path, monkeypatch):
+    def never() -> list[dict]:
+        raise AssertionError("asked claude agents")
+
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {"demo--x-0806": box("demo--x-0806")})
+    refused = worktree.ReapPlan(box="demo--x-0806", refusal="dirty")
+    assert worktree.settle_reap(refused, tmp_path, never, apply=True) == (
+        worktree.HOLD,
+        False,
+        ["[warn] reap refused: dirty"],
+    )
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {})
+    action, ok, _ = worktree.settle_reap(refused, tmp_path, never, apply=True)
+    assert (action, ok) == (worktree.REAP, True), "a refusal of a box since reaped elsewhere"
+    plan = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "demo--x-0806"))
+    assert worktree.settle_reap(plan, tmp_path, never, apply=False) == (worktree.REAP, True, [])
+
+
+def test_reap_vacated_leaves_an_occupied_box_whole(tmp_path, monkeypatch):
+    path = tmp_path / "demo--x-0806"
+    plan = worktree.ReapPlan(box="demo--x-0806", path=str(path))
+    monkeypatch.setattr(worktree, "apply_reap", lambda *a: pytest.fail("reaped an occupied box"))
+    person = {"kind": "interactive", "status": "idle", "cwd": str(path)}
+    action, ok, notes = worktree.reap_vacated(plan, tmp_path, [person])
+    assert (action, ok) == (worktree.WAIT, True)
+    assert notes and notes[-1].startswith("not reaped: interactive session")
+
+
+def test_reap_vacated_waits_out_a_stopped_docker_engine_rather_than_strand_the_stack(
+    tmp_path, monkeypatch
+):
+    """104d356c: with Docker Desktop stopped, reconcile removed a merged box whose
+    `compose down` could not reach the engine and exited 1 -- leaving containers and
+    volumes no box names any more. The box waits, and the pass stays green."""
+    plan = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "b"), stack_down=True)
+    monkeypatch.setattr(worktree, "apply_reap", lambda *a: pytest.fail("reaped past the engine"))
+    action, ok, notes = worktree.reap_vacated(
+        plan, tmp_path, [], lambda: "Docker's engine is not running"
+    )
+    assert (action, ok) == (worktree.WAIT, True)
+    assert notes == [
+        "not reaped: Docker's engine is not running, so its stack cannot be downed -- the "
+        "next pass with the engine up reaps it, stack and all"
+    ]
+
+
+def test_reap_decided_settles_the_plan_and_fails_a_plan_it_cannot_make(tmp_path, monkeypatch):
+    plan = worktree.ReapPlan(box="demo--x-0806")
+    steps: list[str] = []
+    monkeypatch.setattr(worktree.reconcile_journal, "step", steps.append)
+    monkeypatch.setattr(worktree, "plan_reap", lambda box, ws, **k: plan)
+    settled = worktree.reap_decided(
+        "demo--x-0806",
+        tmp_path,
+        worktree.PullRequest(),
+        lambda doomed: (worktree.WAIT, True, [doomed.box]),
+        keep_stack=False,
+        fetch=False,
+    )
+    assert settled == (worktree.WAIT, True, ["demo--x-0806"])
+    assert steps == ["reap demo--x-0806"], "the journal names the box a pass is reaping"
+
+    def refuse(box, ws, **k):
+        raise worktree.WorktreeError("no such box")
+
+    monkeypatch.setattr(worktree, "plan_reap", refuse)
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {"demo--x-0806": box("demo--x-0806")})
+    assert worktree.reap_decided(
+        "demo--x-0806",
+        tmp_path,
+        worktree.PullRequest(),
+        lambda doomed: pytest.fail("settled a plan never made"),
+        keep_stack=False,
+        fetch=False,
+    ) == (worktree.REAP, False, ["[warn] no such box"])
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {})
+    action, ok, _ = worktree.reap_decided(
+        "demo--x-0806",
+        tmp_path,
+        worktree.PullRequest(),
+        lambda doomed: pytest.fail("settled a plan never made"),
+        keep_stack=False,
+        fetch=False,
+    )
+    assert (action, ok) == (worktree.REAP, True), "the box another reaper destroyed meanwhile"
+
+
+def test_a_failed_reap_of_a_box_another_reaper_destroyed_is_a_reap(tmp_path, monkeypatch):
+    """3f2e8171: another reaper was removing social-scraper's adoption box while the
+    scheduled pass inspected it, so the pass read a half-removed tree as "cannot resolve
+    origin/HEAD", refused, and reddened -- over a box that was gone seconds later."""
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {})
+    refused = (worktree.HOLD, False, ["[warn] reap refused: blocked"])
+    action, ok, notes = worktree.unless_reaped_elsewhere(tmp_path, "demo--x-0806", refused)
+    assert (action, ok) == (worktree.REAP, True)
+    assert notes == [
+        "already reaped by another process while this pass read it; this pass's own "
+        "attempt said: [warn] reap refused: blocked"
+    ]
+
+
+def test_a_failed_reap_of_a_box_still_standing_stays_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: {"demo--x-0806": box("demo--x-0806")})
+    refused = (worktree.HOLD, False, ["[warn] reap refused: blocked"])
+    assert worktree.unless_reaped_elsewhere(tmp_path, "demo--x-0806", refused) == refused
+
+
+def test_a_reap_that_did_not_fail_is_not_asked_about(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "live_boxes", lambda root: pytest.fail("asked of a success"))
+    done = (worktree.REAP, True, ["lease released"])
+    assert worktree.unless_reaped_elsewhere(tmp_path, "demo--x-0806", done) == done
+
+
+def test_reaped_elsewhere_waits_for_the_reaper_holding_the_box(tmp_path, monkeypatch):
+    """The answer is read once the other reaper lets go: until then the tree is half
+    removed, and a box mid-teardown still has its directory."""
+    held_while_asked: list[bool] = []
+    lock = worktree.boxes_root(tmp_path) / worktree.reap_lock_name("demo--x-0806")
+    monkeypatch.setattr(
+        worktree, "live_boxes", lambda root: held_while_asked.append(lock.is_dir()) or {}
+    )
+    assert worktree.reaped_elsewhere(tmp_path, "demo--x-0806")
+    assert held_while_asked == [True], "read under the box's reap lock"
+    assert not lock.exists()
+
+
+def test_reap_lock_is_one_directory_per_box_beside_the_boxes(tmp_path):
+    lock = worktree.boxes_root(tmp_path) / worktree.reap_lock_name("demo--x-0806")
+    with worktree.reap_lock(tmp_path, "demo--x-0806") as held:
+        assert held and lock.is_dir()
+        with worktree.reap_lock(tmp_path, "demo--y-0806") as other:
+            assert other, "another box's reap is not held up by this one"
+        with worktree.reap_lock(tmp_path, "demo--x-0806", wait=0.1) as again:
+            assert not again, "a second reaper of the same box waits, then says it did not get it"
+    assert not lock.exists()
+
+
+def test_apply_reap_holds_the_box_reap_lock_for_the_teardown(tmp_path, monkeypatch):
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    workspace.parent.mkdir()
+    worktree.write_leases(workspace.parent, {"demo--x-0806": box("demo--x-0806", project="demo")})
+    worktree.box_path(workspace.parent, "demo--x-0806").mkdir()
+    lock = worktree.boxes_root(workspace.parent) / worktree.reap_lock_name("demo--x-0806")
+    held: list[bool] = []
+    monkeypatch.setattr(
+        worktree, "run_steps", lambda *a, **k: held.append(lock.is_dir()) or ([], "", "")
+    )
+    ok, _ = worktree.apply_reap(worktree.ReapPlan(box="demo--x-0806", project="demo"), workspace)
+    assert ok and held == [True]
+    assert not lock.exists()
+
+
+def test_reap_vacated_asks_the_engine_only_about_a_box_with_a_stack(tmp_path, monkeypatch):
+    reaped: list[str] = []
+    monkeypatch.setattr(worktree, "apply_reap", lambda p, _w: reaped.append(p.box) or (True, []))
+    stackless = worktree.ReapPlan(box="demo--x-0806", path=str(tmp_path / "b"))
+    assert worktree.reap_vacated(stackless, tmp_path, [], lambda: pytest.fail("asked"))[:2] == (
+        worktree.REAP,
+        True,
+    )
+    stacked = worktree.replace(stackless, box="demo--y-0806", stack_down=True)
+    assert worktree.reap_vacated(stacked, tmp_path, [], str)[:2] == (worktree.REAP, True)
+    assert reaped == ["demo--x-0806", "demo--y-0806"]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (
+            subprocess.CompletedProcess(
+                [],
+                1,
+                "",
+                "failed to connect to the docker API at npipe:////./pipe/"
+                "dockerDesktopLinuxEngine; open //./pipe/dockerDesktopLinuxEngine: "
+                "The system cannot find the file specified.",
+            ),
+            "Docker's engine is not running",
+        ),
+        (subprocess.CompletedProcess([], 0, "28.3.2\n", ""), ""),
+        # 08ec2a47, 2026-10-12: WSL hung under Docker Desktop, whose API proxy answered.
+        (
+            subprocess.CompletedProcess(
+                [], 1, "", "Error response from daemon: Docker Desktop is unable to start"
+            ),
+            "Docker's engine is not running",
+        ),
+        (subprocess.CompletedProcess([], 0, "\n", ""), "Docker's engine named no server version"),
+        (subprocess.CompletedProcess([], 1, "", "permission denied"), ""),
+        (FileNotFoundError("docker"), ""),
+        (
+            subprocess.CompletedProcess([], worktree.sweep.TIMED_OUT, "", "timed out"),
+            "Docker's engine did not answer in 60s",
+        ),
+    ],
+)
+def test_docker_engine_down_reads_what_docker_info_says(monkeypatch, outcome, expected):
+    """The 2026-10-01 run's own stderr is the first case. An error that is not the engine
+    is no reason to wait, and no docker at all leaves `compose_down` to say so. Asked
+    with `docker version`: `docker info --format` exits 0 over a stopped engine. Through
+    `sweep.run_bounded`, never `subprocess.run(timeout=)`, which ends `docker.exe` alone
+    and then waits on the pipes its children hold (a7efb9b3)."""
+    asked: list[tuple[list[str], float]] = []
+
+    def bounded(argv, timeout, **_k):
+        asked.append((list(argv), timeout))
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(worktree.sweep, "run_bounded", bounded)
+    monkeypatch.setattr(worktree.subprocess, "run", lambda *a, **k: pytest.fail("unbounded"))
+    assert REAL_DOCKER_ENGINE_DOWN() == expected
+    assert asked == [(["docker", "version", "--format", "{{.Server.Version}}"], 60.0)]
+
+
 def test_reconcile_never_reaps_a_box_holding_work(workspace, monkeypatch):
     root = _reconcilable(
         workspace, monkeypatch, "demo--busy-0806", sweep.READY, "2 uncommitted", "MERGED"
@@ -3905,6 +4771,131 @@ def test_reconcile_syncs_the_checkouts_by_default(workspace, monkeypatch):
     assert called == [True]
 
 
+def test_a_pass_past_its_deadline_begins_nothing_more(workspace, monkeypatch):
+    """3fa66640: 2026-11-07 the 00:30 pass was still going at 00:45 and the scheduler
+    skipped that fire. Every call it made was bounded; the pass was not. Past its
+    deadline it inspects no box, reaps none and syncs no checkout -- each left to the
+    next pass, which the report names -- and it destroys nothing it did not begin."""
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
+    )
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: pytest.fail("reaped past it"))
+    monkeypatch.setattr(
+        worktree, "sync_checkouts", lambda *a, **k: pytest.fail("synced past the deadline")
+    )
+
+    with sweep.until(worktree.time.monotonic() - 1):
+        code, report = worktree.reconcile(workspace, apply=True)
+
+    assert code == 0, "the next pass takes it: a deferral is not a failure"
+    assert report["deferred"] == ["demo--done-0806", "the checkout sync"]
+    assert report["boxes"] == []
+    assert "demo--done-0806" in worktree.read_leases(root)
+    rendered = worktree.render_reconcile(report)
+    assert "left to the next pass" in rendered and "demo--done-0806" in rendered
+
+
+def test_a_box_inspected_in_time_is_not_reaped_once_the_deadline_passes(workspace, monkeypatch):
+    """The deadline checked before each destroying step, not only at the pass's start."""
+    _reconcilable(workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED")
+    deadline = worktree.time.monotonic() + 600
+
+    def inspect_then_run_out(*args, **kwargs):
+        # The clock reaching the deadline mid-inspection; `until`'s exit restores it.
+        sweep._until = deadline - 1200
+        return state(), sweep.NEEDS_PR, "pushed"
+
+    monkeypatch.setattr(worktree, "inspect_box", inspect_then_run_out)
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: pytest.fail("reaped past it"))
+    monkeypatch.setattr(worktree, "sync_checkouts", lambda *a, **k: pytest.fail("synced"))
+
+    with sweep.until(deadline):
+        _code, report = worktree.reconcile(workspace, apply=True)
+
+    assert report["deferred"] == ["demo--done-0806", "the checkout sync"]
+
+
+def test_a_pass_with_time_left_defers_nothing(workspace, monkeypatch):
+    _reconcilable(workspace, monkeypatch, "demo--busy-0806", sweep.READY, "2 uncommitted", "OPEN")
+    monkeypatch.setattr(
+        worktree, "sync_checkouts", lambda *a, **k: (0, {"rows": [], "failed": False})
+    )
+    with sweep.until(worktree.time.monotonic() + 600):
+        _code, report = worktree.reconcile(workspace, apply=True)
+    assert report["deferred"] == []
+    assert "left to the next pass" not in worktree.render_reconcile(report)
+
+
+def test_inspect_boxes_reads_none_past_the_deadline(monkeypatch):
+    monkeypatch.setattr(
+        worktree, "inspect_box", lambda *a, **k: pytest.fail("read a box past the deadline")
+    )
+    deferred: list[str] = []
+    steps: list[str] = []
+    monkeypatch.setattr(worktree.reconcile_journal, "step", steps.append)
+    boxes = {"b--two-0806": box("b--two-0806"), "a--one-0806": box("a--one-0806")}
+    with sweep.until(worktree.time.monotonic() - 1):
+        rows, landed = worktree.inspect_boxes(boxes, Path("ws"), False, deferred)
+    assert (rows, landed) == ([], set())
+    assert steps == [], "a box left for the next pass is not a step this one reached"
+    assert deferred == ["a--one-0806", "b--two-0806"], "in the order a pass reads them"
+
+
+def test_sync_in_time_runs_the_sync_only_when_asked_and_in_time(workspace, monkeypatch):
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        worktree,
+        "sync_checkouts",
+        lambda ws, apply, fetch: (calls.append(apply), (1, {"rows": [], "failed": True}))[1],
+    )
+    deferred: list[str] = []
+    assert worktree.sync_in_time(workspace, False, True, False, deferred) == (0, {})
+    assert worktree.sync_in_time(workspace, True, True, False, deferred)[0] == 1
+    with sweep.until(worktree.time.monotonic() - 1):
+        assert worktree.sync_in_time(workspace, True, True, False, deferred) == (0, {})
+    assert calls == [True] and deferred == ["the checkout sync"]
+
+
+def test_render_deferred_and_render_empty_name_what_was_left():
+    left = {"deferred": ["demo--a-0806", "the checkout sync"]}
+    line = "left to the next pass, this one's time having run out: demo--a-0806, the checkout sync"
+    assert worktree.render_deferred(left) == [line]
+    assert worktree.render_deferred(left, lead="\n  ") == [f"\n  {line}"]
+    assert worktree.render_deferred({}) == []
+    assert worktree.render_empty(left) == line
+    assert worktree.render_empty({"deferred": []}) == worktree.NOTHING_TO_RECONCILE
+
+
+def test_add_reconcile_scope_args_pairs_the_checkouts_flag_and_takes_a_budget():
+    parser = worktree.argparse.ArgumentParser()
+    worktree.add_reconcile_scope_args(parser)
+    assert vars(parser.parse_args([])) == {"checkouts": True, "budget": None}
+    assert vars(parser.parse_args(["--no-checkouts", "--budget", "720"])) == {
+        "checkouts": False,
+        "budget": 720.0,
+    }
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--checkouts", "--no-checkouts"])
+
+
+def test_the_reconcile_cli_bounds_the_pass_by_its_budget(workspace, monkeypatch):
+    seen: list = []
+
+    def reconcile(*args, **kwargs):
+        seen.append(sweep._until)
+        return 0, {"boxes": [], "checkouts": {}, "deferred": []}
+
+    monkeypatch.setattr(worktree, "reconcile", reconcile)
+    monkeypatch.setattr(worktree, "write_reconcile_log", lambda *a, **k: None)
+    before = worktree.time.monotonic()
+    argv = ["reconcile", "--no-fetch", "--workspace", str(workspace)]
+    assert worktree.main([*argv, "--budget", "720"]) == 0
+    assert worktree.main(argv) == 0
+    assert seen[0] is not None and before + 720 <= seen[0] <= worktree.time.monotonic() + 720
+    assert seen[1] is None, "a pass run by hand is unbounded"
+    assert sweep._until is None, "and the bound ends with the pass"
+
+
 def test_reconcile_can_be_scheduled_for_boxes_only(workspace, monkeypatch):
     monkeypatch.setattr(
         worktree,
@@ -3973,6 +4964,42 @@ def test_the_log_is_overwritten_per_run_not_appended(tmp_path):
     assert "first pass" not in body
 
 
+def test_a_failing_pass_is_kept_past_the_clean_pass_that_follows_it(tmp_path):
+    """3a8c74a3: the job failed at 22:30, the 22:45 pass overwrote `reconcile.log` with
+    `exit=0`, and the sweep that read the ledger row found nothing to diagnose."""
+    worktree.write_reconcile_log("could not reap demo--x-0806", 1, root=tmp_path)
+    worktree.write_reconcile_log("Nothing to reconcile.", 0, root=tmp_path)
+    kept = (tmp_path / worktree.RECONCILE_FAILED_LOG).read_text(encoding="utf-8")
+    assert "could not reap demo--x-0806" in kept and "exit=1" in kept
+    assert "exit=0" in (tmp_path / worktree.RECONCILE_LOG).read_text(encoding="utf-8")
+
+
+def test_a_clean_pass_writes_no_failed_copy(tmp_path):
+    worktree.write_reconcile_log("Nothing to reconcile.", 0, root=tmp_path)
+    assert not (tmp_path / worktree.RECONCILE_FAILED_LOG).exists()
+
+
+def test_a_pass_that_raises_leaves_its_traceback_rather_than_the_last_exit_0(tmp_path, monkeypatch):
+    """Under `pythonw.exe` an escaped exception reaches no console: the scheduler said
+    exit 1 while `reconcile.log` still read the previous pass's `exit=0`."""
+    workspace = tmp_path / "ws" / "probe.code-workspace"
+    workspace.parent.mkdir()
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+    log = workspace.parent / worktree.RECONCILE_LOG
+    log.parent.mkdir(parents=True)
+    log.write_text("# devkit worktree reconcile\n# earlier  exit=0\n", encoding="utf-8")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("worktree vanished mid-pass")
+
+    monkeypatch.setattr(worktree, "reconcile", boom)
+    with pytest.raises(RuntimeError):
+        worktree.main(["reconcile", "--yes", "--no-fetch", "--workspace", str(workspace)])
+    for path in (log, workspace.parent / worktree.RECONCILE_FAILED_LOG):
+        body = path.read_text(encoding="utf-8")
+        assert "exit=1" in body and "RuntimeError: worktree vanished mid-pass" in body
+
+
 def test_an_unwritable_log_never_fails_the_pass(tmp_path, monkeypatch):
     """A reconcile that did its work must not report failure over a log file."""
     monkeypatch.setattr(
@@ -3985,8 +5012,17 @@ def test_artifact_root_keeps_this_repo_only_for_the_workspace_it_is_inside(tmp_p
     """`REPO_ROOT` is bound at import to whichever devkit is executing, so every CLI path
     wrote its `logs/` here regardless of the workspace it was pointed at. Right for the
     scheduled job, whose workspace is this one; wrong for everything else."""
-    assert worktree.artifact_root(worktree.REPO_ROOT.parent) == worktree.REPO_ROOT
+    checkout = sweep.source_checkout(worktree.REPO_ROOT)
+    assert worktree.artifact_root(checkout.parent) == checkout
     assert worktree.artifact_root(tmp_path) == tmp_path
+
+
+def test_artifact_root_is_the_checkout_a_tree_was_cut_from(tmp_path):
+    """A reconcile run from a fixer's tree recorded its reap in that tree's `logs/`."""
+    checkout = tmp_path / "devkit"
+    tree = checkout / ".claude" / "worktrees" / "fix-harness-ledger-0929-15"
+    tree.mkdir(parents=True)
+    assert worktree.artifact_root(tmp_path, repo_root=tree) == checkout
 
 
 def test_the_reconcile_cli_writes_the_log_of_the_workspace_it_acted_on(tmp_path):
@@ -4044,6 +5080,38 @@ def test_a_dry_run_leaves_the_scheduled_passs_log_untouched(tmp_path):
     )
 
     assert log.read_text(encoding="utf-8") == before
+    assert not (workspace.parent / worktree.reconcile_journal.HISTORY).exists()
+
+
+def test_the_reconcile_cli_records_when_its_pass_started_and_its_steps(tmp_path, monkeypatch):
+    """1f44005c: the log stamped only its end, and only the latest pass, so how long the
+    overlapping 00:30 pass ran, and in which step, could not be read anywhere."""
+    workspace = tmp_path / "ws" / "probe.code-workspace"
+    workspace.parent.mkdir()
+    workspace.write_text('{"folders": []}', encoding="utf-8")
+
+    def reconcile(*_a, **_k):
+        worktree.reconcile_journal.step("inspect demo--x-0806")
+        return 0, {"boxes": [], "checkouts": {}, "deferred": []}
+
+    monkeypatch.setattr(worktree, "reconcile", reconcile)
+    argv = ["reconcile", "--yes", "--no-fetch", "--workspace", str(workspace)]
+    assert worktree.main(argv) == 0
+    root = workspace.parent
+    body = (root / worktree.RECONCILE_LOG).read_text(encoding="utf-8")
+    assert "started=" in body and "took=" in body and "inspect demo--x-0806@" in body
+    assert worktree.main(argv) == 0
+    rows = (root / worktree.reconcile_journal.HISTORY).read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 2, "every pass is kept, not only the latest"
+    assert not (root / worktree.reconcile_journal.RUNNING).exists()
+
+
+def test_a_reconcile_pass_names_each_box_and_the_sync_as_it_reaches_them(workspace, monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(worktree.reconcile_journal, "step", seen.append)
+    monkeypatch.setattr(worktree, "sync_checkouts", lambda *a, **k: (0, {}))
+    worktree.reconcile(workspace, apply=True)
+    assert seen[-1] == "sync checkouts"
 
 
 # --- the scheduled pass opens no windows ------------------------------------
@@ -4699,7 +5767,7 @@ def test_compose_up_for_a_ui_box_scopes_to_its_services_with_no_deps(monkeypatch
     -- onto the donor's ports, because that is what this box's `.env` holds."""
     seen = []
     monkeypatch.setattr(
-        worktree.subprocess, "run", lambda argv, **k: seen.append(argv) or _completed()
+        worktree.sweep, "run_bounded", lambda argv, timeout, **k: seen.append(argv) or _completed()
     )
 
     # `compose_up` probes `compose config` first; a stub that answers nothing sends it
@@ -4736,9 +5804,9 @@ def test_compose_up_disables_bake_so_two_services_can_share_one_image_tag(monkey
     """
     seen = {}
     monkeypatch.setattr(
-        worktree.subprocess,
-        "run",
-        lambda argv, **k: seen.update(env=k.get("env")) or _completed(),
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, timeout, **k: seen.update(env=k.get("env")) or _completed(),
     )
     monkeypatch.setenv("PATH", "/sentinel-path")
     ok, _ = worktree.compose_up(Path("x"), "c--y")
@@ -4875,6 +5943,46 @@ def test_a_failed_image_removal_is_reported_but_is_not_fatal(monkeypatch):
     assert "image is in use" in message
 
 
+def test_an_image_the_box_never_built_is_already_removed(monkeypatch):
+    """The 2026-10-04 reconcile failure: carameli's `db-backup` is a built service with a
+    box-scoped tag, but a box that never started it never built it, so `docker image rm`
+    removed the app image, said `No such image` for the other, and exited 1 -- failing
+    every reap of such a box over an image that was exactly as gone as it should be."""
+    missing = "Error response from daemon: No such image: carameli-db-backup-c--x:latest"
+    monkeypatch.setattr(
+        worktree.subprocess,
+        "run",
+        lambda *a, **k: _completed(1, stdout="Untagged: carameli-app-c--x:latest", stderr=missing),
+    )
+    ok, message = worktree.remove_images(("carameli-app-c--x", "carameli-db-backup-c--x"))
+    assert ok
+    assert "No such image" not in message
+    assert "carameli-db-backup-c--x" in message
+
+
+def test_a_real_image_error_still_fails_beside_an_already_missing_one(monkeypatch):
+    """Only `No such image` is the goal state. Anything else beside it -- an image still
+    in use -- is a leak the reap must report, and the report names that error alone."""
+    stderr = (
+        "Error response from daemon: No such image: carameli-db-backup-c--x:latest\n"
+        "Error response from daemon: conflict: unable to remove repository reference "
+        '"carameli-app-c--x" - container 1a2b is using its referenced image'
+    )
+    monkeypatch.setattr(worktree.subprocess, "run", lambda *a, **k: _completed(1, stderr=stderr))
+    ok, message = worktree.remove_images(("carameli-app-c--x", "carameli-db-backup-c--x"))
+    assert not ok
+    assert "is using its referenced image" in message
+    assert "No such image" not in message
+
+
+def test_a_silent_image_removal_failure_is_not_read_as_success(monkeypatch):
+    """Filtering out `No such image` leaves nothing for an exit 1 that printed nothing,
+    and an empty error list must not pass for "every error was a missing image"."""
+    monkeypatch.setattr(worktree.subprocess, "run", lambda *a, **k: _completed(1))
+    ok, _ = worktree.remove_images(("carameli-app-c--x",))
+    assert not ok
+
+
 def test_a_missing_docker_leaves_the_images_rather_than_raising(monkeypatch):
     """`reap` runs when the daemon is down -- that is the case `compose_down` already
     tolerates, and an unhandled `FileNotFoundError` here would abort the reap after the
@@ -4964,9 +6072,9 @@ def test_compose_config_reads_the_resolved_stack_and_swallows_every_failure(monk
     by `compose_up`, with the message docker actually gave.
     """
     monkeypatch.setattr(
-        worktree.subprocess,
-        "run",
-        lambda argv, **k: _completed(stdout='{"services": {"app": {}}}'),
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, timeout, **k: _completed(stdout='{"services": {"app": {}}}'),
     )
     assert worktree.compose_config(Path("x"), "c--y") == {"services": {"app": {}}}
 
@@ -4974,15 +6082,17 @@ def test_compose_config_reads_the_resolved_stack_and_swallows_every_failure(monk
         _completed(returncode=1, stderr="no configuration file provided"),
         _completed(stdout="not json at all"),
         _completed(stdout="[1, 2, 3]"),
+        _completed(returncode=worktree.sweep.TIMED_OUT, stderr="timed out after 120s"),
     ):
-        monkeypatch.setattr(worktree.subprocess, "run", lambda argv, a=answer, **k: a)
+        monkeypatch.setattr(worktree.sweep, "run_bounded", lambda argv, t, a=answer, **k: a)
         assert worktree.compose_config(Path("x"), "c--y") is None
 
-    for boom in (FileNotFoundError("docker"), worktree.subprocess.TimeoutExpired("docker", 1)):
-        monkeypatch.setattr(
-            worktree.subprocess, "run", lambda argv, e=boom, **k: (_ for _ in ()).throw(e)
-        )
-        assert worktree.compose_config(Path("x"), "c--y") is None
+    monkeypatch.setattr(
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, t, **k: (_ for _ in ()).throw(FileNotFoundError("docker")),
+    )
+    assert worktree.compose_config(Path("x"), "c--y") is None
 
 
 def test_compose_tail_sorts_what_the_stack_said_so_churn_is_not_progress(monkeypatch):
@@ -5004,11 +6114,11 @@ def test_compose_tail_sorts_what_the_stack_said_so_churn_is_not_progress(monkeyp
         ]
     )
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv, timeout, **kwargs):
         seen.append(argv)
         return _completed(stdout=next(answers))
 
-    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    monkeypatch.setattr(worktree.sweep, "run_bounded", fake_run)
     first = worktree.compose_tail(Path("x"), "c--preview-x")
     assert first == "db-1 | ready to accept connections\nfrontend-1 | vite ready"
     # Reordered *and* repadded, which is the second half of the same measurement: docker
@@ -5027,24 +6137,79 @@ def test_compose_tail_is_never_the_thing_that_ends_a_wait(monkeypatch):
     returned a plausible-looking error string -- would abandon a preview that was fine.
     That is the bug this function was added to fix, in a new place.
     """
-    for answer in (_completed(returncode=1, stderr="no such project"), _completed(stdout="  \n")):
-        monkeypatch.setattr(worktree.subprocess, "run", lambda argv, a=answer, **k: a)
+    for answer in (
+        _completed(returncode=1, stderr="no such project"),
+        _completed(stdout="  \n"),
+        _completed(returncode=worktree.sweep.TIMED_OUT, stdout="db-1 | half a line"),
+    ):
+        monkeypatch.setattr(worktree.sweep, "run_bounded", lambda argv, t, a=answer, **k: a)
         assert worktree.compose_tail(Path("x"), "c--y") == ""
 
-    for boom in (FileNotFoundError("docker"), worktree.subprocess.TimeoutExpired("docker", 1)):
-        monkeypatch.setattr(
-            worktree.subprocess, "run", lambda argv, e=boom, **k: (_ for _ in ()).throw(e)
-        )
-        assert worktree.compose_tail(Path("x"), "c--y") == ""
+    monkeypatch.setattr(
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, t, **k: (_ for _ in ()).throw(FileNotFoundError("docker")),
+    )
+    assert worktree.compose_tail(Path("x"), "c--y") == ""
+
+
+def test_a_compose_down_on_a_wedged_engine_ends_at_its_bound(monkeypatch):
+    """bd12e216: `subprocess.run(timeout=)` killed `docker.exe` and then read the pipes
+    its compose plugin still held, so the reconcile's reap waited for the engine. The
+    tree-ending runner's timeout is the bound, and the reap is told so."""
+    seen = []
+
+    def wedged(argv, timeout, **kwargs):
+        seen.append((argv, timeout, kwargs.get("cwd")))
+        return _completed(worktree.sweep.TIMED_OUT, stderr="timed out after 300s")
+
+    monkeypatch.setattr(worktree.sweep, "run_bounded", wedged)
+    ok, message = worktree.compose_down(Path("box"), "c--x")
+    assert not ok and "timed out after 300s" in message
+    argv = ["docker", "compose", "-p", "c--x", "down", "-v", "--remove-orphans"]
+    assert seen == [(argv, 300, "box")]
+
+
+def test_compose_raises_the_timeout_the_runner_ended_on_and_passes_the_rest(monkeypatch):
+    """`compose` keeps `subprocess.run`'s contract for its callers: a timeout raises,
+    with what was said before it; any other exit is returned as it came."""
+    answers = [
+        _completed(worktree.sweep.TIMED_OUT, stdout="half", stderr="timed out after 9s"),
+        _completed(1, stderr="no such service"),
+    ]
+    seen = []
+
+    def run(argv, timeout, **kwargs):
+        seen.append((argv, timeout, kwargs))
+        return answers.pop(0)
+
+    monkeypatch.setattr(worktree.sweep, "run_bounded", run)
+    with pytest.raises(subprocess.TimeoutExpired) as ended:
+        worktree.compose(Path("box"), "c--x", ["ps"], 9, env={"A": "1"})
+    assert ended.value.timeout == 9 and ended.value.output == "half"
+    assert seen[0] == (
+        ["docker", "compose", "-p", "c--x", "ps"],
+        9,
+        {"cwd": "box", "env": {"A": "1"}},
+    )
+    assert worktree.compose(Path("box"), "c--x", ["up"], 9).returncode == 1
+
+
+def test_every_docker_compose_call_goes_through_the_tree_ending_runner():
+    """A `docker compose` spelled anywhere but `compose` would be a `subprocess.run`
+    again, and its timeout would stop the clock but not the wait."""
+    source = Path(worktree.__file__).read_text(encoding="utf-8")
+    assert source.count('"docker", "compose"') == 1
+    assert 'argv = ["docker", "compose", "-p", project_name, *args]' in source
 
 
 def test_compose_tail_truncates_a_line_that_would_take_the_terminal(monkeypatch):
     """It is printed inline on a progress tick. One container logging a stack trace or a
     minified bundle would wrap the report into unreadability every fifteen seconds."""
     monkeypatch.setattr(
-        worktree.subprocess,
-        "run",
-        lambda argv, **k: _completed(stdout="x" * 4000 + "\n" + "y" * 4000 + "\n"),
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, timeout, **k: _completed(stdout="x" * 4000 + "\n" + "y" * 4000 + "\n"),
     )
     assert worktree.compose_tail(Path("x"), "c--y") == "x" * 120 + "\n" + "y" * 120
 
@@ -5054,13 +6219,13 @@ def test_compose_up_builds_by_name_then_starts_without_build(monkeypatch):
     plan again, so its absence is the assertion that matters."""
     seen = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv, timeout, **kwargs):
         seen.append(argv)
         if "config" in argv:
             return _completed(stdout=json.dumps(_SHARED_TAG_CONFIG))
         return _completed()
 
-    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    monkeypatch.setattr(worktree.sweep, "run_bounded", fake_run)
     ok, message = worktree.compose_up(Path("x"), "c--preview-x")
     assert ok
     build, up = (argv for argv in seen if "config" not in argv)
@@ -5075,13 +6240,13 @@ def test_a_failed_build_is_reported_and_the_up_never_runs(monkeypatch):
     would run the *previous* images and report a preview of the wrong code."""
     seen = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(argv, timeout, **kwargs):
         seen.append(argv)
         if "config" in argv:
             return _completed(stdout=json.dumps(_SHARED_TAG_CONFIG))
         return _completed(returncode=1, stderr="target app: failed to solve")
 
-    monkeypatch.setattr(worktree.subprocess, "run", fake_run)
+    monkeypatch.setattr(worktree.sweep, "run_bounded", fake_run)
     ok, message = worktree.compose_up(Path("x"), "c--preview-x")
     assert not ok
     assert "failed to solve" in message
@@ -5112,7 +6277,9 @@ def test_compose_up_names_a_dead_engine_instead_of_blaming_the_stack(monkeypatch
         "find the file specified."
     )
     monkeypatch.setattr(
-        worktree.subprocess, "run", lambda argv, **k: _completed(returncode=1, stderr=stderr)
+        worktree.sweep,
+        "run_bounded",
+        lambda argv, timeout, **k: _completed(returncode=1, stderr=stderr),
     )
     ok, message = worktree.compose_up(Path("x"), "c--y")
     assert not ok
@@ -5199,7 +6366,9 @@ def test_a_re_leased_ui_box_keeps_its_two_slot_env(tmp_path, monkeypatch):
     monkeypatch.setattr(worktree, "has_stack", lambda path: True)
     monkeypatch.setattr(worktree, "is_tracked", lambda path, name: False)
     seeded: dict[str, str] = {}
-    monkeypatch.setattr(worktree, "seed_env", lambda src, dst, env: seeded.update(env))
+    monkeypatch.setattr(
+        worktree, "seed_env", lambda src, dst, env, published=None: seeded.update(env) or {}
+    )
     ui = worktree.Box(
         name="demo--preview-ui--x",
         project="demo",
@@ -5227,6 +6396,34 @@ def test_a_re_leased_ui_box_keeps_its_two_slot_env(tmp_path, monkeypatch):
     assert seeded["APP_HOST_PORT"] == "8000"  # still the donor's
     assert seeded["VITE_PROXY_TARGET"] == "http://h:8000"
     assert any("re-leased slot 2" in note for note in notes)
+
+
+def test_a_new_box_seeds_its_db_url_onto_its_own_port(tmp_path, monkeypatch):
+    """The spawn hands `seed_env` the source checkout's registry ports, so the box's
+    `DATABASE_URL` names the box's db -- and says so in the notes."""
+    workspace = tmp_path / "ws" / "registry.code-workspace"
+    (tmp_path / "ws" / "ibkr_trader").mkdir(parents=True)
+    (tmp_path / "ws" / "ibkr_trader" / ".env").write_text(IBKR_ENV, encoding="utf-8")
+    monkeypatch.setattr(worktree, "run_steps", lambda *a, **k: ([], "", ""))
+    monkeypatch.setattr(worktree, "load_registry", lambda root: registry(ibkr_trader=1))
+    monkeypatch.setattr(worktree, "has_stack", lambda path: True)
+    monkeypatch.setattr(worktree, "is_tracked", lambda path, name: False)
+    name = "ibkr_trader--x-1011"
+    path = worktree.box_path(workspace.parent, name)
+    path.mkdir(parents=True)
+    plan = worktree.SpawnPlan(
+        box=box(name, project="ibkr_trader", branch="agent/x-1011", slot=3),
+        path=str(path),
+        steps=(),
+        env=worktree.managed_env(name, registry(ibkr_trader=1), 3),
+    )
+
+    ok, notes = worktree.apply_new(plan, workspace, provision=False)
+
+    assert ok
+    seeded = (path / ".env").read_text(encoding="utf-8").rsplit("DATABASE_URL=", 1)[1]
+    assert seeded.startswith(f"{BOX_DB_URL}\n")
+    assert any("moved DATABASE_URL off ibkr_trader's ports" in note for note in notes)
 
 
 def test_a_ui_preview_of_a_project_with_no_ui_tier_is_refused(workspace):

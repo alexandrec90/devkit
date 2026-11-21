@@ -1,0 +1,27 @@
+using System.Reflection;
+
+namespace {{ desktop_name }};
+
+/// <summary>What the app knows about itself, read from its own assembly.</summary>
+public static class AppInfo
+{
+    public const string Name = "{{ desktop_name }}";
+
+    /// <summary>The release version: `scripts/desktop.py release` stamps it from the tag.</summary>
+    public static string Version { get; } = VersionOf(typeof(AppInfo).Assembly);
+
+    internal static string VersionOf(Assembly assembly)
+    {
+        var informational = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion;
+        if (string.IsNullOrWhiteSpace(informational))
+        {
+            return assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        }
+
+        // The SDK appends `+<commit>` to the informational version; users see the release.
+        var plus = informational.IndexOf('+');
+        return plus < 0 ? informational : informational[..plus];
+    }
+}

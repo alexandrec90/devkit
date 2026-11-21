@@ -10,13 +10,25 @@ a diff can be read by anyone, and the message is the one changelog consumers get
 The fix pass (`scripts/fix-pass.py`) does the rest, here: run the commit-stage fixers
 through the tree's own `ship.py --fix`, commit with the message, push with the push gate
 skipped -- CI judges, and the pass reads its artifact -- open the PR, labelled
-`automerge` only when the fix pass cut the tree (`labels_for`): a fixer's PR merges
-once green, a person's waits for them. The outcome is recorded in `logs/ship-state.json`
-beside the intent. A refused commit is
+`automerge` (`labels_for`): every PR merges once green, a person's as much as a fixer's,
+unless it was shipped `/ship hold`. A held PR stays held through a resolver's ship
+(`held_pr`), in this flow as in the direct one.
+
+**A project in the direct flow** (`delivery.py`, `Intent.direct`) ships here too, from the
+ship task (`scripts/ship-pass.py`), by a shorter road: no fixers and no pre-commit
+framework, at the commit or the push, because every check now runs after the merge
+(`_commit_direct`). The branch policy still runs: it is what refuses a retired name, and
+`_commit_carrying` depends on that refusal. Its PR is labelled `merge-now` unless the
+intent carries `Hold: yes` on a line of its own (`asks_hold`), and a held PR stays held
+through a resolver's ship (`held_pr`), which is also what any doubt about it reads as.
+
+The outcome is recorded in `logs/ship-state.json` beside the intent. A refused commit is
 recorded too, with the pre-commit output as evidence, so the pass can tell it from a
 session still working: no intent file means hands off, an intent with a refusal means a
 dispatchable failure, an intent already shipped at this tree's state means nothing to do,
-and so does one over a tree with nothing changed or committed (`commits_ahead`).
+and so does one over a tree with nothing changed or committed (`commits_ahead`), or
+whose every change is already on its base (`lands_nothing`) -- which closes the open PR
+the tree heads as superseded, where the pass or Dependabot opened it (`_superseded`).
 
 **The intent is consumed.** Once shipped it becomes `logs/ship-intent.shipped.md`; once
 a fixer is sent at a refusal it becomes `logs/ship-intent.refused.md` (the pass does
@@ -40,21 +52,29 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import locale
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
+import delivery
 import fix_plan
 import fix_reports
+import git_policy
 import sweep
 import task_branch as tb
+import worktree_tiers
 from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -84,6 +104,10 @@ SKIP_PUSH_GATE = "devkit-push-gate"
 SKIPPED = "skipped"  # shipped already at this intent, or not a shippable branch
 REFUSED = "refused"  # the commit stage said no; a failure the pass can dispatch
 FAILED = "failed"  # the push or the PR failed; try again next pass
+# The push or the PR failed on GitHub's side (`sweep.transient`) past every in-pass retry,
+# and has not been failing for `TRANSIENT_GRACE`: tried again next pass, not filed. The
+# state file still reads `FAILED`, so everything that reads it retries as before.
+DEFERRED = "deferred"
 SHIPPED = "shipped"
 EMPTY = "empty"  # nothing changed and nothing committed: the work was all on the ledger
 
@@ -105,6 +129,12 @@ class Intent:
     # The checkout's default branch: what the PR opens against, and what decided
     # `blocked`. Read once per checkout by `find_intents`.
     base: str = ""
+    # A hand-named branch in an agent's worktree (`hand_named`), which `ship_one` renames
+    # into the `agent/` namespace before it commits.
+    adopt: bool = False
+    # The project is in the direct flow (`delivery.is_direct`), read off its checkout by
+    # `find_intents` so a tree cut before the switch ships the way the project does now.
+    direct: bool = False
 
     @property
     def digest(self) -> str:
@@ -120,6 +150,38 @@ class Outcome:
     url: str = ""
 
 
+class OutOfTime(Exception):
+    """A spawn still running at the deadline `bounded` set, ended with everything under
+    it (`ended`) -- or one that deadline had already passed, never started."""
+
+    def __init__(self, message: str, ended: bool) -> None:
+        super().__init__(message)
+        self.ended = ended
+
+
+# The `time.monotonic()` past which `run_quiet` spawns nothing and ends what it spawned;
+# None outside `bounded`. A module value rather than a runner argument because the
+# commit stage's spawns run several calls deep under `ship_one`, which takes its runner
+# from every caller and every test as `run_quiet` itself.
+_deadline: float | None = None
+
+
+@contextmanager
+def bounded(deadline: float | None) -> Iterator[None]:
+    """Every `run_quiet` inside ends by `deadline` or raises `OutOfTime`.
+
+    The pass's one unbounded step was a ship: on 2026-10-08 a roguelike commit's hooks
+    ran past fifteen minutes on a machine short of memory, and the watchdog stopped the
+    pass in it, with no record written and its lock left behind.
+    """
+    global _deadline
+    before, _deadline = _deadline, deadline
+    try:
+        yield
+    finally:
+        _deadline = before
+
+
 def run_quiet(
     argv: list[str], cwd: Path | str | None = None, env: dict[str, str] | None = None, **kwargs
 ):
@@ -131,11 +193,13 @@ def run_quiet(
     `cwd`, its own `capture_output`. The first dispatch the pass ever made died on
     `TypeError` here, with the record unwritten, because every test on either side
     had replaced the other. The window flag and a non-raising call are forced; the
-    rest is the caller's.
+    rest is the caller's. Inside `bounded`, it ends by the deadline (`_run_bounded`).
     """
     options: dict = {"capture_output": True, "text": True}
     options.update(kwargs)
     options["check"] = False
+    if _deadline is not None and "timeout" not in options:
+        return _run_bounded(argv, cwd, env, options, _deadline - time.monotonic())
     return subprocess.run(
         argv,
         cwd=None if cwd is None else str(cwd),
@@ -143,6 +207,124 @@ def run_quiet(
         creationflags=sweep.NO_WINDOW,
         **options,
     )
+
+
+def _run_bounded(argv: list[str], cwd, env, options: dict, seconds: float):
+    """`subprocess.run` that ends the whole tree when `seconds` run out: `OutOfTime`.
+
+    Not `subprocess.run(timeout=)`, which ends the child alone: `git commit`'s hooks
+    outlive it holding its pipes, and the read after the kill waits on them for as long
+    as they run -- the very wait the timeout was for. Nor pipes at all: what it captures
+    goes through temporary files (`_spooled`), and the wait is on the child, never on an
+    end-of-file. On 2026-10-08 a ship ended at the deadline came back four minutes late,
+    and the watchdog stopped the pass: `taskkill /T` follows live parents only, so a hook
+    process whose shell had exited survived it holding the pipe, and the read waited.
+    """
+    shown = " ".join(map(str, argv[:3]))
+    if seconds <= 0:
+        raise OutOfTime(f"`{shown}` not started: past the pass's deadline", ended=False)
+    options = dict(options)
+    options.pop("check", None)
+    data = options.pop("input", None)
+    if options.pop("capture_output", False):
+        options["stdout"] = options["stderr"] = subprocess.PIPE
+    if sys.platform != "win32":
+        options["start_new_session"] = True  # one group, so `_end_tree` can take all of it
+    cwd = None if cwd is None else str(cwd)
+    with _spooled(options, data) as spools:
+        process = subprocess.Popen(argv, cwd=cwd, env=env, creationflags=sweep.NO_WINDOW, **options)
+        try:
+            code = process.wait(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            _end_tree(process)
+            raise OutOfTime(
+                f"`{shown}` still running at the pass's deadline; ended it", ended=True
+            ) from None
+        out, err = (_read_back(spools.get(name), options) for name in ("stdout", "stderr"))
+    return subprocess.CompletedProcess(argv, code, out, err)
+
+
+@contextmanager
+def _spooled(options: dict, data) -> Iterator[dict]:
+    """A temporary file in `options` for stdin when there is `data`, and for each of
+    stdout and stderr asked to be `PIPE`; yields the output ones by name, and closes all."""
+    spools: dict = {}
+    try:
+        if data is not None:
+            spools["stdin"] = tempfile.TemporaryFile()
+            spools["stdin"].write(
+                data.encode(_encoding(options)) if isinstance(data, str) else data
+            )
+            spools["stdin"].seek(0)
+            options["stdin"] = spools["stdin"]
+        for name in ("stdout", "stderr"):
+            if options.get(name) == subprocess.PIPE:
+                options[name] = spools[name] = tempfile.TemporaryFile()
+        yield spools
+    finally:
+        for spool in spools.values():
+            spool.close()
+
+
+def _encoding(options: dict) -> str:
+    """The encoding `subprocess.run` would use in text mode for these `options`."""
+    return options.get("encoding") or locale.getpreferredencoding(False)
+
+
+def _read_back(spool, options: dict):
+    """What `subprocess.run` would have returned for one captured stream: None when it
+    was not captured, else its bytes, or in text mode its text with newlines translated."""
+    if spool is None:
+        return None
+    spool.seek(0)
+    raw = spool.read()
+    keys = ("text", "universal_newlines", "encoding", "errors")
+    if not any(options.get(key) for key in keys):
+        return raw
+    text = raw.decode(_encoding(options), options.get("errors") or "strict")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _end_tree(process: subprocess.Popen) -> None:
+    """End `process` and everything under it, then reap it (`collector_tasks.kill_tree`'s
+    reason: `Popen.kill` takes the child alone). Reaped by its exit, not by reading its
+    output to the end: an orphan the end missed may hold that open for as long as it
+    runs."""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+            capture_output=True,
+            check=False,
+            timeout=60,
+            creationflags=sweep.NO_WINDOW,
+        )
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)  # the session `_run_bounded` started
+        except ProcessLookupError:
+            pass
+    process.kill()
+    process.wait()
+
+
+def clear_index_lock(tree: Path) -> bool:
+    """Remove the tree's `index.lock` after `OutOfTime` ended what held it; whether one
+    was there. A `git commit` ended in its hooks leaves the lock behind, and every git
+    step the next pass takes in the tree is refused on it until something removes it.
+    Only after an end the pass itself made: its intents are held while a session works."""
+    try:
+        found = run_quiet(["git", "rev-parse", "--git-path", "index.lock"], cwd=tree)
+    except OSError:
+        return False
+    if found.returncode != 0 or not (found.stdout or "").strip():
+        return False
+    lock = Path(found.stdout.strip())
+    lock = lock if lock.is_absolute() else tree / lock
+    try:
+        lock.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 # --- the intent file ----------------------------------------------------------------
@@ -184,6 +366,28 @@ def has_open_pr(gh, branch: str) -> bool:
     return isinstance(rows, list) and bool(rows)
 
 
+# The namespace a hand-named branch is renamed into (`hand_named`).
+ADOPTED_NAMESPACE = "agent/"
+# A `since` before every resolution, for re-pointing off a name that never headed a PR.
+EVER = "1970-01-01T00:00:00+00:00"
+
+
+def hand_named(tree: Path, branch: str, base: str) -> bool:
+    """Whether `branch` is a name a session gave its task branch by hand, in a tree that
+    is disposable by where it sits.
+
+    The namespace rule (`ship.is_shippable`) keeps a PR from opening off a long-lived home
+    branch. An agent CLI's worktree or a box is never one, whatever its branch is called:
+    a session in social-scraper's spent fixer tree cut `reddit-import-memory-cap` and
+    wrote its intent, and every pass refused it (32f97dae). The ship skill never names
+    the rule, so the session had no way to know. The default branch and the static
+    checkout stay blocked.
+    """
+    if not branch or branch == base or "/" in branch:
+        return False
+    return worktree_tiers.is_worktree(tree) or worktree_tiers.is_box(tree)
+
+
 def find_intents(
     root: Path, projects: list[str], git_for=sweep.git_for, gh_for=sweep.gh_for
 ) -> list[Intent]:
@@ -216,7 +420,10 @@ def find_intents(
         shippable, why = ship.is_shippable(branch, base)
         if not shippable and branch != base and has_open_pr(gh_for(root / project), branch):
             shippable, why = True, ""
-        found.append(Intent(project, tree, branch, subject, body, "" if shippable else why, base))
+        adopt = not shippable and hand_named(tree, branch, base)
+        blocked = "" if shippable or adopt else why
+        direct = delivery.is_direct(root / project)
+        found.append(Intent(project, tree, branch, subject, body, blocked, base, adopt, direct))
     return found
 
 
@@ -235,15 +442,22 @@ def set_aside(tree: Path, target: Path) -> Path | None:
 # --- shipping one --------------------------------------------------------------------
 
 
-def already_shipped(intent: Intent, state: dict, porcelain: str) -> bool:
+def already_shipped(intent: Intent, state: dict, porcelain: str, head: str = "") -> bool:
     """Shipped, with nothing changed in the tree since: nothing to do.
 
     The words are deliberately not compared. A message edited after the ship, with no
     file changed, has no commit to carry it; shipping again would push nothing and ask
     for a second PR on a branch whose first may already have merged. The digest is
     still recorded, for the record's own sake -- what the tree *was* shipped as.
+
+    The sha is compared, when both are known: a record of a ship is a record of *that*
+    commit. #463's tree said `shipped` at 035c6b7 with two commits on top that never
+    reached origin, and a clean tree read as that ship set the intent aside (3ae36740).
     """
-    return state.get("stage") == SHIPPED and not porcelain.strip()
+    if state.get("stage") != SHIPPED or porcelain.strip():
+        return False
+    sha = str(state.get("sha", ""))
+    return not (head and sha) or sha == head
 
 
 def spent(intent: Intent, state: dict) -> bool:
@@ -259,35 +473,179 @@ def spent(intent: Intent, state: dict) -> bool:
     return state.get("stage") == SHIPPED and state.get("intent") == intent.digest
 
 
+def merging(tree: Path, runner: Runner) -> bool:
+    """Whether the tree is in the middle of a merge: `MERGE_HEAD` exists.
+
+    Its commit is work even over a clean `git status`. A merge that changes no file --
+    origin's side already in through a criss-cross, or a resolution that kept ours
+    everywhere -- has nothing to stage, and was read as nothing to ship: #538's resolver
+    set up exactly that merge, and the pass set its intent aside as "already shipped",
+    leaving the PR as conflicted as before. The file is looked for rather than the ref
+    verified, so git failing to answer reads as no merge, as everywhere else here.
+    """
+    where = runner(["git", "rev-parse", "--git-path", "MERGE_HEAD"], cwd=tree)
+    named = (where.stdout or "").strip() if where.returncode == 0 else ""
+    if not named:
+        return False
+    path = Path(named)
+    return (path if path.is_absolute() else tree / path).is_file()
+
+
 def _settled(
-    intent: Intent, porcelain: str, base: str, runner: Runner, when: str
+    intent: Intent, porcelain: str, base: str, runner: Runner, when: str, gh
 ) -> Outcome | None:
     """This pass's answer when nothing needs doing: shipped already, nothing to ship,
-    or refused again."""
+    or refused again. A merge in progress (`merging`) is never the first two."""
+    mid_merge = not porcelain.strip() and merging(intent.tree, runner)
     state = read_state(intent.tree)
-    if already_shipped(intent, state, porcelain):
+    head = _shipped_head(intent.tree, state, porcelain, runner)
+    if not mid_merge and already_shipped(intent, state, porcelain, head):
         # Consumed, as a fresh ship's intent is: left in place it was re-read and
         # re-reported by every pass -- ten from before the pass set intents aside.
         set_aside(intent.tree, SHIPPED_FILE)
         return Outcome(intent, SKIPPED, "already shipped at this intent; set aside")
-    if not porcelain.strip() and commits_ahead(intent.tree, base, runner) == 0:
-        write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
-        set_aside(intent.tree, SHIPPED_FILE)
-        return Outcome(intent, EMPTY, "nothing changed or committed: no PR to open; set aside")
+    refresh_base(intent.tree, base, runner)
+    if not porcelain.strip() and not mid_merge and commits_ahead(intent.tree, base, runner) == 0:
+        return _empty(intent, when, "nothing changed or committed: no PR to open; set aside")
+    if lands_nothing(intent.tree, base, runner) and (
+        superseded := _superseded(intent, base, runner, gh, when)
+    ):
+        return superseded
     return still_refused(intent, state, porcelain)
 
 
-def labels_for(tree: Path) -> tuple[str, ...]:
-    """`automerge` for work the fix pass started, nothing for a person's.
+# What a PR closed by `_superseded` is told, so whoever finds it closed knows why.
+SUPERSEDED_COMMENT = (
+    "Superseded: every change on this branch is already on `{base}`, so merging it would "
+    "change nothing. The fix pass resolved its conflict and found nothing left to land, "
+    "and closed it rather than leave it conflicting. Reopen it if that is wrong."
+)
+
+
+def _superseded(intent: Intent, base: str, runner: Runner, gh, when: str) -> Outcome | None:
+    """What a tree that lands nothing comes to: set aside, with the open PR it heads closed
+    where the pass may decide that PR's fate (`pass_owned`); None ships a person's as usual.
+
+    Set aside alone, the PR stayed open and as conflicting as before. carameli #476 was a
+    Dependabot bump whose every change had reached `master` by other PRs: its resolver
+    took `master`'s side and said so, the pass set the merge aside as `EMPTY`, and the
+    next pass found the same conflict, counted that resolver as its one attempt at a
+    problem with no failing id, and escalated it as `blind-evidence` (199602e6). A
+    person's PR is theirs to close, so their resolution is committed and pushed instead:
+    the conflict clears, and the empty PR is theirs to merge or close.
+    """
+    why = f"every change in the tree is already on origin/{base}: no PR to open; set aside"
+    number = open_pr_at_head(intent.tree, intent.branch, runner, gh)
+    if not number:
+        return _empty(intent, when, why)
+    if not pass_owned(intent):
+        return None
+    closed = gh("pr", "close", number, "--comment", SUPERSEDED_COMMENT.format(base=base))
+    if getattr(closed, "returncode", 1) != 0:
+        return _failed(intent, "close", _first(closed), when)
+    return _empty(intent, when, f"closed #{number} as superseded: {why}")
+
+
+def open_pr_at_head(tree: Path, branch: str, runner: Runner, gh) -> str:
+    """The number of the open PR `branch` heads at the tree's own HEAD; "" for none, for
+    one GitHub holds a head this tree has not seen, or when `gh` or git cannot say."""
+    listed = gh("pr", "list", "--head", branch, "--state", "open", "--json", "number,headRefOid")
+    if getattr(listed, "returncode", 1) != 0:
+        return ""
+    try:
+        rows = json.loads(listed.stdout or "[]")
+    except ValueError:
+        return ""
+    head = runner(["git", "rev-parse", "HEAD"], cwd=tree)
+    sha = (head.stdout or "").strip() if head.returncode == 0 else ""
+    for row in rows if isinstance(rows, list) and sha else []:
+        if isinstance(row, dict) and row.get("headRefOid") == sha and row.get("number"):
+            return str(row["number"])
+    return ""
+
+
+def pass_cut(tree: Path) -> bool:
+    """Whether the fix pass cut `tree` for a fixer (`fix_reports.ORIGIN_FILE`), or a fixer
+    cut it and marked it the same way. A fixer committing to a person's PR works in that
+    person's tree, which carries no mark."""
+    return (tree / fix_reports.ORIGIN_FILE).is_file()
+
+
+def pass_owned(intent: Intent) -> bool:
+    """A PR whose fate the pass decides: from a tree it cut (`pass_cut`), or Dependabot's.
+
+    Never read off the labels. A label now says how a PR merges, and a person's PR in the
+    direct flow carries `merge-now`; read as ownership, that would let the pass close it.
+    """
+    return pass_cut(intent.tree) or intent.branch.startswith(fix_plan.DEPENDABOT_BRANCH)
+
+
+def _empty(intent: Intent, when: str, why: str) -> Outcome:
+    """Nothing to ship, recorded as such, with the session's outcome kept beside it."""
+    write_state(intent.tree, {"stage": EMPTY, "when": when, "intent": intent.digest})
+    set_aside(intent.tree, SHIPPED_FILE)
+    return Outcome(intent, EMPTY, why)
+
+
+# The line `/ship hold` adds to an intent: the person's say-so that this PR waits for them.
+# It is the only way a PR waits: in either flow, every other one merges unasked.
+HOLD_TRAILER = re.compile(r"hold:\s*yes", re.I)
+
+
+def asks_hold(body: str) -> bool:
+    """Whether any line of the body is `HOLD_TRAILER`, standing alone.
+
+    Any line, not the last, because a hold is the one promise this flow makes to the
+    person: `Closes #N` or a `Co-Authored-By` after it must not lose it. Only a whole line,
+    so a sentence mentioning it is not one. It stays in the PR body too, which is what
+    keeps the PR held (`held_pr`)."""
+    return any(HOLD_TRAILER.fullmatch(line.strip()) for line in str(body).splitlines())
+
+
+def labels_for(direct: bool = False, held: bool = False) -> tuple[str, ...]:
+    """What the PR is labelled, which says how it merges and nothing about who owns it
+    (`pass_owned`): nothing when `held`, `merge-now` in the `direct` flow, `automerge`
+    otherwise.
 
     `automerge` is an authorization the vendored `dependabot-automerge.yml` honours on
-    any PR once its gate passes, so it goes only where the pass itself is the author: a
-    tree it cut for a fixer (`fix_reports.ORIGIN_FILE`), or one a fixer cut and marked
-    the same way. A fixer committing to a person's PR works in that person's tree, which
-    carries no mark, so their PR still waits for them -- and `ensure_pr` labelling a
-    reused PR too is why the mark is the tree's origin, not the dispatch stamp.
+    any PR once its gate passes. It used to go only to a tree the pass cut (`pass_cut`)
+    or an intent ending `Automerge: yes`, and a person's PR waited for them: on
+    2026-11-20 three were found green and open for a week, waiting on a review nobody
+    meant to give. So the green gate is the review for every PR, and `/ship hold` is
+    how a person keeps one back.
     """
-    return (sweep.AUTOMERGE_LABEL,) if (tree / fix_reports.ORIGIN_FILE).is_file() else ()
+    if held:
+        return ()
+    return (sweep.MERGE_NOW_LABEL,) if direct else (sweep.AUTOMERGE_LABEL,)
+
+
+def held_pr(branch: str, gh) -> bool:
+    """Whether the open PR `branch` heads was shipped `Hold: yes`; True when `gh` cannot say.
+
+    Asked of the PR because a resolver sent at a held PR writes an intent of its own,
+    with no trailer, often in a fresh tree, and read off that intent its ship would label
+    the PR `merge-now` and merge what the person said to keep. It fails closed: a merge
+    label withheld waits for someone, and one applied wrongly cannot be taken back.
+    """
+    listed = gh("pr", "list", "--head", branch, "--state", "open", "--json", "body")
+    if getattr(listed, "returncode", 1) != 0:
+        return True
+    try:
+        rows = json.loads(listed.stdout or "[]")
+    except ValueError:
+        return True
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        return True
+    return any(asks_hold(row.get("body") or "") for row in rows)
+
+
+def intent_labels(intent: Intent, gh) -> tuple[str, ...]:
+    """`labels_for` this intent: what its body asks, else what its open PR was shipped as.
+
+    The PR is asked in both flows now that both merge unasked: a resolver's intent says
+    nothing of a hold, so read off it alone, its ship would label a held PR to merge."""
+    held = asks_hold(intent.body) or held_pr(intent.branch, gh)
+    return labels_for(intent.direct, held)
 
 
 def still_refused(intent: Intent, state: dict, porcelain: str) -> Outcome | None:
@@ -308,6 +666,19 @@ def still_refused(intent: Intent, state: dict, porcelain: str) -> Outcome | None
     return Outcome(intent, REFUSED, detail)
 
 
+def stored_refusal(intent: Intent, runner: Runner = run_quiet) -> Outcome | None:
+    """`still_refused`, asked of the tree itself; None when git cannot read it.
+
+    What the fix pass reads of an intent the ship task owns, turning the refusal into a
+    failure without touching the tree, and what stops the ship task trying a refused
+    intent again every two minutes.
+    """
+    status = runner(["git", "status", "--porcelain"], cwd=intent.tree)
+    if status.returncode != 0:
+        return None
+    return still_refused(intent, read_state(intent.tree), status.stdout or "")
+
+
 def _digest(porcelain: str) -> str:
     return hashlib.sha256(porcelain.encode("utf-8", "replace")).hexdigest()[:12]
 
@@ -316,7 +687,27 @@ def is_spent(intent: Intent, runner: Runner = run_quiet) -> bool:
     """`already_shipped`, asked of the tree itself: what a `plan` pass reads, so it says
     what a `dispatch` would do rather than "would ship" over work that merged."""
     status = runner(["git", "status", "--porcelain"], cwd=intent.tree)
-    return already_shipped(intent, read_state(intent.tree), status.stdout or "")
+    if status.returncode != 0:
+        return False  # unreadable is not clean: say it would ship, as a dispatch tries to
+    porcelain, state = status.stdout or "", read_state(intent.tree)
+    head = _shipped_head(intent.tree, state, porcelain, runner)
+    if not already_shipped(intent, state, porcelain, head):
+        return False
+    return not merging(intent.tree, runner)
+
+
+def _shipped_head(tree: Path, state: dict, porcelain: str, runner: Runner) -> str:
+    """HEAD, read only where `already_shipped` would otherwise say yes; "" unknown."""
+    if state.get("stage") != SHIPPED or porcelain.strip() or not state.get("sha"):
+        return ""
+    head = runner(["git", "rev-parse", "HEAD"], cwd=tree)
+    return (head.stdout or "").strip() if head.returncode == 0 else ""
+
+
+def _first(done: subprocess.CompletedProcess[str]) -> str:
+    """Git's first line of complaint."""
+    text = (done.stderr or done.stdout or "").strip()
+    return text.splitlines()[0] if text else f"exit {done.returncode}"
 
 
 # What git prints when another process holds one of its lock files: `index.lock` for an
@@ -333,19 +724,45 @@ def _wait(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def run_git(argv: list[str], tree: Path, runner: Runner) -> subprocess.CompletedProcess[str]:
+def run_git(
+    argv: list[str], tree: Path, runner: Runner, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """`runner(argv)`, tried again after each of `LOCK_WAITS` while git says a lock is held.
 
     A lock still held after the last wait is left to refuse: a stale one needs a person or
     a fixer to decide it is stale, and fifteen seconds is well past any git call's hold.
     """
-    done = runner(argv, cwd=tree)
+    options = {} if env is None else {"env": env}
+    done = runner(argv, cwd=tree, **options)
     for seconds in LOCK_WAITS:
         if done.returncode == 0 or not LOCK_HELD.search((done.stdout or "") + (done.stderr or "")):
             break
         _wait(seconds)
-        done = runner(argv, cwd=tree)
+        done = runner(argv, cwd=tree, **options)
     return done
+
+
+def _without_framework() -> dict[str, str]:
+    """The environment of a direct-flow commit or push: the git hook still runs, with its
+    branch policy, and skips the project's pre-commit framework alone."""
+    return {**os.environ, git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
+
+
+def _commit_direct(intent: Intent, runner: Runner) -> tuple[str, str]:
+    """Add and commit, for `commit_intent`, with no fixers and no framework.
+
+    The hook is not bypassed: `--no-verify` would take the branch policy with the
+    framework, and with it the refusal `_commit_carrying` moves a commit off a retired
+    name by. Formatting, the secrets baseline and the Codex mirror run after the merge.
+    """
+    added = run_git(["git", "add", "-A"], intent.tree, runner)
+    if added.returncode != 0:
+        return "add", (added.stdout or "") + (added.stderr or "")
+    commit = ["git", "commit", "-F", str(INTENT_FILE)]
+    committed = run_git(commit, intent.tree, runner, _without_framework())
+    if committed.returncode != 0:
+        return "commit", (committed.stdout or "") + (committed.stderr or "")
+    return "", ""
 
 
 def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str]:
@@ -357,7 +774,10 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
     -- so over an unstaged tree both of `ship.py --fix`'s passes failed on "baseline is
     unstaged", a refusal no code change could answer (carameli #395). Staging between
     runs is what a person committing by hand does; the commit takes all of it anyway.
+    In the direct flow this is only `_commit_direct`.
     """
+    if intent.direct:
+        return _commit_direct(intent, runner)
     output = ""
     for _attempt in (1, 2):
         added = run_git(["git", "add", "-A"], intent.tree, runner)
@@ -379,7 +799,8 @@ def commit_intent(intent: Intent, python: str, runner: Runner) -> tuple[str, str
 
 
 # What `git_policy.branch` says when a commit lands on a name whose PR merged; its remedy
-# is one `git switch -c`, which a session was otherwise sent to make.
+# is one new branch at HEAD, which a session was otherwise sent to make
+# (`_carry_to_free_branch`).
 RETIRED_MARK = "is permanently retired because its PR merged"
 # How many fresh names one refused commit is carried across. The first nearly always
 # takes; each further refusal is a name whose PR merged and whose refs were deleted since
@@ -424,13 +845,23 @@ def _taken_names(stem: str, runner: Runner, tree: Path) -> set[str]:
 
 def _carry_to_free_branch(
     intent: Intent, stem: str, runner: Runner, tried: set[str]
-) -> Intent | None:
-    """The intent moved onto the next `<stem>-<n>` no ref and no refusal has used; None
-    when the switch failed."""
+) -> Intent | str:
+    """The intent moved onto the next `<stem>-<n>` no ref and no refusal has used, or
+    git's complaint when the move failed.
+
+    A new name at HEAD, and HEAD pointed at it, touching neither the index nor the tree:
+    what `git switch -c` does, minus its refusal of a tree mid-merge ("cannot switch
+    branch while merging"), which is the tree a fixer resolving a conflict leaves --
+    exactly when its PR merged under it and its name retired (carameli, e21febb8 and
+    f95dffbc). `git checkout -b` would carry it but drop `MERGE_HEAD`, committing the
+    merge with one parent.
+    """
     tried.add(intent.branch)
     name = next_free_name(stem, _taken_names(stem, runner, intent.tree) | tried)
-    if runner(["git", "switch", "-c", name], cwd=intent.tree).returncode != 0:
-        return None
+    for argv in (["git", "branch", name], ["git", "symbolic-ref", "HEAD", f"refs/heads/{name}"]):
+        done = runner(argv, cwd=intent.tree)
+        if done.returncode != 0:
+            return f"`{' '.join(argv)}`: {_first(done)}"
     return replace(intent, branch=name)
 
 
@@ -443,11 +874,62 @@ def _commit_carrying(intent: Intent, python: str, runner: Runner) -> tuple[Inten
         if step != "commit" or RETIRED_MARK not in output:
             break
         moved = _carry_to_free_branch(intent, stem, runner, tried)
-        if moved is None:
+        if isinstance(moved, str):
+            # Said, or the stored refusal reads as a carry never tried (f95dffbc).
+            output = f"{output.rstrip()}\n[fix pass] the carry to a fresh name failed: {moved}\n"
             break
         intent = moved
         step, output = commit_intent(intent, python, runner)
     return intent, step, output
+
+
+def adopt_name(intent: Intent, runner: Runner) -> Intent | str:
+    """The intent with its hand-named branch renamed to `agent/<name>` -- or to the next
+    free `-<n>` after it when that is taken locally or on origin -- or git's complaint.
+
+    `git branch -m` renames the ref and repoints HEAD without touching the index or the
+    tree, so a merge in progress survives it, and no unnamespaced ref is left behind."""
+    stem = f"{ADOPTED_NAMESPACE}{intent.branch}"
+    taken = _taken_names(stem, runner, intent.tree)
+    name = stem if stem not in taken else next_free_name(stem, taken)
+    done = runner(["git", "branch", "-m", name], cwd=intent.tree)
+    if done.returncode != 0:
+        return f"`git branch -m {name}`: {_first(done)}"
+    return replace(intent, branch=name, adopt=False)
+
+
+def retired_at(tree: Path, branch: str, gh_for=sweep.gh_for) -> str:
+    """When `branch`'s newest merged PR merged, as `gh` prints it; "" when unknown.
+
+    What `harness_triage.carried` measures a resolution against once the intent here was
+    carried off that retired name: one written since cannot mean that PR, which is the
+    line `fix_verify.relevant` draws too. It was the merge-base's commit time, which moves
+    on each time the branch merges its base in -- and then re-pointed nothing.
+    """
+    done = gh_for(tree)("pr", "list", "--head", branch, "--state", "merged", "--json", "mergedAt")
+    if getattr(done, "returncode", 1) != 0:
+        return ""
+    try:
+        rows = json.loads(getattr(done, "stdout", "") or "[]")
+    except ValueError:
+        return ""
+    times = [str(r.get("mergedAt")) for r in rows if isinstance(r, dict) and r.get("mergedAt")]
+    return max(times) if times else ""
+
+
+def refresh_base(tree: Path, base: str, runner: Runner) -> None:
+    """`origin/<base>` fetched, so `commits_ahead` and `lands_nothing` read where the base
+    is now. A fetch that fails leaves the ref as it was, and they answer from that.
+
+    Nothing else fetched it. data-lake's archive-read-retry tree pushed its last commit
+    by hand and #55 merged it at 21:40 UTC; the 21:50 pass read the tree's `origin/main`
+    from before that merge, counted two commits ahead, and `gh pr create` refused the
+    branch -- "No commits between main and agent/archive-read-retry-1008" (07c1172a).
+    """
+    runner(
+        ["git", "fetch", "--quiet", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"],
+        cwd=tree,
+    )
 
 
 def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:
@@ -467,6 +949,180 @@ def commits_ahead(tree: Path, base: str, runner: Runner) -> int | None:
         return None
 
 
+def lands_nothing(tree: Path, base: str, runner: Runner) -> bool:
+    """Whether everything the tree holds -- committed, staged, edited, untracked -- is on
+    `origin/<base>` already: merged there, it changes nothing. False when git cannot say.
+
+    Dirty or ahead is not the same as new. carameli's minor-and-patch tree was both: its
+    PR squash-merged while a fixer was mid-merge in it, so the staged files matched
+    `origin/master` byte for byte and the one commit ahead was the pre-squash original.
+    Its intent said "Nothing to ship", the commit stage ran anyway, was refused on the
+    retired name, and the refusal sent a second fixer to say it again (e21febb8).
+
+    A merge in progress counts `MERGE_HEAD` as a parent of the fork, as the commit will:
+    a resolution that took the trunk's side as of the merged commit is no change of the
+    tree's own, though the trunk has moved that file on since (f95dffbc).
+    """
+    upstream = f"origin/{base}"
+    merging = runner(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=tree)
+    heads = ["HEAD", "MERGE_HEAD"] if merging.returncode == 0 else ["HEAD"]
+    # With three commits `merge-base` answers for the first against a merge of the rest.
+    forked = runner(["git", "merge-base", upstream, *heads], cwd=tree)
+    fork = (forked.stdout or "").strip() if forked.returncode == 0 else ""
+    held = _held_tree(tree, runner) if fork else ""
+    if not held:
+        return False
+    target = runner(["git", "rev-parse", f"{upstream}^{{tree}}"], cwd=tree)
+    merged = runner(
+        ["git", "merge-tree", "--write-tree", f"--merge-base={fork}", upstream, held], cwd=tree
+    )
+    if target.returncode != 0 or merged.returncode != 0:
+        return False  # 1 is a conflict: the tree has something origin does not
+    lines = (merged.stdout or "").split()
+    return bool(lines) and lines[0] == (target.stdout or "").strip()
+
+
+def _held_tree(tree: Path, runner: Runner) -> str:
+    """The tree `git add -A` would commit, written through a copy of the index so the real
+    one is never touched -- and, being a copy, its stat cache spares rehashing every file.
+    "" when git cannot say.
+
+    The copy keeps the index's mtime (`copy2`): git trusts a cached stat only for a file
+    older than the index, so a copy stamped now vouched for an edit made in the tick the
+    index was written, and read it as unchanged.
+    """
+    where = runner(["git", "rev-parse", "--git-path", "index"], cwd=tree)
+    if where.returncode != 0 or not (where.stdout or "").strip():
+        return ""
+    index = Path((where.stdout or "").strip())
+    with tempfile.TemporaryDirectory() as scratch:
+        probe = Path(scratch) / "index"
+        try:
+            shutil.copy2(index if index.is_absolute() else tree / index, probe)
+        except OSError:
+            return ""
+        env = {**os.environ, "GIT_INDEX_FILE": str(probe)}
+        if runner(["git", "add", "-A"], cwd=tree, env=env).returncode != 0:
+            return ""
+        written = runner(["git", "write-tree"], cwd=tree, env=env)
+    return (written.stdout or "").strip() if written.returncode == 0 else ""
+
+
+def catch_up(tree: Path, branch: str, runner: Runner) -> str:
+    """Merge origin's `branch` into HEAD when it holds commits HEAD lacks; git's output
+    when that merge conflicts (and is aborted), "" otherwise.
+
+    The pass brings a behind PR up to its base through GitHub (`gh pr update-branch`),
+    and `fix-prs.refresh_head` leaves a tree with edits where it is, because a session is
+    working in it. So origin's head moves while the tree holds a commit of its own:
+    #463's did 24 times, and every push from the tree was refused non-fast-forward
+    (3ae36740, 436fc0c8). No remote branch yet -- a first push -- or a fetch that fails
+    is nothing to merge; the push says whatever else is wrong.
+    """
+    remote = f"refs/remotes/origin/{branch}"
+    fetched = runner(
+        ["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:{remote}"], cwd=tree
+    )
+    if fetched.returncode != 0:
+        return ""
+    if runner(["git", "merge-base", "--is-ancestor", remote, "HEAD"], cwd=tree).returncode != 1:
+        return ""  # 0: already in HEAD; anything else: git cannot say, so push as before
+    merged = run_git(["git", "merge", "--no-edit", remote], tree, runner)
+    if merged.returncode == 0:
+        return ""
+    runner(["git", "merge", "--abort"], cwd=tree)
+    output = f"{merged.stdout or ''}\n{merged.stderr or ''}".strip()
+    return f"origin/{branch} moved and does not merge into this tree cleanly:\n{output}"
+
+
+def _record_failure(intent: Intent, step: str, detail: str, when: str) -> str:
+    """A push or PR that failed, in the state file: left unwritten, an older `shipped`
+    stood and the next pass read the unpushed commit as shipped (3ae36740).
+
+    `since` is when this intent first failed, carried over each failure after it, so a
+    transient failure can be told from one that has lasted. Returned.
+    """
+    before = read_state(intent.tree)
+    since = when
+    if before.get("stage") == FAILED and before.get("intent") == intent.digest:
+        since = str(before.get("since") or before.get("when") or when)
+    record = {"stage": FAILED, "step": step, "output": detail, "when": when, "since": since}
+    write_state(intent.tree, {**record, "intent": intent.digest})
+    return since
+
+
+# Seconds between in-pass tries of a push or a PR that GitHub failed on its own side.
+# One `HTTP 500` from the labels endpoint (a0287c8b) and one `Internal Server Error` on a
+# push (4d942641), a minute apart, each filed a ship as a harness defect.
+GITHUB_RETRY_SECONDS = (10, 30)
+# How long a transient failure is retried pass after pass before it is filed after all:
+# GitHub is not down for half a day, so one that lasts is something about the request.
+TRANSIENT_GRACE = _dt.timedelta(hours=6)
+
+
+def _retrying(attempt: Callable[[], str]) -> str:
+    """`attempt()`'s error, asked again after each `GITHUB_RETRY_SECONDS` pause while
+    `sweep.transient` says so; "" once it went through."""
+    error = attempt()
+    for seconds in GITHUB_RETRY_SECONDS:
+        if not error or not sweep.transient(error):
+            break
+        _wait(seconds)
+        error = attempt()
+    return error
+
+
+def _failed(intent: Intent, step: str, detail: str, when: str) -> Outcome:
+    """A push or a PR that failed, recorded: `DEFERRED` when GitHub failed on its side
+    and has not done so for `TRANSIENT_GRACE`, else `FAILED`."""
+    since = _record_failure(intent, step, detail, when)
+    try:
+        lasted = _dt.datetime.fromisoformat(when) - _dt.datetime.fromisoformat(since)
+    except ValueError:
+        lasted = TRANSIENT_GRACE
+    stage = DEFERRED if sweep.transient(detail) and lasted < TRANSIENT_GRACE else FAILED
+    return Outcome(intent, stage, f"{step}: {detail}")
+
+
+def _push(intent: Intent, runner: Runner, when: str) -> Outcome | None:
+    """Origin's head merged in, then the push past the gate; what stopped it, recorded,
+    or None. A merge that conflicts is a refusal a fixer is sent at; a push that fails
+    is a failure the next pass retries."""
+    tree = intent.tree
+    conflict = catch_up(tree, intent.branch, runner)
+    if conflict:
+        after = runner(["git", "status", "--porcelain"], cwd=tree).stdout or ""
+        record = {"stage": REFUSED, "step": "merge", "output": conflict, "when": when}
+        write_state(tree, {**record, "intent": intent.digest, "tree": _digest(after)})
+        return Outcome(intent, REFUSED, f"merge: {conflict.strip()[-400:]}")
+    env = _without_framework() if intent.direct else dict(os.environ)
+    env["SKIP"] = SKIP_PUSH_GATE
+
+    def push() -> str:
+        pushed = runner(["git", "push", "-u", "origin", intent.branch], cwd=tree, env=env)
+        if pushed.returncode == 0:
+            return ""
+        return (pushed.stderr or pushed.stdout or "").strip()[-400:] or f"exit {pushed.returncode}"
+
+    if detail := _retrying(push):
+        return _failed(intent, "push", detail, when)
+    return None
+
+
+def pr_body(intent: Intent) -> str:
+    """The intent's body, closing the issue the tree's dispatch was sent at, when one was.
+
+    A nightly's fixer was told "the issue closes itself when the workflow next passes",
+    and it does -- unless the workflow never runs green on the base again (renamed,
+    disabled, superseded), and then the issue stood open over a merged fix.
+    """
+    body = intent.body or intent.subject
+    closes = fix_reports.closing_line(intent.tree)
+    if not closes or closes in body:
+        return body
+    return f"{body}\n\n{closes}"
+
+
 def ship_one(
     intent: Intent,
     python: str,
@@ -479,9 +1135,20 @@ def ship_one(
     tree = intent.tree
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
     status = runner(["git", "status", "--porcelain"], cwd=tree)
-    if settled := _settled(intent, status.stdout or "", base, runner, when):
+    if status.returncode != 0:
+        # An unreadable tree is not a clean one: read as clean, a supervisor's second
+        # intent over 19 modified files was set aside as already shipped.
+        return Outcome(intent, FAILED, f"status: git could not read the tree: {_first(status)}")
+    porcelain = status.stdout or ""
+    if settled := _settled(intent, porcelain, base, runner, when, gh_for(tree)):
         return settled
-    if (status.stdout or "").strip():
+    if intent.adopt:
+        adopted = adopt_name(intent, runner)
+        if isinstance(adopted, str):
+            _record_failure(intent, "rename", adopted, when)
+            return Outcome(intent, FAILED, f"rename: {adopted}")
+        intent = adopted
+    if porcelain.strip() or merging(tree, runner):
         intent, step, output = _commit_carrying(intent, python, runner)
         if step:
             after = runner(["git", "status", "--porcelain"], cwd=tree).stdout or ""
@@ -489,25 +1156,31 @@ def ship_one(
             write_state(tree, {**record, "intent": intent.digest, "tree": _digest(after)})
             return Outcome(intent, REFUSED, f"{step}: {output.strip()[-400:]}")
 
-    env = dict(os.environ)
-    env["SKIP"] = SKIP_PUSH_GATE
-    pushed = runner(["git", "push", "-u", "origin", intent.branch], cwd=tree, env=env)
-    if pushed.returncode != 0:
-        detail = (pushed.stderr or pushed.stdout or "").strip()[-400:]
-        return Outcome(intent, FAILED, f"push: {detail}")
+    if stopped := _push(intent, runner, when):
+        return stopped
 
-    url, _created, error = sweep.ensure_pr(
-        gh_for(tree),
-        sweep.Plan(
-            pr_title=intent.subject,
-            pr_body=intent.body or intent.subject,
-            pr_head=intent.branch,
-            pr_base=base,
-            pr_labels=labels_for(tree),
-        ),
+    plan = sweep.Plan(
+        pr_title=intent.subject,
+        pr_body=pr_body(intent),
+        pr_head=intent.branch,
+        pr_base=base,
+        pr_labels=intent_labels(intent, gh_for(tree)),
     )
-    if error:
-        return Outcome(intent, FAILED, f"pr: {error}")
+    url = ""
+
+    def open_pr() -> str:
+        nonlocal url
+        url, _created, error = sweep.ensure_pr(gh_for(tree), plan)
+        return error
+
+    if error := _retrying(open_pr):
+        # The PR's calls go through `sweep`, whose deadline answers with a result where
+        # `run_quiet` raises. Out of time is held, never refused or failed: #710's ship
+        # reached this step past the pass's deadline, and its branch was filed as a
+        # failed ship for a devkit session when the next pass opened the PR unaided.
+        if sweep.past_until():
+            raise OutOfTime(f"pr: {error}", ended=False)
+        return _failed(intent, "pr", error, when)
     head = runner(["git", "rev-parse", "HEAD"], cwd=tree)
     sha = (head.stdout or "").strip()
     write_state(
@@ -527,18 +1200,32 @@ REFUSAL_LINE = re.compile(
 )
 
 
+def _why(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return next((line for line in lines if REFUSAL_LINE.search(line)), lines[-1] if lines else "")
+
+
 def refusal_line(output: str) -> str:
     """The line of a refused commit's output that says why, cut to one record line.
 
     "fixers refused" was the whole signature when no test id or lint line matched, and a
     session had to open `ship-state.json` to learn the branch name was the objection.
     """
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
-    why = next((line for line in lines if REFUSAL_LINE.search(line)), lines[-1] if lines else "")
     # It becomes part of a signature, which must not change between two refusals of the
     # same kind -- or every retry reads as progress and `fix_ledger.ATTEMPTS` never trips.
-    why = re.sub(r"\d+", "N", re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", why))
+    why = re.sub(r"\d+", "N", re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", _why(output)))
     return " ".join(why.split())[:160]
+
+
+def refusal_reason(output: str) -> str:
+    """`refusal_line` as the hook wrote it, for a reader rather than a signature.
+
+    The pass's record kept the *tail* of a refusal's output, which is a hook's closing
+    boilerplate: sports_betting's detect-secrets refusal read "refused: mment If a secret
+    has already been committed, visit https://help.github.com/...", while the line naming
+    the failed hook sat further up, out of reach of the cut.
+    """
+    return " ".join(_why(output).split())[:160]
 
 
 def refusal_failure(outcome: Outcome, base: str) -> fix_plan.Failure:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import subprocess
+import sys
 import time
 
 import pytest
@@ -20,6 +21,7 @@ from support import load_script
 
 rc_machine = load_script("scripts/rc_machine.py")
 reap_machine = load_script("scripts/reap_machine.py")
+win_process_table = reap_machine.win_process_table
 
 P = reap_machine.Process
 
@@ -123,21 +125,115 @@ def test_posix_rows_split_into_four_columns_with_free_text_last():
     ]
 
 
+def no_native():
+    """A native reader that failed, so a test reaches the PowerShell lister behind it."""
+    return None, "the snapshot failed: refused"
+
+
 def test_the_table_is_none_when_the_lister_fails_or_answers_nothing():
-    assert reap_machine.process_table(lambda argv: completed(returncode=1), windows=True) is None
-    assert reap_machine.process_table(lambda argv: completed("[]"), windows=True) is None
+    def table(run):
+        return reap_machine.process_table(run, windows=True, native=no_native)
+
+    assert table(lambda argv: completed(returncode=1)) is None
+    assert table(lambda argv: completed("[]")) is None
 
     def boom(argv):
         raise OSError("no powershell")
 
-    assert reap_machine.process_table(boom, windows=True) is None
+    assert table(boom) is None
+
+
+def test_an_unread_table_says_why():
+    def why(run):
+        return reap_machine.read_table(run, windows=True, native=no_native)
+
+    def slow(argv):
+        raise subprocess.TimeoutExpired(argv, 240)
+
+    native = "the snapshot failed: refused, and "
+    assert why(slow) == (None, native + "the lister did not answer within 240 s")
+    refused = completed(returncode=1)
+    refused.stderr = "Get-CimInstance : Call was canceled.\nAt line:1 char:1\n"
+    assert why(lambda argv: refused) == (None, native + "the lister exited 1: At line:1 char:1")
+    assert why(lambda argv: completed("[]")) == (
+        None,
+        native + "the lister's answer held no process",
+    )
+    assert reap_machine.read_table(lambda argv: completed(), windows=False) == (
+        None,
+        "the lister's answer held no process",
+    )
+
+
+def test_a_windows_table_is_read_in_process_before_powershell_is_asked():
+    """6114e177: the WMI query stalled past 240 s on a loaded desk, after ba883e41 had
+    already raised its bound from 60 s. Asking it first is what kept failing."""
+
+    def never(argv):
+        raise AssertionError(f"the lister was spawned: {argv}")
+
+    rows = [win_process_table.Row(7, 1, "node.EXE", "node x", private=5, rss=6, created=7.0)]
+    assert reap_machine.read_table(never, windows=True, native=lambda: (rows, "")) == (
+        [P(7, 1, "node", "node x", private=5, rss=6, created=7.0)],
+        "",
+    )
+
+
+def test_a_failed_native_read_falls_back_to_the_lister():
+    text = '[{"ProcessId":7,"ParentProcessId":1,"Name":"node.exe","CommandLine":"x"}]'
+    assert reap_machine.read_table(
+        lambda argv: completed(text), windows=True, native=lambda: ([], "")
+    ) == ([P(7, 1, "node", "x")], "")
+    assert reap_machine.native_table(lambda: ([], "")) == (None, "the native table held no process")
+
+
+def test_posix_never_asks_the_native_reader():
+    def never():
+        raise AssertionError("the native reader was asked off Windows")
+
+    assert reap_machine.process_table(
+        lambda argv: completed("7 1 node x"), windows=False, native=never
+    ) == [P(7, 1, "node", "x")]
+
+
+def test_the_native_table_holds_this_process_with_its_command_line_and_parent():
+    """The real kernel on a Windows desk; anywhere else, a decline that names why."""
+    table, why = reap_machine.native_table()
+    # The question `win_process_table.read` asks, so the rehearsal's faked platform is
+    # answered as a Linux runner's would be.
+    if sys.platform != "win32":
+        assert (table, why) == (None, "the native table is only implemented on Windows")
+        return
+    assert table is not None
+    me = next(row for row in table if row.pid == os.getpid())
+    assert me.ppid == os.getppid()
+    assert me.name.startswith("python")
+    assert "python" in me.cmdline.lower()
+    assert me.private > 0 and me.rss > 0 and 0 < me.created <= time.time()
+
+
+def test_the_table_read_outlasts_a_loaded_machine(monkeypatch):
+    """ba883e41: four passes in a row timed out on a loaded desk at the 60 s bound every
+    other probe shares; the fallback lister has its own, inside the task's ten minutes."""
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return completed('[{"ProcessId":7,"ParentProcessId":1,"Name":"x","CommandLine":""}]')
+
+    monkeypatch.setattr(reap_machine.subprocess, "run", fake_run)
+    assert reap_machine.process_table(windows=True, native=no_native) == [P(7, 1, "x", "")]
+    assert reap_machine.QUICK_TIMEOUT < seen["timeout"] == reap_machine.TABLE_TIMEOUT
+    reap_machine.run_table_command(["x"])
+    assert seen["timeout"] == reap_machine.TABLE_TIMEOUT
+    assert reap_machine.TABLE_TIMEOUT <= 5 * 60  # half of `PT10M`, for the reaps after it
 
 
 def test_the_table_is_read_through_the_platform_parser():
     text = '[{"ProcessId":7,"ParentProcessId":1,"Name":"node.exe","CommandLine":"x"}]'
-    assert reap_machine.process_table(lambda argv: completed(text), windows=True) == [
-        P(7, 1, "node", "x")
-    ]
+    assert reap_machine.process_table(
+        lambda argv: completed(text), windows=True, native=no_native
+    ) == [P(7, 1, "node", "x")]
     assert reap_machine.process_table(lambda argv: completed("7 1 node x"), windows=False) == [
         P(7, 1, "node", "x")
     ]
@@ -378,6 +474,73 @@ def test_the_pattern_is_a_parameter():
     assert reap_machine.dev_servers(custom) == []
 
 
+# --- docker CLIs --------------------------------------------------------------------
+
+NOW = 1_800_000_000.0
+OLD = NOW - 2 * reap_machine.DOCKER_CLI_MIN_AGE_SECONDS
+DOCKER = r'"C:\Program Files\Docker\Docker\resources\bin\docker.exe"'
+
+
+def docker_table():
+    """The 2026-10-08 machine: an orphaned `compose up --wait` and its plugin child, a
+    harness's `compose down` under a live python under a live session, and Docker
+    Desktop's own `docker stats` under a Docker Desktop whose launcher has exited."""
+    return [
+        P(1, 0, "explorer", "explorer.exe"),
+        P(10, 1, "claude", "claude"),
+        P(11, 10, "python", "python fix.py", created=OLD),
+        P(12, 11, "docker", f"{DOCKER} compose -p x down -v", created=OLD),
+        P(20, 5844, "docker", f"{DOCKER} compose up -d --wait db", created=OLD),
+        P(21, 20, "docker-compose", "docker-compose.exe compose up -d --wait db", created=OLD),
+        P(30, 777, "docker desktop", '"Docker Desktop.exe"', created=OLD),
+        P(31, 30, "com.docker.backend", "com.docker.backend.exe", created=OLD),
+        P(32, 30, "docker", f"{DOCKER} stats --no-stream", created=OLD),
+        P(33, 31, "docker", f"{DOCKER} version", created=OLD),
+    ]
+
+
+def test_an_orphaned_docker_cli_is_reaped_at_its_top_only():
+    assert [row.pid for row in reap_machine.docker_clis(docker_table(), NOW)] == [20]
+
+
+def test_a_docker_cli_with_a_live_owner_is_never_in_scope():
+    """The CLIs that piled up behind the wedged engine had owners -- a harness, Docker
+    Desktop itself -- and cleared once the engine restarted. Reaping them would have
+    broken the harness's teardown and the dashboard, and fixed nothing."""
+    pids = {row.pid for row in reap_machine.docker_clis(docker_table(), NOW)}
+    assert not pids & {12, 32, 33}
+
+
+def test_a_young_or_undated_orphan_is_kept():
+    young = NOW - reap_machine.DOCKER_CLI_MIN_AGE_SECONDS + 60
+    rows = [
+        P(20, 5844, "docker", f"{DOCKER} compose up -d", created=young),
+        P(40, 5845, "docker", f"{DOCKER} build .", created=0.0),
+    ]
+    assert reap_machine.docker_clis(rows, NOW) == []
+    exactly = [P(20, 5844, "docker", "docker ps", created=NOW - 60)]
+    assert reap_machine.docker_clis(exactly, NOW, min_age=60) == exactly
+
+
+def test_only_a_docker_image_is_a_docker_cli():
+    """A command line that names docker is an editor, a shell or a script, not a CLI."""
+    rows = [
+        P(1, 999, "python", "python scripts/docker-maint.py up", created=OLD),
+        P(2, 999, "bash", "bash -c 'docker compose up'", created=OLD),
+        P(3, 999, "com.docker.backend", "com.docker.backend.exe", created=OLD),
+    ]
+    assert reap_machine.docker_clis(rows, NOW) == []
+
+
+def test_docker_desktop_hosts_docker_clis_and_nothing_else():
+    """Its own `docker stats` is owned; a vite under it is still an orphan, since the
+    docker hosts are not `HOSTS`."""
+    assert "docker desktop" not in reap_machine.HOSTS
+    assert reap_machine.HOSTS <= reap_machine.DOCKER_HOSTS
+    rows = [*docker_table(), P(34, 30, "node", r'"node" C:\p\node_modules\vite\bin\vite.js')]
+    assert 34 in {row.pid for row in reap_machine.dev_servers(rows)}
+
+
 # --- stopping ----------------------------------------------------------------------
 
 
@@ -458,6 +621,52 @@ def test_stop_reports_a_force_that_failed_and_a_runner_that_raised():
         raise subprocess.TimeoutExpired(argv, 1)
 
     assert reap_machine.stop_tree(41, boom, sleep=lambda s: None, windows=True)
+
+
+# Verbatim from logs/reap-stale.log, 2026-10-03 15:45: `taskkill /T /F` exits non-zero
+# over children that had already gone, and every pid it named was gone a minute later.
+_TREE_ALREADY_GONE = (
+    "ERROR: The process with PID 16172 (child process of PID 20512) could not be terminated.\n"
+    "Reason: There is no running instance of the task.\n\n"
+    "ERROR: The process with PID 20512 (child process of PID 9256) could not be terminated.\n"
+    "Reason: The operation attempted is not supported.\n"
+)
+
+
+def _force_complains(alive_after_force: set[int]):
+    """A runner whose polite ask is ignored and whose `/F` exits 128 with the errors above;
+    after the `/F`, only `alive_after_force` still answers `tasklist`."""
+    calls = []
+
+    def run(argv):
+        calls.append(list(argv))
+        if argv[0] == "tasklist":
+            pid = int(argv[2].split()[-1])
+            forced = any("/F" in call for call in calls)
+            if not forced or pid in alive_after_force:
+                return completed(f'"node.exe","{pid}","Console","1","100 K"\n')
+            return completed("INFO: No tasks are running which match the specified criteria.")
+        if "/F" in argv:
+            return subprocess.CompletedProcess(argv, 128, stdout="", stderr=_TREE_ALREADY_GONE)
+        return completed()
+
+    return run, calls
+
+
+def test_a_force_that_complains_about_a_tree_already_gone_is_a_success():
+    run, calls = _force_complains(alive_after_force=set())
+    assert reap_machine.stop_tree(41, run, sleep=lambda s: None, windows=True) == ""
+    probed = {int(call[2].split()[-1]) for call in calls if call[0] == "tasklist"}
+    assert probed >= {41, 16172, 20512}, "every pid taskkill named is checked, not only the root"
+
+
+def test_a_force_that_complains_reports_only_what_survived():
+    run, _ = _force_complains(alive_after_force={20512})
+    error = reap_machine.stop_tree(41, run, sleep=lambda s: None, windows=True)
+    assert "20512" in error and "still running" in error
+
+    run, _ = _force_complains(alive_after_force={41})
+    assert "41" in reap_machine.stop_tree(41, run, sleep=lambda s: None, windows=True)
 
 
 def test_stop_off_windows_says_so_rather_than_pretending():

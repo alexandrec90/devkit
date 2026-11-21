@@ -12,15 +12,20 @@ two formats and the byte-offset bookkeeping live apart from the detectors.
 Both become `Event`s: what the user said, what command a tool call ran, and whether a
 tool result was a failure. Everything else in a transcript is ignored.
 
+Run it on a ledger row's `evidence=` (`<transcript>#L<line>`) to read that session as
+audit lines around the line: two sweeps each wrote their own reader for want of this.
+
 Tested in `tests/test_session_friction.py`, through the detectors that read these.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
+import sys
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 CLAUDE_ROOT = Path.home() / ".claude" / "projects"
@@ -34,12 +39,15 @@ class Event:
 
     kind: str  # "user", "say" (the agent's own text), "call" or "result"
     line: int
-    text: str = ""
+    text: str = ""  # for an edit call, what it writes
     command: str = ""
     error: bool = False
     call_id: str = ""
     tool: str = ""  # a call's tool name: `Bash`, `Edit`, `AskUserQuestion`, `shell`
     path: str = ""  # the file an edit call names: `Edit`'s `file_path`
+    background: bool = False  # a call run with `run_in_background`: its wait holds no turn
+    at: str = ""  # the record's ISO `timestamp`, "" when it has none
+    sidechain: bool = False  # a subagent's record: nothing reaches it once it has returned
 
 
 @dataclass(frozen=True)
@@ -48,7 +56,6 @@ class Chunk:
 
     rows: tuple[tuple[int, dict], ...]  # (line number, record)
     offset: int
-    line: int
 
 
 def _dict(value: object) -> dict:
@@ -67,7 +74,15 @@ def _text(content: object) -> str:
     return str(content or "")
 
 
+# The records that are the conversation. Claude Code also writes each message it sends the
+# API again, as an `api-request-blob` with the same content blocks (from 2026-10-18): read
+# as events, every call and every failure counted twice.
+CONVERSATION = ("user", "assistant")
+
+
 def claude_events(row: dict, line: int) -> Iterator[Event]:
+    if row.get("type") not in CONVERSATION:
+        return
     message = _dict(row.get("message"))
     # A compaction summary and a harness-injected row are typed `user` but are not the user.
     spoken = row.get("type") == "user" and not (row.get("isMeta") or row.get("isCompactSummary"))
@@ -88,12 +103,34 @@ def _claude_block(block: dict, speaker: str, line: int) -> Event | None:
         path = str(given.get("file_path") or given.get("notebook_path") or "")
         tool = str(block.get("name", ""))
         call_id = str(block.get("id", ""))
-        return Event("call", line, command=command, call_id=call_id, tool=tool, path=path)
+        background = given.get("run_in_background") is True
+        return Event(
+            "call",
+            line,
+            _written(given),
+            command=command,
+            call_id=call_id,
+            tool=tool,
+            path=path,
+            background=background,
+        )
     if kind == "tool_result":
         error = bool(block.get("is_error"))
         call_id = str(block.get("tool_use_id", ""))
         return Event("result", line, _text(block.get("content")), error=error, call_id=call_id)
     return None
+
+
+def _written(given: dict) -> str:
+    """The text an edit call puts in its file: `Edit`'s new string, `Write`'s content,
+    each of a `MultiEdit`'s; "" for any other call."""
+    listed = given.get("edits")
+    edits = listed if isinstance(listed, list) else [given]
+    return "\n".join(
+        str(edit.get("new_string") or edit.get("content") or "")
+        for edit in edits
+        if isinstance(edit, dict)
+    ).strip()
 
 
 def codex_events(row: dict, line: int) -> Iterator[Event]:
@@ -120,7 +157,11 @@ def codex_events(row: dict, line: int) -> Iterator[Event]:
 
 def events(path: Path, rows: tuple[tuple[int, dict], ...]) -> list[Event]:
     reader = codex_events if is_codex(path) else claude_events
-    return [event for number, row in rows for event in reader(row, number)]
+    return [
+        replace(event, at=str(row.get("timestamp") or ""), sidechain=row.get("isSidechain") is True)
+        for number, row in rows
+        for event in reader(row, number)
+    ]
 
 
 def is_codex(path: Path) -> bool:
@@ -145,37 +186,44 @@ def transcripts(claude_root: Path = CLAUDE_ROOT, codex_root: Path = CODEX_ROOT) 
     return sorted(found)
 
 
-def read_new(path: Path, offset: int, line: int) -> Chunk:
-    """The complete lines after `offset`, numbered on from `line`.
+def read_new(path: Path, offset: int) -> Chunk:
+    """The complete lines after `offset`, each numbered by its line in the file.
 
     A file shorter than the cursor was rewritten, and is read again from the top. The
     size is checked before anything is read, because nearly every transcript on the
-    machine has not changed since the last pass.
+    machine has not changed since the last pass. The numbers are counted from the file
+    as it is now, never carried on from the last read: Claude Code rewrites a transcript
+    it relocates into a worktree without shrinking it below the cursor, and a carried
+    count then named line 1119 for a call on line 1003 (e1aaca09). An offset that lands
+    inside a line is such a rewrite too, and the torn line is skipped.
     """
     try:
         size = path.stat().st_size
     except OSError:
-        return Chunk((), offset, line)
+        return Chunk((), offset)
     if size < offset:
-        offset, line = 0, 0
+        offset = 0
     if size == offset:
-        return Chunk((), offset, line)
+        return Chunk((), offset)
     try:
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            data = handle.read()
+        data = path.read_bytes()
     except OSError:
-        return Chunk((), offset, line)
-    complete = data[: data.rfind(b"\n") + 1]
+        return Chunk((), offset)
+    line = data.count(b"\n", 0, offset)
+    if offset and data[offset - 1 : offset] != b"\n":
+        torn = data.find(b"\n", offset)
+        offset, line = (offset, line) if torn < 0 else (torn + 1, line + 1)
+    complete = data[offset : data.rfind(b"\n") + 1]
     rows = []
-    for number, raw in enumerate(complete.splitlines(), start=line + 1):
+    # Split on `\n` alone, as the count above is: a line is what `grep -n` calls one.
+    for number, raw in enumerate(complete.split(b"\n")[:-1], start=line + 1):
         try:
             row = json.loads(raw)
         except ValueError:
             continue
         if isinstance(row, dict):
             rows.append((number, row))
-    return Chunk(tuple(rows), offset + len(complete), line + complete.count(b"\n"))
+    return Chunk(tuple(rows), offset + len(complete))
 
 
 # How much of each event a rendering keeps: an audit reads for what a session did and
@@ -190,7 +238,7 @@ def render(path: Path) -> str:
     own condenser first -- the first one did.
     """
     lines = []
-    for event in events(path, read_new(path, 0, 0).rows):
+    for event in events(path, read_new(path, 0).rows):
         kind = "error" if event.kind == "result" and event.error else event.kind
         body = event.command if event.kind == "call" else event.text
         body = " ".join(body.split())
@@ -199,3 +247,74 @@ def render(path: Path) -> str:
         tool = f" {event.tool}" if event.tool else ""
         lines.append(f"L{event.line} {kind.upper()}{tool}: {cut}")
     return "\n".join(lines) + "\n"
+
+
+# A ledger row's `evidence=`: a transcript, and optionally the line a finding was read at
+# -- or, in an `agent-report`, the range `#L82-L94`. Several are joined by `;`.
+EVIDENCE = re.compile(r"^(?P<path>.+?)(?:#L(?P<line>\d+)(?:-L?(?P<end>\d+))?)?$")
+RENDERED_LINE = re.compile(r"^L(\d+) ")
+# Transcript lines either side of a single `#L<n>`; a range is read as written.
+AROUND_A_LINE = 40
+
+
+def window(rendered: str, line: int, around: int, end: int | None = None) -> str:
+    """The rendered lines from `around` before `line` to `around` after `end` (or `line`)."""
+    last = line if end is None else end
+    kept = [
+        text
+        for text in rendered.splitlines()
+        if (found := RENDERED_LINE.match(text))
+        and line - around <= int(found.group(1)) <= last + around
+    ]
+    return "".join(f"{text}\n" for text in kept)
+
+
+def evidence_path(evidence: str) -> Path:
+    """The transcript one `<path>[#L<n>[-L<m>]]` names."""
+    found = EVIDENCE.match(evidence)
+    return Path(found.group("path") if found else evidence)
+
+
+def read_evidence(evidence: str, around: int | None) -> str | None:
+    """One `<path>[#L<n>[-L<m>]]` rendered as audit lines; None when no transcript is there."""
+    path = evidence_path(evidence)
+    if not path.is_file():
+        return None
+    rendered = render(path)
+    found = EVIDENCE.match(evidence)
+    if not found or not found.group("line"):
+        return rendered
+    end = found.group("end")
+    wide = around if around is not None else (0 if end else AROUND_A_LINE)
+    return window(rendered, int(found.group("line")), wide, int(end) if end else None)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Render a session transcript as audit lines.")
+    parser.add_argument(
+        "evidence",
+        help="a transcript path, or a ledger evidence= `<path>#L<n>`, `#L<n>-L<m>`, `;`-joined",
+    )
+    parser.add_argument(
+        "--around",
+        type=int,
+        default=None,
+        help=f"transcript lines either side (default {AROUND_A_LINE} for #L<n>, 0 for a range)",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    parts = [part.strip() for part in args.evidence.split(";") if part.strip()]
+    status = 0
+    for part in parts:
+        out = read_evidence(part, args.around)
+        if out is None:
+            print(f"session_transcripts: no transcript at {evidence_path(part)}", file=sys.stderr)
+            status = 2
+            continue
+        if len(parts) > 1:
+            print(f"== {evidence_path(part)}")
+        print(out, end="")
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())

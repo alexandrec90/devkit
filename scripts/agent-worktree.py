@@ -42,11 +42,14 @@ anything now: a worktree is in the list because it exists, which is also why
 `fix-prs.py` can cut into this tier without knowing this file exists.
 
 **Each dropdown asks which checkouts first, and that costs no second scan.**
-`tree-projects` and `base-projects` are the first stage: they run the fan-out once,
-record it through `picker_scan`, and draw one row per checkout with what it holds. The
-second stage is `rows` or `bases` with `--checkouts`, which filters that record by the
-token it was handed and rescans only what was ticked when the token names no write --
-so the list a person picks from is never older than the click that opened it. See
+`tree-projects` and `base-projects` are the first stage, drawing one row per checkout
+with what it holds. `base-projects` runs the branch fan-out once and records it through
+`picker_scan`; the second stage, `bases --checkouts`, filters that record by the token
+it was handed. `tree-projects` only counts, from `git worktree list`, and records
+nothing, so `rows --checkouts` always reads the ticked checkouts' worktrees live: the
+`git status` each one costs is paid for what was ticked, never for the whole machine.
+Either way, a token naming no write is a rescan of what was ticked, so the list a person
+picks from is never older than the click that opened it. See
 `scripts/picker_scan.py` for why the token is the whole design.
 
 Every decision is in `scripts/agent_worktrees.py`, pure and separately tested; what is
@@ -57,14 +60,18 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as futures
+import json
+import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_models
 import agent_tabs
 import agent_worktrees as aw
+import box_teardown
 import devkit_project
 import fix_reports
 import picker_rows
@@ -74,12 +81,22 @@ import task_branch as tb
 import task_input
 import tree_provision
 import worktree
-import worktree_env
 
-# How many checkouts `scan` reads at once. A worktree scan is three `git` calls per
-# checkout and one more per worktree found, which is seconds in a row; the picker runs
-# it while somebody watches.
+# How many checkouts `scan` reads at once. A worktree scan is four `git` calls per
+# checkout and a `git status` per worktree found, which is seconds in a row; the picker
+# runs it while somebody watches.
 SCAN_WORKERS = 8
+
+# How many `git status` calls run at once, across every checkout. Wider than `SCAN_WORKERS`
+# because the wait is on the disk and not on a core: 96 cold trees took 25s at a width of
+# 8 and 8s at 32, and warm ones 2.1s at any width. Shared, because eight checkouts with a
+# pool each would be a hundred git processes on eight cores for one dropdown.
+STATUS_WORKERS = 24
+STATUS_SLOTS = threading.BoundedSemaphore(STATUS_WORKERS)
+# `--no-optional-locks`: a bare `git status` refreshes the index and takes `index.lock`
+# to do it, in trees a live session may be committing from. A dropdown opening must not
+# be able to fail somebody's `git add`.
+STATUS = ("--no-optional-locks", "status", "--porcelain")
 
 # What the `new` picker offers. `none` is CLI-only and deliberately not a row: the task's
 # whole purpose is opening an agent, and a worktree with nothing in it is `git worktree
@@ -91,10 +108,38 @@ AGENTS = ("claude", "codex", "none")
 # each records the half it will be asked for rather than sharing a write neither click
 # can be sure the other made.
 SCAN_NAMES = {"trees": "worktree-trees", "bases": "worktree-bases"}
+HALVES = tuple(SCAN_NAMES)
+
+# A `scan` half: the trees, listed but not read -- no `git status`, no ahead count, so
+# their zeros mean "not asked". Only the delete task's checkout stage takes it, to count.
+LISTED = "listed"
+
+# The token the delete task's checkout stage hands on. Empty names no write, so stage
+# two always rescans what was ticked (see `draw`).
+UNRECORDED = ""
 
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
+
+# Seconds one `gh pr list` may take when `create` names a taken branch's PR. A lookup
+# that hangs costs the cut nothing but the PR number.
+GH_TIMEOUT = 20
+
+
+def listed_trees(project_dir: Path) -> list[aw.Tree]:
+    """This checkout's agent-CLI worktrees, counted but not read.
+
+    One `git worktree list` and nothing per worktree, so `dirty` and `unpushed` are
+    zero because nobody asked, not because the tree is clean: never draw a row from it.
+    """
+    listed = sweep.git_for(project_dir)("worktree", "list", "--porcelain")
+    if listed.returncode != 0:
+        return []
+    return [
+        aw.Tree(name, path, branch)
+        for name, path, branch in aw.nested(project_dir, listed.stdout or "")
+    ]
 
 
 def trees_for(project_dir: Path) -> list[aw.Tree]:
@@ -111,31 +156,81 @@ def trees_for(project_dir: Path) -> list[aw.Tree]:
     nested = aw.nested(project_dir, listed.stdout or "")
     if not nested:
         return []
+    default = tb.detect_default_branch(git)
+    ahead = ahead_counts(git, default)
 
     def read(entry: tuple[str, str, str]) -> aw.Tree:
         name, path, branch = entry
         inner = sweep.git_for(Path(path))
-        status = inner("status", "--porcelain")
+        with STATUS_SLOTS:
+            status = inner(*STATUS)
         dirty = len((status.stdout or "").strip().splitlines()) if status.returncode == 0 else 0
-        return aw.Tree(name, path, branch, dirty, unpushed_count(inner, branch))
+        if ahead is not None and (not branch or branch in ahead):
+            unpushed = ahead.get(branch, 0)
+        else:
+            unpushed = unpushed_count(inner, branch, default)
+        return aw.Tree(name, path, branch, dirty, unpushed)
 
     # Fanned out for `scan`'s reason, one level in: a checkout with eight worktrees is
-    # sixteen git calls, and this runs while somebody watches a quick-pick open.
-    with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(nested))) as pool:
+    # eight `git status` calls, and this runs while somebody watches a quick-pick open.
+    with futures.ThreadPoolExecutor(max_workers=min(STATUS_WORKERS, len(nested))) as pool:
         return list(pool.map(read, nested))
 
 
-def unpushed_count(git, branch: str) -> int:
+# One line per local branch: its name, its upstream, how it stands against that
+# upstream, and `<ahead> <behind>` against the default branch.
+AHEAD_FORMAT = (
+    "--format=%(refname:short)%09%(upstream:short)%09%(upstream:track)"
+    "%09%(ahead-behind:origin/{default})"
+)
+AHEAD_OF_UPSTREAM = re.compile(r"\[ahead (\d+)")
+
+
+def ahead_counts(git, default: str) -> dict[str, int] | None:
+    """`unpushed_count` for every local branch at once; None when this git cannot say.
+
+    The picker paid two `rev-list` calls and a `symbolic-ref` per worktree, which across
+    the machine's 257 worktrees was 770 of the 1050 git processes behind a 25-second
+    open: a `for-each-ref` per checkout answers all of them. `%(ahead-behind:)` is new
+    in git 2.41, so an older git fails the call and `trees_for` counts per worktree.
+    """
+    done = git("for-each-ref", AHEAD_FORMAT.format(default=default), "refs/heads")
+    if done.returncode != 0:
+        return None
+    counts: dict[str, int] = {}
+    for line in (done.stdout or "").splitlines():
+        fields = line.split("\t")
+        if len(fields) == 4 and fields[0]:
+            counts[fields[0]] = branch_ahead(*fields[1:])
+    return counts
+
+
+def branch_ahead(upstream: str, track: str, against_default: str) -> int:
+    """One `ahead_counts` line's answer, by `unpushed_count`'s rule.
+
+    The upstream decides when it exists; a branch with none, or whose upstream is gone,
+    counts against the default branch. `track` is empty both for no upstream and for an
+    upstream it is level with, which is why `upstream` is read at all.
+    """
+    if upstream and track != "[gone]":
+        found = AHEAD_OF_UPSTREAM.match(track)
+        return int(found.group(1)) if found else 0
+    ahead, _, _ = against_default.partition(" ")
+    return int(ahead) if ahead.isdigit() else 0
+
+
+def unpushed_count(git, branch: str, default: str | None = None) -> int:
     """Commits this worktree holds that no remote does. 0 when the question has no answer.
 
     Falls back to the default branch when there is no upstream, because a branch that was
     never pushed has no `@{u}` and is precisely the case where unpushed work is most
     likely. A detached HEAD gets 0: `removal_decision` still sees the dirty count, and
     counting commits against a base nobody chose would refuse removals for no reason.
+    `default` saves the lookup when the caller already made it.
     """
     if not branch:
         return 0
-    for ref in (f"{branch}@{{u}}", f"origin/{tb.detect_default_branch(git)}"):
+    for ref in (f"{branch}@{{u}}", f"origin/{default or tb.detect_default_branch(git)}"):
         done = git("rev-list", "--count", f"{ref}..HEAD")
         if done.returncode == 0:
             return int((done.stdout or "0").strip() or 0)
@@ -152,6 +247,51 @@ def known_branches(git) -> set[str]:
     done = git("for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin")
     names = {line.strip() for line in (done.stdout or "").splitlines() if line.strip()}
     return {name.removeprefix("origin/") for name in names}
+
+
+def same_task(plain: str, branch: str, existing: set[str]) -> list[str]:
+    """The taken names `tb.branch_name` moved past from `plain` to `branch`, oldest first.
+
+    `agent/x-1008-2` exists because `agent/x-1008` did: the same slug, cut the same day,
+    which is most often the same task. Empty when `branch` is the plain name.
+    """
+    if plain == branch:
+        return []
+    taken = [name for name in existing if re.fullmatch(rf"{re.escape(plain)}(?:-\d+)?", name)]
+    return sorted((name for name in taken if name != branch), key=lambda name: (len(name), name))
+
+
+def prior_work(source: Path, names: list[str], runner) -> list[str]:
+    """One line per taken name, naming its PR when `gh` knows one.
+
+    A devkit ledger sweep cut `data-lake:agent/archive-read-retry-1008-2` at 21:28 while
+    #55 from `...-1008` -- the same fix -- was open; #55 merged twelve minutes later, and
+    the sweep's PR opened as a duplicate and was closed. The suffix was the one sign, and
+    nothing said it out loud.
+    """
+    lines = []
+    for name in names:
+        pr = ""
+        try:
+            listing = ["gh", "pr", "list", "--head", name, "--state", "all", "--limit", "1"]
+            done = runner(
+                [*listing, "--json", "number,state,url"],
+                cwd=source,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=GH_TIMEOUT,
+            )
+            found = json.loads(done.stdout or "[]") if done.returncode == 0 else []
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            found = []
+        if found and isinstance(found[0], dict):
+            pr = f" -- PR #{found[0].get('number')} ({found[0].get('state')}) {found[0].get('url')}"
+        lines.append(
+            f"agent-worktree: {name} was taken{pr}; if it carries this task, "
+            "the work is there, not in this tree"
+        )
+    return lines
 
 
 def recent_bases(project_dir: Path) -> list[tuple[str, str]]:
@@ -182,7 +322,7 @@ def recent_bases(project_dir: Path) -> list[tuple[str, str]]:
 
 
 def scan(
-    workspace: Path, projects: list[str] | None = None
+    workspace: Path, projects: list[str] | None = None, halves: tuple[str, ...] = HALVES
 ) -> tuple[dict[str, list[aw.Tree]], dict[str, list[tuple[str, str]]]]:
     """Every registered checkout's worktrees and base branches.
 
@@ -200,6 +340,12 @@ def scan(
     `git worktree list` and a `for-each-ref`: discarding those afterwards would spend
     the whole fan-out the narrowing exists to avoid. Names the registry does not know
     are dropped, so a stale pick cannot reach the filesystem as a path.
+
+    `halves` skips the half a picker will not draw, which is the same argument one level
+    up: the base picker drew from `recent_bases` alone and still paid a `git status` in
+    every worktree on the machine, which was nearly all of its seven seconds. A skipped
+    half comes back as an empty list per checkout; `LISTED` in place of `"trees"` lists
+    the worktrees without reading them.
     """
     text = workspace.read_text(encoding="utf-8")
     root = workspace.parent
@@ -209,10 +355,17 @@ def scan(
         names = [name for name in names if name in wanted]
     if not names:
         return {}, {}
+
+    def one(name: str) -> tuple[list[aw.Tree], list[tuple[str, str]]]:
+        trees: list[aw.Tree] = []
+        if "trees" in halves:
+            trees = trees_for(root / name)
+        elif LISTED in halves:
+            trees = listed_trees(root / name)
+        return trees, recent_bases(root / name) if "bases" in halves else []
+
     with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(names))) as pool:
-        found = list(
-            pool.map(lambda name: (trees_for(root / name), recent_bases(root / name)), names)
-        )
+        found = list(pool.map(one, names))
     return (
         {name: trees for name, (trees, _) in zip(names, found, strict=True)},
         {name: bases for name, (_, bases) in zip(names, found, strict=True)},
@@ -240,7 +393,9 @@ def create(
         print(f"agent-worktree: origin has no branch '{ref}'", file=sys.stderr)
         return EXIT_USAGE
     existing = known_branches(git)
-    branch = tb.branch_name(tb.slugify(slug or project), existing)
+    stem = tb.slugify(slug or project)
+    branch = tb.branch_name(stem, existing)
+    taken = same_task(tb.branch_name(stem, set()), branch, existing)
     name = branch.partition("/")[2]
     path = aw.default_root(source) / name
     # `--quiet`: git's checkout progress was most of what this printed (80a224ea).
@@ -254,10 +409,15 @@ def create(
     # The git hook provisions a tree only when its checkout has a `.venv`, which keeps an
     # unused project's `worktree add` fast. A tree cut here is one somebody works in, so
     # a cold checkout's is provisioned too: a fixer's social-scraper tree came up with no
-    # `.venv` and no line saying why, and no test could run in it.
-    if not (path / worktree_env.PROVISIONED).is_file():
+    # `.venv` and no line saying why, and no test could run in it. The hook's mark covers
+    # the `.venv` alone, so a frontend tree is provisioned for its `node_modules` too.
+    if tree_provision.needs_provision(path):
         tree_provision.provision(path, runner)
-    return agent_tabs.open_agent(launch, path, branch, runner)
+    opened = agent_tabs.open_agent(launch, path, branch, runner)
+    # Last, so a caller reading the tail of the output still sees it.
+    for line in prior_work(source, taken, runner):
+        print(line)
+    return opened
 
 
 def remove_one(project: str, source: Path, tree: aw.Tree, forced: bool, runner) -> int:
@@ -276,9 +436,18 @@ def remove_one(project: str, source: Path, tree: aw.Tree, forced: bool, runner) 
     argv = ["git", "-C", str(source), "worktree", "remove", tree.path]
     if verdict == aw.FORCE:
         argv.insert(-1, "--force")
-    if runner(argv, check=False).returncode != 0:
-        print(f"  {project}: git refused to remove {tree.name}", file=sys.stderr)
-        return EXIT_FAILED
+    removed = runner(argv, capture_output=True, text=True, check=False)
+    if removed.returncode != 0:
+        # Git drops the record even when the filesystem refused a file, so a refusal left
+        # here is a directory and a branch no later `remove` can name.
+        said = (removed.stderr or "").strip()[-200:]
+        prune = ["git", "-C", str(source), "worktree", "prune"]
+        error = box_teardown.finish_refused_removal(
+            Path(tree.path), said, lambda: runner(prune, check=False)
+        )
+        if error is None or error:
+            print(f"  {project}: could not remove {tree.name}: {error or said}", file=sys.stderr)
+            return EXIT_FAILED
     print(f"  removed {tree.name}")
     if tree.branch:
         gone = runner(
@@ -385,11 +554,16 @@ def draw(workspace: Path, verb: str, checkouts: str) -> list[str]:
     half = PICKER_VERBS[verb]
     if not verb.endswith("-projects"):
         return picked_rows(workspace, checkouts, half)
-    trees, bases = scan(workspace)
     if half == "trees":
-        return aw.tree_project_rows(
-            trees, picker_scan.write(SCAN_NAMES[half], aw.tree_entries(trees))
-        )
+        # Counted, not read, and recorded as nothing. The row says how many worktrees a
+        # checkout has, which `git worktree list` answers alone, so stage one no longer
+        # pays a `git status` in every worktree on the machine (nine seconds across 257)
+        # for rows only stage two draws. A row built from this scan would call every
+        # worktree clean and pushed, so none is written: the empty token names no write,
+        # and stage two reads the ticked checkouts live -- `picker_scan`'s miss, on purpose.
+        trees, _ = scan(workspace, halves=(LISTED,))
+        return aw.tree_project_rows(trees, UNRECORDED)
+    _, bases = scan(workspace, halves=(half,))
     return aw.base_project_rows(bases, picker_scan.write(SCAN_NAMES[half], aw.base_entries(bases)))
 
 
@@ -413,7 +587,7 @@ def picked_rows(workspace: Path, checkouts: str, half: str) -> list[str]:
     # A miss, or a verb typed by hand with no first stage in front of it. `projects`
     # narrows the rescan in the first case and is empty in the second, which `scan`
     # reads as "every checkout" -- the answer this verb gave before there was a stage.
-    found = scan(workspace, projects or None)
+    found = scan(workspace, projects or None, (half,))
     return aw.tree_rows(found[0]) if half == "trees" else aw.base_rows(found[1])
 
 

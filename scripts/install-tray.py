@@ -92,6 +92,20 @@ TRAY_MODULES = (
     "schedule_health",
     "devkit_schtasks",
     "harness_state",
+    # `tray_state` draws the ingestion collectors' rows through `collectors.row`.
+    "collectors",
+    "collector_build",
+    # `tray_rows` reads the handoffs this machine sent (`collector_handoff.OUTGOING`).
+    "collector_handoff",
+    "collector_tasks",
+    "collectors_config",
+    "docker_memory",
+    "machine_clock",
+    "devkit_jsonc",
+    "sweep",
+    "task_branch",
+    # `collectors.Git.pin` reads a consumer's sibling pin through it.
+    "worktree_env",
 )
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]

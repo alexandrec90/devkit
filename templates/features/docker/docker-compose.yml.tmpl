@@ -21,7 +21,9 @@ services:
     ports:
       - "${DB_HOST_PORT:-{{ db_port }}}:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # The parent, not `.../data`: from 18 the image keeps its cluster in a versioned
+      # directory below this one, and refuses to start with a volume on the old path.
+      - pgdata:/var/lib/postgresql
     healthcheck:
       # Other services wait on this, so `up -d` returning means the DB is actually
       # accepting connections — not merely that the container started.

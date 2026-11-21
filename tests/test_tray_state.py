@@ -12,11 +12,15 @@ could say.
 
 from __future__ import annotations
 
+import datetime as _dt
+import json
 from dataclasses import dataclass
 
 import pytest
 from support import load_script
 
+fix_cycle = load_script("scripts/fix_cycle.py")
+fix_loop = load_script("scripts/fix_loop.py")
 schedule_health = load_script("scripts/schedule_health.py")
 tray_state = load_script("scripts/tray_state.py")
 
@@ -28,6 +32,17 @@ class FakeJob:
 
 def jobs(*names: str) -> list[FakeJob]:
     return [FakeJob(name) for name in names]
+
+
+@pytest.fixture(autouse=True)
+def no_collectors(monkeypatch, tmp_path):
+    """`refresh` also reads this machine's collector assignment and asks docker about it,
+    and reads the fix pass's history out of this checkout. Off by default here, so a
+    workstation that runs a collector or the pass gets the same answers as CI; the tests
+    that want rows stub `collectors.tray_rows` or write a history themselves."""
+    monkeypatch.setattr(tray_state.collectors, "tray_rows", lambda: [])
+    monkeypatch.setattr(tray_state.collectors, "scheduled_tasks", lambda: {})
+    monkeypatch.setattr(tray_state, "REPO_ROOT", tmp_path)
 
 
 # --- reading a problem line --------------------------------------------------
@@ -208,11 +223,15 @@ def test_the_colours_differ_in_brightness_as_well_as_hue():
 def test_refresh_asks_the_scheduler_and_returns_what_the_tray_draws(monkeypatch):
     """The one function the tray calls on a timer. It exists so the message loop holds
     no knowledge of `schedule_health` at all."""
-    monkeypatch.setattr(schedule_health, "query", lambda: jobs("devkit-a", "devkit-b"))
+    monkeypatch.setattr(
+        schedule_health, "query", lambda also=frozenset(): jobs("devkit-a", "devkit-b")
+    )
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(): ["devkit-b: disabled -- nothing runs it"],
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: [
+            "devkit-b: disabled -- nothing runs it"
+        ],
     )
     found = tray_state.refresh()
     assert [(item.name, item.state) for item in found] == [
@@ -222,9 +241,11 @@ def test_refresh_asks_the_scheduler_and_returns_what_the_tray_draws(monkeypatch)
 
 
 def test_refresh_on_a_machine_with_no_scheduler_reports_nothing_registered(monkeypatch):
-    monkeypatch.setattr(schedule_health, "query", lambda: [])
+    monkeypatch.setattr(schedule_health, "query", lambda also=frozenset(): [])
     monkeypatch.setattr(
-        schedule_health, "problems", lambda found, now=None, deliberate=frozenset(): []
+        schedule_health,
+        "problems",
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
     )
     assert tray_state.refresh() == []
     assert tray_state.overall(tray_state.refresh()) == tray_state.WARN
@@ -260,12 +281,282 @@ def test_refresh_tells_problems_what_was_stood_down_on_purpose(monkeypatch):
     the operator stops reading the icon. `problems` only knows the difference if its
     caller passes the ledger, and `refresh` is a caller it would be easy to forget."""
     seen = {}
-    monkeypatch.setattr(schedule_health, "query", lambda: jobs("devkit-a"))
+    monkeypatch.setattr(schedule_health, "query", lambda also=frozenset(): jobs("devkit-a"))
     monkeypatch.setattr(schedule_health, "stood_down", lambda: frozenset({"devkit-a"}))
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(): seen.update(passed=deliberate) or [],
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: (
+            seen.update(passed=deliberate) or []
+        ),
     )
     tray_state.refresh()
     assert seen["passed"] == frozenset({"devkit-a"})
+
+
+# --- the collectors ride along ---------------------------------------------------
+
+
+def test_a_collector_row_joins_the_jobs_and_sorts_by_how_loud_it_is(monkeypatch):
+    monkeypatch.setattr(schedule_health, "query", lambda also=frozenset(): jobs("devkit-a"))
+    monkeypatch.setattr(
+        schedule_health,
+        "problems",
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
+    )
+    monkeypatch.setattr(
+        tray_state.collectors,
+        "tray_rows",
+        lambda: [("collector: ibkr_trader", tray_state.FAIL, "not running (Exited (1))")],
+    )
+    found = tray_state.refresh()
+    assert [(item.name, item.state) for item in found] == [
+        ("collector: ibkr_trader", tray_state.FAIL),
+        ("devkit-a", tray_state.OK),
+    ]
+    assert tray_state.overall(found) == tray_state.FAIL
+    assert "collector: ibkr_trader" in tray_state.tooltip(found)
+
+
+def test_a_collector_row_opens_the_collectors_log(monkeypatch):
+    """Clicking a row opens its record; a collector is no scheduled task, so it names its
+    own rather than being looked up in `schedule_health.ARTIFACTS`."""
+    monkeypatch.setattr(
+        tray_state.collectors, "tray_rows", lambda: [("collector: x", tray_state.OK, "")]
+    )
+    (item,) = tray_state.collector_states()
+    assert item.artifact == "logs/collectors.log"
+    assert tray_state.JobState("devkit-fix-pass", tray_state.OK).artifact == "logs/fix-pass.log"
+
+
+def test_the_collector_levels_are_the_trays_levels():
+    """`collectors` spells the three levels itself because this module imports it; a
+    respelling on either side would leave a row with no colour (`RANK` KeyError)."""
+    levels = {tray_state.collectors.OK, tray_state.collectors.WARN, tray_state.collectors.FAIL}
+    assert levels == set(tray_state.RANK)
+
+
+# --- a scheduled collector is a scheduler row under the collectors' label -------------
+
+
+def test_a_line_about_a_known_non_devkit_job_names_it():
+    line = "social-scraper: last run failed (exit 1) at 2026-10-02 14:30"
+    assert tray_state.named_in(line) == ""
+    assert tray_state.named_in(line, frozenset({"social-scraper"})) == "social-scraper"
+
+
+def test_a_scheduled_collector_is_asked_about_in_the_same_query_and_judged_the_same(
+    monkeypatch,
+):
+    asked = {}
+    tasks = {"social-scraper": "logs/collector-social-scraper.log"}
+    monkeypatch.setattr(tray_state.collectors, "scheduled_tasks", lambda: tasks)
+
+    def query(also=frozenset()):
+        asked["also"] = also
+        return jobs("devkit-a", "social-scraper")
+
+    def problems(found, now=None, deliberate=frozenset(), artifacts=None):
+        asked["artifacts"] = artifacts
+        return ["social-scraper: last run failed (exit 1) at 2026-10-02 14:30"]
+
+    monkeypatch.setattr(schedule_health, "query", query)
+    monkeypatch.setattr(schedule_health, "problems", problems)
+    found = tray_state.refresh()
+    assert asked["also"] == frozenset({"social-scraper"})
+    assert asked["artifacts"]["social-scraper"] == "logs/collector-social-scraper.log"
+    assert asked["artifacts"]["devkit-fix-pass"] == "logs/fix-pass.log"
+    assert [(item.name, item.state) for item in found] == [
+        ("collector: social-scraper", tray_state.FAIL),
+        ("devkit-a", tray_state.OK),
+    ]
+    assert found[0].artifact == "logs/collector-social-scraper.log"
+
+
+def test_collector_task_states_relabels_the_tasks_and_adds_the_missing_ones():
+    found = [
+        tray_state.JobState("devkit-a", tray_state.OK),
+        tray_state.JobState("social-scraper", tray_state.WARN, "slow"),
+    ]
+    tasks = {"social-scraper": "logs/collector-social-scraper.log", "other": "logs/o.log"}
+    relabelled = tray_state.collector_task_states(found, tasks)
+    assert relabelled[:2] == [
+        tray_state.JobState("devkit-a", tray_state.OK),
+        tray_state.JobState(
+            "collector: social-scraper",
+            tray_state.WARN,
+            "slow",
+            "logs/collector-social-scraper.log",
+        ),
+    ]
+    ((name, state),) = [(item.name, item.state) for item in relabelled[2:]]
+    assert (name, state) == ("collector: other", tray_state.FAIL)
+    assert tray_state.collector_task_states(found[:1], {}) == found[:1]
+
+
+def test_a_scheduled_collector_with_no_task_is_red_rather_than_absent(monkeypatch):
+    """Asked about by name, so a task never registered or deleted by hand is a row that
+    says so -- not a row that silently is not there."""
+    monkeypatch.setattr(
+        tray_state.collectors,
+        "scheduled_tasks",
+        lambda: {"social-scraper": "logs/collector-social-scraper.log"},
+    )
+    monkeypatch.setattr(schedule_health, "query", lambda also=frozenset(): jobs("devkit-a"))
+    monkeypatch.setattr(
+        schedule_health,
+        "problems",
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
+    )
+    first, _devkit = tray_state.refresh()
+    assert (first.name, first.state) == ("collector: social-scraper", tray_state.FAIL)
+    assert "not scheduled" in first.detail and first.artifact == "logs/collectors.log"
+
+
+# --- the fix pass ------------------------------------------------------------
+
+
+def pass_row(when="2026-10-28T17:30:04+00:00", **fields):
+    """One history line as `fix_cycle.history_line` writes it: a clean dispatch pass."""
+    row = {"when": when, "mode": "dispatch", "harness": "clean", "sent": [], "waiting": {}}
+    row.update({"working": [], "person": [], "owed": 0, **fields})
+    return row
+
+
+def test_a_machine_with_no_fix_pass_history_gets_no_fix_pass_rows():
+    """The pass's scheduled job is a row of its own; one that never ran is its to say."""
+    assert tray_state.fix_pass_states([]) == []
+
+
+def test_each_step_awaiting_a_person_is_a_red_row_that_opens_the_record():
+    """A step no fixer can take reached the person only through the morning toast, once
+    a day: 26291670's `claude auth login` sat behind it for three days."""
+    step = "run `claude auth login` on this machine"
+    line = f"{step} -- then: python scripts/harness_triage.py --resolve-like ab12 --note '<x>'"
+    found = tray_state.fix_pass_states([pass_row(person=[line])])
+    assert found[0] == tray_state.JobState("your step", tray_state.FAIL, step, "logs/fix-pass.log")
+    assert tray_state.overall(found) == tray_state.FAIL
+
+
+def test_groups_awaiting_one_step_are_one_row_that_counts_them():
+    """2026-11-01: the account's billing finding and five per-PR stalls naming its step
+    were six red rows differing only in the id of the command that retires each."""
+    billing = "settle the GitHub account's Actions billing"
+    steps = [
+        f"{billing} -- then: python scripts/harness_triage.py --resolve-like {i}" for i in "abc"
+    ]
+    *person, _fixers = tray_state.fix_pass_states([pass_row(person=[*steps, "reboot"])])
+    assert [row.detail for row in person] == [f"{billing} (x3)", "reboot"]
+    assert tray_state.person_rows([*steps, "reboot"]) == {billing: 3, "reboot": 1}
+
+
+def test_the_resolve_tail_is_the_one_the_pass_writes():
+    """`fix_loop.person_steps` writes it; the tray cuts there and imports none of the pass."""
+    assert tray_state.RESOLVE_TAIL == fix_loop.PERSON_RESOLVE_TAIL
+
+
+def test_a_long_detail_is_cut_in_the_menu_with_a_mark():
+    long = tray_state.JobState("your step", tray_state.FAIL, "x" * 300)
+    label = tray_state.menu_label(long)
+    assert label.endswith("…") and len(label) == len("X   your step -- ") + 100
+    short = tray_state.JobState("your step", tray_state.FAIL, "x" * 100)
+    assert tray_state.menu_label(short).endswith("x")
+
+
+def test_the_fixers_row_says_what_is_at_work_waiting_owed_and_last_sent():
+    history = [
+        pass_row("2026-10-28T12:00:06+00:00", sent=["carameli #485 -- dispatch"]),
+        pass_row(working=["devkit agent/fix-x"], waiting={"devkit #1": "held"}, owed=2),
+    ]
+    [fixers] = tray_state.fix_pass_states(history)
+    assert (fixers.name, fixers.state) == ("fixers", tray_state.OK)
+    assert fixers.detail == "1 at work, 1 waiting, 2 owed, last sent 12:00Z"
+
+
+def test_the_fixers_row_follows_every_person_step_and_reads_the_whole_history():
+    history = [pass_row(sent=["carameli #485 -- dispatch"]), pass_row(person=["a", "b"])]
+    *person, fixers = tray_state.fix_pass_states(history)
+    assert [row.name for row in person] == ["your step", "your step"]
+    assert fixers == tray_state.fixers_state(history)
+    assert fixers.detail == "0 at work, last sent 17:30Z", "the send is an older line's"
+
+
+def test_a_red_harness_holds_every_send_and_says_so():
+    [fixers] = tray_state.fix_pass_states([pass_row(harness=["1 harness failure(s) open"])])
+    assert fixers.state == tray_state.WARN
+    assert fixers.detail.startswith("harness RED, sends held -- 1 harness failure(s) open")
+
+
+def test_owed_with_nothing_sent_for_six_passes_is_amber_and_five_is_not():
+    """What a lapsed login, an unstartable launcher or a plan that drops the backlog all
+    look like from outside: work owed and no fixer going at it."""
+    stuck = [pass_row(owed=1)] * tray_state.STUCK_PASSES
+    [fixers] = tray_state.fix_pass_states(stuck)
+    assert fixers.state == tray_state.WARN and "none sent for 6 passes" in fixers.detail
+    [fixers] = tray_state.fix_pass_states(stuck[1:])
+    assert fixers.state == tray_state.OK
+
+
+def test_a_fixer_at_work_or_a_reasoned_wait_is_not_stuck():
+    for busy in ({"working": ["devkit x"]}, {"waiting": {"devkit #1": "held"}}):
+        history = [pass_row(owed=1, **busy)] * tray_state.STUCK_PASSES
+        assert tray_state.fix_pass_states(history)[0].state == tray_state.OK
+
+
+def test_history_written_before_the_tray_fields_is_never_judged_stuck():
+    old = {"when": "2026-10-20T00:00:00+00:00", "mode": "dispatch", "harness": "clean"}
+    [fixers] = tray_state.fix_pass_states([old] * tray_state.STUCK_PASSES)
+    assert (fixers.state, fixers.detail) == (tray_state.OK, "none sent")
+
+
+def test_a_pass_that_sends_nothing_by_its_mode_says_so():
+    [fixers] = tray_state.fix_pass_states([pass_row(mode="plan")])
+    assert fixers.state == tray_state.OK
+    assert fixers.detail.startswith("mode=plan, sends nothing; ")
+
+
+def test_the_dispatch_mode_is_the_passes_own_spelling():
+    assert tray_state.DISPATCH == fix_cycle.DISPATCH
+
+
+def test_the_tray_reads_the_line_the_pass_writes():
+    """The two halves agree on field names only through this: the pass's own history
+    line, read back by the tray."""
+    account = fix_cycle.Account(
+        fix_cycle.DISPATCH,
+        fix_cycle.harness_state({}, True, []),
+        sent=("devkit ledger -- upstream",),
+        working=("devkit agent/fix-x",),
+        person=("run `claude auth login` on this machine",),
+        owed=1,
+    )
+    now = _dt.datetime(2026, 10, 28, 18, 0, tzinfo=_dt.UTC)
+    row = json.loads(fix_cycle.history_line(account, now))
+    person, fixers = tray_state.fix_pass_states([row])
+    assert (person.state, person.detail) == (tray_state.FAIL, account.person[0])
+    assert fixers.detail == "1 at work, 1 owed, last sent 18:00Z"
+
+
+def test_read_history_skips_what_is_not_a_line_of_json(tmp_path):
+    path = tmp_path / "history.jsonl"
+    path.write_text('{"when": "a"}\nnot json\n[1]\n{"when": "b"}\n', encoding="utf-8")
+    assert tray_state.read_history(path) == [{"when": "a"}, {"when": "b"}]
+    assert tray_state.read_history(tmp_path / "absent.jsonl") == []
+
+
+def test_refresh_adds_the_fix_pass_rows_from_this_checkouts_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(schedule_health, "query", lambda also=frozenset(): jobs("devkit-a"))
+    monkeypatch.setattr(
+        schedule_health,
+        "problems",
+        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
+    )
+    history = tmp_path / tray_state.FIX_HISTORY
+    history.parent.mkdir(parents=True)
+    history.write_text(json.dumps(pass_row(person=["log in"])) + "\n", encoding="utf-8")
+    found = tray_state.refresh()
+    assert [(item.name, item.state) for item in found] == [
+        ("your step", tray_state.FAIL),
+        ("devkit-a", tray_state.OK),
+        ("fixers", tray_state.OK),
+    ]

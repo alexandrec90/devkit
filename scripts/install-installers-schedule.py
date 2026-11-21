@@ -54,6 +54,11 @@ GROUP = "maintenance"
 # reader here when the scheduler reports a failure.
 ARTIFACT = "logs/installers.log"
 
+# The `log-wrap.py --always` label the task runs under (`devkit_schtasks.logged`), which
+# files each failed run on the harness-events ledger; its files are
+# `logs/scheduled-installers[.failed].log`, beside the runner's own `ARTIFACT`.
+LABEL = "Scheduled: Installers"
+
 WINDOWS = os.name == "nt"
 
 # Before the 09:00 workspace-status pass, so the report a person reads describes a
@@ -122,14 +127,15 @@ def task_document(schedule: Schedule) -> str:
     `IgnoreNew` means a wedged run suppresses every later fire until the limit expires.
     """
     program, *arguments = schedule.command
+    # `PureWindowsPath`, not `Path`: the document is Windows by construction, so it has to
+    # be split on backslashes whatever host builds it.
+    root = str(PureWindowsPath(schedule.script).parent.parent)
     return devkit_schtasks.task_xml(
         program,
-        subprocess.list2cmdline(arguments),
+        devkit_schtasks.logged(LABEL, program, subprocess.list2cmdline(arguments), root),
         devkit_schtasks.daily_trigger(schedule.at) + devkit_schtasks.logon_trigger(LOGON_DELAY),
         time_limit="PT30M",
-        # `PureWindowsPath`, not `Path`: the document is Windows by construction, so it
-        # has to be split on backslashes whatever host builds it.
-        working_dir=str(PureWindowsPath(schedule.script).parent.parent),
+        working_dir=root,
         # Lands disabled when this job has been stood down by name. The pass itself is
         # maintenance and no group stands it down, but `--off --job` can, and an
         # installer that ignored the ledger would hand the operator back a running job.

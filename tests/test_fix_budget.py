@@ -104,6 +104,56 @@ def test_an_escalated_problem_waits_while_open_and_starts_over_once_resolved():
     assert go(fix_budget.budget(third, ledger, NOW, fix_findings.Escalation(False, resolved)))
 
 
+def _medium(*signature: str, project: str = "carameli") -> fix_plan.Decision:
+    return decision(
+        fix_plan.DISPATCH,
+        failure(
+            kind=fix_plan.LOCAL,
+            project=project,
+            number=0,
+            head="",
+            workflow=fix_plan.MEDIUM_TIER,
+            signature=signature,
+        ),
+    )
+
+
+def test_one_medium_tier_session_per_project_at_a_time():
+    """The key digests the signature, so `{x}` then `{x, flaky}` is a new problem, and a
+    second session would go at once while the first still works."""
+    ledger = ledger_after(_medium("tests/a.py::x"))
+    wider = _medium("tests/a.py::x", "tests/b.py::flaky")
+    verdict = fix_budget.budget(wider, ledger, NOW)
+    assert not verdict.go
+    assert verdict.finding is None
+    assert "medium tier session" in verdict.why
+
+
+def test_another_project_s_medium_session_holds_nobody():
+    ledger = ledger_after(_medium("tests/a.py::x"))
+    assert go(fix_budget.budget(_medium("tests/a.py::y", project="homelab"), ledger, NOW))
+
+
+def test_a_medium_session_that_died_or_went_quiet_is_not_open():
+    first = _medium("tests/a.py::x")
+    wider = _medium("tests/a.py::x", "tests/b.py::flaky")
+    ledger = ledger_after(first)
+    ledger[fix_ledger.decision_key(first)]["dead"] = "never started"
+    assert go(fix_budget.budget(wider, ledger, NOW))
+    later = NOW + fix_ledger.RESEND_AFTER
+    assert go(fix_budget.budget(wider, ledger_after(first), later))
+
+
+def test_a_local_e2e_session_is_not_a_medium_tier_one():
+    e2e = decision(
+        fix_plan.DISPATCH,
+        failure(
+            kind=fix_plan.LOCAL, number=0, head="", workflow="Local E2E", signature=("t::e2e",)
+        ),
+    )
+    assert go(fix_budget.budget(_medium("tests/a.py::x"), ledger_after(e2e), NOW))
+
+
 def test_a_changed_failure_is_progress_and_goes():
     first = decision(
         fix_plan.DISPATCH, failure(sha="a1", signature=("tests/a.py::t", "tests/b.py::t"))
@@ -113,6 +163,54 @@ def test_a_changed_failure_is_progress_and_goes():
     )
     narrower = decision(fix_plan.DISPATCH, failure(sha="c3", signature=("tests/b.py::t",)))
     assert go(fix_budget.budget(narrower, ledger_after(first, second), NOW))
+
+
+def _master(sha: str, green_at: str = "", signature=("Lint / Lint",)) -> fix_plan.Decision:
+    red = failure(
+        kind=fix_plan.BRANCH,
+        number=0,
+        head="",
+        base="master",
+        sha=sha,
+        reason="",
+        signature=signature,
+        green_at=green_at,
+    )
+    return decision(fix_plan.DISPATCH, red)
+
+
+def test_a_default_branch_that_passed_since_its_fixers_is_a_new_problem():
+    """430656bd: carameli master's pip-audit `Lint / Lint` on 2026-10-22 was escalated
+    fixers-exhausted with no fixer sent at it -- its two attempts were spent on 09-29
+    and 10-06 at other lint failures, and master had passed on 10-19 in between."""
+    first = _master("c9a75cce")
+    second = _master("6a53eac3")
+    ledger = ledger_after(first, second, when=NOW - _dt.timedelta(days=16))
+    passed = (NOW - _dt.timedelta(days=3)).isoformat()
+    assert go(fix_budget.budget(_master("65a79584", green_at=passed), ledger, NOW))
+    still = fix_budget.budget(_master("65a79584"), ledger, NOW)
+    assert still.finding and still.finding.kind == "fixers-exhausted", "never passed: the loop"
+    before = (NOW - _dt.timedelta(days=20)).isoformat()
+    assert not fix_budget.budget(_master("65a79584", green_at=before), ledger, NOW).go
+
+
+def test_a_blind_default_branch_after_a_pass_gets_its_one_session_again():
+    """a0fb253d: the 10-05 runner outage spent `branch:carameli:0:e3b0c44298fc:dispatch`'s
+    one blind attempt for the life of the ledger, though master passed on 10-06."""
+    ledger = ledger_after(_master("6a53eac3", signature=()), when=NOW - _dt.timedelta(days=17))
+    passed = (NOW - _dt.timedelta(days=16)).isoformat()
+    assert go(fix_budget.budget(_master("65a79584", passed, signature=()), ledger, NOW))
+
+
+def test_the_ledger_counts_after_the_later_of_a_resolution_and_a_pass():
+    resolved = "2026-10-20T00:00:00+00:00"
+    escalated = fix_findings.Escalation(False, resolved)
+    assert fix_budget.since_for(_master("a"), escalated) == resolved
+    later = "2026-10-21T08:00:00Z"
+    assert fix_budget.since_for(_master("a", green_at=later), escalated) == later
+    earlier = "2026-10-19T13:01:11Z"
+    assert fix_budget.since_for(_master("a", green_at=earlier), escalated) == resolved
+    assert fix_budget.since_for(_master("a"), fix_findings.NOT_ESCALATED) == ""
 
 
 def test_legacy_entries_count_against_their_problem():
@@ -149,6 +247,23 @@ def test_a_blocked_report_is_escalated_rather_than_parked():
         one, ledger, NOW + _dt.timedelta(days=30), fix_findings.Escalation(False, resolved)
     )
     assert go(after), "once the devkit session resolved it, the block is history"
+
+
+def test_a_fix_waiting_on_an_open_pr_holds_unescalated_until_that_pr_closes():
+    """f7c4e5db: ibkr_trader #116 needed data-lake #66 merged. Escalating that reached a
+    devkit session that could not merge it either, and resolving it sent the next fixer
+    at the same wall."""
+    one = decision(fix_plan.DISPATCH, failure())
+    ledger = ledger_after(one)
+    ledger[fix_ledger.decision_key(one)]["waits"] = "https://github.com/o/r/pull/66"
+    later = NOW + _dt.timedelta(days=2)
+    for state in ("OPEN", ""):
+        verdict = fix_budget.budget(one, ledger, later, pr_state=lambda url, s=state: s)
+        assert not verdict.go and verdict.finding is None, state
+        assert "waits on https://github.com/o/r/pull/66" in verdict.why
+    assert not fix_budget.budget(one, ledger, later).go, "unread by default: it waits"
+    for state in fix_budget.SETTLED:
+        assert go(fix_budget.budget(one, ledger, later, pr_state=lambda url, s=state: s)), state
 
 
 def test_the_devkit_session_backs_off_at_the_top_of_the_ladder_and_never_stops():
@@ -225,3 +340,61 @@ def test_a_conflict_back_at_a_new_head_gets_its_resolver_again_however_often():
     for sha in shas[1:]:
         assert go(fix_budget.budget(_conflict(sha), ledger, NOW))
         ledger.update(ledger_after(_conflict(sha)))
+
+
+def _dependabot(project: str = "ibkr_trader", alert: str = "urllib3") -> fix_plan.Decision:
+    found = failure(
+        kind=fix_plan.DEPENDABOT,
+        project=project,
+        number=0,
+        head="",
+        sha="",
+        signature=(f"{fix_plan.ALERT_ENTRY}{alert} >= 1.0",),
+    )
+    return decision(fix_plan.DISPATCH, found)
+
+
+def test_dependabot_sessions_stop_at_the_daily_cap_and_nothing_else_does(tmp_path):
+    """Added as an input while the ledger session already went out a dozen times a day:
+    an alert backlog can always find one more session to spend, so it has a fuse."""
+    path = tmp_path / "dispatch.json"
+    sent = [_dependabot("ibkr_trader"), _dependabot("data-lake")]
+    for n, one in enumerate(sent):
+        assert go(fix_budget.budget(one, fix_ledger.read_ledger(path), NOW))
+        when = NOW - _dt.timedelta(hours=n)
+        key = fix_ledger.decision_key(one)
+        fix_ledger.record(path, key, "n", when, source=fix_budget.source(one))
+    ledger = fix_ledger.read_ledger(path)
+    red_pr = decision(fix_plan.DISPATCH, failure(head="dependabot/uv/urllib3-2.8.0"))
+    for third in (_dependabot("social-scraper"), red_pr):
+        capped = fix_budget.budget(third, ledger, NOW)
+        assert not capped.go and capped.finding is None
+        assert capped.why == f"{fix_budget.DAILY_CAPPED}: 2 of 2 sessions sent in the last 24h"
+    assert go(fix_budget.budget(decision(fix_plan.DISPATCH, failure()), ledger, NOW))
+    folded = decision(fix_plan.UPSTREAM, failure(head="dependabot/uv/x"), failure(project="devkit"))
+    assert fix_budget.over_daily_cap(folded, ledger, NOW) == "", "the harness is never held by it"
+    tomorrow = NOW + fix_budget.DAY
+    assert go(fix_budget.budget(_dependabot("social-scraper"), ledger, tomorrow))
+
+
+def test_only_a_dependabot_session_is_recorded_under_its_source():
+    assert fix_budget.source(_dependabot()) == fix_plan.DEPENDABOT
+    assert fix_budget.source(decision(fix_plan.DISPATCH, failure())) == ""
+    assert fix_budget.source(decision(fix_plan.UPSTREAM, failure(head="dependabot/x"))) == ""
+
+
+def test_a_free_update_of_a_dependabot_pr_spends_none_of_the_cap(tmp_path):
+    """Supervision 2026-10-11: carameli #446, a Dependabot PR behind its base, was
+    updated four times in a day, each stamped under the Dependabot source, and the
+    resolver for #440's conflict read "6 of 2 sessions sent" -- the cap spent by
+    branch updates that are no session at all."""
+    path = tmp_path / "dispatch.json"
+    bump = failure(number=446, head="dependabot/npm/vite-7")
+    for action in fix_plan.NO_SESSION:
+        free = decision(action, bump)
+        assert fix_budget.source(free) == ""
+        fix_ledger.record(
+            path, fix_ledger.decision_key(free), "n", NOW, source=fix_budget.source(free)
+        )
+    resolver = decision(fix_plan.RESOLVE, failure(number=440, head="dependabot/npm/x"))
+    assert fix_budget.over_daily_cap(resolver, fix_ledger.read_ledger(path), NOW) == ""

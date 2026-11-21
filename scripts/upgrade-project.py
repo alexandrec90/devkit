@@ -74,25 +74,33 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import harness_events
 import policy_runtime
 import precommit_store
 from adoption_prs import (
+    UPGRADE_SLUG,
     close_superseded,
     open_adoption_pr,
+    upgrade_branch_stem,
     upgrade_slug,
 )
+import release
 import sweep
 import task_branch as tb
 import task_input
+import template_refresh
 import temproot_wiring
 import worktree
 from worktree_env import SKIP_PROVISION_VAR
@@ -276,17 +284,66 @@ def _same_path(left: Path, right: Path) -> bool:
         return False
 
 
-def pending_adoption(project: Path, name: str, tag: str) -> str:
-    """`open_adoption_pr`, after closing what `tag` supersedes.
+def pending_adoption(
+    project: Path,
+    name: str,
+    tag: str,
+    workspace: Path | None = None,
+    online: Callable[[], bool] | None = None,
+) -> str:
+    """Why `name` gets no box for `tag` this run, "" when it does: its adoption PR is
+    open (`open_adoption_pr`, asked after closing what `tag` supersedes -- its PRs, and
+    the boxes of older adoptions that never got one), or GitHub cannot be looked up
+    (`online`, by default `harness_events.resolves`).
 
     One call from `main` rather than two, because `main`'s complexity is at the ceiling
     the structure ratchet records for it and this decision is one the loop there
     already makes -- "is the adoption for this release in flight?" -- only asked after
     the older ones stop being.
+
+    Offline, `open_adoption_pr` fails open and reads as no PR: on 2026-11-12 a night
+    without DNS cut agent-terminal a second v0.11.88 box beside its open #11, and the
+    box's commit was refused by a branch policy that could not reach GitHub either
+    (2e881f69). Every step after the box needs the network, so none is cut without it.
     """
+    if not (online or harness_events.resolves)():
+        return f"GitHub cannot be looked up from this machine, so no box is cut for devkit {tag}"
     for closed in close_superseded(project, tag):
         print(f"upgrade: {name} -- closed {closed}, superseded by devkit {tag}")
-    return open_adoption_pr(project, tag)
+    for box in discard_superseded_boxes(name, tag, workspace) if workspace else []:
+        print(f"upgrade: {name} -- discarded {box}, superseded by devkit {tag}")
+    pending = open_adoption_pr(project, tag)
+    return f"devkit {tag} is already up for adoption in {pending}" if pending else ""
+
+
+# Every adoption branch, whatever release it adopted.
+ADOPTION_PREFIX = f"{tb.AUTOMATION_PREFIX}{tb.slugify(UPGRADE_SLUG)}-"
+
+
+def discard_superseded_boxes(name: str, tag: str, workspace: Path) -> list[str]:
+    """Reap `name`'s adoption boxes for releases before `tag`; the names reaped.
+
+    `close_superseded` closes an older adoption's PR and leaves its box to reconcile.
+    One that failed before opening a PR has none to close, and reconcile rightly holds a
+    box whose files exist nowhere else: six such boxes (v0.11.27, v0.11.28) sat reported
+    every 15 minutes after v0.11.31 replaced them. What they hold is pull output the new
+    release regenerates, so it is discarded -- `force` drops uncommitted files only, and
+    a plan `reap` refuses (commits not on origin, a live claim) is left standing.
+    """
+    current = upgrade_branch_stem(tag)
+    gone: list[str] = []
+    for box in worktree.read_leases(workspace.parent).values():
+        if box.project != name or not box.branch.startswith(ADOPTION_PREFIX):
+            continue
+        if box.branch.startswith(current):
+            continue
+        try:
+            plan = worktree.plan_reap(box.name, workspace, force=True)
+            if not plan.refusal and worktree.apply_reap(plan, workspace)[0]:
+                gone.append(box.name)
+        except worktree.WorktreeError:
+            continue  # fails open: the adoption does not wait on an old box
+    return gone
 
 
 def commit_message(tag: str, files: int | str) -> str:
@@ -670,6 +727,13 @@ def commit_with_hook_retry(
     lint error the formatter cannot fix leaves the tree exactly as it was, and
     committing over it again would just fail twice and say so twice.
 
+    **A commit that went through is amended when it left the tree dirty.** pre-commit
+    fails a hook only for rewriting a *tracked* file, so a generator that writes new
+    ones passes and leaves them untracked: carameli's `sync-codex` mirrored a newly
+    vendored skill into `.agents/skills/`, the adoption commit landed without it, and
+    the project's `codex-sync` gate went red on the PR (38836107). The box was staged
+    whole just before, so anything left afterwards is the hooks' output.
+
     `heal` runs first: the scheduled run is unelevated, and a pre-commit clone an
     elevated session left in the store failed data-lake's and sports_betting's commits
     before any hook ran (2026-09-28). `precommit_store` says why.
@@ -678,11 +742,64 @@ def commit_with_hook_retry(
     if healed:
         print(f"upgrade: {healed}")
     before = _status(git)
-    first = git("commit", "-m", message)
-    if first.returncode == 0 or _status(git) == before:
-        return first, False
-    git("add", "-A")
-    return git("commit", "-m", message), True
+    committed, retried = git("commit", "-m", message), False
+    if committed.returncode != 0:
+        if _status(git) == before:
+            return committed, False
+        git("add", "-A")
+        committed, retried = git("commit", "-m", message), True
+    if committed.returncode == 0 and _status(git):
+        git("add", "-A")
+        return git("commit", "--amend", "--no-edit"), True
+    return committed, retried
+
+
+# git's words for a push the transport lost, as opposed to one the remote or a hook
+# judged: HTTP's `unable to access` (a 403 or 5xx from GitHub), a DNS miss, a dropped
+# connection. The v0.11.35 adoption lost two of three consumers to a 403 a minute after
+# the first push went through, and both answered again within minutes (a1edc2f7).
+TRANSPORT_FAILURE = re.compile(
+    r"unable to access|could not resolve host|connection (?:reset|refused|timed out)|"
+    r"the remote end hung up|early EOF",
+    re.I,
+)
+# Seconds before each further push. Once the tag exists nothing retries an adoption
+# until the nightly `devkit-upgrade-projects`, so a few minutes here save a failed job.
+PUSH_WAITS = (30, 120)
+
+
+def said_by(done: subprocess.CompletedProcess[str]) -> str:
+    """Everything a git call printed, stdout first so git's own `error:` line stays last,
+    where `log-wrap.py` reads a job's cause.
+
+    Both streams, never `stderr or stdout`: git leaves a pre-push hook's output on stdout
+    and writes only `error: failed to push some refs` to stderr, which is always
+    non-empty on a refusal, so the hook's reason was dropped every time (1720b7f4).
+    """
+    return "\n".join(part.strip() for part in (done.stdout, done.stderr) if part and part.strip())
+
+
+def push_with_retry(git, branch: str, sleep=time.sleep) -> subprocess.CompletedProcess[str]:
+    """`git push -u origin <branch>` past the local push gate, pushed again after each
+    `PUSH_WAITS` while git says the transport failed; a remote's or a hook's refusal is
+    returned at once.
+
+    **Past the gate** (`release.push_env`) as every other unattended push goes, and for
+    the same reasons: the adoption PR's CI gate is what judges it and a red there reaches
+    a fixer, while a local refusal leaves no PR for anything to read. The box cannot run
+    what the gate asks of it either: it has no stack and, where the checkout has no
+    `.env`, no database URL, so productivity-tracker's Postgres tests fail on
+    `DATABASE_URL is not set` whatever the release changed; and homelab's gate went red
+    on a run that passed when the same commit was run again (1720b7f4).
+    """
+    env = release.push_env()
+    pushed = git("push", "-u", "origin", branch, env=env)
+    for wait in PUSH_WAITS:
+        if pushed.returncode == 0 or not TRANSPORT_FAILURE.search(said_by(pushed)):
+            return pushed
+        sleep(wait)
+        pushed = git("push", "-u", "origin", branch, env=env)
+    return pushed
 
 
 def _status(git) -> str:
@@ -723,10 +840,12 @@ def plan_lines(name: str, previous: str, tag: str, default_branch: str) -> list[
         f" (fresh off origin/{default_branch})",
         f"  2. {SYNC_SCRIPT} --pull --src <devkit worktree at {tag}>  [in the box]",
         f"  3. load the vendored temp-root plugin from the project's own pytest config"
-        f" ({temproot_wiring.__name__}.wire)",
+        f" ({temproot_wiring.__name__}.wire) with no `-q` in its addopts (.unquiet),"
+        " and refresh an untouched earlier template"
+        f" ({template_refresh.__name__}.refresh)",
         f"  4. git add {' '.join(UPGRADE_PATHS)} + the MANIFEST paths",
         f"  5. git commit -m {commit_message(tag, '<n>')!r}",
-        "  6. git push -u origin, then gh pr create",
+        f"  6. git push -u origin (SKIP={release.SKIP_PUSH_GATE}: CI is its gate), then gh pr create",
         "  7. leave the box; `worktree.py reconcile` reaps it when the PR merges",
     ]
 
@@ -744,6 +863,20 @@ class Outcome:
     name: str
     code: int
     detail: str = ""
+
+
+def _update_owned_files(name: str, box: Path, source: Path) -> None:
+    """The adoption's edits to files the project owns, which no pull touches.
+
+    The plugin the pull vendored loads only from the project's own pytest config
+    (7f011bf8); anything short of a whole wiring leaves the tree as it was. And a
+    template is a one-shot copy, so a project that never edited its copy would keep the
+    one it was generated with forever (114da279); its own edits are left alone.
+    """
+    print(f"upgrade: {name} -- temp-root plugin: {temproot_wiring.wire(box)}")
+    print(f"upgrade: {name} -- pytest addopts: {temproot_wiring.unquiet(box)}")
+    for line in template_refresh.refresh(box, source):
+        print(f"upgrade: {name} -- {line}")
 
 
 def upgrade_one(
@@ -834,9 +967,7 @@ def upgrade_one(
             checked.stderr,
         )
 
-    # The plugin the pull vendored loads only from files the project owns, which no pull
-    # touches (7f011bf8). Anything short of a whole wiring leaves the tree as it was.
-    print(f"upgrade: {name} -- temp-root plugin: {temproot_wiring.wire(box)}")
+    _update_owned_files(name, box, source)
 
     changed = changed_paths(box_git)
     if not changed:
@@ -859,12 +990,12 @@ def upgrade_one(
             2,
             f"upgrade: {name} -- FAILED at `git commit` "
             f"({'the hooks rewrote the tree and it still failed' if retried else 'a gate refused it'})",
-            committed.stderr or committed.stdout,
+            said_by(committed),
         )
 
-    pushed = box_git("push", "-u", "origin", spawn.box.branch)
+    pushed = push_with_retry(box_git, spawn.box.branch)
     if pushed.returncode != 0:
-        return failed(2, f"upgrade: {name} -- FAILED at `git push`", pushed.stderr or pushed.stdout)
+        return failed(2, f"upgrade: {name} -- FAILED at `git push`", said_by(pushed))
 
     # Labelled `automerge` because an upgrade PR is upstream churn the gate already
     # judges: the diff is a vendored copy of an already-released devkit tag, so a
@@ -934,6 +1065,29 @@ def artifact_body(tag: str, dry_run: bool, outcomes: list[Outcome]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def unresolved_names(body: str) -> list[str]:
+    """The names `artifact_body`'s `# unresolved:` header lists; [] for a clean artifact."""
+    for line in body.splitlines():
+        if line.startswith("# unresolved:"):
+            return line.removeprefix("# unresolved:").split()
+    return []
+
+
+def owes_only_a_release(body: str) -> bool:
+    """Is the one thing this artifact holds against its run the `(release)` warning?
+
+    That is every checkout adopted, and devkit main carrying vendored changes the tag
+    does not. Exit 1 is right for the run a person started (an `--all` run exits 0 on
+    it, `run_code`), but not for the one
+    `release-pipeline.py` starts: there it means main moved on while the release was
+    being cut (#629 merged during v0.11.62's), and the next `--if-needed` run cuts the
+    release it owes. Read off the artifact because the exit code alone cannot tell
+    this apart from a checkout that failed with the same code.
+    """
+    names = unresolved_names(body)
+    return bool(names) and all(name == RELEASE_SCOPED for name in names)
+
+
 def write_artifact(root: Path, body: str) -> Path | None:
     """Persist the report under `root`. Best-effort: an unwritable `logs/` is not
     itself a reason to fail an upgrade that otherwise worked."""
@@ -946,8 +1100,24 @@ def write_artifact(root: Path, body: str) -> Path | None:
     return path
 
 
-def _finish(tag: str, dry_run: bool, outcomes: list[Outcome]) -> int:
-    """Write the artifact, then return the worst code across the run.
+def run_code(outcomes: list[Outcome], unattended: bool) -> int:
+    """The run's exit code: the worst outcome's, but for an owed release when unattended.
+
+    **The unattended pass does not own the owed release.** Exit 1 on `(release)` is a
+    person's cue to cut one, and right for a run a person started. On `--all` the fix
+    pass reads that same predicate every half hour and cuts the release itself
+    (`fix_release.cut_release`), and files it once a wait stalls (`fix_stall`) -- so
+    the scheduled run's exit 1 was a second, slower report of a job already started.
+    On 2026-10-19 the 03:00 run exited 1 ninety seconds before the pass opened the
+    release PR, and the ledger sent a fixer at a release that was already cut (ledger
+    619cf2dd). The line still reaches `logs/upgrade.log`; only the code is spared.
+    """
+    counted = [o for o in outcomes if not (unattended and o.name == RELEASE_SCOPED)]
+    return max((outcome.code for outcome in counted), default=0)
+
+
+def _finish(tag: str, dry_run: bool, outcomes: list[Outcome], unattended: bool = False) -> int:
+    """Write the artifact, then return the run's code -- `run_code` says which.
 
     Every exit from `main` goes through here, including the ones that never reach a
     project: "devkit has no tags" and "that checkout is not in the workspace" are the
@@ -973,7 +1143,7 @@ def _finish(tag: str, dry_run: bool, outcomes: list[Outcome]) -> int:
             f"upgrade: clean -- every selected checkout is on devkit {tag}; "
             f"nothing needs a human, so {ARTIFACT.as_posix()} is empty."
         )
-    return max((outcome.code for outcome in outcomes), default=0)
+    return run_code(outcomes, unattended)
 
 
 class _ReportingParser(argparse.ArgumentParser):
@@ -1072,7 +1242,8 @@ def main(argv: list[str] | None = None) -> int:
     def stopped(code: int, message: str, tag: str = "(none resolved)") -> int:
         """A run-level failure: reported once, and to the artifact like any other."""
         print(message, file=sys.stderr)
-        return _finish(tag, args.dry_run, [*preflight, Outcome(RUN_SCOPED, code, message)])
+        outcomes = [*preflight, Outcome(RUN_SCOPED, code, message)]
+        return _finish(tag, args.dry_run, outcomes, args.every)
 
     if not args.workspace.is_file():
         return stopped(2, f"upgrade: no workspace file at {args.workspace}")
@@ -1102,15 +1273,12 @@ def main(argv: list[str] | None = None) -> int:
     # project, and a reader who came here for a specific vendored fix needs to know the
     # tag does not carry it *before* reading four green adoption lines.
     #
-    # **Carried into the artifact, and exit 1 with it.** For months this printed to
-    # stderr and stopped there, which made it the one actionable sentence this script
+    # **Carried into the artifact, and exit 1 with it but on `--all` (`run_code`).** It
+    # once printed to stderr and stopped there, the one actionable sentence this script
     # produces that nothing could act on: the nightly pass runs under `pythonw`, whose
     # stderr goes nowhere at all, so the machine's whole record of "every consumer is
-    # about to adopt a release missing the fix you merged" was an exit code of 0 beside
-    # an empty log saying the run was clean. It was, of the checkouts -- and that is
-    # precisely the reading that made the gap invisible. Exit 1 is the needs-a-human
-    # code, and now that the human step is one task, this is a signal with a click
-    # behind it rather than a chore.
+    # about to adopt a release missing the fix you merged" was an empty log saying the
+    # run was clean. Exit 1 is the needs-a-human code; the human step is one task.
     if warning := unreleased_line(unreleased_vendored_changes(args.devkit, tag), tag):
         print(warning, file=sys.stderr)
         preflight.append(Outcome(RELEASE_SCOPED, 1, warning))
@@ -1136,20 +1304,20 @@ def main(argv: list[str] | None = None) -> int:
         # the answer can differ from the stamp's: the adoption exists, it is just not
         # merged yet. Skipping is right whatever is holding it up -- a red gate, a
         # review, a human -- because a second identical PR fixes none of them.
-        elif pending := pending_adoption(root / name, name, tag):
-            print(f"upgrade: {name} -- devkit {tag} is already up for adoption in {pending}.")
+        elif pending := pending_adoption(root / name, name, tag, args.workspace):
+            print(f"upgrade: {name} -- {pending}.")
         else:
             todo.append(name)
 
     if not todo:
         # Still written -- as an empty file when nothing needs a human, clearing
         # whatever the last run left.
-        return _finish(tag, args.dry_run, preflight)
+        return _finish(tag, args.dry_run, preflight, args.every)
 
     if args.dry_run:
         outcomes = [upgrade_one(name, root / name, tag) for name in todo]
         print("\nDry run -- nothing was changed. Re-run with --yes to apply.")
-        return _finish(tag, args.dry_run, preflight + outcomes)
+        return _finish(tag, args.dry_run, preflight + outcomes, args.every)
 
     # One worktree for the whole run: every project adopts the same revision, and
     # it is materialised only once something is actually going to be pulled.
@@ -1160,7 +1328,7 @@ def main(argv: list[str] | None = None) -> int:
             ]
     except RuntimeError as exc:
         return stopped(2, f"upgrade: could not check devkit out at {tag}: {exc}", tag)
-    return _finish(tag, args.dry_run, preflight + outcomes)
+    return _finish(tag, args.dry_run, preflight + outcomes, args.every)
 
 
 def release_tags(devkit: Path) -> list[str]:

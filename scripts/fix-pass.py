@@ -12,24 +12,42 @@ which survives this file crashing). Two rules hold it together:
   what the pass cannot turn green becomes a finding on the harness-defect ledger
   (`fix_findings.py`), which the devkit session this same pass sends takes over.
 
-1. **Ship every intent** (`ship_intent.py`); a refused commit is a failure like any other.
+1. **Ship every gated intent** (`ship_step.py`); a refused commit is a failure like any
+   other. An intent of a project in the direct flow (`delivery.py`) is the ship task's
+   (`ship-pass.py`, every two minutes), so nothing races; only the refusal it stored is
+   read here, and turned into that same failure.
 2. **Merge green adoptions**, then start any release `main` owes (`fix_release.py`).
 3. **Read back** (`fix_loop.py`): blocked reports, friction files, dead sessions,
    transcripts, resolutions that did not hold, waits that have gone stale -- filed now,
    so the backlog read next already carries them.
-4. **Collect everything red** (`fix_red.py`), the harness-defect backlog included,
-   plan it (`fix_plan.py`) and classify it (`fix_cycle.py`).
+4. **Collect everything red** (`fix_red.py`), the harness-defect backlog included, and
+   what Dependabot cannot do (`fix_dependabot.py`: failing update jobs, alerts no PR
+   answers -- under its own daily cap), plan it (`fix_plan.py`) and classify it
+   (`fix_cycle.py`). A gate refused over the account's billing, a private repo that
+   runs Actions (`fix_visibility.py`), and a request waiting on a PC with no elevated
+   worker (`fix_elevated.py`), are each filed as its owner's step.
 5. **Harness first**: while anything harness-shaped is red, one devkit session gets
    all of it and project fixers are held, out loud. Only one at a time.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
    escalation ladder.
 7. **Installers current** (`installers.py maintain`), on a dispatching pass, so a
    merged change to what a job registers is live within a pass, not a day.
+8. **Upkeep** (`tend`): a default branch's uncommitted lockfile carried or restored
+   (`fix_drift.py`), any other drift reported and left; tracker issues whose workflow is
+   green at the tip closed (`fix_issues.py`); each dev database upgraded to its merged
+   head (`fix_migrate.py`); and, in the direct flow alone, the commits that turned a
+   default branch red reverted once it has stayed red too long (`fix_revert.py`).
+
+The pass keeps inside the watchdog's stop (`send_deadline`): past its deadline the ship
+under way is ended and held, no further step starts and no session is launched, and the
+record says what was left. Each step prints a line as it starts.
 
 Every pass appends a line to `logs/fix-pass.history.jsonl`, which `fix_stall` reads.
 `"devkit.fixPass"` in the workspace file is `off` (the default), `plan` (write it all,
-do nothing) or `dispatch`. Scheduled runs use `claude-bg`. The record is
-`logs/fix-pass.log`, overwritten per pass.
+do nothing) or `dispatch`. **`off` means this PC sends no fixers, not that nothing runs:**
+the ship task still ships this machine's intents, gated ones included. `plan` is the dry
+run, and ships nothing gated. `harness-switch.py` is the stop. Scheduled runs use
+`claude-bg`. The record is `logs/fix-pass.log`, overwritten per pass.
 
 `tests/test_fix_pass.py` drives the wiring with every subprocess replaced.
 """
@@ -38,27 +56,42 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import os
+import subprocess
 import sys
+import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
+import agent_tabs
 import broken_pr_menu as menu
+import delivery
 import devkit_project
 import fix_cycle
+import fix_dependabot
+import fix_drift
+import fix_elevated
+import fix_issues
 import fix_ledger
 import fix_loop
+import fix_migrate
 import fix_plan
 import fix_release
 import fix_red
+import fix_revert
 import fix_send
+import fix_visibility
 import gate_evidence
+import git_trust
 import installers
 import precommit_store
 import ship_intent
+import ship_step
+import sweep
 import worktree
-from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -68,12 +101,10 @@ fix_prs = fix_send.fix_prs
 send_all = fix_send.send_all
 dispatch = fix_send.dispatch
 update_branch = fix_send.update_branch
-# The interpreter resolver the push gate uses: the tree's venv, or the checkout's when
-# the tree has none, so `ship.py --fix` runs with the project's own pre-commit.
-push_gate = load_by_path("run_push_gate", REPO_ROOT / "scripts" / "precommit" / "run_push_gate.py")
 
 Finding = fix_loop.Finding
 Journal = fix_loop.fix_findings.Journal
+harness_events = fix_loop.fix_findings.harness_events
 
 ARTIFACT = Path("logs") / "fix-pass.log"
 HISTORY = Path("logs") / "fix-pass.history.jsonl"
@@ -85,11 +116,77 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 
+# One dispatching pass at a time, machine-wide: beside the boxes, which every pass shares
+# whichever checkout it runs from. On 2026-09-29 a supervised pass run from a worktree
+# and the scheduled one started 21 seconds apart; both shipped the same two intents, and
+# the loser's push was refused ("cannot lock ref ... reference already exists") and filed
+# as a ship failure against a branch that had shipped (babfee68). A plan pass ships and
+# sends nothing, so it needs no lock.
+RUN_LOCK_NAME = "fix-pass.lock"
+# Long enough for a normal pass to finish and the waiter to run after it, current.
+RUN_LOCK_WAIT = 300.0
+# Past the watchdog's 25-minute stop (`fix-pass-watchdog.TIMEOUT`): a pass it killed
+# leaves the lock behind, and the next half-hourly fire breaks it.
+RUN_LOCK_STALE = 26 * 60.0
+# How long the ship step waits on the ship task's lock (`ship_step.SHIP_LOCK_NAME`): a fire
+# stops starting ships at 100 seconds. Still held past this, the next pass ships.
+SHIP_LOCK_WAIT = 150.0
+
+# The ship step's share of the watchdog's 25 minutes: no intent starts shipping once the
+# step has run this long, and the next pass ships it. Each ship is a commit stage, a push
+# and a PR, none of them bounded, and on 2026-10-07, just after a wake, they ran at a
+# fraction of their speed: ibkr_trader #98's took 17 minutes, data-lake's was still in
+# `ship.py --fix` when the watchdog stopped the pass -- which had sent no one, written no
+# record and left its lock (the 7s that ship takes now is the usual cost). Short, because
+# one ship started just inside it still has to finish, and the pass after it.
+SHIP_BUDGET_SECONDS = 4 * 60.0
+
+# The seconds this run has before the watchdog stops it, handed over by the watchdog
+# (`fix-pass-watchdog.WINDOW_ENV`): a rerun after a mid-pass merge gets only what is left
+# of the fire. A pass started any other way assumes the whole of the watchdog's stop.
+WINDOW_ENV = "DEVKIT_FIX_PASS_SECONDS"
+WINDOW_SECONDS = 25 * 60.0
+# What the pass keeps back from that stop: past it, the ship under way is ended
+# (`ship_intent.bounded`), no further step starts (`Journal.left`) and no session is
+# launched. That evening the watchdog stopped two passes running -- each with no record,
+# no history line and its lock left behind. At 01:00 the reading steps took fifteen
+# minutes after a five-minute ship, and the send began at minute 20, launching three
+# sessions at up to 2.5 minutes each. At 01:30 one roguelike commit's hooks ran past
+# fifteen minutes. The step under way at the deadline still has to finish, and the
+# record after it.
+SEND_RESERVE_SECONDS = 5 * 60.0
+LATE = "left to the next pass, past the deadline"
+# The send step's result when it raised: nothing sent, nothing held, the task red.
+UNSENT: tuple[tuple, tuple, int] = ((), (), EXIT_FAILED)
+
 # Every CLI the pass spawns before it can say anything, probed by running it: found is
 # not enough. On Windows `python3` is often only the Store alias, which exits 9009, and
-# every git hook runs through it. `gh auth status` rather than `--version`: a `gh`
-# whose token expired answers every read with nothing, which reads as nothing red.
-REQUIRED_TOOLS = {"git": ("--version",), "gh": ("auth", "status"), "python3": ("-c", "")}
+# every git hook runs through it. `gh auth token` rather than `--version`: it fails when
+# no credential is stored, and reads nothing but the store.
+REQUIRED_TOOLS = {"git": ("--version",), "gh": ("auth", "token"), "python3": ("-c", "")}
+# A stored token can still be one GitHub refuses, and a `gh` whose token expired answers
+# every read with nothing, which reads as nothing red -- so GitHub is asked too. Only
+# GitHub's own refusal counts: failing on any error refused the whole pass as "not usable
+# from this PATH", telling the operator to restart VS Code, when GitHub merely did not
+# answer (f455f3fe). And not `gh auth status`, whose "the token in keyring is invalid" is
+# also what it says when the network is down (gh 2.98, reproduced through a dead proxy):
+# 08d09ea5 refused the pass that way twice while this PC changed networks. `gh api` names
+# the refusal itself, `Bad credentials (HTTP 401)`, and a failed connection as one.
+GH_PROBE = ("gh", "api", "user", "--jq", ".login")
+GH_REFUSED_SAYS = "http 401"
+
+
+def window(env: Mapping[str, str] = os.environ) -> float:
+    """The seconds this run has before the watchdog stops it (`WINDOW_ENV`)."""
+    try:
+        return float(env.get(WINDOW_ENV, ""))
+    except ValueError:
+        return WINDOW_SECONDS
+
+
+def send_deadline(started: float, env: Mapping[str, str] = os.environ) -> float:
+    """The `time.monotonic()` past which a pass started at `started` launches no one."""
+    return started + window(env) - SEND_RESERVE_SECONDS
 
 
 def runs(argv: list[str]) -> bool:
@@ -100,8 +197,55 @@ def runs(argv: list[str]) -> bool:
         return False
 
 
+def gh_token_refused() -> bool:
+    """Whether GitHub refused the stored token (`GH_PROBE` answering HTTP 401); a probe
+    that failed for any other reason -- GitHub not answering -- is not that."""
+    try:
+        done = ship_intent.run_quiet(list(GH_PROBE))
+    except OSError:
+        return False
+    said = f"{done.stdout or ''}\n{done.stderr or ''}".lower()
+    return done.returncode != 0 and GH_REFUSED_SAYS in said
+
+
+def offline(lookup=None) -> bool:
+    """Whether this machine cannot look GitHub up (`harness_events.resolves`).
+
+    Every step of a pass needs the network, and a pass run without it filed what it
+    could not reach: on 2026-11-12 a night without DNS left eleven `regate-failed` rows,
+    and the four ledger fixers it sent died on their first reply, the API unreachable."""
+    return not harness_events.resolves(lookup=lookup)
+
+
+def cannot_start() -> int | None:
+    """The exit code of a pass that cannot run on this machine now, its reason printed
+    and recorded; None when it can. Offline is a clean exit, so the watchdog files
+    nothing; a CLI missing from the PATH is a person's, and a failure."""
+    if offline():
+        why = (
+            f"offline -- {harness_events.PROBE_HOST} does not resolve, so this pass ships, "
+            f"re-gates and sends nothing; the next fire on a network does"
+        )
+        print(f"fix-pass: {why}")
+        write_artifact(f"fix-pass: {why}")
+        return EXIT_OK
+    if missing := missing_tools():
+        why = (
+            f"not usable from this PATH: {', '.join(missing)} -- install it, or `gh auth "
+            f"login` (scripts/bootstrap-machine.ps1 -Yes does both), then fully restart VS "
+            f"Code: a task inherits the PATH VS Code started with"
+        )
+        print(f"fix-pass: {why}", file=sys.stderr)
+        write_artifact(f"fix-pass: FAILED -- {why}")
+        return EXIT_USAGE
+    return None
+
+
 def missing_tools() -> list[str]:
-    return [tool for tool, args in REQUIRED_TOOLS.items() if not runs([tool, *args])]
+    missing = [tool for tool, args in REQUIRED_TOOLS.items() if not runs([tool, *args])]
+    if "gh" not in missing and gh_token_refused():
+        missing.insert(list(REQUIRED_TOOLS).index("gh"), "gh")
+    return missing
 
 
 def write_artifact(text: str, root: Path | None = None) -> Path:
@@ -129,61 +273,38 @@ def append_history(account: fix_cycle.Account, now: _dt.datetime, root: Path | N
 
 
 def ship_intents(
-    root: Path, projects: list[str], mode: str, journal: Journal | None = None
+    root: Path,
+    projects: list[str],
+    mode: str,
+    journal: Journal | None = None,
+    budget: float = SHIP_BUDGET_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[list[str], list[fix_plan.Failure], bool]:
     """Step 1. `(lines for the record, refused commits as failures, any ship failed)`.
 
-    A push or a PR that failed is retried next pass and filed now; the third element
-    turns the task red rather than green over a branch that did not go out. An intent
-    where no PR can be opened from is filed for the devkit session to move. An intent
-    whose fixer is still busy in its tree waits (`fix_loop.fixers_working`).
+    A gated intent ships here (`ship_step.ship_each`). A direct-flow one is the ship
+    task's, so this only reads it back; a refusal stored there still becomes a failure
+    here, which is how a fixer goes (`ship_step.left_to_ship_task`). A dispatching pass
+    does all of it under the ship task's own lock, so the two exclude each other, and a
+    fire that outlasts `SHIP_LOCK_WAIT` costs this step, which the next pass makes good.
     """
-    lines: list[str] = []
-    refused: list[fix_plan.Failure] = []
-    failed = False
-    busy = fix_loop.fixers_working() if mode == fix_cycle.DISPATCH else frozenset()
-    for intent in ship_intent.find_intents(root, projects):
-        where = f"{intent.project} {intent.branch}"
-        if fix_loop.bg_sessions.busy_in(busy, intent.tree):
-            lines.append(f"{where} -- held: its session is still working in the tree")
-            continue
-        if intent.blocked:
-            lines.append(f"{where} -- NOT shipped: {intent.blocked}")
-            fix_loop.fix_findings.file(
-                journal,
-                "intent-unshippable",
-                intent.project,
-                f"{where}: {intent.blocked}",
-                str(intent.tree),
-            )
-            continue
-        if mode != fix_cycle.DISPATCH:
-            spent = ship_intent.is_spent(intent)
-            lines.append(
-                f"{where} -- {'would set aside, already shipped' if spent else 'would ship'}: {intent.subject}"
-            )
-            continue
-        base = intent.base or "main"
-        outcome = ship_intent.ship_one(intent, push_gate.interpreter(intent.tree), base)
-        if outcome.intent.branch != intent.branch:
-            # Carried off a retired name: the record names what went out, or it reads as
-            # a merged branch shipping again.
-            where = f"{intent.project} {outcome.intent.branch} (carried off {intent.branch})"
-        # One line: a refusal's detail is hook output, and its newlines broke the record
-        # into rows no reader of it could attribute. The tail says why; the rest is evidence.
-        lines.append(f"{where} -- {outcome.stage}: {' '.join(outcome.detail.split())[-240:]}")
-        if outcome.stage == ship_intent.REFUSED:
-            refused.append(ship_intent.refusal_failure(outcome, base))
-        if outcome.stage == ship_intent.FAILED:
-            failed = True
-            fix_loop.fix_findings.file(
-                journal,
-                "ship-failed",
-                intent.project,
-                f"{where}: {outcome.detail[:200]}",
-                str(intent.tree),
-            )
-    return lines, refused, failed
+
+    def step() -> tuple[list[str], list[fix_plan.Failure], bool]:
+        intents = ship_intent.find_intents(root, projects)
+        gated = [intent for intent in intents if not intent.direct]
+        direct = [intent for intent in intents if intent.direct]
+        lines, refused, failed = ship_step.ship_each(gated, root, mode, journal, budget, clock)
+        left, stored = ship_step.left_to_ship_task(direct, mode, journal)
+        return lines + left, refused + stored, failed
+
+    if mode != fix_cycle.DISPATCH:
+        return step()
+    name, stale = ship_step.SHIP_LOCK_NAME, ship_step.SHIP_LOCK_STALE
+    with worktree.named_lock(root, name, SHIP_LOCK_WAIT, stale) as held:
+        lock = worktree.boxes_root(root) / name
+        if not held and lock.is_dir():
+            return [f"nothing shipped: the ship task holds {lock}; the next pass ships"], [], False
+        return step()
 
 
 def refresh_installers(workspace: Path, journal: Journal | None = None) -> int:
@@ -214,13 +335,37 @@ def _ship_and_merge(
     root: Path, projects: list[str], mode: str, journal: Journal
 ) -> tuple[list[str], list[fix_plan.Failure], bool, list[str]]:
     """Steps 1 and 2, each isolated: `(shipped lines, refusals, ship failed, merged)`."""
+    # Not failed by default: a crash is already `journal.crashed`, and one left for time
+    # is late.
     shipped, refused, failed = journal.step(
-        "ship", ship_intents, root, projects, mode, journal, default=([], [], True)
+        "ship", ship_intents, root, projects, mode, journal, default=([], [], False)
     )
     if mode != fix_cycle.DISPATCH:
         return shipped, refused, failed, []
     merged = journal.step("merge", fix_release.merge_green_adoptions, root, projects, default=[])
     return shipped, refused, failed, merged
+
+
+def _collect(
+    workspace: Path,
+    ctx: fix_loop.Context,
+    refused: list[fix_plan.Failure],
+    journal: Journal,
+) -> tuple[list[fix_plan.Failure], bool | str | None, list[str], list[str]]:
+    """Step 4's reading, each source isolated: `(failures, devkit's default-branch
+    verdict, the default branches with none, what Dependabot fails on that no session
+    can change)`. A Dependabot read that raised costs its own failures, not the gate's.
+    A red only tidy owes is marked once its grace is up, for the plan and the revert step."""
+    failures, green, unread = journal.step(
+        "collect", fix_red.collect_red, workspace, ctx.projects, refused, default=([], None, [])
+    )
+    found, notes = journal.step(
+        "dependabot", fix_dependabot.collect, workspace, ctx.projects, ctx.now, default=([], [])
+    )
+    marked = journal.step(
+        "tidy-grace", fix_revert.mark_tidy_lapsed, ctx, failures, default=failures
+    )
+    return marked + found, green, unread, notes
 
 
 def _file_failures(lines: list[str], kind: str, journal: Journal) -> None:
@@ -230,12 +375,39 @@ def _file_failures(lines: list[str], kind: str, journal: Journal) -> None:
             fix_loop.fix_findings.file(journal, kind, line.split(" ", 1)[0], line)
 
 
+def tend(
+    workspace: Path, ctx: fix_loop.Context, journal: Journal, failures: list[fix_plan.Failure]
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """The checkouts' own upkeep, after the send: `(drift, issue, migrate, revert lines)`.
+
+    Uncommitted drift on a default branch (`fix_drift.tend`), the tracker issues a green
+    tip has answered (`fix_issues.sweep_green`), each dev database brought to its merged
+    head (`fix_migrate.tend`), and a direct-flow branch that stayed red reverted
+    (`fix_revert.tend`). Each step isolated, and a line any of them says `FAILED` on is
+    filed against its checkout, as a failed merge is.
+    """
+    drift = journal.step("drift", fix_drift.tend, workspace, ctx.projects, ctx.mode, default=[])
+    issues = journal.step(
+        "issues", fix_issues.sweep_green, workspace, ctx.projects, ctx.mode, default=[]
+    )
+    migrated = journal.step(
+        "migrate", fix_migrate.tend, workspace, ctx.projects, ctx.mode, default=[]
+    )
+    reverted = journal.step("revert", fix_revert.tend, ctx, failures, journal, default=[])
+    _file_failures(drift, "drift-failed", journal)
+    _file_failures(issues, "issue-close-failed", journal)
+    _file_failures(migrated, "migrate-failed", journal)
+    _file_failures(reverted, "revert-failed", journal)
+    return drift, issues, migrated, reverted
+
+
 def decide(
     failures: list[fix_plan.Failure],
     green: bool | str | None,
     newest: str,
     adopting: list[str],
     prefixes: tuple[str, ...],
+    direct: frozenset[str] = frozenset(),
 ) -> tuple[
     fix_cycle.Harness,
     list[fix_plan.Decision],
@@ -243,7 +415,7 @@ def decide(
     list[fix_plan.Decision],
 ]:
     """Steps 4-6's decisions: `(harness, go, held, skipped)`, pure over what was read."""
-    decisions = fix_plan.plan(failures, newest, prefixes)
+    decisions = fix_plan.plan(failures, newest, prefixes, direct)
     classes = fix_cycle.classify_all(failures, prefixes)
     harness = fix_cycle.harness_state(classes, green, adopting)
     go, held = fix_cycle.phase(decisions, classes, harness, prefixes)
@@ -253,36 +425,121 @@ def decide(
 # --- the pass -----------------------------------------------------------------------------
 
 
-def run(
-    workspace: Path,
-    mode: str,
-    launch: agent_models.Launch,
-    now: _dt.datetime | None = None,
-) -> int:
-    now = now or _dt.datetime.now(_dt.UTC)
-    if mode == fix_cycle.OFF:
-        # A switched-off fire did nothing, so it says so only where nothing else has:
-        # every half hour it would otherwise erase the record a manual pass just wrote.
-        if not (REPO_ROOT / ARTIFACT).is_file():
-            write_artifact(f"fix-pass: mode=off -- set {fix_cycle.SETTING} to plan or dispatch")
-        return EXIT_OK
+def context(workspace: Path, mode: str, now: _dt.datetime) -> fix_loop.Context:
+    """What every step of a pass reads: the checkouts, the two ledgers, the clock, and
+    when the machine last started, which tells a fixer a restart killed from a dead one."""
     root = workspace.parent
     # Every registered checkout, `devkit.onHold` or not: a PR that exists is work in
     # flight whatever the setting says, and the pass is the last thing that would move it.
     projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
     ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
     devkit_dir = root / fix_cycle.DEVKIT
-    ctx = fix_loop.Context(root, projects, devkit_dir, ledger_path, REPO_ROOT / HISTORY, mode, now)
+    booted = fix_loop.fix_reports.booted_at(now)
+    history = REPO_ROOT / HISTORY
+    direct = delivery.direct_projects(root, projects)
+    return fix_loop.Context(
+        root, projects, devkit_dir, ledger_path, history, mode, now, booted, direct
+    )
+
+
+def pass_journal(devkit_dir: Path, deadline: float) -> Journal:
+    """The pass's journal: its step errors, `deadline` (a `time.monotonic()`) as
+    `Journal.left`, and a flushed line as each step starts (`Journal.trace`), so the
+    watchdog's log of a pass it stopped names the step its minutes went to."""
+    begun = time.monotonic()
     errors = (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError)
-    journal = Journal(devkit_dir, errors=fix_loop.fix_findings.STEP_ERRORS + errors)
+    return Journal(
+        devkit_dir,
+        errors=fix_loop.fix_findings.STEP_ERRORS + errors,
+        left=lambda: deadline - time.monotonic(),
+        trace=lambda name: print(
+            f"fix-pass: step {name} at {int(time.monotonic() - begun)}s", flush=True
+        ),
+    )
+
+
+def release_and_plan(
+    workspace: Path,
+    ctx: fix_loop.Context,
+    journal: Journal,
+    failures: list[fix_plan.Failure],
+    green: bool | str | None,
+    backlog: fix_plan.Failure | None,
+) -> tuple[str, tuple]:
+    """Step 4's release and plan, each isolated: `(release line, decide's result)`, the
+    plan falling back to the harness alone when it raises or is left for the deadline."""
+    step = journal.step
+    newest = step("newest-release", gate_evidence.newest_release, ctx.devkit_dir, default="")
+    dispatching = ctx.mode == fix_cycle.DISPATCH
+    release = step(
+        "release",
+        fix_release.cut_release,
+        workspace,
+        newest,
+        fix_release.release_verdict(green, failures),
+        dispatching,
+        ctx.now,
+        default="",
+    )
+    adopting = step(
+        "adoptions", fix_release.pending_adoptions, ctx.root, ctx.projects, newest, default=[]
+    )
     prefixes = fix_release.adoption_prefixes()
+    fallback = fix_cycle.only_the_harness(backlog)
+    planned = step(
+        "plan", decide, failures, green, newest, adopting, prefixes, ctx.direct, default=fallback
+    )
+    if "plan" in journal.late:
+        # Not the step's fault: the record said it "raised", with nothing filed to match.
+        return release, fix_cycle.only_the_harness(backlog, fix_cycle.PLAN_LATE)
+    return release, planned
+
+
+def late_lines(journal: Journal) -> tuple[str, ...]:
+    """The record's line naming every step left for the deadline (`Journal.late`). Past
+    it the record is what is left to protect: the watchdog's stop would take it, the
+    history line and the lock, and every skipped step keeps for a pass."""
+    return (f"{LATE}: {', '.join(journal.late)}",) if journal.late else ()
+
+
+def _switched_off() -> int:
+    """A switched-off fire did nothing, so it says so only where nothing else has: every
+    half hour it would otherwise erase the record a manual pass just wrote."""
+    if not (REPO_ROOT / ARTIFACT).is_file():
+        write_artifact(f"fix-pass: mode=off -- set {fix_cycle.SETTING} to plan or dispatch")
+    return EXIT_OK
+
+
+def owners_steps(ctx: fix_loop.Context, journal: Journal) -> list[str]:
+    """What this pass files for an owner alone. Two steps, so one raising costs the other
+    nothing."""
+    step = journal.step
+    visibility = step("visibility", fix_visibility.check, ctx, journal, default=[])
+    return visibility + step("elevated", fix_elevated.check, ctx, journal, default=[])
+
+
+def run(
+    workspace: Path,
+    mode: str,
+    launch: agent_models.Launch,
+    now: _dt.datetime | None = None,
+    deadline: float | None = None,
+) -> int:
+    """One pass. `deadline` is the `time.monotonic()` past which it ends the ship under
+    way, starts no further step and launches no session (`send_deadline`); by default,
+    measured from this call."""
+    now = now or _dt.datetime.now(_dt.UTC)
+    deadline = send_deadline(time.monotonic()) if deadline is None else deadline
+    if mode == fix_cycle.OFF:
+        return _switched_off()
+    ctx = context(workspace, mode, now)
+    root, projects, devkit_dir = ctx.root, ctx.projects, ctx.devkit_dir
+    journal = pass_journal(devkit_dir, deadline)
     step = journal.step
 
     shipped, refused, ship_failed, merged = _ship_and_merge(root, projects, mode, journal)
     closed = step("read-back", fix_loop.close, ctx, journal, default=fix_loop.Closed())
-    failures, green, unread = step(
-        "collect", fix_red.collect_red, workspace, projects, refused, default=([], None, [])
-    )
+    failures, green, unread, unsent = _collect(workspace, ctx, refused, journal)
     regated, rerun = step("regate", fix_red.regate_unread, root, unread, mode, default=([], set()))
     _file_failures(regated, "regate-failed", journal)
     _file_failures(merged, "merge-failed", journal)
@@ -290,30 +547,28 @@ def run(
     # Filed before the backlog is read, and the backlog read on its own: whatever broke
     # above -- the collect step included -- reaches the devkit session this same pass.
     filed = fix_loop.record(ctx, journal)
-    closed.lines += step("pending", fix_loop.recheck_open, ctx, default=[])
+    closed.verified += step("pending", fix_loop.recheck_open, ctx, default=[])
     backlog = step("backlog", fix_red.backlog_failure, workspace, closed.in_flight, default=None)
     failures += [backlog] if backlog else []
-    newest = step("newest-release", gate_evidence.newest_release, devkit_dir, default="")
-    dispatching = mode == fix_cycle.DISPATCH
-    release = step(
-        "release", fix_release.cut_release, workspace, newest, green, dispatching, now, default=""
+    release, (harness, go, held, skipped) = release_and_plan(
+        workspace, ctx, journal, failures, green, backlog
     )
-    adopting = step("adoptions", fix_release.pending_adoptions, root, projects, newest, default=[])
-    fallback = fix_cycle.only_the_harness(backlog)
-    harness, go, held, skipped = step(
-        "plan", decide, failures, green, newest, adopting, prefixes, default=fallback
-    )
+    closed.verified += step("billing", fix_red.billing, ctx, journal, skipped, default=[])
+    closed.verified += owners_steps(ctx, journal)
 
-    # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current.
+    # Nothing routes with code a merge replaced mid-pass; the watchdog reruns it current,
+    # and the next fire routes a click's.
     go, held, moved = step("current", fix_send.hold_if_moved, go, held, ctx, default=(go, held, ""))
     items = fix_loop.triage.load(devkit_dir)
+    # Run past the deadline too, holding each session it would launch out loud: a pass
+    # that skipped it would leave its decisions out of the record altogether.
     sent, capped, worst = step(
-        "send", send_all, go, ctx, launch, journal, closed, items, default=([], [], EXIT_FAILED)
+        "send", send_all, go, ctx, launch, journal, closed, items, default=UNSENT, always=True
     )
-    if dispatching:
+    if mode == fix_cycle.DISPATCH:
         step("installers", refresh_installers, workspace, journal, default=2)
+    drift, issues, migrated, reverted = tend(workspace, ctx, journal, failures)
     filed += fix_loop.record(ctx, journal)
-    failed_steps = ship_failed or bool(journal.crashed)
     account = fix_cycle.Account(
         mode,
         harness,
@@ -330,9 +585,30 @@ def run(
         tuple(filed),
         fix_loop.backlog(ctx),
         tuple(closed.stopped),
+        tuple(closed.verified),
+        dependabot=tuple(unsent),
+        drift=tuple(drift),
+        issues=tuple(issues),
+        migrated=tuple(migrated),
+        reverted=tuple(reverted),
+        late=late_lines(journal),
+        working=tuple(closed.at_work),
+        person=tuple(step("person", fix_loop.person_steps, ctx, default=[], always=True)),
+        owed=step("owed", fix_loop.owed, ctx, default=0, always=True),
     )
     publish(account, now)
-    return fix_send.EXIT_STALE if moved else max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
+    return exit_code(moved, worst, ship_failed or bool(journal.crashed))
+
+
+def exit_code(
+    moved: str, worst: int, failed_steps: bool, env: Mapping[str, str] = os.environ
+) -> int:
+    """`EXIT_STALE` when the code moved and a watchdog (`WINDOW_ENV`) is there to rerun
+    it, else the pass's ordinary code. A click has no one to rerun it: its held lines are
+    the report, and a 75 there was filed by `log-wrap` as the task failing (50dfb707)."""
+    if moved and WINDOW_ENV in env:
+        return fix_send.EXIT_STALE
+    return max(worst, EXIT_FAILED if failed_steps else EXIT_OK)
 
 
 def publish(account: fix_cycle.Account, now: _dt.datetime, root: Path | None = None) -> Path:
@@ -373,7 +649,95 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# The scheduled job that runs this pass: `install-fix-pass-task.py`'s `TASK_NAME`.
+SCHEDULED_TASK = fix_loop.OWN_TASK
+
+
+def hand_to_scheduled_task() -> int:
+    """Start the scheduled pass now instead of running this one elevated.
+
+    An elevated process may not launch a background session (`agent_tabs.ELEVATED`: its
+    service would lock the scheduled pass out), so a pass run from an elevated VS Code
+    refused every launch and left each to a scheduled pass up to 30 minutes away. The
+    task runs with the user's ordinary token, so starting it is that same pass, now.
+
+    Either way this checkout's record is rewritten to say so: left alone it still held
+    the previous pass, which a supervisor read back three times as clean dispatches.
+    """
+    done = subprocess.run(
+        ["schtasks", "/Run", "/TN", SCHEDULED_TASK],
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=sweep.NO_WINDOW,
+    )
+    if done.returncode != 0:
+        why = f"elevated, and could not start {SCHEDULED_TASK}: " + " ".join(
+            (done.stderr or done.stdout or "").split()
+        )
+        print(f"fix-pass: {why}", file=sys.stderr)
+        write_artifact(f"fix-pass: FAILED -- {why}")
+        return EXIT_USAGE
+    write_artifact(
+        f"fix-pass: handed to {SCHEDULED_TASK} -- this shell is elevated; the task runs "
+        f"the pass unelevated from its own checkout, and records it there"
+    )
+    print(
+        f"fix-pass: this shell is elevated, so the pass was handed to the scheduled task "
+        f"{SCHEDULED_TASK}, which runs unelevated; its record lands in {ARTIFACT}"
+    )
+    return EXIT_OK
+
+
+def run_alone(
+    workspace: Path,
+    mode: str,
+    launch: agent_models.Launch,
+    wait: float = RUN_LOCK_WAIT,
+    stale: float = RUN_LOCK_STALE,
+    deadline: float | None = None,
+) -> int:
+    """`run`, with no other dispatching pass on the machine running beside it.
+
+    One still holding the lock after `wait` owns this fire: this pass exits clean, and
+    says so in this checkout's record -- the running pass is usually the scheduled one,
+    in another checkout, so left alone the record here was the previous pass's, which
+    the supervisor read back as this one's. A lock that could
+    not be made at all -- no lock directory standing -- is no evidence of another pass,
+    so the pass runs, as it did before there was a lock. `deadline` is `run`'s, and the
+    wait for the lock counts against it.
+    """
+    if mode != fix_cycle.DISPATCH:
+        return run(workspace, mode, launch, deadline=deadline)
+    root = workspace.parent
+    with worktree.named_lock(root, RUN_LOCK_NAME, wait, stale) as held:
+        lock = worktree.boxes_root(root) / RUN_LOCK_NAME
+        if not held and lock.is_dir():
+            why = (
+                f"another dispatching pass holds {lock} -- this one ships and sends "
+                f"nothing; the running pass's record, in its own checkout, is the one to read"
+            )
+            print(f"fix-pass: {why}")
+            write_artifact(f"fix-pass: yielded -- {why}")
+            return EXIT_OK
+        return run(workspace, mode, launch, deadline=deadline)
+
+
+def undo_elevated_leftovers(root: Path, write: bool) -> None:
+    """What an elevated session left that this unelevated pass is refused, undone before
+    any git call. Its trees are dubious ownership to git, and every push, read and
+    re-gate in them failed (5025d284, e1463857); git's global config is written only by a
+    pass that acts (`write`). Its pre-commit clones fail the ship step's commit
+    (`precommit_store`)."""
+    if trusted := git_trust.adopt(root, write=write):
+        print(trusted)
+    if healed := precommit_store.say_healed(precommit_store.heal()):
+        print(f"fix-pass: {healed}")
+
+
 def main(argv: list[str] | None = None) -> int:
+    # From the start: the watchdog's stop counts the preflight and the lock wait too.
+    deadline = send_deadline(time.monotonic())
     fix_send.pin_loaded(REPO_ROOT)  # before anything can fast-forward the checkout
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     workspace = args.workspace.resolve()
@@ -385,24 +749,16 @@ def main(argv: list[str] | None = None) -> int:
     agent = SCHEDULED_AGENT if args.scheduled else args.agent
     if args.scheduled:
         mode = fix_cycle.mode_from_workspace(text)
+    mode = fix_send.dispatch_mode(mode, REPO_ROOT)
+    if mode == fix_cycle.DISPATCH and not args.scheduled and agent_tabs.is_elevated():
+        return hand_to_scheduled_task()
     launch = agent_models.Launch.parse(agent, args.model, args.effort)
-    if mode != fix_cycle.OFF and (missing := missing_tools()):
-        why = (
-            f"not usable from this PATH: {', '.join(missing)} -- install it, or `gh auth "
-            f"login` (scripts/bootstrap-machine.ps1 -Yes does both), then fully restart VS "
-            f"Code: a task inherits the PATH VS Code started with"
-        )
-        print(f"fix-pass: {why}", file=sys.stderr)
-        write_artifact(f"fix-pass: FAILED -- {why}")
-        return EXIT_USAGE
+    if mode != fix_cycle.OFF and (code := cannot_start()) is not None:
+        return code
     if mode != fix_cycle.OFF:
-        # Its ship step commits through pre-commit, unelevated when scheduled: a clone an
-        # elevated fixer left in the store fails that commit (`precommit_store`).
-        healed = precommit_store.say_healed(precommit_store.heal())
-        if healed:
-            print(f"fix-pass: {healed}")
+        undo_elevated_leftovers(workspace.parent, write=mode == fix_cycle.DISPATCH)
     try:
-        return run(workspace, mode, launch)
+        return run_alone(workspace, mode, launch, deadline=deadline)
     except (menu.FixError, worktree.WorktreeError, devkit_project.ProjectError) as exc:
         print(f"fix-pass: {exc}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {exc}")
@@ -415,5 +771,31 @@ def main(argv: list[str] | None = None) -> int:
         raise
 
 
+def in_utf8_mode(argv: list[str], utf8_mode: int = sys.flags.utf8_mode) -> int | None:
+    """Run this pass again under `-X utf8` when it was not started in UTF-8 mode, and
+    return that run's exit code. `None` means this process already is the pass to run.
+
+    Dozens of the pass's runners read a child's output with `text=True` and no encoding,
+    so outside UTF-8 mode a child's `”` (0x9d in UTF-8) kills a reader thread on a cp1252
+    console. The watchdog and the task dispatcher each start the pass in UTF-8 mode, and
+    any other launcher (a terminal, a script calling it by path) used to get the
+    traceback. The guard lives in the pass because the pass is the one place every
+    launcher reaches.
+
+    The rerun is handed `stdin` so that Windows hands it this process's stdout and stderr
+    too: given no std handle at all, a `NO_WINDOW` child writes to a hidden console of its
+    own, and a pass started from a terminal printed nothing.
+    """
+    if utf8_mode:
+        return None
+    return subprocess.run(
+        [sweep.console_python(), "-X", "utf8", str(Path(__file__).resolve()), *argv],
+        check=False,
+        creationflags=sweep.NO_WINDOW,
+        stdin=subprocess.DEVNULL,
+    ).returncode
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    relaunched = in_utf8_mode(sys.argv[1:])
+    sys.exit(main() if relaunched is None else relaunched)

@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT, load_script
+from support import REPO_ROOT, devkit_jsonc, load_script
 
 installers = load_script("scripts/installers.py")
 
@@ -61,10 +61,29 @@ def test_installers_are_found_by_name_and_reported_in_order(tmp_path):
 
 def test_every_real_installer_is_discovered():
     """The property `tests/test_installer_contract.py` builds on: a new `install-*.py`
-    is in scope the moment it exists, with no list to forget it in."""
+    is in scope the moment it exists, with no list to forget it in, bar `HELD_OUT`."""
     found = {p.name for p in installers.discover(REPO_ROOT)}
-    assert found == {p.name for p in (REPO_ROOT / "scripts").glob("install-*.py")}
+    every = {p.name for p in (REPO_ROOT / "scripts").glob("install-*.py")}
+    assert found == every - installers.HELD_OUT
     assert "install-installers-schedule.py" in found
+
+
+def test_the_elevated_installer_is_never_driven_by_the_pass(tmp_path):
+    """It stays out of `maintain`, `status` and `uninstall` alike: all three start at
+    `discover`, and each `--yes` would be an unelevated run that can only refuse."""
+    root = a_checkout(tmp_path, "install-tray.py", "install-elevated-worker.py")
+    runner = Answers({"install-tray.py": 1}, {"install-tray.py": 0})
+    outcomes = installers.reconcile(root, True, {}, runner)
+    assert [outcome.installer for outcome in outcomes] == ["install-tray.py"]
+    assert not any("install-elevated-worker.py" in " ".join(argv) for argv in runner.calls)
+
+
+def test_a_stood_down_elevated_job_is_not_an_orphan(tmp_path):
+    """`HELD_OUT` is about driving it. It still has an installer here."""
+    root = a_checkout(tmp_path, "install-elevated-worker.py")
+    script = root / "scripts" / "install-elevated-worker.py"
+    script.write_text('TASK_NAME = "devkit-elevated"\n', encoding="utf-8")
+    assert installers.stood_down_without_installer(frozenset({"devkit-elevated"}), root) == []
 
 
 def test_the_task_name_is_read_off_the_source_without_importing_it(tmp_path):
@@ -518,3 +537,16 @@ def test_uninstall_carries_the_same_per_installer_options_the_check_does(tmp_pat
     runner = Removals()
     installers.decommission(root, True, {"install-alpha.py": ["--merge"]}, runner)
     assert runner.calls[0][2:] == ["--uninstall", "--yes", "--merge"]
+
+
+def test_the_scheduled_jobs_picker_offers_every_installer_on_disk():
+    """`installerJobs` is a hand-kept list, and it had already lost `collectors` and
+    `fix-pass-task` when `e2e-schedule` was added beside them: an installer missing from
+    it cannot be ticked, only reached by running every installer at once."""
+    inputs = devkit_jsonc.loads((REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8"))[
+        "tasks"
+    ]["inputs"]
+    picker = next(spec for spec in inputs if spec.get("id") == "installerJobs")
+    offered = [option for group in picker["args"]["optionGroups"] for option in group["options"]]
+    on_disk = [path.stem.removeprefix("install-") for path in installers.discover(REPO_ROOT)]
+    assert offered == on_disk

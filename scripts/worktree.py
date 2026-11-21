@@ -41,7 +41,9 @@ Modes:
                   borrows the rest of the stack from the static checkout — the
                   cheap preview for a frontend change.
   provision <box> install the toolchain into a box that was cut without one (the
-                  guard hook cuts those — see `apply_new`).
+                  guard hook cuts those — see `apply_new`). In a linked worktree it
+                  first moves each path-source sibling to the ref CI pins now
+                  (`link_siblings`), so a bumped pin is followed.
   reap <box>      tear the stack down, remove the worktree, delete the branch,
                   release the lease. **Refuses while the box still holds work.**
   reap --all      the same pass over every live box, stepping over the ones still
@@ -70,6 +72,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as _dt
+import functools
 import json
 import os
 import re
@@ -78,6 +81,7 @@ import string
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -87,6 +91,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 # The host half of a teardown -- deleting the directory, and evicting whatever on this
 # machine is still running out of it. Its own module because nothing in it knows what a
 # `ReapPlan` is, and because this one is already past every structural limit.
+import bg_sessions
 import box_teardown
 import devkit_ports
 import devkit_project
@@ -97,6 +102,7 @@ import git_policy
 # seam the hooks use, so a box provisions the way its project says to rather than the way
 # this file guesses.
 import harness_config
+import reconcile_journal
 import sweep
 import task_branch as tb
 import worktree_env
@@ -136,6 +142,13 @@ LEASE_LOCK_STALE = 60.0
 SPAWN_LOCK_PREFIX = "spawn-"
 SPAWN_LOCK_WAIT = 45.0
 SPAWN_LOCK_STALE = 120.0
+
+# Held by `apply_reap` for one box's whole teardown, so a second reaper reads the box
+# after the first is done rather than a tree half removed (3f2e8171). `stale` outlasts a
+# slow `compose down` plus image removal; past `wait` the waiter proceeds as before.
+REAP_LOCK_PREFIX = "reap-"
+REAP_LOCK_WAIT = 300.0
+REAP_LOCK_STALE = 900.0
 
 # Separates the project from the branch topic in a box name. Two hyphens rather than
 # one because project names already contain hyphens (`apt-finder`) and the box name is
@@ -386,11 +399,16 @@ def reapable(
     return pr_merged and not holds_uncommitted and verdict in MERGE_CAN_BE_STALE_ABOUT
 
 
-# Marks the block `new` writes into a box's `.env`. Docker Compose's dotenv parser
-# takes the LAST assignment of a key, so appending is what lets the block win over a
-# seeded copy of the project's own `.env` without editing the lines it came with.
+# Marks the block `new` writes into a box's `.env`, after a seeded copy of the project's
+# own `.env`.
 MANAGED_BEGIN = "# --- devkit worktree: managed block (rewritten on every spawn) ---"
 MANAGED_END = "# --- end devkit worktree block ---"
+# What a seeded assignment of a key the block also sets is commented out under. Compose's
+# last-wins parser made the duplicate harmless to compose, but not to dotenv-linter, which
+# fails a duplicated key, so every box's `lint-all` was red on a `.env` the session never
+# touched (social-scraper, 5f01977b). Taken back off on a re-read (`_unmanaged_lines`),
+# so a re-render restores the line once the block stops setting its key.
+OVERRIDDEN = "# devkit worktree: set in the managed block below: "
 
 # --- reconcile ---------------------------------------------------------------
 # What `reconcile` decides to do with one box. Four, because they are the four
@@ -1064,24 +1082,103 @@ def managed_env(
     return env
 
 
+def _unmanaged_lines(text: str) -> list[str]:
+    """`text`'s lines outside any managed block -- what the source checkout itself chose,
+    with any line `render_env` commented out (`OVERRIDDEN`) restored."""
+    kept: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        if line.strip() == MANAGED_BEGIN:
+            skipping = True
+        elif line.strip() == MANAGED_END:
+            skipping = False
+        elif not skipping:
+            kept.append(line.removeprefix(OVERRIDDEN))
+    return kept
+
+
+_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
+
+# Hosts a seeded value names when it means "a port published on this machine" -- the only
+# place a compose port mapping lands, and so the only place a box's port differs from its
+# source checkout's.
+_LOCAL_HOSTS = r"localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal"
+
+
+def dotenv_assignments(text: str) -> dict[str, str]:
+    """`KEY -> raw value` for every assignment outside a managed block, last one winning
+    as compose's own dotenv parser has it. Comments and blank lines are skipped."""
+    found: dict[str, str] = {}
+    for line in _unmanaged_lines(text):
+        match = _ASSIGNMENT.match(line)
+        if match and not line.lstrip().startswith("#"):
+            found[match.group(1)] = match.group(2)
+    return found
+
+
+def checkout_ports(registry: devkit_ports.Registry | None, project: str) -> dict[str, str]:
+    """The `*_HOST_PORT` env the source checkout `project` publishes on, from its registry
+    slot; empty for an unregistered project or no registry. Never raises."""
+    if registry is None or project not in registry.slots:
+        return {}
+    return registry.env_for(project)
+
+
+def rebase_seeded_ports(
+    seeded: str, published: Mapping[str, str], managed: Mapping[str, str]
+) -> dict[str, str]:
+    """Overrides moving every seeded value that names the source checkout's published port
+    onto the box's own. Pure.
+
+    The managed block gives a box its own `<SERVICE>_HOST_PORT`, but a value *derived* from
+    one -- a `DATABASE_URL` naming `127.0.0.1:5433` -- is copied verbatim with the rest of
+    the source `.env`. In a box that is worse than stale: the box's stack publishes its db
+    on its own port, the source checkout's is the long-lived database, and a bare
+    `alembic upgrade head` in the box migrated it (ibkr_trader, 2026-10-11). A
+    `[worktree] env` template can fix one key in one project; this fixes the shape, since
+    a port number on a local host is the one thing devkit knows the meaning of.
+
+    `published` is what the source actually publishes on: its registry slot, overridden by
+    any `*_HOST_PORT` its own `.env` sets. Only a port that moved is rewritten, so a UI-only
+    box -- which keeps the donor's ports for the backend -- leaves its backend URLs alone.
+    A key `managed` already sets is skipped: an explicit template knows better.
+    """
+    assigned = dotenv_assignments(seeded)
+    source = {**published}
+    for key, raw in assigned.items():
+        if key.endswith(devkit_ports.ENV_SUFFIX):
+            source[key] = raw.split("#", 1)[0].strip().strip("'\"")
+    moved = {
+        old: managed[key]
+        for key, old in source.items()
+        if old.isdigit() and key in managed and managed[key] != old
+    }
+    if not moved:
+        return {}
+    pattern = re.compile(rf"(?<![\w.-])({_LOCAL_HOSTS}):({'|'.join(map(re.escape, moved))})(?!\d)")
+    overrides: dict[str, str] = {}
+    for key, value in assigned.items():
+        if key in managed:
+            continue
+        rebased = pattern.sub(lambda m: f"{m.group(1)}:{moved[m.group(2)]}", value)
+        if rebased != value:
+            overrides[key] = rebased
+    return overrides
+
+
 def render_env(source: str, managed: Mapping[str, str]) -> str:
     """`source` with the managed block appended, replacing an earlier one.
 
     A fresh worktree checks out **tracked files only**, so a project whose stack reads
     a gitignored `.env` gets none and its compose run fails on missing variables. The
     fix is to seed a copy of the source checkout's file and then override the handful
-    of keys that must differ — which works because compose's dotenv parser takes the
-    last assignment of a duplicated key, so nothing in the seeded half needs editing.
+    of keys that must differ. A seeded line assigning one of those is commented out
+    (`OVERRIDDEN`) rather than left as a second assignment of the key.
     """
-    kept: list[str] = []
-    skipping = False
-    for line in source.splitlines():
-        if line.strip() == MANAGED_BEGIN:
-            skipping = True
-        elif line.strip() == MANAGED_END:
-            skipping = False
-        elif not skipping:
-            kept.append(line)
+    kept = [
+        f"{OVERRIDDEN}{line}" if _assigns(line, managed) else line
+        for line in _unmanaged_lines(source)
+    ]
     while kept and not kept[-1].strip():
         kept.pop()
     block = [
@@ -1090,6 +1187,12 @@ def render_env(source: str, managed: Mapping[str, str]) -> str:
         MANAGED_END,
     ]
     return "\n".join([*kept, "", *block]) + "\n"
+
+
+def _assigns(line: str, keys: Mapping[str, str]) -> bool:
+    """Whether `line` is a dotenv assignment of one of `keys`."""
+    match = _ASSIGNMENT.match(line)
+    return match is not None and not line.lstrip().startswith("#") and match.group(1) in keys
 
 
 def venv_python(windows: bool) -> str:
@@ -1281,6 +1384,28 @@ def detect_python_version(source: Path) -> tuple[str, str]:
     return "", ""
 
 
+def npm_target(source: Path, frontend_dir: str) -> str:
+    """Where `npm` installs for `source`'s frontend: `frontend_dir`, another directory, or ""
+    when nothing needs installing.
+
+    A `claude --worktree` tree's `node_modules` links into its checkout
+    (`project_settings.dependency_dirs`), so an install run in the tree is really an
+    install into the checkout's `node_modules`. `npm ci` empties that directory first,
+    while the checkout and every other tree are using it, and an `npm ci` that fails
+    leaves it empty: a roguelike session found `vite` missing behind a link to an empty
+    directory (fcf111b9). So a link to a finished install needs no step, and a link to
+    an unfinished one gets its install where the link points, using the lockfile there.
+    """
+    if not frontend_dir:
+        return ""
+    real = worktree_env.borrowed(source / frontend_dir / "node_modules")
+    if real is None:
+        return frontend_dir
+    if worktree_env.node_modules_installed(real):
+        return ""
+    return str(real.parent)
+
+
 def plan_provision(
     source: Path, windows: bool = os.name == "nt", quiet: bool = False
 ) -> tuple[ProvisionStep, ...]:
@@ -1326,6 +1451,7 @@ def plan_provision(
     # Read off the SOURCE checkout, like every other marker here: the lockfile is
     # tracked, so the box is guaranteed the same answer and the dry run shows the verb
     # that will actually run.
+    frontend_dir = npm_target(source, frontend_dir)
     frontend_locked = bool(frontend_dir) and (source / frontend_dir / "package-lock.json").is_file()
     return provision_steps(
         present,
@@ -1909,7 +2035,7 @@ def reap_decision(
     )
 
 
-def branch_delete_flag(state: sweep.State, pr_merged: bool) -> str:
+def branch_delete_flag(state: sweep.State, pr_merged: bool, work_is_landed: bool = False) -> str:
     """`-d` or `-D` for the box's branch — `-D` only when nothing can be lost by it.
 
     `-d` refuses a branch that is not an ancestor of the default branch, which is the
@@ -1935,8 +2061,17 @@ def branch_delete_flag(state: sweep.State, pr_merged: bool) -> str:
     `test_no_reap_plan_ever_emits_a_capital_D_without_the_remote_having_it` sweeps
     exactly that combination. `is_git` gates it because `ahead` is 0 by default, so a
     state nothing could be read from must not be mistaken for an empty branch.
+
+    `work_is_landed` is the fourth: `reapable` freed the box because its exact tree, or
+    the HEAD a merged PR squashed, is on `origin/<default>` (`work_landed`), so every
+    committed line is there under other shas. Those commits are ancestors of nothing, so
+    `-d` refused, and every such reap ended `FAILED at git branch -d` after the tree was
+    already gone (agent-terminal's `fix-pr8-1111`, c70da35f). Gated on a clean, readable
+    state, as `reapable` gates it: the evidence answers for the commits alone.
     """
     if pr_merged:
+        return "-D"
+    if work_is_landed and state.is_git and not state.dirty:
         return "-D"
     if state.upstream and state.unpushed == 0:
         return "-D"
@@ -2086,7 +2221,7 @@ def reap_plan(
         flag = (
             preview_branch_delete_flag(state, copy_intact=copy_intact)
             if box.kind == PREVIEW_KIND
-            else branch_delete_flag(state, pr_merged)
+            else branch_delete_flag(state, pr_merged, work_is_landed)
         )
         if force and flag == "-d":
             warning = "; ".join(
@@ -2662,6 +2797,11 @@ def _dir_lock(path: Path, wait: float, stale: float):
     while True:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Apart from the mkdir below: a parent that is a *file* raises FileExistsError
+            # too, and read as a held lock whose stat then fails, it spun forever.
+            break
+        try:
             os.mkdir(path)
             acquired = True
             break
@@ -2725,6 +2865,44 @@ def spawn_lock(
         yield held
 
 
+def reap_lock_name(box: str) -> str:
+    """The lock directory one box's teardown holds. A box name is already path-safe."""
+    return f"{REAP_LOCK_PREFIX}{box}.lock"
+
+
+@contextlib.contextmanager
+def reap_lock(
+    workspace_root: Path, box: str, wait: float = REAP_LOCK_WAIT, stale: float = REAP_LOCK_STALE
+):
+    """Serialise the reapers of one box -- `reconcile`, `reap`, an adoption's cleanup."""
+    with _dir_lock(boxes_root(workspace_root) / reap_lock_name(box), wait, stale) as held:
+        yield held
+
+
+def git_refusal(git: sweep.Git) -> str:
+    """`; git refuses the checkout: <why>` when git will not read it at all, else "".
+
+    `detect_default_branch` reads a refusal as "no such ref", so a clone an elevated
+    process made -- which git refuses as dubious ownership -- was reported to the
+    release job as having no base branch (100bf14f), naming nothing that was wrong.
+    """
+    probe = git("rev-parse", "--git-dir")
+    if probe.returncode == 0:
+        return ""
+    lines = [line.strip() for line in (probe.stderr or probe.stdout or "").splitlines()]
+    why = next((line for line in lines if line.startswith("fatal:")), "") or " ".join(lines)
+    return f"; git refuses the checkout: {why or f'exit {probe.returncode}'}"
+
+
+@contextlib.contextmanager
+def named_lock(workspace_root: Path, name: str, wait: float, stale: float):
+    """`_dir_lock` on `name` beside the boxes, for a caller outside this module. Yields
+    whether the lock was had; one that was not, with the lock directory standing, is
+    another holder's."""
+    with _dir_lock(boxes_root(workspace_root) / name, wait, stale) as held:
+        yield held
+
+
 def write_leases(workspace_root: Path, boxes: Mapping[str, Box]) -> None:
     """Replace the lease file atomically, so a reader never sees a torn write.
 
@@ -2738,16 +2916,60 @@ def write_leases(workspace_root: Path, boxes: Mapping[str, Box]) -> None:
     os.replace(tmp, path)
 
 
-def seed_env(source: Path, target: Path, env: Mapping[str, str]) -> None:
-    """Write the box's `.env`: the source checkout's, plus the managed overrides."""
+def seed_env(
+    source: Path,
+    target: Path,
+    env: Mapping[str, str],
+    published: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Write the box's `.env`: the source checkout's, plus the managed overrides.
+
+    A checkout with no `.env` seeds from the `.env.example` beside it instead: the
+    managed block alone is ports and no `DATABASE_URL`, so every database test in the
+    box's push gate failed (d2-trader, 2026-11-11). The example's ports are rebased
+    like any other seeded value's.
+
+    `published` is the source checkout's own `*_HOST_PORT` env (`checkout_ports`); every
+    seeded value naming one of those ports on a local host is moved onto the box's
+    (`rebase_seeded_ports`). Returns those rebased keys, for the spawn's notes.
+    """
+    example = source.with_name(".env.example")
+    seed = source if source.is_file() else example
     try:
-        existing = source.read_text(encoding="utf-8") if source.is_file() else ""
+        existing = seed.read_text(encoding="utf-8") if seed.is_file() else ""
     except OSError:
         existing = ""
+    rebased = rebase_seeded_ports(existing, published or {}, env)
     try:
-        target.write_text(render_env(existing, env), encoding="utf-8", newline="\n")
+        target.write_text(render_env(existing, {**rebased, **env}), encoding="utf-8", newline="\n")
     except OSError as exc:
         print(f"worktree: could not write {target}: {exc}", file=sys.stderr)
+    return rebased
+
+
+# The variable that tells uv which directory is the project's environment.
+UV_ENVIRONMENT_VAR = "UV_PROJECT_ENVIRONMENT"
+
+
+def install_env(path: Path, environ: Mapping[str, str] | None = None) -> dict[str, str] | None:
+    """The environment an install in `path` runs with; None to inherit unchanged.
+
+    Not None only where `path/.venv` is a link -- a `claude --worktree` tree of devkit
+    borrows the checkout's through `worktree.symlinkDirectories`. uv writes the venv path
+    it was *given* into every console script it installs, so a sync in the tree wrote the
+    tree's path into the checkout's launchers, and once that tree was deleted each one
+    died with `uv trampoline failed to canonicalize script path`. Naming the link's real
+    directory makes them name the checkout, which outlives every tree.
+    """
+    venv = path / ".venv"
+    try:
+        real = venv.resolve(strict=True)
+        own = path.resolve(strict=True) / ".venv"
+    except OSError:
+        return None
+    if os.path.normcase(str(real)) == os.path.normcase(str(own)):
+        return None
+    return {**(os.environ if environ is None else environ), UV_ENVIRONMENT_VAR: str(real)}
 
 
 def run_provision(
@@ -2762,6 +2984,7 @@ def run_provision(
     """
     notes: list[str] = []
     worktree_env.mark_provisioned(path, False)
+    env = install_env(path)
     for step in steps:
         try:
             if step.shell_command:
@@ -2771,6 +2994,7 @@ def run_provision(
                     step.shell_command,
                     shell=True,
                     cwd=str(path),
+                    env=env,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
@@ -2781,6 +3005,7 @@ def run_provision(
                 completed = subprocess.run(
                     list(step.argv),
                     cwd=str(path),
+                    env=env,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
@@ -2795,7 +3020,12 @@ def run_provision(
             return False, notes
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-            notes.append(f"FAILED provision: {step.label} failed: {detail[-1] if detail else ''}")
+            # npm ends on "A complete log ... can be found in", so the last line alone
+            # dropped the ERESOLVE that says whose failure it is (`tree_provision`).
+            said = worktree_env.unresolvable(completed.stderr, completed.stdout)
+            notes.append(
+                f"FAILED provision: {step.label} failed: {said or (detail[-1] if detail else '')}"
+            )
             return False, notes
         notes.append(f"provisioned: {step.label}")
     worktree_env.mark_provisioned(path, True)
@@ -3021,14 +3251,18 @@ def known_projects(workspace: Path) -> list[str]:
 
 
 def run_steps(
-    cwd: Path, steps: tuple[tuple[str, ...], ...], timeout: float = 300.0
+    cwd: Path,
+    steps: tuple[tuple[str, ...], ...],
+    timeout: float = 300.0,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[list[str], str, str]:
     """Run git argv in `cwd`, stopping at the first failure. `(ran, failed, error)`.
 
     Bounded because `new` is reachable from a PreToolUse hook (`worktree-guard.py`),
     where an unbounded `git fetch` against an unreachable remote does not fail — it
     hangs the agent's tool call. A timeout is reported as an ordinary step failure, so
-    the fetch-is-optional path in `apply_new` handles it like any other.
+    the fetch-is-optional path in `apply_new` handles it like any other. `env` is the
+    whole environment, the caller's own when None.
     """
     ran: list[str] = []
     for step in steps:
@@ -3041,6 +3275,7 @@ def run_steps(
                 timeout=timeout,
                 check=False,
                 creationflags=sweep.NO_WINDOW,
+                env=None if env is None else dict(env),
             )
         except subprocess.TimeoutExpired:
             return ran, rendered, f"timed out after {timeout:g}s"
@@ -3088,16 +3323,6 @@ def is_tracked(repo: Path, relative: str) -> bool:
     return completed.returncode == 0
 
 
-# What a Docker CLI says when the engine is not there to talk to. Windows names the
-# missing named pipe, Linux and macOS the missing socket; both spellings appear as the
-# tail of a much longer connect error, so this is a substring test rather than a match.
-DAEMON_DOWN_SIGNS = (
-    "cannot connect to the docker daemon",
-    "error during connect",
-    "the docker daemon is not running",
-    "open //./pipe/",
-)
-
 DAEMON_DOWN_NOTE = (
     "Docker's engine is not running, so nothing could be built or started. "
     "Start Docker Desktop and wait for it to say `Engine running`, then run this again. "
@@ -3120,10 +3345,10 @@ def daemon_down_note(text: str) -> str:
 
     Substring rather than exact, and lower-cased, because the sign is the tail of a
     connect error whose leading half carries an API version and a URL-encoded path that
-    change between releases.
+    change between releases. The signs are `box_teardown.DAEMON_DOWN_SIGNS`, which
+    `session_trees.py` asks too and which does not import this module.
     """
-    haystack = (text or "").lower()
-    return DAEMON_DOWN_NOTE if any(sign in haystack for sign in DAEMON_DOWN_SIGNS) else ""
+    return DAEMON_DOWN_NOTE if box_teardown.engine_unreachable(text) else ""
 
 
 def build_env() -> dict[str, str]:
@@ -3259,6 +3484,11 @@ def remove_images(tags: Sequence[str]) -> tuple[bool, str]:
     already gone or the daemon went away mid-teardown -- the box is destroyed either
     way, and the caller's exit code is about the *stack*, per `apply_reap`. So the
     message says what happened and the boolean only gates the wording.
+
+    **`No such image` is success**, because the image being gone is the goal. A built
+    service the box never started was never built -- carameli's `db-backup` in a box
+    that ran only `app` -- and docker removes the tags it has, then exits 1 over the
+    rest. Counted as a failure, that failed every reconcile that reaped such a box.
     """
     if not tags:
         return True, ""
@@ -3275,10 +3505,34 @@ def remove_images(tags: Sequence[str]) -> tuple[bool, str]:
         return False, "docker is not on PATH — the box's images were left behind"
     except subprocess.TimeoutExpired:
         return False, "docker image rm timed out after 120s — images may survive"
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        return False, f"could not remove {len(tags)} box image(s): {detail}"
-    return True, f"removed {len(tags)} image(s) built by the box: {', '.join(tags)}"
+    if completed.returncode == 0:
+        return True, f"removed {len(tags)} image(s) built by the box: {', '.join(tags)}"
+    lines = (completed.stderr or completed.stdout or "").strip().splitlines()
+    errors = [line for line in lines if "No such image" not in line]
+    if errors or not lines:
+        return False, f"could not remove {len(tags)} box image(s): {chr(10).join(errors)}"
+    return True, f"removed the image(s) built by the box, some never built: {', '.join(tags)}"
+
+
+def compose(
+    path: Path, project_name: str, args: Sequence[str], timeout: float, **kwargs
+) -> subprocess.CompletedProcess[str]:
+    """`docker compose -p <project_name> <args>` in `path`, ended **with its whole process
+    tree** at `timeout` (`sweep.run_bounded`), which raises `subprocess.TimeoutExpired`
+    as the `subprocess.run` it replaces did.
+
+    `docker compose` is a CLI plugin: `docker.exe` runs `docker-compose.exe` as a child
+    that holds the same pipes. `subprocess.run(timeout=)` kills `docker.exe` alone on
+    Windows and then reads those pipes with no bound, so a compose call on a wedged
+    engine waited for the engine, not for its timeout: 2026-10-09 the reconcile in flight
+    since 20:15 reaped its first compose box only once the engine came back at 21:11, and
+    every fire behind it was skipped (bd12e216).
+    """
+    argv = ["docker", "compose", "-p", project_name, *args]
+    completed = sweep.run_bounded(argv, timeout, cwd=str(path), **kwargs)
+    if completed.returncode == sweep.TIMED_OUT:
+        raise subprocess.TimeoutExpired(argv, timeout, completed.stdout, completed.stderr)
+    return completed
 
 
 def compose_config(
@@ -3293,15 +3547,8 @@ def compose_config(
     docker actually gave.
     """
     try:
-        completed = subprocess.run(
-            ["docker", "compose", "-p", project_name, "config", "--format", "json"],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            creationflags=sweep.NO_WINDOW,
-            env=build_env(),
+        completed = compose(
+            path, project_name, ["config", "--format", "json"], timeout, env=build_env()
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -3345,16 +3592,7 @@ def compose_tail(path: Path, project_name: str, timeout: float = 20.0) -> str:
     job is to make a wait more informative must never be the thing that ends it.
     """
     try:
-        completed = subprocess.run(
-            ["docker", "compose", "-p", project_name, "logs", "--tail", "1"],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            creationflags=sweep.NO_WINDOW,
-            env=build_env(),
-        )
+        completed = compose(path, project_name, ["logs", "--tail", "1"], timeout, env=build_env())
     except (OSError, subprocess.SubprocessError):
         return ""
     if completed.returncode != 0:
@@ -3409,16 +3647,7 @@ def compose_up(
     )
     for step in plan:
         try:
-            completed = subprocess.run(
-                ["docker", "compose", "-p", project_name, *step],
-                cwd=str(path),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-                creationflags=sweep.NO_WINDOW,
-                env=build_env(),
-            )
+            completed = compose(path, project_name, step, timeout, env=build_env())
         except FileNotFoundError:
             return False, "docker is not on PATH — the stack was not started"
         except subprocess.TimeoutExpired:
@@ -3461,15 +3690,7 @@ def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
     to a seeded `COMPOSE_PROJECT_NAME` from the source checkout's `.env`.
     """
     try:
-        completed = subprocess.run(
-            ["docker", "compose", "-p", project_name, "down", "-v", "--remove-orphans"],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-            creationflags=sweep.NO_WINDOW,
-        )
+        completed = compose(path, project_name, ["down", "-v", "--remove-orphans"], 300)
     except FileNotFoundError:
         return False, "docker is not on PATH — the stack was left running"
     except subprocess.TimeoutExpired:
@@ -3477,6 +3698,44 @@ def compose_down(path: Path, project_name: str) -> tuple[bool, str]:
     if completed.returncode != 0:
         return False, (completed.stderr or completed.stdout or "").strip()
     return True, f"stack {project_name} torn down (containers, network, volumes)"
+
+
+# How long `docker version`, `claude agents` or `claude stop` may take before a reap goes
+# on without the answer, with the whole process tree ended (`sweep.run_bounded`).
+PROBE_TIMEOUT = 60.0
+
+
+def docker_engine_down() -> str:
+    """Why a box's stack cannot be downed now, or "" when Docker's engine answers.
+
+    Asked by `reconcile` before it reaps a box with a stack. With Docker Desktop stopped,
+    `compose_down` cannot reach the engine, `apply_reap` removes the box anyway and
+    fails the pass -- and the containers and volumes it leaves have no box left to name
+    them, so no later pass can tear them down (104d356c, 2026-10-01). The box waits
+    instead, and the first pass with the engine up reaps it whole.
+
+    "" too when docker is not installed: then there is no engine to wait for, and
+    `compose_down`'s own "not on PATH" is the report. Asked as `collector_tasks.probe`
+    asks, and for its reason: `docker info --format` exits 0 over a stopped engine.
+
+    Through `sweep.run_bounded`, for `compose`'s reason: `subprocess.run(timeout=)` ends
+    `docker.exe` alone and then reads pipes its children still hold, so a wedged engine
+    kept the scheduled reconcile inside one reap for 45 minutes (a7efb9b3).
+    """
+    try:
+        completed = sweep.run_bounded(
+            ["docker", "version", "--format", "{{.Server.Version}}"], PROBE_TIMEOUT
+        )
+    except FileNotFoundError:
+        return ""
+    if completed.returncode == sweep.TIMED_OUT:
+        return f"Docker's engine did not answer in {PROBE_TIMEOUT:g}s"
+    said = f"{completed.stderr or ''}\n{completed.stdout or ''}"
+    if completed.returncode != 0 and daemon_down_note(said):
+        return "Docker's engine is not running"
+    if completed.returncode == 0 and not (completed.stdout or "").strip():
+        return "Docker's engine named no server version"
+    return ""
 
 
 # --- modes ------------------------------------------------------------------
@@ -3542,6 +3801,7 @@ def plan_new(
     if not default_branch:
         raise WorktreeError(
             f"cannot resolve origin/HEAD in {project} — there is no base branch to cut from"
+            + git_refusal(git)
         )
     if base and not origin_has_branch(git, base, network=fetch):
         raise WorktreeError(f"origin/{base} does not exist in {project} — nothing to cut from")
@@ -3677,6 +3937,38 @@ def plan_respawn(
     return plan_new(project, workspace, slug=slug, session=session, fetch=fetch, quiet=quiet)
 
 
+def cut_worktree(
+    source: Path, steps: tuple[tuple[str, ...], ...], timeout: float
+) -> tuple[bool, list[str]]:
+    """Run a box's git `steps` in `source` with the hook's provisioning skipped. `(ok, notes)`.
+
+    The `post-checkout` hook provisions a tree inside the `worktree add` it runs under,
+    bounded at `worktree_env.PROVISION_TIMEOUT` -- longer than `timeout`, which killed
+    carameli's v0.11.52 adoption `worktree add` at 300 s while the hook's
+    `scripts/bootstrap.py` ran on to 600 s (4a9086cf, 77a810f7). `apply_new` provisions
+    the box after the cut, under its own bound and reported, so the hook only names and
+    links it.
+
+    A failed `fetch` is a stale base, not a failure: the worktree still gets cut from
+    whatever `origin/<default>` says locally, which is what an offline machine has.
+    Anything else leaves nothing behind to clean up, because the lease is only written
+    after the worktree exists.
+    """
+    notes: list[str] = []
+    cut_env = {**os.environ, worktree_env.SKIP_PROVISION_VAR: "1"}
+    _, failed, error = run_steps(source, steps, timeout=timeout, env=cut_env)
+    if failed.startswith("git fetch"):
+        notes.append(
+            f"fetch failed ({error.splitlines()[0] if error else 'no detail'}) — "
+            f"the box is cut from a possibly stale origin/<default>"
+        )
+        _, failed, error = run_steps(source, steps[1:], timeout=timeout, env=cut_env)
+    if failed:
+        notes.append(f"FAILED at `{failed}`: {error}")
+        return False, notes
+    return True, notes
+
+
 def apply_new(
     plan: SpawnPlan, workspace: Path, timeout: float = 300.0, provision: bool = True
 ) -> tuple[bool, list[str]]:
@@ -3693,24 +3985,11 @@ def apply_new(
     """
     root = workspace.parent
     source = root / plan.box.project
-    notes: list[str] = []
     boxes_root(root).mkdir(parents=True, exist_ok=True)
 
-    _, failed, error = run_steps(source, plan.steps, timeout=timeout)
-    if failed:
-        # A failed `fetch` is a stale base, not a failure: the worktree still gets cut
-        # from whatever `origin/<default>` says locally, which is what an offline
-        # machine has. Anything else leaves nothing behind to clean up, because the
-        # lease is only written after the worktree exists.
-        if failed.startswith("git fetch"):
-            notes.append(
-                f"fetch failed ({error.splitlines()[0] if error else 'no detail'}) — "
-                f"the box is cut from a possibly stale origin/<default>"
-            )
-            _, failed, error = run_steps(source, plan.steps[1:], timeout=timeout)
-        if failed:
-            notes.append(f"FAILED at `{failed}`: {error}")
-            return False, notes
+    cut, notes = cut_worktree(source, plan.steps, timeout)
+    if not cut:
+        return False, notes
 
     path = Path(plan.path)
 
@@ -3764,26 +4043,65 @@ def apply_new(
             f"`worktree.py reap <box> --yes` one that is done and let the next spawn "
             f"take its slot."
         )
-    if should_seed_env(stack, is_tracked(path, ".env")):
-        seed_env(source / ".env", path / ".env", env)
-        notes.append(f"seeded {path.name}/.env (COMPOSE_PROJECT_NAME={box.name})")
-    elif stack:
-        notes.append(
-            f"[warn] .env is tracked in {box.project}, so it was left alone — this "
-            f"box shares the source checkout's COMPOSE_PROJECT_NAME and ports. Export "
-            f"{' '.join(f'{k}={v}' for k, v in sorted(env.items()))} when running "
-            f"compose here, or gitignore .env so future boxes can be seeded."
-        )
+    notes.extend(seed_box_env(root, path, box, env, stack))
 
-    if provision and plan.provision:
-        _, provision_notes = run_provision(path, plan.provision)
-        notes.extend(provision_notes)
-    elif plan.provision:
-        notes.append(
-            f"not provisioned - run `python {Path(__file__).resolve()} provision "
-            f"{box.name} --yes` before running its tests or /ship"
-        )
+    notes.extend(provision_new_box(path, box.name, plan.provision, provision))
     return True, notes
+
+
+def seed_box_env(
+    root: Path, path: Path, box: Box, env: Mapping[str, str], stack: bool
+) -> list[str]:
+    """Seed a new box's `.env` from its source checkout's, and say what was done.
+
+    The source's registry ports go to `seed_env`, so a seeded URL naming the source's
+    published port is moved onto the box's own (`rebase_seeded_ports`).
+    """
+    if should_seed_env(stack, is_tracked(path, ".env")):
+        published: dict[str, str] = {}
+        with contextlib.suppress(devkit_ports.RegistryError):
+            published = checkout_ports(load_registry(root), box.project)
+        rebased = seed_env(root / box.project / ".env", path / ".env", env, published)
+        notes = [f"seeded {path.name}/.env (COMPOSE_PROJECT_NAME={box.name})"]
+        if rebased:
+            notes.append(
+                f"moved {', '.join(sorted(rebased))} off {box.project}'s ports onto this box's"
+            )
+        return notes
+    if not stack:
+        return []
+    return [
+        f"[warn] .env is tracked in {box.project}, so it was left alone — this "
+        f"box shares the source checkout's COMPOSE_PROJECT_NAME and ports. Export "
+        f"{' '.join(f'{k}={v}' for k, v in sorted(env.items()))} when running "
+        f"compose here, or gitignore .env so future boxes can be seeded."
+    ]
+
+
+def provision_new_box(
+    path: Path, name: str, steps: tuple[ProvisionStep, ...], provision: bool
+) -> list[str]:
+    """`apply_new`'s last step: link the siblings and install, or name the command that would.
+
+    The siblings are linked again rather than left to the hook inside the captured
+    `worktree add`: d2e29fee's failed link was reported only as the `uv sync` it broke.
+    """
+    if not steps:
+        return []
+    if not provision:
+        return [
+            f"not provisioned - run `python {Path(__file__).resolve()} provision "
+            f"{name} --yes` before running its tests or /ship"
+        ]
+    linked = link_siblings(path)
+    if worktree_env.held(linked):
+        # Never waits: a `new` that stalls behind another box's test run reads as a hang.
+        return [
+            *linked,
+            f"not provisioned - run `python {Path(__file__).resolve()} provision {name}` "
+            "once the run holding the sibling ends",
+        ]
+    return [*linked, *run_provision(path, steps)[1]]
 
 
 def serve_preview(
@@ -4761,23 +5079,38 @@ def apply_reap(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
     teardown gives: the box is destroyed and the slot is reclaimed regardless, and a
     leaked image costs disk rather than work. It does count toward `stack_ok`, because
     "the stack needs a look" is exactly what it means.
+
+    **The whole teardown holds the box's `reap_lock`**, so a second reaper of the same
+    box waits it out (`reaped_elsewhere`) instead of reading the tree half removed.
     """
+    with reap_lock(workspace.parent, plan.box):
+        return _teardown(plan, workspace)
+
+
+def _down_stack(plan: ReapPlan, notes: list[str]) -> bool:
+    """Down the box's stack and delete the images it built, noting each; whether both
+    went cleanly. The image order is `apply_reap`'s docstring's."""
+    images = box_image_tags(compose_config(Path(plan.path), plan.box), plan.box)
+    stack_ok, message = compose_down(Path(plan.path), plan.box)
+    notes.append(f"{'' if stack_ok else '[warn] '}{message}")
+    if not stack_ok:
+        notes.append(
+            f"the box was still removed, but its containers and volumes may survive "
+            f"as project {plan.box} — check `docker compose ls` and prune by hand"
+        )
+        return False
+    if not images:
+        return True
+    images_ok, image_note = remove_images(images)
+    notes.append(f"{'' if images_ok else '[warn] '}{image_note}")
+    return images_ok
+
+
+def _teardown(plan: ReapPlan, workspace: Path) -> tuple[bool, list[str]]:
+    """`apply_reap`'s body, run under the box's reap lock."""
     root = workspace.parent
     notes: list[str] = []
-    stack_ok = True
-    if plan.stack_down:
-        images = box_image_tags(compose_config(Path(plan.path), plan.box), plan.box)
-        stack_ok, message = compose_down(Path(plan.path), plan.box)
-        notes.append(f"{'' if stack_ok else '[warn] '}{message}")
-        if not stack_ok:
-            notes.append(
-                f"the box was still removed, but its containers and volumes may survive "
-                f"as project {plan.box} — check `docker compose ls` and prune by hand"
-            )
-        if stack_ok and images:
-            images_ok, image_note = remove_images(images)
-            notes.append(f"{'' if images_ok else '[warn] '}{image_note}")
-            stack_ok = stack_ok and images_ok
+    stack_ok = _down_stack(plan, notes) if plan.stack_down else True
 
     source = root / plan.project
     ran, failed, error = run_steps(source, plan.steps)
@@ -4986,6 +5319,200 @@ def sync_checkouts(
     return (1 if summary["failed"] else 0), summary
 
 
+def inspect_boxes(
+    boxes: dict[str, Box], root: Path, fetch: bool, deferred: list[str]
+) -> tuple[list[tuple[Box, str, str, PullRequest, int]], set[str]]:
+    """`reconcile`'s reading of each box: its row for `reconcile_plan`, and the names
+    whose work has landed. A box reached past a caller's `sweep.until` deadline is not
+    read, only named in `deferred`, for the next pass."""
+    rows: list[tuple[Box, str, str, PullRequest, int]] = []
+    landed: set[str] = set()
+    for name, box in sorted(boxes.items()):
+        if sweep.past_until():
+            deferred.append(name)
+            continue
+        reconcile_journal.step(f"inspect {name}")
+        state, verdict, reason = inspect_box(box, root, fetch=fetch)
+        # A preview's PR is the one for the branch it is SHOWING. Looking it up by
+        # `box.branch` would ask GitHub about the throwaway `preview/...` ref, get
+        # nothing back, and leave the preview standing after the work it shows merged.
+        subject = box.tracks or box.branch
+        pr = (
+            pr_for(sweep.gh_for(box_path(root, name)), subject)
+            if fetch and subject and state.host == "github"
+            else PullRequest()
+        )
+        # Asked only for the verdicts it can settle, and only of a clean box, so a pass
+        # over sixteen boxes adds two git calls for the rare one rather than thirty-two
+        # for the ordinary ones. Same gate as `plan_reap`'s, so `reap` and this pass
+        # cannot describe one box differently.
+        if work_landed(sweep.git_for(box_path(root, name)), state, verdict, pr):
+            landed.add(name)
+        rows.append((box, verdict, reason, pr, state.dirty))
+    return rows, landed
+
+
+def sync_in_time(
+    workspace: Path, checkouts: bool, apply: bool, fetch: bool, deferred: list[str]
+) -> tuple[int, dict]:
+    """`sync_checkouts` for `reconcile`, unless `checkouts` is off -- or a caller's
+    `sweep.until` deadline has passed, which names the sync in `deferred` instead."""
+    if not checkouts:
+        return 0, {}
+    if sweep.past_until():
+        deferred.append("the checkout sync")
+        return 0, {}
+    reconcile_journal.step("sync checkouts")
+    return sync_checkouts(workspace, apply=apply, fetch=fetch)
+
+
+def bounded_cli(
+    argv: Sequence[str], *_args: object, **_kwargs: object
+) -> subprocess.CompletedProcess[str]:
+    """A `subprocess.run`-shaped runner for `bg_sessions`, over `sweep.run_bounded`, which
+    captures and decodes itself: `claude agents` and `claude stop` had no bound at all."""
+    return sweep.run_bounded(list(argv), PROBE_TIMEOUT)
+
+
+def agent_sessions() -> list[dict] | None:
+    """Every Claude Code session on this machine, with its working directory; None when
+    `claude agents` did not answer in `PROBE_TIMEOUT`, which says nothing about the box."""
+    answered: list[subprocess.CompletedProcess[str]] = []
+
+    def run(
+        argv: Sequence[str], *args: object, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        answered.append(bounded_cli(argv, *args, **kwargs))
+        return answered[-1]
+
+    rows = bg_sessions.listed(run)
+    return None if answered and answered[-1].returncode == sweep.TIMED_OUT else rows
+
+
+def reap_decided(
+    box: str,
+    workspace: Path,
+    pr: PullRequest,
+    settle: Callable[[ReapPlan], tuple[str, bool, list[str]]],
+    *,
+    keep_stack: bool,
+    fetch: bool,
+) -> tuple[str, bool, list[str]]:
+    """Plan the reap `reconcile` decided on for `box` and `settle` it: `(action, ok,
+    notes)`. A plan that cannot be made is a failed reap, never a skipped one -- unless
+    another reaper destroyed the box meanwhile (`unless_reaped_elsewhere`)."""
+    reconcile_journal.step(f"reap {box}")
+    try:
+        doomed = plan_reap(box, workspace, keep_stack=keep_stack, fetch=fetch, pr=pr)
+    except WorktreeError as exc:
+        return unless_reaped_elsewhere(workspace.parent, box, (REAP, False, [f"[warn] {exc}"]))
+    return settle(doomed)
+
+
+def reaped_elsewhere(workspace_root: Path, box: str) -> bool:
+    """Whether `box` is gone, read once any reaper tearing it down has let go of it."""
+    with reap_lock(workspace_root, box):
+        return box not in live_boxes(workspace_root)
+
+
+def unless_reaped_elsewhere(
+    workspace_root: Path, box: str, outcome: tuple[str, bool, list[str]]
+) -> tuple[str, bool, list[str]]:
+    """`outcome`, unless it is a failed reap of a box another process has since destroyed.
+
+    3f2e8171: a second reaper was removing social-scraper's adoption box while the
+    scheduled pass inspected it, so the pass read the half-removed tree as "cannot
+    resolve origin/HEAD", refused, and reddened over a box gone seconds later. The box
+    being gone is the outcome a reap wants, whoever got there first.
+    """
+    _action, ok, notes = outcome
+    if ok or not reaped_elsewhere(workspace_root, box):
+        return outcome
+    said = "; ".join(notes) or "nothing"
+    return (
+        REAP,
+        True,
+        [
+            "already reaped by another process while this pass read it; this pass's own "
+            f"attempt said: {said}"
+        ],
+    )
+
+
+def settle_reap(
+    doomed: ReapPlan,
+    workspace: Path,
+    sessions: Callable[[], list[dict] | None],
+    *,
+    apply: bool,
+    engine_down: Callable[[], str] | None = None,
+) -> tuple[str, bool, list[str]]:
+    """What a reconcile pass does with a box it decided to reap: `(action, ok, notes)`.
+
+    `sessions` is called only when the reap is applied, so a dry run and a pass with
+    nothing to reap never ask `claude agents`; `engine_down` likewise, and only for a
+    box with a stack (`reap_vacated`).
+    """
+    if doomed.refusal:
+        # `reconcile_action` already cleared this box, so a refusal here is the two
+        # classifiers disagreeing — report it, never force past it. Or a second reaper
+        # was mid-teardown and this one read the half-removed tree.
+        refused = (HOLD, False, [f"[warn] reap refused: {doomed.refusal}"])
+        return unless_reaped_elsewhere(workspace.parent, doomed.box, refused)
+    if not apply:
+        return REAP, True, []
+    return reap_vacated(doomed, workspace, sessions(), engine_down)
+
+
+def reap_vacated(
+    doomed: ReapPlan,
+    workspace: Path,
+    sessions: list[dict] | None,
+    engine_down: Callable[[], str] | None = None,
+) -> tuple[str, bool, list[str]]:
+    """Reap `doomed` unless a session is still in it: `(action, ok, notes)`.
+
+    A session in the box is a WAIT, not a failure: the scheduled pass is what reddened
+    every time a live fixer held the directory, and the next pass reaps it once the
+    session has gone. `box_teardown.vacate` stops the ones the pass may stop. `sessions`
+    None is `claude agents` not answering, which is a WAIT too: it says nothing about
+    who stands in the box.
+
+    So is a stack Docker's engine cannot reach (`docker_engine_down`, the default for
+    `engine_down`): reaping then would strand the stack with nothing left to name it.
+    """
+    if doomed.stack_down and (down := (engine_down or docker_engine_down)()):
+        return (
+            WAIT,
+            True,
+            [
+                f"not reaped: {down}, so its stack cannot be downed -- the "
+                f"next pass with the engine up reaps it, stack and all"
+            ],
+        )
+    if sessions is None:
+        return (
+            WAIT,
+            True,
+            [
+                f"not reaped: `claude agents` did not answer in {PROBE_TIMEOUT:g}s, so "
+                f"nothing says whether a session stands in it -- the next pass asks again"
+            ],
+        )
+    occupants, notes = box_teardown.vacate(Path(doomed.path), sessions, run=bounded_cli)
+    if occupants:
+        notes.append(
+            f"not reaped: {', '.join(occupants)} still in it -- the next pass reaps it "
+            f"once the session has gone"
+        )
+        return WAIT, True, notes
+    # Its own journal step, so a pass that stalls here is told apart from one stalled in
+    # the probes above: a7efb9b3's journal said only "reap <box>", then 45 minutes.
+    reconcile_journal.step(f"tear down {doomed.box}")
+    ok, reap_notes = apply_reap(doomed, workspace)
+    return REAP, ok, notes + reap_notes
+
+
 def reconcile(
     workspace: Path,
     *,
@@ -5039,29 +5566,24 @@ def reconcile(
     free = free_gb(boxes_root(root) if boxes_root(root).is_dir() else root)
     pressure = under_pressure(free, min_free_gb)
 
-    rows: list[tuple[Box, str, str, PullRequest, int]] = []
-    landed: set[str] = set()
-    for name, box in sorted(boxes.items()):
-        state, verdict, reason = inspect_box(box, root, fetch=fetch)
-        # A preview's PR is the one for the branch it is SHOWING. Looking it up by
-        # `box.branch` would ask GitHub about the throwaway `preview/...` ref, get
-        # nothing back, and leave the preview standing after the work it shows merged.
-        subject = box.tracks or box.branch
-        pr = (
-            pr_for(sweep.gh_for(box_path(root, name)), subject)
-            if fetch and subject and state.host == "github"
-            else PullRequest()
-        )
-        # Asked only for the verdicts it can settle, and only of a clean box, so a pass
-        # over sixteen boxes adds two git calls for the rare one rather than thirty-two
-        # for the ordinary ones. Same gate as `plan_reap`'s, so `reap` and this pass
-        # cannot describe one box differently.
-        if work_landed(sweep.git_for(box_path(root, name)), state, verdict, pr):
-            landed.add(name)
-        rows.append((box, verdict, reason, pr, state.dirty))
-
+    # Inside a caller's `sweep.until` -- the scheduled pass's `--budget` -- no unit of
+    # work is begun past the deadline: a box not inspected or not reaped, or the checkout
+    # sync, is the next pass's, and named in the report. Every call already begun ends by
+    # the deadline too, so the pass is over before its next fire is due. 2026-11-07 the
+    # 00:30 pass was still going at 00:45, each of its calls bounded and the pass as a
+    # whole not (3fa66640, after three fixes bounding the calls).
+    deferred: list[str] = []
+    rows, landed = inspect_boxes(boxes, root, fetch, deferred)
     outcomes: list[dict] = []
     worst = 0
+    # Each asked once, and only by a pass that reaps (the engine: only one reaping a stack).
+    settle = functools.partial(
+        settle_reap,
+        workspace=workspace,
+        sessions=functools.cache(lambda: agent_sessions()),
+        apply=apply,
+        engine_down=functools.cache(lambda: docker_engine_down()),
+    )
     for decision in reconcile_plan(
         rows,
         automerge=automerge,
@@ -5074,6 +5596,9 @@ def reconcile(
         notes: list[str] = []
         action = decision.action
         pr = decision.pr
+        if action in (MERGE, REAP) and sweep.past_until():
+            deferred.append(decision.box)
+            continue
 
         if action == MERGE and apply:
             ok, message = merge_pr(sweep.gh_for(box_path(root, decision.box)), pr.number)
@@ -5087,26 +5612,11 @@ def reconcile(
                 worst = 1
 
         if action == REAP:
-            try:
-                doomed = plan_reap(
-                    decision.box, workspace, keep_stack=keep_stack, fetch=fetch, pr=pr
-                )
-            except WorktreeError as exc:
-                notes.append(f"[warn] {exc}")
-                worst = 1
-                doomed = None
-            if doomed is not None:
-                if doomed.refusal:
-                    # `reconcile_action` already cleared this box, so a refusal here is
-                    # the two classifiers disagreeing — report it, never force past it.
-                    notes.append(f"[warn] reap refused: {doomed.refusal}")
-                    action = HOLD
-                    worst = 1
-                elif apply:
-                    ok, reap_notes = apply_reap(doomed, workspace)
-                    notes.extend(reap_notes)
-                    if not ok:
-                        worst = 1
+            action, ok, reap_notes = reap_decided(
+                decision.box, workspace, pr, settle, keep_stack=keep_stack, fetch=fetch
+            )
+            notes.extend(reap_notes)
+            worst = worst if ok else 1
 
         outcomes.append(
             reconcile_outcome(decision, action, pr, notes, boxes.get(decision.box), paused)
@@ -5114,10 +5624,8 @@ def reconcile(
 
     # Last, and after the reaps: a reap deletes its box's branch in the source
     # checkout, so the sync reads a checkout this pass has finished with.
-    synced: dict = {}
-    if checkouts:
-        code, synced = sync_checkouts(workspace, apply=apply, fetch=fetch)
-        worst = max(worst, code)
+    code, synced = sync_in_time(workspace, checkouts, apply, fetch, deferred)
+    worst = max(worst, code)
 
     report = {
         "applied": apply,
@@ -5127,6 +5635,7 @@ def reconcile(
         "automerge": automerge,
         "boxes": outcomes,
         "checkouts": synced,
+        "deferred": deferred,
     }
     return worst, report
 
@@ -5278,6 +5787,12 @@ def render_survey(rows: list[dict], registry: devkit_ports.Registry | None = Non
 
 
 RECONCILE_LOG = "logs/reconcile.log"
+# The failing pass's own copy, kept until the next failure replaces it. The job runs
+# every fifteen minutes, so the per-run log a ledger row names has been overwritten by a
+# clean pass long before a sweep reads it: 3a8c74a3 reached triage with nothing but the
+# next pass's `exit=0` to read. `log-wrap.py`'s `FAILED_SUFFIX` is the same idea for the
+# jobs it wraps, and `schedule_health.failure_artifact` sends a reader to either.
+RECONCILE_FAILED_LOG = "logs/reconcile.failed.log"
 
 
 def artifact_root(root: Path, repo_root: Path | None = None) -> Path:
@@ -5301,8 +5816,13 @@ def artifact_root(root: Path, repo_root: Path | None = None) -> Path:
     workspace being acted on, which is every real invocation; a workspace somewhere else
     gets its own `logs/`, and nothing a test drives can reach this one. `repo_root` is
     resolved at call time rather than defaulted, so patching `REPO_ROOT` still works.
+
+    **This repo is its permanent checkout, never a tree cut from it** (`source_checkout`):
+    a reconcile run from a fixer's `.claude/worktrees/` tree recorded its reap in that
+    tree's `logs/`, which the tree's own reap deletes, and `reaped_branch` reads the
+    checkout's copy.
     """
-    here = REPO_ROOT if repo_root is None else repo_root
+    here = sweep.source_checkout(REPO_ROOT if repo_root is None else repo_root)
     try:
         if here.resolve().is_relative_to(root.resolve()):
             return here
@@ -5312,7 +5832,11 @@ def artifact_root(root: Path, repo_root: Path | None = None) -> Path:
 
 
 def write_reconcile_log(
-    rendered: str, code: int, root: Path = REPO_ROOT, dry_run: bool = False
+    rendered: str,
+    code: int,
+    root: Path = REPO_ROOT,
+    dry_run: bool = False,
+    journal: reconcile_journal.Journal | None = None,
 ) -> Path | None:
     """Persist a reconcile pass to `logs/reconcile.log`. Returns the path, or None.
 
@@ -5341,23 +5865,75 @@ def write_reconcile_log(
     direction, when `pytest tests/ -q` wrote over the real log; a dry run is that bug
     with the right workspace and the wrong verb.
 
+    A failing pass is written a second time, to `RECONCILE_FAILED_LOG`, which only the
+    next failure replaces: the per-run log belongs to whichever pass ran last.
+
+    `journal` is the pass's timing (`reconcile_journal`): the header then says when the
+    pass started and how long each step took, and the pass is filed in the history that
+    outlives this log.
+
     Best-effort — a reconcile pass that did its work must not report failure because a
     log file could not be written.
     """
     if dry_run:
         return None
     path = root / RECONCILE_LOG
-    stamp = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+    ended = _dt.datetime.now(_dt.UTC)
+    head = (
+        journal.header(code, ended)
+        if journal
+        else f"# {ended.isoformat(timespec='seconds')}  exit={code}"
+    )
+    if journal:
+        reconcile_journal.finish(journal, code, ended)
+    body = f"# devkit worktree reconcile\n{head}\n\n{rendered}\n"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            f"# devkit worktree reconcile\n# {stamp}  exit={code}\n\n{rendered}\n",
-            encoding="utf-8",
-            newline="\n",
-        )
+        path.write_text(body, encoding="utf-8", newline="\n")
+        if code:
+            (root / RECONCILE_FAILED_LOG).write_text(body, encoding="utf-8", newline="\n")
     except OSError:
         return None
     return path
+
+
+def _run_reconcile(args: argparse.Namespace) -> int:
+    """The `reconcile` verb, which accounts for itself even when it raises.
+
+    The scheduled pass runs under `pythonw.exe`, so an exception that escaped `main`
+    went to no console and left `RECONCILE_LOG` holding the *previous* pass's `exit=0`:
+    the scheduler said exit 1 and the only evidence on disk said success. The
+    traceback is written as the pass's report, and the exception still propagates, so
+    the exit code and `main`'s own handling are what they were.
+
+    `--budget` bounds the whole pass (`sweep.until`); see `reconcile`'s `deferred`. The
+    pass is journaled (`reconcile_journal`) so its start, duration and steps outlive the
+    next pass's log; a dry run journals nothing, as it logs nothing.
+    """
+    root = artifact_root(args.workspace.parent)
+    deadline = time.monotonic() + args.budget if args.budget else None
+    journal: reconcile_journal.Journal | None = None
+    try:
+        with sweep.until(deadline), reconcile_journal.journaled(root, not args.dry_run) as journal:
+            code, report = reconcile(
+                args.workspace,
+                apply=not args.dry_run,
+                automerge=args.automerge,
+                merge_label=args.merge_label,
+                min_free_gb=args.min_free_gb,
+                max_age_days=args.max_age_days,
+                unclaimed_age_days=args.unclaimed_age_days,
+                fetch=args.fetch,
+                keep_stack=args.keep_stack,
+                checkouts=args.checkouts,
+            )
+    except Exception:
+        write_reconcile_log(traceback.format_exc().rstrip(), 1, root, args.dry_run, journal)
+        raise
+    rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
+    print(rendered)
+    write_reconcile_log(rendered, code, root, args.dry_run, journal)
+    return code
 
 
 def outcome_heading(row: dict) -> str:
@@ -5383,7 +5959,7 @@ def render_reconcile(report: dict) -> str:
     outcomes = report.get("boxes") or []
     checkouts = report.get("checkouts") or {}
     if not outcomes and not checkouts.get("rows"):
-        return "No ephemeral boxes and no checkouts to sync. Nothing to reconcile."
+        return render_empty(report)
 
     by_action: dict[str, list[dict]] = {}
     for row in outcomes:
@@ -5420,9 +5996,28 @@ def render_reconcile(report: dict) -> str:
             lines.append(f"    {row['box']} -- {row['reason']}{url}")
             lines.extend(f"        {note}" for note in row.get("notes") or [])
     lines.extend(render_checkout_sync(checkouts, applied=bool(applied)))
+    lines.extend(render_deferred(report, lead="\n  "))
     if not applied:
         lines.append("\nDry run -- nothing was changed. Re-run with --yes to apply.")
     return "\n".join(lines)
+
+
+NOTHING_TO_RECONCILE = "No ephemeral boxes and no checkouts to sync. Nothing to reconcile."
+
+
+def render_empty(report: dict) -> str:
+    """The report of a pass with no box and no checkout rows: nothing to do, or -- past
+    its deadline before it began any -- what it left to the next pass."""
+    return "\n".join(render_deferred(report)) or NOTHING_TO_RECONCILE
+
+
+def render_deferred(report: dict, lead: str = "") -> list[str]:
+    """The line naming what a pass past its deadline left to the next one, after `lead`;
+    none when it left nothing (`reconcile`'s `deferred`)."""
+    deferred = report.get("deferred") or []
+    if not deferred:
+        return []
+    return [f"{lead}left to the next pass, this one's time having run out: {', '.join(deferred)}"]
 
 
 def render_checkout_sync(summary: dict, *, applied: bool) -> list[str]:
@@ -5578,6 +6173,35 @@ def render_reap(plan: ReapPlan, applied: bool, notes: list[str]) -> str:
 # --- entrypoint -------------------------------------------------------------
 
 
+def add_reconcile_scope_args(fix: argparse.ArgumentParser) -> None:
+    """`reconcile`'s reach: whether the static checkouts are synced too, and how long
+    the pass may take (`--budget`, which `_run_reconcile` holds it to)."""
+    # Paired with its negation for the same reason `--no-merge` is: the scheduled
+    # command names every knob it passes, so `schtasks /query` shows what is on.
+    static = fix.add_mutually_exclusive_group()
+    static.add_argument(
+        "--checkouts",
+        dest="checkouts",
+        action="store_true",
+        default=True,
+        help="also run sweep.py --sync over the static checkouts (the default)",
+    )
+    static.add_argument(
+        "--no-checkouts",
+        dest="checkouts",
+        action="store_false",
+        help="boxes only; static checkouts stay wherever they are parked",
+    )
+    fix.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="end the pass by then: no git, gh or compose call runs past it, and what is "
+        "not started is left to the next pass (the scheduled task passes its interval's)",
+    )
+
+
 def add_common_args(parser: argparse.ArgumentParser, dry_run: bool = True) -> None:
     """The flags every mode takes, added to each SUBparser rather than the top level.
     `dry_run=False` is `provision`'s: it only installs, and a plan left sessions no .venv.
@@ -5691,14 +6315,54 @@ def provision_target(root: Path, name: str) -> tuple[str, Path]:
     raise WorktreeError(f"no live box or checkout called {name!r}; live boxes: {known}")
 
 
+def link_siblings(path: Path, wait: float = 0.0) -> list[str]:
+    """Cut or move a linked worktree's path-source siblings to the ref its CI pins now.
+
+    916daf9b: the `post-checkout` hook aims the shared `../data-lake` at ibkr's PR-gate
+    pin when a tree is cut, and nothing re-aimed it after a session moved that pin -- so
+    the relock the pin's own comment prescribes ran against the old data-lake. Re-running
+    provisioning is the one command a session is told to reach for, so it re-reads the
+    pin. Nothing for a static checkout: its `..` is the sibling's own checkout. A move
+    waits up to `wait` seconds for a run in another tree on another pin (d32ffcc2).
+    """
+    checkout = worktree_env.checkout_of(path)
+    if checkout is None:
+        return []
+    return worktree_env.link_path_sources(path, checkout, wait=wait)
+
+
+def seed_tree_env(path: Path) -> list[str]:
+    """A linked tree's `.env` and compose name, as its `post-checkout` hook writes them;
+    what that printed. Here because a `claude --worktree` tree runs no hook (Claude Code
+    cuts it with `core.hooksPath=/dev/null`), so this command is the only thing that
+    reaches it. A tree with a `.env` -- every box, which `seed_env` gave one -- is left
+    as it is."""
+    checkout = worktree_env.checkout_of(path)
+    if checkout is None or (path / worktree_env.ENV_FILE).exists():
+        return []
+    said = worktree_env.name_compose_project(path, checkout)
+    return [line for line in said.splitlines() if line]
+
+
 def _run_provision(args: argparse.Namespace) -> int:
     root = args.workspace.parent
     name, path = provision_target(root, args.box)
     steps = plan_provision(path)
-    ok, notes = run_provision(path, steps) if steps and not args.dry_run else (True, [])
+    # Before the sync, which resolves the path source against wherever the sibling sits.
+    linked = [] if args.dry_run else link_siblings(path, wait=worktree_env.SESSION_WAIT)
+    seeded = [] if args.dry_run else seed_tree_env(path)
+    if worktree_env.held(linked):
+        # d32ffcc2: syncing against another run's pin relocks `uv.lock` against it.
+        ok, notes = False, ["not synced: run it again once the run holding the sibling ends"]
+    elif steps and not args.dry_run:
+        ok, notes = run_provision(path, steps)
+    else:
+        ok, notes = True, []
     if args.json:
         payload = {
             "box": name,
+            "siblings": linked,
+            "env": seeded,
             "steps": [asdict(step) for step in steps],
             "applied": not args.dry_run,
             "ok": ok,
@@ -5706,6 +6370,8 @@ def _run_provision(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2))
     else:
+        for line in (*linked, *seeded):
+            print(line)
         print(render_provision(name, steps, applied=not args.dry_run, notes=notes, ok=ok))
     return 0 if ok else 1
 
@@ -5838,22 +6504,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     fix.add_argument("--keep-stack", action="store_true", help="leave Docker stacks running")
-    # Paired with its negation for the same reason `--no-merge` is: the scheduled
-    # command names every knob it passes, so `schtasks /query` shows what is on.
-    static = fix.add_mutually_exclusive_group()
-    static.add_argument(
-        "--checkouts",
-        dest="checkouts",
-        action="store_true",
-        default=True,
-        help="also run sweep.py --sync over the static checkouts (the default)",
-    )
-    static.add_argument(
-        "--no-checkouts",
-        dest="checkouts",
-        action="store_false",
-        help="boxes only; static checkouts stay wherever they are parked",
-    )
+    add_reconcile_scope_args(fix)
     add_common_args(fix)
 
     look = sub.add_parser(
@@ -5959,22 +6610,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.mode == "reconcile":
-            code, report = reconcile(
-                args.workspace,
-                apply=not args.dry_run,
-                automerge=args.automerge,
-                merge_label=args.merge_label,
-                min_free_gb=args.min_free_gb,
-                max_age_days=args.max_age_days,
-                unclaimed_age_days=args.unclaimed_age_days,
-                fetch=args.fetch,
-                keep_stack=args.keep_stack,
-                checkouts=args.checkouts,
-            )
-            rendered = json.dumps(report, indent=2) if args.json else render_reconcile(report)
-            print(rendered)
-            write_reconcile_log(rendered, code, artifact_root(args.workspace.parent), args.dry_run)
-            return code
+            return _run_reconcile(args)
 
         if args.mode == "new":
             plan = plan_new(

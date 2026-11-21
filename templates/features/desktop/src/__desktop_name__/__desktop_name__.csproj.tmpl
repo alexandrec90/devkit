@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>{{ desktop_name }}</RootNamespace>
+    <AssemblyName>{{ desktop_name }}</AssemblyName>
+    <Product>{{ desktop_name }}</Product>
+    <!-- The release's version comes from its tag (`scripts/desktop.py release`); this is
+         only what a local build reports. -->
+    <Version>0.1.0</Version>
+    <!-- Runs unelevated; see `Elevation.cs` for the operations that ask for more. -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- `Program.Main`, not the one WPF generates from App.xaml: the installer's hooks
+         must run before any window exists. -->
+    <StartupObject>{{ desktop_name }}.Program</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="{{ desktop_name }}.Tests" />
+  </ItemGroup>
+{{#updater}}
+
+  <ItemGroup>
+    <!-- `scripts/desktop.py` installs the `vpk` packer at this same version. -->
+    <PackageReference Include="Velopack" Version="0.0.1298" />
+  </ItemGroup>
+{{/updater}}
+
+</Project>

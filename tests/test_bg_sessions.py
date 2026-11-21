@@ -10,18 +10,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import bg_sessions
 
+# As `claude agents --json` (2.1.296) prints them: an interactive row carries `status`
+# and a background row `state`, with a `pid` while its process lives.
 ROWS = [
     {
         "id": "a1",
+        "pid": 101,
         "kind": "background",
-        "status": "idle",
         "state": "done",
         "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x",
     },
     {
         "id": "b2",
+        "pid": 102,
         "kind": "background",
-        "status": "busy",
         "state": "working",
         "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x",
     },
@@ -33,12 +35,23 @@ ROWS = [
     },
     {
         "id": "d4",
+        "pid": 104,
         "kind": "background",
-        "status": "idle",
         "state": "blocked",
         "cwd": "C:\\ws\\carameli\\.claude\\worktrees\\y",
     },
 ]
+
+
+def test_a_background_row_s_state_is_read_as_its_status():
+    """c476bac3 sat `blocked` for a day in a finished rescue tree, holding the memory the
+    pass then held a devkit fixer for: background rows carry no `status`, so nothing read
+    as idle and nothing was ever stopped. An unknown state is busy -- never stopped and
+    never raced on a guess."""
+    assert [bg_sessions.status(row) for row in ROWS] == ["idle", "busy", "idle", "idle"]
+    assert bg_sessions.status({"kind": "background", "state": "compacting"}) == "busy"
+    assert bg_sessions.status({"kind": "background", "status": "idle", "state": "x"}) == "idle"
+    assert bg_sessions.status({"kind": "background"}) == ""
 
 
 def runner_for(rows, stops: list, listing_code: int = 0):
@@ -58,6 +71,8 @@ def test_a_tree_is_working_while_any_session_in_it_is_busy_whatever_its_kind():
     assert bg_sessions.busy_in(dirs, Path("C:/ws/carameli"))
     assert not bg_sessions.busy_in(dirs, "C:/ws/carameli/.claude/worktrees/y")
     assert bg_sessions.working([]) == frozenset()
+    background = bg_sessions.working(ROWS, kinds=("background",))
+    assert bg_sessions.busy_in(background, "C:/ws/devkit/.claude/worktrees/x"), "b2 is working"
 
 
 def test_only_idle_background_sessions_in_finished_trees_are_stopped():
@@ -85,6 +100,66 @@ def test_nothing_is_stopped_when_the_listing_cannot_be_read():
     assert bg_sessions.listed(missing) == []
     garbage = lambda argv, **_k: subprocess.CompletedProcess(argv, 0, "not json", "")
     assert bg_sessions.listed(garbage) == []
+
+
+def test_in_tree_is_every_session_in_the_tree_or_under_it_and_nothing_beside_it():
+    rows = [*ROWS, {"id": "e5", "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x\\app"}]
+    rows.append({"id": "f6", "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\x-2"})
+    found = bg_sessions.in_tree(rows, "c:/WS/devkit/.claude/worktrees/x/")
+    assert [r["id"] for r in found] == ["a1", "b2", "c3", "e5"]
+
+
+def test_a_transcript_is_gone_only_when_a_listing_shows_no_live_session_of_it_or_its_tree():
+    tree = "c:/WS/devkit/.claude/worktrees/y"
+    transcript = Path("C:/home/.claude/projects/y/5e55-10a.jsonl")
+    assert bg_sessions.gone(ROWS, tree, transcript), "nobody listed in y, nor 5e55-10a"
+    assert not bg_sessions.gone([], tree, transcript), "an empty listing could not say"
+    under = {
+        "pid": 7,
+        "kind": "interactive",
+        "status": "idle",
+        "cwd": "C:\\ws\\devkit\\.claude\\worktrees\\y\\app",
+    }
+    assert not bg_sessions.gone([*ROWS, under], tree, transcript), "idle is still present"
+    moved = {"pid": 8, "kind": "interactive", "cwd": "C:\\elsewhere", "sessionId": "5e55-10a"}
+    assert not bg_sessions.gone([*ROWS, moved], tree, transcript), "its own session, listed"
+    exited = {"id": "g7", "kind": "background", "state": "done", "cwd": tree}
+    assert bg_sessions.gone([*ROWS, exited], tree, transcript), "a row with no process is gone"
+
+
+def test_only_an_idle_background_session_is_stoppable():
+    assert [r["id"] for r in ROWS if bg_sessions.stoppable(r)] == ["a1", "d4"]
+
+
+def test_a_listed_session_with_no_process_is_never_stopped():
+    """d95eb347: `claude stop c476bac3` refused twice with "couldn't confirm c476bac3 was
+    stopped", read as a session holding memory. Its row, as `claude agents --json` gave
+    it on 2026-10-09, has no `pid` and no `status`: no process to stop, and so none
+    holding memory. The pass never asks."""
+    row = {
+        "id": "c476bac3",
+        "cwd": "C:\\Users\\alexa\\vs-code\\devkit\\.claude\\worktrees\\fix-pass-rescue-1008-1730",
+        "kind": "background",
+        "name": "devkit/fix-pass-rescue-1008-1730",
+        "state": "blocked",
+    }
+    assert not bg_sessions.alive(row)
+    assert not bg_sessions.stoppable(row)
+    assert bg_sessions.finished_in([row], [row["cwd"]]) == []
+    assert bg_sessions.alive({**row, "pid": 6704}), "the same row while its process lives"
+    assert bg_sessions.alive({"kind": "interactive", "status": "idle"}), "a person's is"
+
+
+def test_stop_is_false_where_claude_refuses_or_is_missing():
+    def refuses(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "no such session")
+
+    def missing(argv, **_kwargs):
+        raise FileNotFoundError("claude")
+
+    assert bg_sessions.stop("a1", refuses) is False
+    assert bg_sessions.stop("a1", missing) is False
+    assert bg_sessions.stop("a1", lambda argv, **_k: subprocess.CompletedProcess(argv, 0)) is True
 
 
 def test_finished_in_matches_paths_whatever_their_slashes_and_case():

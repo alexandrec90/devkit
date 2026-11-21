@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import subprocess
 import time
 
 import pytest
@@ -23,6 +24,7 @@ rc_config = load_script("scripts/rc_config.py")
 rc_machine = load_script("scripts/rc_machine.py")
 reap_machine = load_script("scripts/reap_machine.py")
 reap = load_script("scripts/reap-stale.py")
+wrap = load_script("scripts/log-wrap.py")
 
 P = reap_machine.Process
 CLAUDE = r'"C:\bin\claude.EXE"'
@@ -201,6 +203,43 @@ def test_dev_servers_can_be_switched_off(tmp_path, store):
     assert reap.assess_dev_servers(plan_for(tmp_path, store, dev_servers=False)) == []
 
 
+# --- docker CLIs and the engine -----------------------------------------------------
+
+DOCKER = r'"C:\Program Files\Docker\Docker\resources\bin\docker.exe"'
+
+
+def docker_plan(tmp_path, store, **kw):
+    plan = plan_for(tmp_path, store, **kw)
+    plan.table = [
+        *plan.table,
+        P(70, 5844, "docker", f"{DOCKER} compose up -d --wait db", created=NOW - 3 * 3600),
+        P(71, 70, "docker-compose", "docker-compose.exe up", created=NOW - 3 * 3600),
+        P(72, 12, "docker", f"{DOCKER} compose down", created=NOW - 3 * 3600),
+    ]
+    return plan
+
+
+def test_an_orphaned_docker_cli_is_reaped_and_labelled_by_what_it_runs(tmp_path, store):
+    findings = reap.assess_docker_clis(docker_plan(tmp_path, store))
+    assert verdicts(findings) == {70: True}
+    assert findings[0].label == "docker cli pid 70 `docker compose up -d --wait`"
+    assert findings[0].reason == "no living owner above it, 180 min old"
+
+
+def test_docker_clis_can_be_switched_off(tmp_path, store):
+    assert reap.assess_docker_clis(docker_plan(tmp_path, store, docker_clis=False)) == []
+
+
+def test_assess_ends_with_the_docker_clis(tmp_path, store):
+    findings = reap.assess(docker_plan(tmp_path, store))
+    assert findings[-1].row.pid == 70
+
+
+def test_only_a_bare_false_switches_docker_clis_off():
+    assert reap.parse_settings(workspace_text({"dockerClis": "no"})).docker_clis
+    assert not reap.parse_settings(workspace_text({"dockerClis": False})).docker_clis
+
+
 def test_assess_puts_sessions_before_strays_before_dev_servers(tmp_path, store):
     kinds = [finding.label.split()[0] for finding in reap.assess(plan_for(tmp_path, store))]
     assert kinds == ["session", "session", "session", "stray", "stray", "dev"]
@@ -283,8 +322,103 @@ def test_the_plan_looks_a_row_up_by_pid(tmp_path, store):
 
 
 def test_render_leads_with_the_stamp_the_mode_and_the_failure_count():
-    text = reap.render(["a", "b"], 1, WHEN, "maintain")
-    assert text == "# reap-stale 2026-09-07T15:40:00 [maintain] -- 1 failure(s)\na\nb\n"
+    text = reap.render(["a", "b"], 0, WHEN, "maintain")
+    assert text == "# reap-stale 2026-09-07T15:40:00 [maintain] -- 0 failure(s)\na\nb\n"
+    failed = reap.render(["a", "b"], 1, WHEN, "maintain")
+    assert failed.splitlines()[:3] == [
+        "# reap-stale 2026-09-07T15:40:00 [maintain] -- 1 failure(s)",
+        "a",
+        "b",
+    ]
+    assert failed.splitlines()[3] == reap.cause_line(["a", "b"], 1)
+
+
+# --- the cause the ledger files -------------------------------------------------------
+
+# The two Reap Stale failures of 2026-10-03 (9d0f1476): one defect -- a uv-hardlinked
+# image mapped through another link -- on two trees, each refusing a different file.
+HUSK_LINES = (
+    r"session tree data-lake:social-scraper-connector-1003: could not remove its husk: "
+    r"\\?\C:\ws\data-lake\.claude\worktrees\social-scraper-connector-1003\.venv\Lib"
+    r"\site-packages\pyarrow\arrow.dll: Access is denied",
+    r"session tree social-scraper:x-timeline-op-1003: could not remove its husk: "
+    r"\\?\C:\ws\social-scraper\.claude\worktrees\x-timeline-op-1003\.venv\Lib"
+    r"\site-packages\greenlet\_greenlet.cp312-win_amd64.pyd: Access is denied",
+)
+HUSK_KIND = "a session tree's husk could not be removed"
+
+
+def test_one_defect_on_two_trees_is_one_cause_on_the_ledger():
+    """9d0f1476: `log-wrap` read the cause off the pass's last line, which named the tree
+    and the refused file. Its fold keeps a basename, so `arrow.dll` and `_greenlet.pyd`
+    filed two groups, and the fix pass sent a fixer to re-verify a defect whose fix was
+    already in review."""
+    causes = {
+        wrap.failure_cause(reap.render(["stopped 0 process tree(s)", line], 1, WHEN, "maintain"))
+        for line in HUSK_LINES
+    }
+    assert causes == {f"error: {HUSK_KIND}"}
+
+
+def test_the_cause_names_each_kind_once_in_a_fixed_order():
+    stop = "session cse_X (pid 2, carameli): idle 600 min -- could not stop: access denied"
+    lines = [HUSK_LINES[1], stop, HUSK_LINES[0], "stopped 0 process tree(s)"]
+    assert reap.cause_line(lines, 3) == f"error: a process tree could not be stopped; {HUSK_KIND}"
+    assert reap.cause_line(list(reversed(lines)), 3) == reap.cause_line(lines, 3)
+    assert reap.cause_line(lines, 0) == ""
+    assert reap.cause_line(["something nobody named"], 1) == "error: reap-stale failed"
+
+
+def test_each_way_a_session_tree_fails_files_its_own_kind(tmp_path, monkeypatch):
+    """Driven through `session_trees` itself, so a reworded line cannot leave its kind
+    behind: an unclassified failure would read `reap-stale failed` and merge with all."""
+    st = reap.session_trees
+    monkeypatch.setattr(st, "admin_only", lambda path: "")
+    checkout = tmp_path / "carameli"
+
+    def tree(name, stack=False):
+        path = checkout / ".claude" / "worktrees" / name
+        path.mkdir(parents=True)
+        if stack:
+            (path / ".env").write_text(f"COMPOSE_PROJECT_NAME={name}\n", "utf-8")
+        return st.Tree(path, f"agent/{name}", "abc", False)
+
+    def run(argv):
+        if argv == st.ENGINE_PROBE:  # the engine answers: the failure is the stack's
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[0] == "docker":
+            return subprocess.CompletedProcess(argv, 1, "", "volume is in use")
+        if "remove" in argv:
+            return subprocess.CompletedProcess(argv, 255, "", "fatal: Invalid argument")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def git_refuses(argv):
+        if "remove" in argv:
+            return subprocess.CompletedProcess(argv, 128, "", "fatal: validation failed")
+        return run(argv)
+
+    refused = lambda path: ("denied", [])
+    # Gone, and refused in git's words rather than the filesystem's: a tree gone after a
+    # *delete* refusal is reaped (ad9e1a06), so it would file no kind at all.
+    gone = st.Tree(checkout / "gone", "agent/gone", "abc", False)
+    reaps = {
+        "a merged session tree's stack would not come down": st.reap(
+            tree("stacked", stack=True), checkout, run
+        ),
+        "a merged session tree could not be removed after git refused it": st.reap(
+            tree("husked"), checkout, run, remove=refused
+        ),
+        "git refused to remove a merged session tree": st.reap(gone, checkout, git_refuses),
+    }
+    for kind, error in reaps.items():
+        line, failed = st.reap_outcome(gone.path, error)
+        assert (
+            failed and reap.cause_line([f"session tree carameli:x: {line}"], 1) == f"error: {kind}"
+        )
+
+    said: list[str] = []
+    st.sweep_husks(checkout, [], True, said.append, lambda path: 10**9, refused)
+    assert said and reap.cause_line(said, len(said)) == f"error: {HUSK_KIND}"
 
 
 def test_the_artifact_lands_under_logs_in_the_named_root(tmp_path):
@@ -344,7 +478,7 @@ def test_parse_args_defaults_to_the_read_only_mode():
 
 def test_status_reports_and_never_stops(tmp_path, store, monkeypatch, capsys):
     workspace = write_workspace(tmp_path, {rc_config.RC_SETTING: ["carameli"]})
-    monkeypatch.setattr(reap_machine, "process_table", lambda: table())
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (table(), ""))
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     stopped = []
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: stopped.append(pid) or "")
@@ -359,7 +493,7 @@ def test_status_reports_and_never_stops(tmp_path, store, monkeypatch, capsys):
 
 def test_maintain_stops_what_status_would_and_records_it(tmp_path, store, monkeypatch, capsys):
     workspace = write_workspace(tmp_path, {rc_config.RC_SETTING: ["carameli"]})
-    monkeypatch.setattr(reap_machine, "process_table", lambda: table())
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (table(), ""))
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     stopped = []
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: stopped.append(pid) or "")
@@ -373,22 +507,47 @@ def test_maintain_stops_what_status_would_and_records_it(tmp_path, store, monkey
 
 
 def test_an_unreadable_table_assesses_nothing_and_exits_red(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(reap_machine, "process_table", lambda: None)
+    why = "the lister did not answer within 240 s"
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (None, why))
     code = reap.main(["maintain", "--devkit", str(tmp_path)])
     assert code == 2
-    assert "could not be read" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # The artifact says why; the cause line names only the kind, so one defect stays one
+    # ledger group whatever the lister said.
+    assert f"could not be read ({why})" in out
+    assert out.rstrip().splitlines()[-1] == f"error: {reap.NO_TABLE}"
     assert (tmp_path / reap.ARTIFACT).is_file()
 
 
 def test_a_quiet_machine_says_so(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(reap_machine, "process_table", lambda: [P(1, 0, "explorer", "")])
+    monkeypatch.setattr(reap_machine, "read_table", lambda: ([P(1, 0, "explorer", "")], ""))
     assert reap.main(["maintain", "--devkit", str(tmp_path)]) == 0
     assert "nothing left behind" in capsys.readouterr().out
 
 
 def test_a_failed_stop_reddens_the_pass(tmp_path, store, monkeypatch):
     workspace = write_workspace(tmp_path, {rc_config.RC_SETTING: ["carameli"]})
-    monkeypatch.setattr(reap_machine, "process_table", lambda: table())
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (table(), ""))
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: "denied")
     assert reap.main(["reap", "--workspace", str(workspace), "--devkit", str(tmp_path)]) == 2
+
+
+def test_maintain_reaps_an_orphaned_docker_cli_and_records_it(tmp_path, monkeypatch, capsys):
+    """The 2026-10-08 orphan: a `compose up --wait` whose parent died, hours old, under
+    a Docker Desktop that is itself running. Only the orphan is stopped."""
+    now = time.time()
+    rows = [
+        P(1, 0, "explorer", ""),
+        P(40, 1, "docker desktop", "Docker Desktop.exe", created=now - 5 * 3600),
+        P(41, 40, "docker", f"{DOCKER} stats --no-stream", created=now - 5 * 3600),
+        P(70, 5844, "docker", f"{DOCKER} compose up -d --wait db", created=now - 3 * 3600),
+    ]
+    stopped = []
+    monkeypatch.setattr(reap_machine, "read_table", lambda: (rows, ""))
+    monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: stopped.append(pid) or "")
+    assert reap.main(["maintain", "--devkit", str(tmp_path)]) == 0
+    assert stopped == [70]
+    assert "docker cli pid 70" in capsys.readouterr().out
+    history = (tmp_path / reap.HISTORY).read_text(encoding="utf-8")
+    assert "docker cli pid 70" in history

@@ -18,8 +18,49 @@ docker compose up -d
 {{#alembic}}
 alembic upgrade head
 {{/alembic}}
+{{^shipped}}
 pytest
+{{/shipped}}
+{{#desktop}}
+dotnet run --project {{ desktop_project }}   # the app, from source
+python scripts/desktop.py test               # its tests (and lint: format + build)
+{{/desktop}}
+{{#electron}}
+cd frontend && npm ci    # installs the app and its toolchain
+npm run dev              # the app, from source, reloading as you edit
+npm run test:run         # unit tests
+npm run test:e2e         # drives the real app; the screenshot lands in logs/ui/
+{{/electron}}
 ```
+{{#electron}}
+
+## Releasing
+
+Push a tag: `git tag v0.1.0 && git push origin v0.1.0`. `.github/workflows/release.yml`
+builds the app, packs it with [electron-builder](https://www.electron.build) and publishes
+the installer as the GitHub release for that tag. That release is the download link to
+share. Installed copies check the same releases on launch and offer a restart once the
+newer version has downloaded.
+
+Until the `CSC_LINK` and `CSC_KEY_PASSWORD` repository secrets hold a code-signing
+certificate, the installer is unsigned and Windows SmartScreen warns on download.
+{{/electron}}
+{{#desktop}}
+
+## Releasing
+
+Push a tag: `git tag v0.1.0 && git push origin v0.1.0`. `.github/workflows/release.yml`
+builds the app, packs it with [Velopack](https://velopack.io) and publishes
+`{{ desktop_name }}-win-Setup.exe` as the GitHub release for that tag. That release is
+the download link to share.
+{{#updater}}
+Installed copies check the same releases on launch and offer a restart once the newer
+version has downloaded.
+{{/updater}}
+
+Until the `VPK_SIGN_PARAMS` repository secret holds a code-signing certificate's
+signtool arguments, the installer is unsigned and Windows SmartScreen warns on download.
+{{/desktop}}
 
 In VS Code, `Ctrl+Shift+B` runs the default build task and the task quick-pick
 (`Ctrl+Shift+P` → "Run Task") lists everything else, each with a one-line `detail`
@@ -75,9 +116,10 @@ where `DEVKIT_DIR` is usually unset, `pre-commit run devkit-drift --all-files` i
 same check against the devkit rev pinned in `.pre-commit-config.yaml`.
 
 `.github/dependabot.yml` opens weekly dependency PRs, and
-`.github/workflows/dependabot-automerge.yml` merges them once the gate passes —
-patch/minor bumps of anything, plus majors confined to dev tooling. A major that
-touches a runtime dependency is labelled `needs-manual-merge` and waits for you.
+`.github/workflows/dependabot-automerge.yml` merges every one of them once the gate
+passes, majors included: the gate is the review, so keep it covering what you care
+about. To hold one bump back, close it or comment `@dependabot ignore this major
+version`: a removed `automerge` label comes back on Dependabot's next rebase.
 
 That auto-merge workflow is **vendored** from devkit, so `sync-devkit.py --check`
 compares it byte-for-byte and editing it here shows up as drift. Keep the gate's title

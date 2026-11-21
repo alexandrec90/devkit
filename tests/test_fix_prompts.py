@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import e2e_results
 import fix_plan
 import fix_prompts
 import fix_reports
@@ -75,6 +76,10 @@ def test_the_upstream_prompt_names_every_project_and_pr_and_ends_in_the_ship_ski
     assert "2 checkout(s) (carameli, roguelike)" in text
     assert "carameli #412 u/412" in text and "roguelike #16 u/16" in text
     assert "not in each consumer" in text
+    # sports_betting #67: a template fix reaches no generated project, so a right test
+    # of a project's own runner is fixed in that project.
+    assert "A template reaches no project already generated" in text
+    assert all(owned in text for owned in fix_plan.PROJECT_OWNED)
     assert "ship skill" in text and "agent/fix-x-0918" in text
 
 
@@ -96,7 +101,167 @@ def every_prompt() -> list[str]:
         fix_prompts.upstream_prompt((failure(), red_main()), "agent/fix"),
         fix_prompts.branch_prompt(red_main(), "agent/fix"),
         fix_prompts.nightly_prompt(failure(kind=fix_plan.NIGHTLY, number=3), "agent/fix"),
+        fix_prompts.local_prompt(local_red(), "agent/fix"),
+        fix_prompts.local_prompt(local_red(signature=(e2e_results.MISSING,)), "agent/fix"),
+        fix_prompts.local_prompt(local_red(workflow=fix_plan.MEDIUM_TIER), "agent/fix"),
+        fix_prompts.local_prompt(
+            local_red(workflow=fix_plan.MEDIUM_TIER, signature=(e2e_results.MEDIUM.missing,)),
+            "agent/fix",
+        ),
     ]
+
+
+def local_red(**fields) -> fix_plan.Failure:
+    base: dict[str, Any] = {
+        "kind": fix_plan.LOCAL,
+        "number": 0,
+        "head": "",
+        "url": "",
+        "reason": "",
+        "workflow": "Local E2E",
+        "sha": "59a4ef5aaaaa1111",
+        "tip": "59a4ef5aaaaa1111",
+        "signature": ("tests/test_tasks_live.py::test_every_picker_draws",),
+    }
+    base.update(fields)
+    return failure(**base)
+
+
+def test_the_local_prompt_says_it_ran_here_and_how_to_run_it_again(tmp_path):
+    """The inverse of the gate's Linux note: this red was seen on this machine, so the
+    fixer reproduces it -- and the PR gate never runs these tests, so its green on the
+    fix is no evidence about them."""
+    (tmp_path / "output.log").write_text("FAILED x\n", encoding="utf-8")
+    text = fix_prompts.local_prompt(local_red(evidence=str(tmp_path)), "agent/fix-e2e")
+    for expected in (
+        "Local E2E run in carameli",
+        "origin/main at 59a4ef5aaaaa",
+        "test_every_picker_draws",
+        "python scripts/e2e.py",
+        f"{fix_plan.EVIDENCE_DIR}/ in this worktree -- read output.log there first",
+        "its green is no evidence about them",
+        "agent/fix-e2e",
+    ):
+        assert expected in text, expected
+    assert fix_prompts.LINUX not in text
+    assert "Its output did not come down" in fix_prompts.local_prompt(local_red(), "b")
+
+
+def test_a_missing_tier_sends_its_fixer_to_write_one_not_to_fix_a_run():
+    """Every project owes the tier; one without it is red with the one `MISSING`
+    signature, and its fixer has nothing to reproduce -- it has a tier to write."""
+    text = fix_prompts.local_prompt(local_red(signature=(e2e_results.MISSING,)), "agent/e2e")
+    for expected in (
+        "carameli has no local end-to-end tier",
+        "origin/main at 59a4ef5aaaaa carries no scripts/e2e.py",
+        fix_prompts.LOCAL_E2E_RULE,
+        "sync-devkit.py --pull",
+        "agent/e2e",
+    ):
+        assert expected in text, expected
+    assert "Fix what the run is failing on" not in text
+    body = fix_prompts.missing_tier(local_red(signature=(e2e_results.MISSING,)), "agent/e2e")
+    own = body.removesuffix(fix_prompts.FINISH)
+    assert own != body
+    assert not set("`'\"") & set(own), "the prompt crosses a wt command line"
+
+
+def test_a_medium_tier_fixer_is_told_its_tier_and_that_it_must_bisect(tmp_path):
+    """The tier tests only the tip, so one red spans every merge since its last green."""
+    (tmp_path / "output.log").write_text("FAILED x\n", encoding="utf-8")
+    red_run = local_red(
+        workflow=fix_plan.MEDIUM_TIER,
+        evidence=str(tmp_path),
+        green_sha="a1b2c3d4e5f60000",  # pragma: allowlist secret
+    )
+    text = fix_prompts.local_prompt(red_run, "agent/fix-medium")
+    for expected in (
+        "Medium Tier run in carameli",
+        "first seen at 59a4ef5aaaaa",
+        "test_every_picker_draws",
+        "spans every merge",
+        "bisect with git bisect start 59a4ef5aaaaa a1b2c3d4e5f6",
+        "Medium Tier run happened on this machine, on Windows",
+        "python scripts/run-tests.py",
+        "The PR gate runs on Linux",
+        "agent/fix-medium",
+    ):
+        assert expected in text, expected
+    assert fix_prompts.LOCAL_RERUN.strip() not in text
+    assert "python scripts/e2e.py" not in text
+
+
+def test_a_medium_tier_red_with_no_green_on_record_says_so_rather_than_naming_nothing():
+    text = fix_prompts.local_prompt(local_red(workflow=fix_plan.MEDIUM_TIER), "b")
+    assert "git bisect, from a commit you have shown is good" in text
+
+
+def test_the_medium_prompts_cross_a_wt_command_line():
+    red_run = local_red(workflow=fix_plan.MEDIUM_TIER, green_sha="a1b2c3d4e5f60000")
+    for body in (fix_prompts.medium_body(red_run, "b"), fix_prompts.missing_medium(red_run, "b")):
+        own = body.removesuffix(fix_prompts.FINISH)
+        assert own != body
+        assert not set("`'\"") & set(own), own
+
+
+def test_a_project_with_no_runner_sends_its_fixer_to_write_one():
+    missing = local_red(workflow=fix_plan.MEDIUM_TIER, signature=(e2e_results.MEDIUM.missing,))
+    text = fix_prompts.local_prompt(missing, "agent/runner")
+    for expected in (
+        "carameli has nothing for the medium tier to run",
+        "carries no scripts/run-tests.py",
+        "medium_tier",
+        "whole suite run under --all",
+        "agent/runner",
+    ):
+        assert expected in text, expected
+    assert "bisect" not in text
+
+
+def test_a_devkit_medium_red_folded_upstream_is_told_how_to_reproduce_it():
+    both = (
+        local_red(project="devkit"),
+        local_red(project="devkit", workflow=fix_plan.MEDIUM_TIER),
+    )
+    text = fix_prompts.upstream_prompt(both, "agent/fix")
+    assert "devkit origin/main (medium tier) -- Medium Tier failing" in text
+    assert text.count(fix_prompts.MEDIUM_RERUN.strip()) == 1
+    assert text.count(fix_prompts.LOCAL_RERUN.strip()) == 1
+
+
+def test_the_environment_a_tier_ran_in_is_the_wrappers_and_its_runners():
+    """d789e104: a fixer told to run a red test "the same way" saw it pass, because the
+    tier's run had `log-wrap.py`'s `FORCE_COLOR` and its shell did not."""
+    wrapper = load_script("scripts/log-wrap.py").COLOR_ENV
+    assert fix_prompts.WRAPPER_ENV == wrapper
+    assert fix_prompts.MEDIUM_ENV == wrapper | load_script("scripts/tier-pass.py").RUN_ENV
+    assert fix_prompts.LOCAL_ENV == wrapper | load_script("scripts/e2e-pass.py").RUN_ENV
+
+
+def test_each_tiers_prompt_names_the_environment_to_reproduce_it_under():
+    medium = fix_prompts.local_prompt(local_red(workflow=fix_plan.MEDIUM_TIER), "b")
+    local = fix_prompts.local_prompt(local_red(), "b")
+    assert "env FORCE_COLOR=1 PY_COLORS=1 " in medium
+    assert "PYTEST_XDIST_AUTO_NUM_WORKERS=2 in front of it" in medium
+    assert "env FORCE_COLOR=1 PY_COLORS=1 " in local
+    assert "DEVKIT_E2E=1" in local and "DEVKIT_E2E=1" not in medium
+
+
+def test_the_environment_sentence_is_one_env_prefix():
+    said = fix_prompts.env_said({"A": "1", "B": "x"})
+    assert "with env A=1 B=x in front of it" in said
+    assert said.startswith(" ") and said.endswith(".")
+    assert not set("`'\"") & set(said), "the prompt crosses a wt command line"
+
+
+def test_a_devkit_local_red_folded_upstream_is_told_how_to_reproduce_it():
+    """devkit's own local red is harness-shaped, so it reaches the upstream session,
+    whose shared sentence otherwise points at a run URL a local run does not have."""
+    text = fix_prompts.upstream_prompt((local_red(project="devkit"),), "agent/fix")
+    assert "devkit origin/main (local e2e) -- Local E2E failing" in text
+    assert text.count(fix_prompts.LOCAL_RERUN.strip()) == 1
+    assert fix_prompts.LOCAL_RERUN.strip() not in fix_prompts.upstream_prompt((failure(),), "b")
+    assert "takes the failing test ids" in text, "not a half-hour run per red, before and after"
 
 
 def test_every_prompt_ends_on_the_one_narrow_exit():
@@ -158,6 +323,8 @@ def test_the_exit_names_its_blockers_what_is_not_one_and_asks_for_evidence():
         "outside this repository",
         "adding a worktree on another branch",
         "what you tried first",
+        # the line `fix_reports.waits_on` reads, so a wait on another PR is held, not filed
+        "a line Waits on: and the full github.com URL",
     ):
         assert expected in fix_prompts.STOP
     # It crosses a wt command line with every other sentence here.
@@ -191,6 +358,91 @@ def test_the_nightly_prompt_names_the_red_runs_commit_beside_the_tip_it_was_cut_
     assert "which is not the tip" not in at_tip and "at b31b60cbbbbb" in at_tip
 
 
+def _dependabot(*signature: str) -> fix_plan.Failure:
+    return failure(
+        kind=fix_plan.DEPENDABOT,
+        number=0,
+        title="Dependabot in ibkr_trader: 1 package(s) with alerts no PR answers",
+        url="https://run/9",
+        signature=signature,
+    )
+
+
+def test_the_dependabot_prompt_names_each_bump_and_where_the_evidence_is():
+    alert = f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0"
+    text = fix_prompts.dependabot_prompt(
+        _dependabot(alert, "run sqlalchemy: dependency_file_content_not_changed"), "agent/fix-d"
+    )
+    assert text.startswith(fix_prompts.ROLE)
+    assert "Bump each of these to at least the version named: urllib3 >= 2.8.0." in text
+    assert "Update jobs also fail on: run sqlalchemy" in text
+    assert f"{fix_plan.EVIDENCE_DIR}/{fix_plan.DEPENDABOT_EVIDENCE}" in text
+    assert "Name every package you bumped" in text, "how the pass knows an alert is answered"
+    assert "path dependency" not in text, "nothing to say about a sibling there is not"
+    assert not set("`") & set(text)
+
+
+def test_a_failing_update_job_sends_its_fixer_at_the_cause_not_only_the_bump():
+    """dd07a7ab: data-lake's job failed on sqlalchemy five weeks running; one fixer bumped
+    the lock by hand, the next found nothing to bump, and the manifest spelled it
+    SQLAlchemy, which Dependabot's case-sensitive match never rewrote."""
+    text = fix_prompts.dependabot_prompt(
+        _dependabot("run sqlalchemy: dependency_file_content_not_changed"), "agent/fix-d"
+    )
+    assert "a bump by hand answers one run" in text
+    assert "how many runs in a row each job has failed" in text
+    assert "Find what in this repository stops Dependabot and fix that, with a test" in text
+    assert "case-sensitive match on the lowercase package name" in text
+    assert not set('`"') & set(text), "the prompt crosses a wt command line"
+
+    other = fix_prompts.dependabot_prompt(_dependabot("run Something else broke"), "agent/f")
+    assert "Find what in this repository stops Dependabot" in other
+    assert "case-sensitive" not in other, "a kind's cause is said only for that kind"
+
+    alert_only = fix_prompts.dependabot_prompt(
+        _dependabot(f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0"), "agent/f"
+    )
+    assert "stops Dependabot" not in alert_only, "no failing job, nothing to say about one"
+
+
+def test_an_unfetchable_sibling_is_said_with_the_only_two_fixes_and_never_a_retry():
+    """ibkr_trader: every Dependabot job died on `"data-lake" at /pyproject.toml`."""
+    text = fix_prompts.dependabot_prompt(
+        _dependabot(
+            f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0", f"{fix_plan.UNFETCHABLE_ENTRY}data-lake"
+        ),
+        "agent/fix-d",
+    )
+    assert "dies on the path dependency data-lake" in text
+    assert "re-running or retrying Dependabot changes nothing -- do neither" in text
+    assert "bump the packages by hand in this repository" in text
+    assert "give data-lake a source Dependabot can fetch" in text
+    assert "move that ref to the sibling commit you locked against" in text
+    assert "Update jobs also fail" not in text, "the sibling is said once, as the cause"
+
+
+def test_a_pr_prompt_sends_its_fixer_to_the_prs_own_description():
+    """42482fc1: ibkr_trader #98's body named the unmerged data-lake branch it needs; its
+    resolver was not pointed there, and found out from tests that would not import."""
+    for shape in (failure(), failure(signature=(fix_plan.CONFLICT,))):
+        text = fix_prompts.pr_prompt(shape)
+        assert f"Read the PR's description first (gh pr view {shape.number})" in text
+    commit = failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",))
+    assert "gh pr view" not in fix_prompts.pr_prompt(commit), "a refused commit has no PR yet"
+
+
+def test_a_resolver_is_told_the_true_base_when_the_base_squashed_part_of_its_branch():
+    """6c10216b: #96 squashed #98's first two commits into main, so `git merge` called
+    eight files add/add against a merge base older than both."""
+    conflicted = failure(signature=(fix_plan.CONFLICT,))
+    squashed = "#96 (head 70aa105, squashed as 1731e5e)"
+    text = fix_prompts.pr_prompt(conflicted, fix_prompts.TreeNotes(squashed=squashed))
+    assert f"origin/main holds PR {squashed} as one commit" in text
+    assert "squash commit as the true base" in text
+    assert text.endswith(fix_prompts.STOP)
+    assert "squash" not in fix_prompts.pr_prompt(conflicted)
+
+
 def test_a_conflicted_pr_gets_the_resolver_prompt_which_names_no_failure():
     """The gate cannot have run, and a resolver told "also fix the tests" fixes the
     wrong thing; whatever the gate says after the push is the next pass's business."""
@@ -205,12 +457,31 @@ def test_a_pr_prompt_says_when_its_tree_holds_what_an_earlier_session_left():
     session and told nothing of it (f7167792); the pass knew, and only printed it."""
     left = "the tree has uncommitted changes"
     for red in (failure(), failure(signature=(fix_plan.CONFLICT,))):
-        text = fix_prompts.pr_prompt(red, "", left)
+        text = fix_prompts.pr_prompt(red, fix_prompts.TreeNotes(left=left))
         assert left in text and "git status" in text and "earlier session" in text
         assert f"git log origin/{red.head}..HEAD" in text
+        # 5f5c4b3c: told only to look, a fixer worked on a base three merges behind.
+        assert f"git fetch origin {red.head} and git merge origin/{red.head}" in text
         assert "already up to date" not in text
     assert "earlier session" not in fix_prompts.pr_prompt(failure())
     assert "already up to date with its base" in fix_prompts.pr_prompt(failure())
+
+
+def test_a_red_pr_behind_its_base_is_told_to_merge_it_before_fixing_anything():
+    """carameli #474: "already up to date with its base" was said of a head master had
+    moved past with the very fix the gate wanted, and the fixer found it by hand. The
+    claim is made only when the dispatch checked it; otherwise the lag is said."""
+    lag = "origin/main has 2 commits it does not"
+    text = fix_prompts.pr_prompt(failure(), fix_prompts.TreeNotes(lag=lag))
+    assert "already up to date" not in text
+    assert lag in text and "git merge origin/main" in text
+    assert "a fix the base already carries" in text
+    left = "the tree has uncommitted changes"
+    both = fix_prompts.pr_prompt(failure(), fix_prompts.TreeNotes(left=left, lag=lag))
+    assert left in both and lag in both and "already up to date" not in both
+    conflicted = failure(signature=(fix_plan.CONFLICT,))
+    conflict = fix_prompts.pr_prompt(conflicted, fix_prompts.TreeNotes(lag=lag))
+    assert lag not in conflict, "a resolver is already told to merge the base"
 
 
 def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
@@ -218,6 +489,27 @@ def test_a_refused_commit_gets_the_prompt_for_its_own_worktree():
     text = fix_prompts.pr_prompt(refused)
     assert "The commit stage refused the change on agent/auto/devkit-upgrade-v0-11-21-0917" in text
     assert "logs/ship-intent.refused.md" in text and "fix pass commits" in text
+
+
+def test_every_pr_shape_names_a_cache_an_elevated_session_locked_and_the_way_round_it():
+    """cadb6ba8: sports_betting #48's fixer reused a tree an elevated session had run
+    pytest in, found its `.pytest_cache` by `WinError 5`, and worked out
+    `-p no:cacheprovider` alone. The prompt says so up front, in every shape."""
+    locked = {".pytest_cache": "PYTEST_ADDOPTS=-p no:cacheprovider"}
+    shapes = (
+        failure(),
+        failure(signature=(fix_plan.CONFLICT,)),
+        failure(kind=fix_plan.COMMIT, number=0, signature=("x refused",)),
+    )
+    for red in shapes:
+        text = fix_prompts.pr_prompt(red, fix_prompts.TreeNotes(locked=locked))
+        assert "An elevated session left .pytest_cache" in text
+        assert "PYTEST_ADDOPTS=-p no:cacheprovider" in text
+        assert text.endswith(fix_prompts.STOP)
+        assert "elevated session" not in fix_prompts.pr_prompt(red)
+        assert "elevated session" not in fix_prompts.pr_prompt(
+            red, fix_prompts.TreeNotes(locked={})
+        )
 
 
 def test_a_pr_prompt_quotes_a_refusal_already_standing_in_its_tree(tmp_path):
@@ -234,7 +526,7 @@ def test_a_pr_prompt_quotes_a_refusal_already_standing_in_its_tree(tmp_path):
     refusal = fix_prompts.standing_refusal(tmp_path)
     assert refusal.startswith("commit: ") and "detect-secrets" in refusal
     for red in (failure(), failure(signature=(fix_plan.CONFLICT,))):
-        text = fix_prompts.pr_prompt(red, refusal)
+        text = fix_prompts.pr_prompt(red, fix_prompts.TreeNotes(refusal=refusal))
         assert "refused" in text and ".secrets.baseline unstaged" in text
     assert "ship-state" not in fix_prompts.pr_prompt(failure())
     # A shipped state, no state, or an unreadable one: nothing to quote.
@@ -283,6 +575,28 @@ def test_a_prompt_says_when_no_artifact_came_down_instead_of_naming_an_empty_dir
     assert "read the run at its URL" in fix_prompts.upstream_prompt((none,), "agent/fix")
 
 
+def test_a_prompt_says_when_the_failed_job_never_started_a_step():
+    """carameli PR Gate run 37363944090: "Failing: see the run" and "no artifact came
+    down" gave its fixer no hint that the one red job had never been given a runner."""
+    sig = ("Backend unit + integration (never started a step)",)
+    text = fix_prompts.pr_prompt(failure(evidence="", url="u/412", signature=sig))
+    assert "Backend unit + integration (never started a step)" in text
+    assert "No job that failed ever started a step, so there is no log" in text
+    assert "a runner was never acquired" in text
+    assert "annotations at u/412" in text
+    assert "No artifact came down" not in text
+
+
+def test_a_prompt_says_when_the_failed_job_died_in_the_runners_own_setup():
+    """social-scraper #90's `Tests / Initialize containers`: a fixer told only that no
+    artifact came down is not told that no step of the workflow ever ran."""
+    sig = ("Tests / Initialize containers",)
+    text = fix_prompts.pr_prompt(failure(evidence="", url="u/90", signature=sig))
+    assert "before any step of the workflow ran" in text
+    assert "so this one failed twice; read its log at u/90" in text
+    assert "No artifact came down" not in text
+
+
 def test_the_resolver_leaves_the_merge_for_the_pass_to_commit():
     """The first resolver the pass sent used --no-verify on its merge commit and flagged
     it itself. Now it commits nothing: the pass concludes the merge with the hooks
@@ -315,6 +629,23 @@ def test_the_upstream_prompt_sends_the_session_at_the_ledger_only_when_the_backl
     assert fix_prompts.LEDGER_STEPS in with_it
     without = fix_prompts.upstream_prompt((failure(),), "agent/fix")
     assert "resolve-like" not in without
+
+
+def test_a_ledger_group_is_not_told_its_fix_is_in_devkit():
+    """e0301529: a sweep sent at a scheduled-job-failed group was told the fix belongs
+    here in devkit, once. The job was collectors.py firing social-scraper's scrape, and
+    the cause was that project's export against a storage PC left off: the fix was
+    social-scraper's. A ledger group names where the harness saw a failure, not where
+    its cause is, so the sentence is the vendored failures' alone."""
+    backlog = red_main(
+        kind=fix_plan.LEDGER, workflow="harness ledger", signature=("scheduled-job-failed [a]",)
+    )
+    alone = fix_prompts.upstream_prompt((backlog,), "agent/fix")
+    assert "belongs here in devkit" not in alone
+    assert "find where the cause is before fixing" in alone
+    assert "collectors.py fire" in fix_prompts.LEDGER_STEPS
+    beside = fix_prompts.upstream_prompt((backlog, failure()), "agent/fix")
+    assert "belongs here in devkit" in beside and "not in each consumer" in beside
 
 
 def test_the_upstream_prompt_names_the_triage_log_at_the_path_it_is_placed():
@@ -388,6 +719,19 @@ def test_the_resolver_checks_every_file_for_a_conflict_marker():
 def test_every_prompt_names_the_ratchets_and_forbids_a_question():
     for text in every_prompt():
         assert "structure_check.py" in text and "untested_symbols.py" in text
+        # 0929-6 ran mypy on its scripts only, "the linter" being unnamed, and #467 went
+        # red on the test file it added: a second fixer for one annotation.
+        assert "python scripts/lint-all.py over every file you changed, the tests" in text
+        # 2026-10-02: sports_betting's fixer handed --paths only its `*.py` files, and
+        # dotenv-linter's finding in the `.env.example` it had staged went red in CI: a
+        # second fixer for one pair of quotes. --changed leaves nothing to choose.
+        assert "python scripts/lint-all.py --changed" in text and "*.py" not in text
+        # afd00d21: "so no file type is left out" read as every type being linted, and a
+        # fixer found its CLAUDE.md and workflow edits skipped. The scope is whole; the
+        # linters are not, and the prompt says which half it promises.
+        assert "no file type is left out" not in text
+        assert "no changed file is left out of its scope" in text
+        assert "names the changed files it has none for" in text
         # A resolver took main's wording in a rule, ran the two ratchets it was named,
         # and left #398 13 tokens over the hot-tier ceiling: a third session to fix it.
         assert "python scripts/hot-budget.py" in text
@@ -427,7 +771,73 @@ def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linu
     assert "failures.txt" in with_evidence and "ran on Linux" in with_evidence
     assert "ran on Linux" in fix_prompts.pr_prompt(failure(evidence=""))
     assert ".venv interpreter" in fix_prompts.FINISH
+    # db3e57f7: the interpreter was named for the tests only, so a fixer ran roguelike's
+    # lint-all.py under the PATH python, which skipped ruff and mypy and said clean.
+    head = fix_prompts.FINISH.split("python scripts/lint-all.py")[0]
+    assert ".venv interpreter, not the python on PATH" in head and "the linter" in head
     assert "--pr" in fix_prompts.LEDGER_STEPS and "any repository" in fix_prompts.LEDGER_STEPS
+
+
+def test_a_friction_line_quotes_what_the_session_saw():
+    """2e747f02: e3d8cb27's line said the triage log printed #629 as unrelated, a word no
+    harness text uses, and the fixer sent at it spent turns in the previous transcript
+    finding what the session had actually been shown. A line is filed verbatim, so the
+    words the harness printed are the only evidence a paraphrase cannot lose."""
+    for text in every_prompt():
+        assert "quote the harness words you saw, not your paraphrase" in text
+    skill = " ".join((REPO_ROOT / ".claude/skills/ship/SKILL.md").read_text("utf-8").split())
+    assert "quoting the harness words you saw, not your paraphrase" in skill
+
+
+def test_who_made_a_reused_tree_reaches_every_pr_shape():
+    """df43b14e: a fixer in an operator's elevated tree spent its turns working out whose
+    it was; `fix_trees.provenance` says, and every shape a reused tree gets carries it."""
+    made = " This tree was not cut for you: someone made it."
+    shapes = (
+        failure(),
+        failure(signature=(fix_plan.CONFLICT,)),
+        failure(kind=fix_plan.COMMIT, number=0, signature=("commit refused",)),
+    )
+    for red in shapes:
+        assert made in fix_prompts.pr_prompt(red, fix_prompts.TreeNotes(made=made))
+        assert "not cut for you" not in fix_prompts.pr_prompt(red)
+
+
+def test_every_prompt_names_the_runner_that_adds_the_contract_tests():
+    """54bb72df: #467's fixer ran the tests its files named and missed the one that
+    reads every module; a second fixer was sent for it."""
+    run_tests = load_script("scripts/run-tests.py")
+    assert "tests/test_scheduled_jobs.py" in run_tests.CONTRACT_TESTS
+    for text in every_prompt():
+        assert "python scripts/run-tests.py with no arguments" in text
+        assert "the contract tests that read every module" in text
+
+
+def test_every_prompt_says_a_runner_that_runs_the_suite_bare_is_given_files():
+    """27a0245d: carameli's own run-tests.py runs the whole suite in its app container
+    when bare, so the runner sentence was true of devkit only; its fixer, told nothing
+    else, ran all 2,331 vendored hook tests where one file was asked for."""
+    for text in every_prompt():
+        assert "where its --help says so" in text
+        assert "given the test files for what you changed" in text
+        assert "a whole test directory is the gate's to run" in text
+
+
+def test_a_tree_whose_runner_runs_the_suite_bare_is_told_so_as_a_fact():
+    """028caaaf, recurring after 27a0245d's conditional: carameli's fixer ran --help and
+    the bare runner in one call, reading "where its --help says so" as "run it". In such
+    a tree the sentence is a fact with no condition left to check; elsewhere it stands."""
+    for text in every_prompt():
+        told = fix_prompts.for_runner(text, suite_bare=True)
+        assert "with no arguments picks the tests" not in told
+        assert "where its --help says so" not in told
+        assert "runs the whole suite, so never run it bare" in told
+        assert "the contract tests that read every module" in told
+        # b8b42ded: the runner's --help listed no test paths, so the call is spelled.
+        assert "as its arguments, python scripts/run-tests.py tests/test_a.py" in told
+        assert told.endswith(fix_prompts.STOP)
+        assert fix_prompts.for_runner(text, suite_bare=False) == text
+    assert fix_prompts.RUNNER_SENTENCE in fix_prompts.FINISH
 
 
 def test_a_prompt_names_the_log_that_came_down_when_no_junit_report_failed(tmp_path):

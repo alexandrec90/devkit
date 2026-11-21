@@ -60,12 +60,33 @@ GROUP = "delivery"
 
 DEFAULT_INTERVAL_MINUTES = 15
 
+# How long before its next fire a pass must have ended (`pass_budget`): a pass still
+# running when the scheduler fires again skips that fire. It covers the one call a
+# deadline cannot cut short -- a reap's tree ended at the bound and given its grace --
+# and the log written after. 3fa66640: the 00:30 pass of 2026-11-07 ran past 00:45.
+BUDGET_MARGIN_S = 3 * 60
+
+
+def pass_budget(minutes: int) -> int:
+    """The `--budget` a pass every `minutes` runs with: the interval less
+    `BUDGET_MARGIN_S`, and never less than half of it."""
+    seconds = minutes * 60
+    return max(seconds // 2, seconds - BUDGET_MARGIN_S)
+
+
 # Where this job's account of itself lives -- `worktree.write_reconcile_log` writes it,
 # and `schedule_health.ARTIFACTS` sends a reader here when the scheduler reports a
 # failure. Declared on the installer because that is the one place that knows a job
 # exists at all; `tests/test_scheduled_jobs.py` checks it against `worktree.py`'s own
 # constant rather than trusting the copy.
 ARTIFACT = "logs/reconcile.log"
+
+# The `log-wrap.py --always` label the task runs under (`devkit_schtasks.logged`), which
+# files each failed run on the harness-events ledger. Its files are
+# `logs/scheduled-worktree-reconcile[.failed].log` -- the captured console, traceback
+# included -- beside `ARTIFACT`, which stays the runner's own account of the pass; the
+# two slug apart so neither overwrites the other.
+LABEL = "Scheduled: Worktree Reconcile"
 
 # Resolved once, at import, so a test can force the Windows path without touching
 # `os.name` itself. That distinction is not stylistic: `pathlib` reads `os.name` to
@@ -130,8 +151,15 @@ def reconcile_arguments(
     return " ".join(parts)
 
 
-def task_document(python: str, arguments: str, minutes: int) -> str:
-    """The task XML registering (or replacing) the recurring pass.
+def with_budget(arguments: str, minutes: int) -> str:
+    """`arguments` for a task firing every `minutes`, holding each pass to its
+    `pass_budget` so it has ended before the next fire."""
+    return f"{arguments} --budget {pass_budget(minutes)}"
+
+
+def task_document(python: str, arguments: str, minutes: int, root: Path = REPO_ROOT) -> str:
+    """The task XML registering (or replacing) the recurring pass, under `log-wrap.py`
+    (`devkit_schtasks.logged`) and started in `root`, where the wrapper writes `logs/`.
 
     Every fifteen minutes rather than hourly: the tier's whole promise is that a merged
     PR stops costing disk within minutes, and an hourly job would leave a box's
@@ -144,8 +172,9 @@ def task_document(python: str, arguments: str, minutes: int) -> str:
     """
     return devkit_schtasks.task_xml(
         python,
-        arguments,
+        devkit_schtasks.logged(LABEL, python, arguments, root),
         devkit_schtasks.repeating_trigger(minutes),
+        working_dir=str(root),
         # Lands disabled when the jobs tier is stood down. `harness-switch.py --off
         # jobs` records the whole group, not just the tasks that existed when it
         # ran, so an installer executed afterwards must not hand the operator back
@@ -279,13 +308,16 @@ def main(argv: list[str] | None = None) -> int:
 
     workspace = (args.workspace or sweep.default_workspace(REPO_ROOT)).resolve()
     python = windowless(sys.executable)
-    arguments = reconcile_arguments(
-        worktree_script(),
-        workspace,
-        args.automerge,
-        args.min_free_gb,
-        args.checkouts,
-        args.merge_label,
+    arguments = with_budget(
+        reconcile_arguments(
+            worktree_script(),
+            workspace,
+            args.automerge,
+            args.min_free_gb,
+            args.checkouts,
+            args.merge_label,
+        ),
+        args.minutes,
     )
     if args.check:
         code, message = devkit_schtasks.run_check(

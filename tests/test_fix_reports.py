@@ -37,6 +37,21 @@ def test_the_stamp_round_trips_and_a_missing_or_corrupt_one_reads_as_empty(tmp_p
     assert fix_reports.read_stamp(tmp_path) == {}
 
 
+def test_the_issue_a_dispatch_was_sent_at_is_what_its_pr_closes_and_a_restamp_forgets_it(
+    tmp_path,
+):
+    assert fix_reports.closing_line(tmp_path) == "", "no stamp, nothing to close"
+    fix_reports.stamp(tmp_path, "nightly:carameli:9:t:d:dispatch", "n", NOW)
+    assert fix_reports.closing_line(tmp_path) == ""
+    fix_reports.note_on_stamp(tmp_path, fix_reports.CLOSES, "9")
+    assert fix_reports.closing_line(tmp_path) == "Closes #9"
+    fix_reports.note_on_stamp(tmp_path, fix_reports.CLOSES, "#9; rm -rf")
+    assert fix_reports.closing_line(tmp_path) == "", "only a number is ever written out"
+    fix_reports.note_on_stamp(tmp_path, fix_reports.CLOSES, "9")
+    fix_reports.stamp(tmp_path, "pr:carameli:412:abc:d:dispatch", "n", NOW)
+    assert fix_reports.closing_line(tmp_path) == "", "the next dispatch in the tree is not for it"
+
+
 def test_a_restamp_keeps_the_mark_of_a_tree_the_pass_cut(tmp_path):
     """A fixer sent back at a fixer's branch is still on the pass's branch; one sent at a
     person's never gains the mark. Only the dispatch that cut the tree writes it."""
@@ -104,6 +119,22 @@ def test_a_blocked_report_is_its_first_lines_trimmed_and_absent_is_empty(tmp_pat
     reason = fix_reports.blocked_reason(tmp_path)
     assert reason.startswith("Blocked The fixture needs a database")
     assert len(reason) <= fix_reports.REASON_LIMIT
+
+
+def test_waits_on_reads_the_pr_a_blocked_report_names_on_its_own_line(tmp_path):
+    assert fix_reports.waits_on(tmp_path) == ""
+    (tmp_path / "logs").mkdir()
+    url = "https://github.com/alexandrec90/data-lake/pull/66"
+    report = tmp_path / fix_reports.BLOCKED_FILE
+    report.write_text(f"# Fix blocked\n\n**Waits on:** {url}\n\nIt adds the columns.\n", "utf-8")
+    assert fix_reports.waits_on(tmp_path) == url
+    report.write_text(f"Waits on: `{url}`.\n", encoding="utf-8")
+    assert fix_reports.waits_on(tmp_path) == url
+    # Prose naming a PR is not the line: only a fixer that wrote it is waiting.
+    report.write_text(f"It depends on {url}, which is open.\n", encoding="utf-8")
+    assert fix_reports.waits_on(tmp_path) == ""
+    report.write_text("Waits on: data-lake #66\n", encoding="utf-8")
+    assert fix_reports.waits_on(tmp_path) == "", "a URL, so gh can read it from anywhere"
 
 
 def listing(*entries: tuple[Path, str]) -> str:
@@ -206,6 +237,80 @@ def test_a_launch_the_launcher_refused_never_started_without_waiting_out_the_gra
     assert fix_reports.session_state(tree, now, tmp_path / "projects")[0] == fix_reports.WORKING
 
 
+def _claude_config(tmp_path, projects) -> Path:
+    config = tmp_path / ".claude.json"
+    config.write_text(json.dumps({"projects": projects}), encoding="utf-8")
+    return config
+
+
+def test_a_checkout_is_trusted_by_its_own_answer_alone(tmp_path):
+    """Claude Code keys its answers by directory, forward-slashed. A session tree under a
+    checkout is covered by the checkout's own yes, and by nothing above it: with
+    'C:/Users/alexa/vs-code' accepted and no entry for host-scripts, Claude Code 2.1.330
+    refused four after-merge sessions there in 13 hours (2026-11-20/21), while this read
+    called host-scripts trusted -- so nothing filed the person's step."""
+    root = tmp_path / "vs-code"
+    accepted = {"hasTrustDialogAccepted": True}
+    config = _claude_config(
+        tmp_path,
+        {
+            root.as_posix(): accepted,
+            (tmp_path / "other").as_posix(): {"hasTrustDialogAccepted": False},
+            (root / "own").as_posix(): accepted,
+        },
+    )
+    assert fix_reports.trusted(root / "own", config)
+    assert not fix_reports.trusted(root / "host-scripts", config)
+    assert not fix_reports.trusted(tmp_path / "other", config)
+    assert not fix_reports.trusted(tmp_path / "elsewhere", config)
+
+
+def test_a_checkout_declined_under_a_trusted_parent_is_not_trusted(tmp_path):
+    """Its own `False` is what any first visit writes, and the parent's yes does not
+    reach a session started under it; the listing here is this workstation's shape."""
+    root = tmp_path / "vs-code"
+    config = _claude_config(
+        tmp_path,
+        {
+            root.as_posix(): {"hasTrustDialogAccepted": True},
+            (root / "photolab").as_posix(): {"hasTrustDialogAccepted": False},
+        },
+    )
+    assert not fix_reports.trusted(root / "photolab", config)
+
+
+@pytest.mark.parametrize("text", ["not json", "[]", '{"projects": 3}'])
+def test_a_config_that_cannot_say_is_not_trust(tmp_path, text):
+    config = tmp_path / ".claude.json"
+    config.write_text(text, encoding="utf-8")
+    assert not fix_reports.trusted(tmp_path, config)
+    assert not fix_reports.trusted(tmp_path, tmp_path / "gone.json")
+
+
+def test_a_launch_refused_for_an_untrusted_checkout_is_its_own_dead_state(tmp_path):
+    """10a9810d, 18e737b9: `claude --bg` exits 1 in a checkout nobody trusted, a step only
+    a person can take, so it is told apart from a launcher that failed on its own."""
+    now = _dt.datetime.now(_dt.UTC)
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=2))
+    said = (
+        "Workspace not trusted. Run `claude` in C:\\x once and accept the trust prompt, then retry."
+    )
+    assert fix_reports.untrusted(said) and not fix_reports.untrusted("Couldn't reach it")
+    refused = subprocess.CompletedProcess(["claude", "--bg", "p"], 1, "", said)
+    fix_reports.record_launch(tree, ["claude", "--bg", "p"], refused)
+    assert fix_reports.launch_untrusted(tree)
+    assert fix_reports.session_state(tree, now, tmp_path / "projects") == (
+        fix_reports.UNTRUSTED,
+        "",
+    )
+    assert fix_reports.UNTRUSTED in fix_reports.DEAD
+    other = subprocess.CompletedProcess(["claude", "--bg", "p"], 1, "", "Couldn't reach it")
+    fix_reports.record_launch(tree, ["claude", "--bg", "p"], other)
+    assert not fix_reports.launch_untrusted(tree)
+    (tree / fix_reports.LAUNCH_FILE).unlink()
+    assert not fix_reports.launch_untrusted(tree), "no record, no refusal"
+
+
 def test_a_session_is_working_done_or_dead(tmp_path):
     now = _dt.datetime.now(_dt.UTC)
     projects = tmp_path / "projects"
@@ -222,6 +327,170 @@ def test_a_session_is_working_done_or_dead(tmp_path):
     assert fix_reports.session_state(tree, now, projects)[0] == fix_reports.NO_OUTCOME
     (tree / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
     assert fix_reports.session_state(tree, now, projects) == (fix_reports.DONE, str(log))
+
+
+def test_a_session_last_heard_before_the_machine_started_was_stopped_by_it(tmp_path):
+    """No process outlives a restart, so the 90-minute quiet is not waited out: the three
+    fixers a power-off killed on 2026-09-30 were each filed as a dead fixer instead."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=5), now)
+    booted = now - _dt.timedelta(minutes=2)
+    assert fix_reports.session_state(tree, now, projects, booted) == (
+        fix_reports.INTERRUPTED,
+        str(log),
+    )
+    assert fix_reports.INTERRUPTED in fix_reports.DEAD
+    assert fix_reports.session_state(tree, now, projects)[0] == fix_reports.WORKING, "unknown"
+    earlier = now - _dt.timedelta(minutes=8)
+    assert fix_reports.session_state(tree, now, projects, earlier)[0] == fix_reports.WORKING, (
+        "it spoke after the boot"
+    )
+    later = now + _dt.timedelta(minutes=1)
+    assert fix_reports.session_state(tree, now, projects, later)[0] == fix_reports.WORKING, (
+        "a boot past the pass's own clock is not one it can judge by"
+    )
+    (tree / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    assert fix_reports.session_state(tree, now, projects, booted)[0] == fix_reports.DONE
+
+
+def test_a_session_sent_just_before_a_restart_never_spoke_and_was_stopped_by_it(tmp_path):
+    now = _dt.datetime.now(_dt.UTC)
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    booted = now - _dt.timedelta(minutes=2)
+    projects = tmp_path / "projects"
+    assert fix_reports.session_state(tree, now, projects, booted) == (fix_reports.INTERRUPTED, "")
+    refused = subprocess.CompletedProcess(["claude", "--bg", "p"], 1, "", "Couldn't reach it")
+    fix_reports.record_launch(tree, ["claude", "--bg", "p"], refused)
+    assert fix_reports.session_state(tree, now, projects, booted)[0] == fix_reports.NEVER_STARTED
+
+
+def _reply(when: _dt.datetime, error: str = "") -> str:
+    """An assistant record as Claude Code writes one; with `error`, its synthetic API-error
+    reply -- `Login expired - Please run /login` is `fix_reports.LOGIN_REFUSED`."""
+    failed = f', "error": "{error}", "isApiErrorMessage": true' if error else ""
+    return f'{{"type": "assistant", "timestamp": "{when.isoformat()}"{failed}}}\n'
+
+
+def test_a_session_refused_at_login_is_logged_out_without_waiting_out_the_quiet(tmp_path):
+    """social-scraper #90 and #91's fixers each ended at their first turn on 2026-10-18 on
+    Claude Code's `Login expired` reply, and were judged by silence: working for 90
+    minutes, then filed as fixers that ended without an outcome."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=9), now)
+    assert not fix_reports.login_refused(log), "no reply yet"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(_reply(now - _dt.timedelta(minutes=9), fix_reports.LOGIN_REFUSED))
+        handle.write('{"type": "cost-state"}\n')
+    assert fix_reports.login_refused(log)
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.LOGGED_OUT, str(log))
+    assert fix_reports.LOGGED_OUT in fix_reports.DEAD
+    (tree / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    assert fix_reports.session_state(tree, now, projects)[0] == fix_reports.DONE, "an outcome wins"
+
+
+def test_a_session_whose_last_reply_was_the_api_unreachable_is_offline(tmp_path):
+    """1f71e4cf and three before it: ledger fixers that ended on "API Error: Can't reach
+    the API server -- check your internet or DNS (ENOTFOUND)" during a night without DNS."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=9), now)
+    assert not fix_reports.api_unreachable(log), "no reply yet"
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f'{{"type": "assistant", "timestamp": "{(now - _dt.timedelta(minutes=9)).isoformat()}", '
+            f'"error": "server_error", "apiError": "{fix_reports.API_UNREACHABLE}", '
+            '"isApiErrorMessage": true}\n'
+        )
+        handle.write('{"type": "cost-state"}\n')
+    assert fix_reports.api_unreachable(log)
+    assert not fix_reports.login_refused(log)
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.OFFLINE, str(log))
+    assert fix_reports.OFFLINE in fix_reports.DEAD
+
+
+def test_a_reply_after_an_unreachable_api_is_not_offline(tmp_path):
+    """A blip the session recovered from: its last reply is what counts."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=10))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=9), now)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f'{{"type": "assistant", "apiError": "{fix_reports.API_UNREACHABLE}", '
+            '"isApiErrorMessage": true}\n'
+        )
+        handle.write(_reply(now - _dt.timedelta(minutes=8)))
+    assert not fix_reports.api_unreachable(log)
+
+
+def test_the_boot_is_read_off_the_machine_and_unknown_where_it_cannot_be(monkeypatch):
+    now = _dt.datetime.now(_dt.UTC)
+    booted = fix_reports.booted_at(now)
+    # What the machine can answer from, not what it calls itself: the POSIX rehearsal is
+    # a Windows host reporting `linux`, with no `/proc/uptime` to read.
+    if sys.platform == "win32" or Path("/proc/uptime").is_file():
+        assert booted is not None and booted < now
+    monkeypatch.setattr(fix_reports, "_uptime", lambda: 90.0)
+    assert fix_reports.booted_at(now) == now - _dt.timedelta(seconds=90)
+    monkeypatch.setattr(fix_reports, "_uptime", lambda: None)
+    assert fix_reports.booted_at(now) is None
+
+
+# The two records 0929-7's transcript held around its early ship, as Claude Code writes
+# them: the Bash result that started the suite, and the notification that it ended.
+LAUNCH = (
+    '{"type":"user","message":{"content":[{"type":"tool_result","content":"Command running '
+    'in background with ID: b172nyn6g. Output is being written to: C:\\\\t.output"}]}}\n'
+)
+NOTIFY = (
+    '{"type":"user","message":{"content":"<task-notification>\\n<task-id>b172nyn6g'
+    '</task-id>\\n<status>killed</status>"}}\n'
+)
+
+
+def test_a_session_waiting_on_its_own_background_task_is_not_done_with_an_intent(tmp_path):
+    """8d2f56f5: 0929-7 wrote its intent, started the suite in the background and ended
+    its turn to wait for it. `claude agents` listed it idle, so the 21:30 pass shipped
+    the tree mid-test, and the commit carried a test that hung."""
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=30))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=17), now)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(LAUNCH)
+    (tree / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
+    assert fix_reports.pending_tasks(log) == {"b172nyn6g"}
+    assert fix_reports.awaiting_task(tree, now, projects)
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.WORKING, str(log))
+
+    # Gone quiet past QUIET_AFTER with the task still out: stopped mid-task, not waiting.
+    later = now + fix_reports.QUIET_AFTER + _dt.timedelta(minutes=18)
+    assert not fix_reports.awaiting_task(tree, later, projects)
+    assert fix_reports.session_state(tree, later, projects)[0] == fix_reports.DONE
+
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(NOTIFY)
+    assert fix_reports.pending_tasks(log) == frozenset()
+    assert not fix_reports.awaiting_task(tree, now, projects)
+    assert fix_reports.session_state(tree, now, projects) == (fix_reports.DONE, str(log))
+
+
+def test_only_the_stamped_live_session_is_asked_about_background_tasks(tmp_path):
+    now = _dt.datetime.now(_dt.UTC)
+    projects = tmp_path / "projects"
+    assert not fix_reports.awaiting_task(tmp_path / "unstamped", now, projects)
+    assert fix_reports.pending_tasks(tmp_path / "missing.jsonl") == frozenset()
+    tree = _stamped(tmp_path / "t", now - _dt.timedelta(minutes=30))
+    log = _transcript(projects, tree, _dt.timedelta(minutes=17), now)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(LAUNCH)
+    fix_reports.note_on_stamp(tree, "dead", "never started")
+    assert not fix_reports.awaiting_task(tree, now, projects), "a session judged dead"
 
 
 def test_the_stamped_session_is_told_from_another_session_in_the_same_tree(tmp_path):
@@ -288,6 +557,46 @@ def test_the_last_record_is_found_past_a_line_split_by_the_read_window(tmp_path,
     assert fix_reports.last_spoke(tmp_path / "missing.jsonl") is None
 
 
+# The record Claude Code wrote as each of 2026-10-18's five dead fixers' only reply.
+REFUSED_REPLY = json.dumps(
+    {
+        "type": "assistant",
+        "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Login expired"}]},
+        "error": fix_reports.LOGIN_REFUSED,
+        "isApiErrorMessage": True,
+    }
+)
+
+
+def test_a_transcript_whose_last_reply_is_a_refused_login_says_so(tmp_path):
+    """2621edbf, 5eae232b, 8c96282b, b50ced67, 742cfe40: each read as a fixer that died."""
+    path = tmp_path / "s.jsonl"
+    path.write_text(
+        '{"type": "user", "message": {"content": "fix it"}}\n'
+        f"{REFUSED_REPLY}\n"
+        '{"type": "system", "subtype": "turn_duration"}\n{"type": "last-prompt"}\nnot json\n',
+        encoding="utf-8",
+    )
+    assert fix_reports.login_refused(path)
+
+
+def test_a_refused_login_the_session_got_past_or_another_api_error_is_not_one(tmp_path):
+    later = tmp_path / "later.jsonl"
+    reply = '{"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}}'
+    later.write_text(f"{REFUSED_REPLY}\n{reply}\n", encoding="utf-8")
+    assert not fix_reports.login_refused(later), "only the last reply speaks"
+    other = tmp_path / "other.jsonl"
+    other.write_text(
+        json.dumps({"type": "assistant", "error": "rate_limit", "isApiErrorMessage": True}),
+        encoding="utf-8",
+    )
+    assert not fix_reports.login_refused(other)
+    silent = tmp_path / "silent.jsonl"
+    silent.write_text('{"type": "user"}\n', encoding="utf-8")
+    assert not fix_reports.login_refused(silent)
+    assert not fix_reports.login_refused(tmp_path / "missing.jsonl")
+
+
 def test_a_session_judged_once_or_one_that_leaves_no_transcript_is_not_judged(tmp_path):
     now = _dt.datetime.now(_dt.UTC)
     tree = _stamped(tmp_path / "t", now - _dt.timedelta(hours=4), agent="codex")
@@ -311,6 +620,49 @@ def test_friction_lines_drop_markup_and_blanks_and_filing_away_reads_them_once(t
     assert fix_reports.friction_lines(tmp_path) == ()
     assert (tmp_path / "logs" / "friction.filed.md").exists()
     fix_reports.file_away(tmp_path, fix_reports.FRICTION_FILE)  # nothing there: no error
+
+
+def test_a_friction_line_that_opens_on_a_date_or_a_number_keeps_it(tmp_path):
+    """Stripping list markers as a set of characters ate `- 2026-10-10, desktop-ml5f3pj:`
+    down to `, desktop-ml5f3pj:`, and the 2026-10-11 rehearsal would have filed that."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        "- 2026-10-10, desktop-ml5f3pj: collectors overlapped\n- 3 sessions waited\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "2026-10-10, desktop-ml5f3pj: collectors overlapped",
+        "3 sessions waited",
+    )
+
+
+def test_a_label_over_listed_entries_is_not_an_entry(tmp_path):
+    """b25fcfe9: the file opened on `supervise-fix-pass`, the bare name of what the session
+    was doing, over two bulleted reports, and the label was filed as a third report. In
+    a file that lists its entries, only the items are entries; a wrapped tail goes too."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        "supervise-fix-pass\n"
+        "- `claude stop c476bac3` refused twice\n"
+        "  with a wrapped tail\n"
+        "1) the rehearsal was not run\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "`claude stop c476bac3` refused twice",
+        "the rehearsal was not run",
+    )
+
+
+def test_a_file_of_plain_lines_is_one_entry_per_line(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        "the evidence dir was empty\n\nno .venv in the tree\n", encoding="utf-8"
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "the evidence dir was empty",
+        "no .venv in the tree",
+    )
 
 
 def test_a_line_the_tree_already_had_filed_is_not_read_again(tmp_path):
@@ -342,6 +694,61 @@ def test_a_line_about_claude_codes_worktree_guard_is_not_filed(tmp_path):
     assert fix_reports.friction_lines(tmp_path) == (
         "`harness_triage.py --resolve-like` crashed on a group with no host",
     )
+
+
+def test_a_line_about_the_powershell_tools_protected_path_check_is_not_filed(tmp_path):
+    """9a2a5478: Claude Code's PowerShell tool refused an `rm` inside `docker exec`'s
+    `sh -c` text as a host path. Nothing in devkit changes what it accepts, and
+    `.claude/rules/engineering.md` now names the spelling that passes it."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        '- PowerShell `docker exec ... mutmut-probe sh -c "rm -rf mutants; ..."` refused: '
+        "\"Remove-Item on system path '/work' is blocked. This path is protected from "
+        'removal." The `rm` ran inside a container, not on the host\n'
+        "- `run-tests.py --changed` skipped its only target\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "`run-tests.py --changed` skipped its only target",
+    )
+
+
+def test_the_rule_names_the_spelling_that_passes_both_tools():
+    """The filter above is only honest while the rule carries the way past the refusal."""
+    root = Path(__file__).resolve().parents[1]
+    rule = (root / ".claude/rules/engineering.md").read_text(encoding="utf-8")
+    row = next(line for line in rule.splitlines() if 'sh -c "' in line)
+    assert "either tool" in row and "script file" in row
+    assert '"protected" host path' in rule
+
+
+def test_a_line_about_claude_codes_rm_check_is_not_filed(tmp_path):
+    """b945aedf: Claude Code's built-in check refused an `rm` whose target was built from
+    variables. Nothing in devkit changes what it accepts, its refusal names the rewrite,
+    and the rule below now carries it, so one more line could only be retired again."""
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.FRICTION_FILE).write_text(
+        '- a `for` loop was refused: "Dangerous rm operation detected in `rm -f $B/$p/x`. '
+        "The target '$B/$p/x' is a shell variable expansion\"\n"
+        "- `run-tests.py --changed` skipped its only target\n",
+        encoding="utf-8",
+    )
+    assert fix_reports.friction_lines(tmp_path) == (
+        "`run-tests.py --changed` skipped its only target",
+    )
+
+
+def test_the_rule_names_the_rewrite_the_rm_check_accepts():
+    """The filter above is only honest while the rule carries the way past the refusal,
+    and that way is the refusal's own: it forbids re-issuing through another tool, which
+    the table's "PowerShell for a compound statement" would otherwise read as allowing."""
+    root = Path(__file__).resolve().parents[1]
+    rule = (root / ".claude/rules/engineering.md").read_text(encoding="utf-8")
+    row = next(line for line in rule.splitlines() if "Dangerous rm operation" in line)
+    assert '`"${A:?}/${f:?}/x"`' in row and "literal path" in row
+    assert "never another tool" in row
+    evidence = (root / ".claude/engineering-evidence.md").read_text(encoding="utf-8")
+    assert "Dangerous rm operation" in evidence, "the reproduction the rule points at"
 
 
 @pytest.mark.parametrize(

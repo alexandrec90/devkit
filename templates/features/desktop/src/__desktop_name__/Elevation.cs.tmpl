@@ -1,0 +1,89 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Security.Principal;
+using System.Text;
+
+namespace {{ desktop_name }};
+
+/// <summary>
+/// Administrator rights for one operation at a time, never for the whole app.
+/// </summary>
+/// <remarks>
+/// The app runs unelevated (`app.manifest`). An operation that needs more -- a
+/// machine-wide registry key, another elevated process's windows -- runs this same
+/// executable again through UAC with <see cref="TaskSwitch"/> and a task name, and
+/// <see cref="ElevatedTasks"/> performs it there and exits. The UI never runs elevated.
+/// </remarks>
+public static class Elevation
+{
+    /// <summary>The first argument of a relaunch that is doing an elevated task.</summary>
+    public const string TaskSwitch = "--elevated-task";
+
+    // The user dismissed the UAC prompt.
+    private const int ErrorCancelled = 1223;
+
+    public static bool IsElevated()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="task"/> in an elevated copy of this app and waits for it.
+    /// </summary>
+    /// <returns>The task's exit code, or null when the user declined the UAC prompt.</returns>
+    public static int? RunElevated(string task, params string[] arguments)
+    {
+        var exe = Environment.ProcessPath
+            ?? throw new InvalidOperationException("this process has no executable path");
+        var start = new ProcessStartInfo(exe, CommandLine([TaskSwitch, task, .. arguments]))
+        {
+            UseShellExecute = true,
+            Verb = "runas",
+        };
+        try
+        {
+            using var process = Process.Start(start);
+            if (process is null)
+            {
+                return null;
+            }
+
+            process.WaitForExit();
+            return process.ExitCode;
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == ErrorCancelled)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Arguments joined the way Windows splits them back apart.</summary>
+    public static string CommandLine(IEnumerable<string> arguments) =>
+        string.Join(" ", arguments.Select(Quote));
+
+    internal static string Quote(string argument)
+    {
+        if (argument.Length > 0 && argument.IndexOfAny([' ', '\t', '"']) < 0)
+        {
+            return argument;
+        }
+
+        // Backslashes are literal unless they precede a quote, where each must be doubled.
+        var quoted = new StringBuilder("\"");
+        var slashes = 0;
+        foreach (var c in argument)
+        {
+            if (c == '\\')
+            {
+                slashes++;
+                continue;
+            }
+
+            quoted.Append('\\', c == '"' ? (slashes * 2) + 1 : slashes).Append(c);
+            slashes = 0;
+        }
+
+        return quoted.Append('\\', slashes * 2).Append('"').ToString();
+    }
+}

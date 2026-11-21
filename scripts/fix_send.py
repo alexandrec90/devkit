@@ -11,19 +11,29 @@ Tested through the pass in `tests/test_fix_pass.py`.
 
 from __future__ import annotations
 
+import io
 import json
+import re
 import sys
+from collections.abc import Callable
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import TypeVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import agent_models
+import branch_facts
 import fix_budget
+import fix_claims
+import fix_cycle
 import fix_findings
 import fix_ledger
 import fix_loop
 import fix_plan
+import fix_reports
 import host_memory
+import release
 import ship_intent
 import sweep
 from _loader import load_by_path
@@ -35,11 +45,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 fix_prs = load_by_path("fix_prs", REPO_ROOT / "scripts" / "fix-prs.py")
 
 Journal = fix_findings.Journal
+Said = TypeVar("Said")
 
 EXIT_OK = 0
 EXIT_FAILED = 1
 # EX_TEMPFAIL: the pass's own code moved under it, so it sent no one. The watchdog
-# fast-forwards and runs it again; any other caller simply runs it again.
+# fast-forwards and runs it again; no other caller does, so only it is told
+# (`fix-pass.exit_code`).
 EXIT_STALE = 75
 
 # The commit each checkout's code was loaded from, pinned by `pin_loaded` as a pass
@@ -70,18 +82,74 @@ def code_moved(root: Path) -> str:
     if (root / ".git").is_file():
         return ""
     git = sweep.git_for(root)
+    if not (new := origin_tip(git)):
+        return ""
+    old = LOADED_FROM.get(str(root)) or git("rev-parse", "HEAD").stdout.strip()
+    if not old or old == new:
+        return ""
+    if git("merge-base", "--is-ancestor", old, new).returncode != 0:
+        return ""
+    return scripts_range(git, old, new)
+
+
+def origin_tip(git: sweep.Git) -> str:
+    """The commit this checkout is meant to be at, fetched first; "" when the fetch fails.
+
+    `origin/green` where it exists, the ref `fix-pass-watchdog.update_target` follows.
+    Read off `origin/<default>` the pass would be held forever whenever `main` is ahead
+    of its last passing commit, which in the direct flow is most of the time.
+    """
+    git("fetch", "--quiet", "origin", "+refs/heads/green:refs/remotes/origin/green")
+    known = git("rev-parse", "--verify", "--quiet", "refs/remotes/origin/green")
+    if known.returncode == 0:
+        return known.stdout.strip()
     head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout.strip()
     base = head.removeprefix("origin/") or "main"
     if git("fetch", "--quiet", "origin", base).returncode != 0:
         return ""
-    loaded = LOADED_FROM.get(str(root)) or git("rev-parse", "HEAD").stdout.strip()
-    old, new = loaded, git("rev-parse", f"origin/{base}").stdout.strip()
-    if not old or not new or old == new:
-        return ""
-    if git("merge-base", "--is-ancestor", old, new).returncode != 0:
-        return ""
+    return git("rev-parse", f"origin/{base}").stdout.strip()
+
+
+def scripts_range(git: sweep.Git, old: str, new: str) -> str:
+    """`old..new` when `scripts/` differs between them, else ""."""
     changed = git("diff", "--name-only", old, new, "--", "scripts/")
     return f"{old[:9]}..{new[:9]}" if changed.returncode == 0 and changed.stdout.strip() else ""
+
+
+def stale_tree(root: Path) -> str:
+    """`fork..tip` when `root` is a linked worktree whose code lacks `scripts/` changes
+    merged on `origin/<default>` since it forked, else "".
+
+    `code_moved` judges only the static checkout the watchdog updates. A pass run by
+    hand from a linked tree -- a click on the task in a window opened on it -- routes with
+    that tree's code however old: `wobbly-snuggling-sunset`, two days behind, sent a fixer
+    at two groups awaiting a person, since its code predated `awaiting_person`
+    (c335743e, ecff4199). The tree's own commits do not count: it lags or it does not.
+    """
+    if not (root / ".git").is_file():
+        return ""
+    git = sweep.git_for(root)
+    if not (tip := origin_tip(git)):
+        return ""
+    fork = git("merge-base", "HEAD", tip)
+    if fork.returncode != 0 or not (old := fork.stdout.strip()) or old == tip:
+        return ""
+    return scripts_range(git, old, tip)
+
+
+def dispatch_mode(mode: str, root: Path) -> str:
+    """The mode to run: a dispatch from a stale linked worktree (`stale_tree`) runs as a
+    plan -- it ships, merges and sends nothing -- and says so on stderr; any other is as
+    asked."""
+    if mode != fix_cycle.DISPATCH or not (lag := stale_tree(root)):
+        return mode
+    print(
+        f"fix-pass: {root} lacks origin's scripts/ changes {lag}, so it ran as a plan and "
+        "sent no one: dispatch from the devkit checkout, or merge the default branch into "
+        "this tree",
+        file=sys.stderr,
+    )
+    return fix_cycle.PLAN
 
 
 def hold_if_moved(
@@ -101,11 +169,13 @@ def hold_if_moved(
     )
 
 
-# A background fixer measured ~450 MB (the session and its pty host) once it loads no
-# MCP server; the floor leaves the person at the machine room for their own work.
-SESSION_MB = 500
-MEMORY_FLOOR_MB = 2048
+SESSION_MB = host_memory.SESSION_MB
+MEMORY_FLOOR_MB = host_memory.FLOOR_MB
 HELD_FOR_MEMORY = "held for memory"
+# Why a session is not launched by a pass past its deadline (`fix-pass.SEND_RESERVE_SECONDS`
+# before the watchdog's stop). A launch provisions a tree and starts a session, 1-2.5
+# minutes each on 2026-10-08, and the pass stopped after its third had no record written.
+HELD_FOR_TIME = "held for time"
 
 
 def update_branch(failure: fix_plan.Failure, root: Path) -> int:
@@ -113,8 +183,12 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
 
     No session and no worktree. A PR that comes back green is done; one still red at
     the new sha is a new ledger key and gets its session next pass; one GitHub cannot
-    update (a conflict) reads `CONFLICTING` next pass and goes to the resolver.
+    update (a conflict) reads `CONFLICTING` next pass and goes to the resolver. One that
+    only GitHub calls conflicting (`merges_clean`) is merged here instead: GitHub would
+    refuse to update it on that same verdict.
     """
+    if failure.merges_clean:
+        return push_clean_merge(failure, root)
     gh = sweep.gh_for(root / failure.project)
     done = gh("pr", "update-branch", str(failure.number))
     if done.returncode != 0 and (state := _state(gh, failure.number)) not in ("", "OPEN"):
@@ -132,13 +206,73 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
     return EXIT_OK
 
 
-def _state(gh, number: int) -> str:
-    """The PR's state (`OPEN`, `CLOSED`, `MERGED`), or "" when it cannot be read."""
-    done = gh("pr", "view", str(number), "--json", "state")
+def push_clean_merge(failure: fix_plan.Failure, root: Path) -> int:
+    """Merge `origin/<base>` into the PR's head in the checkout's object store and push the
+    merge commit to the head branch: what a resolver sent at #538 did by hand.
+
+    No worktree: `merge-tree` writes the tree and `commit-tree` the commit, both against
+    the refs `gate_evidence` judged clean. The push is a fast-forward of the head sha the
+    pass read, so a head pushed to meanwhile is refused rather than overwritten.
+
+    The push skips the pre-push gate, as every other push the pass makes does
+    (`release.push_env`). Pushed from the project's own checkout, that gate ran the whole
+    suite over whatever that working copy held, not over the merge: #538's push spent six
+    minutes in it and came back an `update-failed` naming no cause. CI gates the merge.
+    """
+    git = sweep.git_for(root / failure.project)
+    where = f"  {failure.project} #{failure.number}"
+    tree = branch_facts.clean_merge(git, failure.base, failure.sha)
+    if not tree:
+        print(f"{where}: no longer merges cleanly with origin/{failure.base}")
+        return EXIT_FAILED
+    message = f"Merge origin/{failure.base} into {failure.head}"
+    base = f"refs/remotes/origin/{failure.base}"
+    made = git("commit-tree", tree, "-p", failure.sha, "-p", base, "-m", message)
+    commit = (made.stdout or "").strip() if made.returncode == 0 else ""
+    pushed = (
+        git(
+            "push",
+            "--quiet",
+            "origin",
+            f"{commit}:refs/heads/{failure.head}",
+            env=release.push_env(),
+        )
+        if commit
+        else made
+    )
+    if not commit or pushed.returncode != 0:
+        why = (pushed.stderr or pushed.stdout or "").strip().splitlines()
+        print(f"{where}: pushing the merge failed: {why[-1] if why else '?'}")
+        return EXIT_FAILED
+    print(f"{where}: GitHub said conflicting; pushed git's clean merge, the gate re-runs")
+    return EXIT_OK
+
+
+def _state(gh, number: int | str) -> str:
+    """The PR's state (`OPEN`, `CLOSED`, `MERGED`), or "" when it cannot be read. A URL
+    for `number` reads a PR in any repository, from wherever `gh` runs."""
     try:
+        done = gh("pr", "view", str(number), "--json", "state")
         return str(json.loads(done.stdout or "{}").get("state", "")) if done.returncode == 0 else ""
-    except (ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError):  # no `gh`, or no checkout for it to run in
         return ""
+
+
+def closed_since(failure: fix_plan.Failure, root: Path) -> str:
+    """The record line for a PR that closed or merged after the plan read it, or "".
+
+    Sends run minutes after the read that planned them, each behind a tree and a session
+    before it. Dependabot closed carameli #512 and deleted its branch in that gap, so the
+    resolve found no branch and filed a `resolve-failed` (4b29b7ac); had a tree still held
+    that head, a fixer would have opened at a closed PR. Only a state read as closed stops
+    a send: "" is `gh` not answering, and the send's own failure says more than that does.
+    """
+    if failure.kind != fix_plan.PR or not failure.number:
+        return ""
+    state = _state(sweep.gh_for(root / failure.project), failure.number)
+    if state in ("", "OPEN"):
+        return ""
+    return f"{state.lower()} since the plan read it; nothing to send"
 
 
 def dispatch(
@@ -176,35 +310,50 @@ def send_all(
     only for a dispatch that opened. `items` is the harness-defect ledger, for what
     became of each problem's escalation; `closed` says which devkit session is still
     working, which holds another, and which tree each problem's fixer worked in, which
-    is what an escalation names.
+    is what an escalation names. At or past the journal's deadline (`Journal.left`), no
+    session is launched (`HELD_FOR_TIME`). What is left is claimed first, so a second PC
+    running this pass sends nothing this one did (`fix_claims`).
     """
+    left = None if journal is None else journal.left
     closed = closed or fix_loop.Closed()
     ledger = fix_ledger.read_ledger(ctx.ledger_path)
     sent: list[str] = []
     capped: list[tuple[fix_plan.Decision, str]] = []
     worst = EXIT_OK
     room = host_memory.available_mb()
+    turn = fix_claims.Turn(ctx.root, ctx.writes, room, closed.harness_busy, left)
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
-        if why := _occupied(decision, closed):
+        if why := _held(decision, ctx, closed, items or []):
             capped.append((decision, why))
             continue
         problem = fix_ledger.problem_key(decision)
         escalated = fix_loop.fix_findings.escalation(problem, items or [])
-        verdict = fix_budget.budget(decision, ledger, ctx.now, escalated)
+        verdict = fix_budget.budget(
+            decision, ledger, ctx.now, escalated, lambda url: _state(sweep.gh_for(ctx.root), url)
+        )
         if verdict.finding and journal is not None:
-            journal.add(verdict.finding.at(closed.trees.get(problem, "")))
-        why = verdict.why if not verdict.go else _no_memory(decision, room)
-        if why:
+            since = fix_budget.since_for(decision, escalated)
+            journal.add(verdict.finding.at(closed.tree_after(problem, since)))
+        if why := _kept_back(decision, verdict, room, left, turn):
             capped.append((decision, why))
             continue
         if room is not None and decision.action not in fix_plan.NO_SESSION:
             room -= SESSION_MB
         line, code = _send_one(decision, ctx, launch, verdict.effort, journal)
-        sent.append(f"{names} -- {line}")
+        sent.append(f"{names} -- {line}{turn.note(decision)}")
         worst = max(worst, code)
+        if code != EXIT_OK:
+            turn.failed(decision)
         ledger = fix_ledger.read_ledger(ctx.ledger_path)
     return sent, capped, worst
+
+
+def _kept_back(decision, verdict, room, left, turn: fix_claims.Turn) -> str:
+    """Why `decision` is not sent this pass, or "". The claim is asked last: it is the one
+    question that pushes a ref, so nothing already held costs a call to GitHub."""
+    why = verdict.why if not verdict.go else _no_memory(decision, room)
+    return why or _no_time(decision, left) or turn.held(decision)
 
 
 def _no_memory(decision: fix_plan.Decision, room: int | None) -> str:
@@ -221,11 +370,34 @@ def _no_memory(decision: fix_plan.Decision, room: int | None) -> str:
     )
 
 
+def _no_time(decision: fix_plan.Decision, left: Callable[[], float] | None) -> str:
+    """Why this pass launches no more sessions, or "": its send deadline has passed. An
+    update or a rerun opens no session and is one call, so it is never held for time."""
+    if left is None or decision.action in fix_plan.NO_SESSION or left() > 0:
+        return ""
+    return f"{HELD_FOR_TIME}: this pass is past its send deadline; the next pass sends it"
+
+
+def _held(
+    decision: fix_plan.Decision, ctx: fix_loop.Context, closed: fix_loop.Closed, history: list
+) -> str:
+    """Why this decision goes nowhere this pass whatever its budget says, or ""."""
+    return _occupied(decision, closed) or _untrusted(decision, ctx, history)
+
+
 def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
     """Why a session is already where this one would go, or "": the one devkit session
-    at the harness, or any live session in the branch's own tree."""
-    if closed.harness_busy and decision.action == fix_plan.UPSTREAM:
-        return f"held until the devkit session in {closed.harness_busy} finishes"
+    at the harness, or any live session in the branch's own tree.
+
+    The devkit session opens a fresh devkit tree (`dispatch_fresh`), so no branch tree
+    is in its way: a consumer's refused intent folded into it was capped by the idle
+    session in that intent's tree on every pass, and the backlog grew with none sent.
+    """
+    if decision.action == fix_plan.UPSTREAM:
+        if closed.harness_busy:
+            return f"held until the devkit session in {closed.harness_busy} finishes"
+        named = named_by(decision, closed.devkit_fixes)
+        return f"pending {named}, which names every failure it is for" if named else ""
     first = decision.failures[0]
     tree = (
         closed.busy.get((first.project, first.head))
@@ -233,6 +405,46 @@ def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
         else None
     )
     return f"a session is working in {tree}" if tree else ""
+
+
+def _untrusted(decision: fix_plan.Decision, ctx: fix_loop.Context, history: list) -> str:
+    """Why this session would only be refused, or "": its checkout has a launch refusal
+    open and is not trusted yet. The reason names a person's step, so it is no stale wait
+    (`fix_stall.tracked`).
+
+    Each re-send cut a fresh tree and was refused the same way, and a failure with no PR
+    has no tree to find again: 94 under photolab in three days (0edfe2b4). The devkit
+    session opens its tree in devkit, whatever projects its failures name.
+    """
+    if decision.action in (*fix_plan.NO_SESSION, fix_plan.UPSTREAM):
+        return ""
+    project = decision.failures[0].project
+    checkout = ctx.root / project
+    if project not in fix_loop.awaiting_trust(history) or fix_reports.trusted(checkout):
+        return ""
+    return f"held: {fix_loop.untrusted_detail(checkout)}"
+
+
+def named_by(decision: fix_plan.Decision, fixes: tuple[tuple[int, str], ...]) -> str:
+    """The devkit PRs (`fix_loop.devkit_fixes`) whose bodies name every failure of
+    `decision` by URL, as `devkit #N, #M`; "" when any one is named by none.
+
+    2026-10-01: a devkit session was sent at roguelike #52 and social-scraper #23 while
+    #483, whose body named both as what it unblocks, was open, and again once it had
+    merged and was waiting on adoption. The ledger's backlog rides in the session without
+    deciding whether it goes (`fix_cycle.harness_state`), so it is not asked.
+    """
+    urls = [f.url for f in decision.failures if f.kind != fix_plan.LEDGER]
+    if not urls or not all(urls):
+        return ""
+    found: list[int] = []
+    for url in urls:
+        whole = re.compile(re.escape(url.rstrip("/")) + r"(?![\w/])")  # not #5 inside #52
+        naming = [number for number, body in fixes if whole.search(body)]
+        if not naming:
+            return ""
+        found += [n for n in naming if n not in found]
+    return "devkit " + ", ".join(f"#{n}" for n in sorted(found))
 
 
 def _send_one(
@@ -244,20 +456,67 @@ def _send_one(
 ) -> tuple[str, int]:
     """Dispatch one decision the budget let through; `(record line, exit code)`.
 
-    The ledger is written only for a dispatch that opened; one that did not is filed.
+    The ledger is written only for a dispatch that opened; one that did not is filed. A
+    PR that closed since the plan is neither: nothing went wrong and nothing is owed.
     """
     if not ctx.writes:
         would = {fix_plan.UPDATE: "update the branch", fix_plan.RERUN: "re-run the workflow"}
         return f"would {would.get(decision.action, f'send ({decision.action})')}", EXIT_OK
+    first = decision.failures[0]
+    if gone := closed_since(first, ctx.root):
+        return gone, EXIT_OK
     how = agent_models.Launch(launch.agent, launch.model, effort) if effort else launch
     problem = fix_ledger.problem_key(decision)
-    if dispatch(decision, ctx.root, how, problem) != EXIT_OK:
-        first = decision.failures[0]
+    code, said = saying(dispatch, decision, ctx.root, how, problem)
+    if code != EXIT_OK:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
-        fix_findings.file(
-            journal, f"{decision.action}-failed", first.project, f"{names}: {decision.note[:160]}"
-        )
+        detail, kind = f"{names}: {decision.note[:160]}", f"{decision.action}-failed"
+        if fix_reports.untrusted(said):
+            # The machine's setup, not this problem: the group the dead session files
+            # too, awaiting the person who trusts the checkout (`fix_loop.UNTRUSTED_KIND`).
+            detail = fix_loop.untrusted_detail(ctx.root / first.project)
+            kind = fix_loop.UNTRUSTED_KIND
+        # Why it failed is only ever printed, and a scheduled pass's streams go nowhere:
+        # the finding for #538 named no step until its push was reproduced by hand.
+        where = ""
+        if journal is not None and said.strip():
+            where = fix_findings.evidence_file(f"{detail}\n\n{said}", journal.devkit_dir, kind)
+        fix_findings.file(journal, kind, first.project, detail, evidence=where)
+        if kind == fix_loop.UNTRUSTED_KIND:
+            return f"refused, its checkout untrusted ({kind} filed)", EXIT_FAILED
         return f"FAILED to {decision.action}", EXIT_FAILED
     key = fix_ledger.decision_key(decision)
-    fix_ledger.record(ctx.ledger_path, key, decision.note, ctx.now, problem=problem)
+    fix_ledger.record(
+        ctx.ledger_path,
+        key,
+        decision.note,
+        ctx.now,
+        problem=problem,
+        source=fix_budget.source(decision),
+    )
     return decision.action + (f" at effort {effort}" if effort else ""), EXIT_OK
+
+
+class _Tee(io.TextIOBase):
+    """A stream that keeps what is written to it and passes it on, when there is an on."""
+
+    def __init__(self, on, kept: io.StringIO) -> None:
+        self.on, self.kept = on, kept
+
+    def write(self, text: str) -> int:
+        self.kept.write(text)
+        if self.on is not None:  # None under `pythonw.exe`, which the scheduled pass is
+            self.on.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        if self.on is not None:
+            self.on.flush()
+
+
+def saying(fn: Callable[..., Said], *args) -> tuple[Said, str]:
+    """`(fn(*args), what it printed to either stream)`; the printing still happens."""
+    kept = io.StringIO()
+    with redirect_stdout(_Tee(sys.stdout, kept)), redirect_stderr(_Tee(sys.stderr, kept)):
+        code = fn(*args)
+    return code, kept.getvalue()

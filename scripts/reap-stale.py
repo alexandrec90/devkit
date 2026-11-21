@@ -26,7 +26,7 @@ restart, not this job's to stop; a dev server whose ancestry reaches a living ed
 terminal or agent is owned however old it is. The settings live beside
 `devkit.remoteControl` in the workspace file:
 
-    "devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true}
+    "devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true, "dockerClis": true}
 
 Stdlib only, and every decision is an importable function tested in
 `tests/test_reap_stale.py`.
@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
+import elevated_writes
 import rc_config
 import rc_machine
 import reap_machine
@@ -73,20 +74,31 @@ SETTING = "devkit.reapStale"
 # that resumes every session, this one gates a stop that does not.
 DEFAULT_SESSION_IDLE_MINUTES = 120
 
+# Each way a pass fails, as a marker its line carries and the kind `cause_line` names it
+# by; `session_trees` owns the kinds of its own removals. First marker wins per line.
+NO_TABLE = "the process table could not be read"
+STOP_REFUSED = "could not stop"
+FAILURE_KINDS = {
+    NO_TABLE: NO_TABLE,
+    f"-- {STOP_REFUSED}:": "a process tree could not be stopped",
+    **session_trees.FAILURE_KINDS,
+}
+
 
 @dataclass(frozen=True)
 class Settings:
     session_idle_minutes: int = DEFAULT_SESSION_IDLE_MINUTES
     dev_servers: bool = True
     dev_server_pattern: str = reap_machine.DEV_SERVER_PATTERN
+    docker_clis: bool = True
 
 
 def parse_settings(text: str) -> Settings:
     """Read `SETTING` out of a workspace file, defaults for anything missing or malformed.
 
     Same leniency as `rc_config.parse_config`, for its reason: a scheduled task whose
-    stdout goes nowhere must not crash on a hand-edited file. `devServers` is a bare
-    bool only, so a string cannot switch a reap on.
+    stdout goes nowhere must not crash on a hand-edited file. `devServers` and
+    `dockerClis` are bare bools only, so a string cannot switch a reap off.
     """
     try:
         payload = devkit_jsonc.loads(text)
@@ -108,6 +120,7 @@ def parse_settings(text: str) -> Settings:
         dev_server_pattern=(
             pattern if isinstance(pattern, str) and pattern else reap_machine.DEV_SERVER_PATTERN
         ),
+        docker_clis=raw.get("dockerClis") is not False,
     )
 
 
@@ -214,6 +227,20 @@ def assess_dev_servers(plan: Plan) -> list[Finding]:
     return findings
 
 
+def assess_docker_clis(plan: Plan) -> list[Finding]:
+    """Orphaned docker CLIs past their minimum age, every one reapable, as dev servers are."""
+    if not plan.settings.docker_clis:
+        return []
+    findings = []
+    for row in reap_machine.docker_clis(plan.table, plan.now):
+        argv = reap_machine.argv_of(row.cmdline)
+        shown = " ".join([row.name, *(token.strip('"') for token in argv[1:5])])
+        minutes = int((plan.now - row.created) // 60)
+        label = f"docker cli pid {row.pid} `{shown}`"
+        findings.append(Finding(row, label, f"no living owner above it, {minutes} min old", True))
+    return findings
+
+
 def assess(plan: Plan) -> list[Finding]:
     """Every finding, sessions first so a stray's verdict can read theirs.
 
@@ -221,7 +248,12 @@ def assess(plan: Plan) -> list[Finding]:
     twice: `act` skips a row whose ancestor is also on the list.
     """
     session_findings = assess_sessions(plan)
-    return [*session_findings, *assess_strays(plan, session_findings), *assess_dev_servers(plan)]
+    return [
+        *session_findings,
+        *assess_strays(plan, session_findings),
+        *assess_dev_servers(plan),
+        *assess_docker_clis(plan),
+    ]
 
 
 # --- acting ----------------------------------------------------------------------
@@ -258,7 +290,7 @@ def act(
             continue
         error = stop(finding.row.pid)
         if error:
-            report.fail(f"{finding.label}: {finding.reason} -- could not stop: {error}")
+            report.fail(f"{finding.label}: {finding.reason} -- {STOP_REFUSED}: {error}")
             continue
         stopped += 1
         report.say(f"{finding.label}: {finding.reason} -- reaped")
@@ -290,9 +322,31 @@ def describe(findings: Sequence[Finding], report: Pass) -> None:
 # --- the artifact ------------------------------------------------------------------
 
 
+def cause_line(lines: Sequence[str], failures: int) -> str:
+    """A failed pass's last line: `error: ` and each kind of failure its `lines` name,
+    once each, in `FAILURE_KINDS` order. `""` for a pass that did not fail.
+
+    `log-wrap.py` files a scheduled job's `cause=` from an `error:` line, and from the
+    last line printed when there is none. Here that was a failure naming its tree and
+    the file the filesystem refused, and the fold keeps a basename: one reap defect on
+    two trees, `arrow.dll` and `_greenlet.pyd`, filed two ledger groups and sent a fixer
+    at a defect whose fix was in review (9d0f1476). The kinds name neither, and the
+    artifact above them keeps both.
+    """
+    if not failures:
+        return ""
+    found = {
+        next((kind for marker, kind in FAILURE_KINDS.items() if marker in line), "")
+        for line in lines
+    }
+    kinds = [kind for kind in dict.fromkeys(FAILURE_KINDS.values()) if kind in found]
+    return "error: " + ("; ".join(kinds) or "reap-stale failed")
+
+
 def render(lines: Sequence[str], failures: int, when: _dt.datetime, mode: str) -> str:
     head = f"# reap-stale {when.isoformat(timespec='seconds')} [{mode}] -- {failures} failure(s)"
-    return "\n".join([head, *lines, ""])
+    cause = cause_line(lines, failures)
+    return "\n".join([head, *lines, *([cause] if cause else []), ""])
 
 
 def write_artifact(text: str, root: Path = REPO_ROOT) -> None:
@@ -366,9 +420,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(text, end="")
         return code
 
-    table = reap_machine.process_table()
+    table, why = reap_machine.read_table()
     if table is None:
-        report.fail("the process table could not be read -- nothing assessed")
+        report.fail(f"{NO_TABLE} ({why}) -- nothing assessed")
         return finish(2)
 
     plan = build_plan(table, Path(workspace) if workspace else None, root, report)
@@ -383,6 +437,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         report.say(f"stopped {stopped} process tree(s)")
     if workspace and Path(workspace).is_file():
         report.failures += session_trees.sweep_workspace(Path(workspace), apply, report.say)
+        # Filed on the ledger once each, not counted: an administrator clears it, and
+        # a failure every run would send a fixer at it every run.
+        elevated_writes.check(Path(workspace), root, apply, report.say)
     return finish(2 if report.failures else 0)
 
 

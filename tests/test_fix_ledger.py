@@ -60,6 +60,79 @@ def test_a_nightly_read_at_its_bases_tip_is_keyed_there():
     )
 
 
+def test_a_medium_red_stays_under_one_key_as_the_tip_moves():
+    """Every merge after the first sighting would otherwise be a new key, and a second
+    session sent while the first still works."""
+    fields = {
+        "kind": fix_plan.LOCAL,
+        "number": 0,
+        "workflow": fix_plan.MEDIUM_TIER,
+        "sha": "run",
+        "first_seen": "first",
+    }
+    one, two = (fix_ledger.failure_key(failure(**fields, tip=tip)) for tip in ("t1", "t2"))
+    assert one == two
+    assert one.startswith(f"local:carameli:{fix_ledger.MEDIUM_TARGET}:first:")
+
+
+def _medium_decision(*signature: str) -> fix_plan.Decision:
+    red = failure(
+        kind=fix_plan.LOCAL,
+        number=0,
+        workflow=fix_plan.MEDIUM_TIER,
+        sha="s",
+        signature=signature,
+    )
+    return fix_plan.Decision(fix_plan.DISPATCH, "n", (red,))
+
+
+def test_a_project_s_open_medium_session_is_found_whatever_its_signature():
+    now = _dt.datetime(2026, 11, 6, 12, 0, tzinfo=_dt.UTC)
+    first = _medium_decision("t::x")
+    ledger = {fix_ledger.decision_key(first): {"when": now.isoformat(), "sent": 1}}
+    wider = _medium_decision("t::x", "t::flaky")
+    assert fix_ledger.open_medium_session(wider, ledger, now) == now.isoformat()
+    later = now + fix_ledger.RESEND_AFTER
+    assert fix_ledger.open_medium_session(wider, ledger, later) == ""
+    blocked = {key: {**entry, "blocked": "no"} for key, entry in ledger.items()}
+    assert fix_ledger.open_medium_session(wider, blocked, now) == ""
+    pr = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    assert fix_ledger.open_medium_session(pr, ledger, now) == ""
+
+
+def test_a_local_e2e_red_keeps_its_key_shape():
+    key = fix_ledger.failure_key(
+        failure(kind=fix_plan.LOCAL, number=0, workflow="Local E2E", sha="s", tip="t")
+    )
+    assert key.startswith("local:carameli:0:t:")
+
+
+def test_a_refused_commit_is_keyed_by_its_branch_so_each_tree_is_its_own_problem(tmp_path):
+    """787d0750: every refused commit was target `0`, so social-scraper's
+    happy-drifting-sprout, refused by detect-secrets, was filed fixers-exhausted with no
+    fixer ever sent at it -- the two attempts had gone to other trees' detect-secrets
+    refusals. A retry of one tree's intent is still the same problem."""
+
+    def refused(branch: str, digest: str) -> fix_plan.Decision:
+        fields = {"kind": fix_plan.COMMIT, "number": 0, "head": branch, "sha": digest}
+        sig = ("fixers refused: Detect secrets....Failed",)
+        return fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(**fields, signature=sig),))
+
+    path = tmp_path / "dispatch.json"
+    for branch, digest in (("worktree-a", "64e09c"), ("worktree-b", "9f0312")):
+        sent = refused(branch, digest)
+        fix_ledger.record(
+            path, fix_ledger.decision_key(sent), "n", NOW, fix_ledger.problem_key(sent)
+        )
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.attempts(refused("worktree-happy-drifting-sprout", "9fbc9e"), ledger) == 0
+    assert fix_ledger.attempts(refused("worktree-a", "rewritten"), ledger) == 1
+    assert fix_ledger.failure_key(refused("worktree-a", "64e09c").failures[0]).startswith(
+        "commit:carameli:worktree-a:64e09c:"
+    )
+    assert fix_ledger.target(failure()) == "412", "a PR is still its number"
+
+
 def test_a_key_says_which_kind_of_failure_it_names():
     assert fix_ledger.key_kind(fix_ledger.failure_key(failure())) == fix_plan.PR
     assert fix_ledger.key_kind("ledger:devkit:0:abc:def") == fix_plan.LEDGER
@@ -117,6 +190,37 @@ def test_the_ledger_records_and_answers_the_second_click(tmp_path):
     assert ledger[fix_ledger.decision_key(decision)]["what"] == "1 check failing"
 
 
+def test_a_sourced_entry_keeps_every_send_and_a_day_counts_them_all(tmp_path):
+    """`when` is only the newest send: a key re-sent after `RESEND_AFTER` is two sends in
+    one day, and a daily cap that read `when` would count it once."""
+    path = tmp_path / "dispatch.json"
+    for hours in (30, 7, 1):
+        stamp = NOW - _dt.timedelta(hours=hours)
+        fix_ledger.record(path, "dependabot:a:0:?:d:dispatch", "n", stamp, source="dependabot")
+    fix_ledger.record(path, "pr:b:1:s:d:dispatch", "n", NOW)
+    ledger = fix_ledger.read_ledger(path)
+    entry = ledger["dependabot:a:0:?:d:dispatch"]
+    assert entry["sent"] == 3 and entry["source"] == "dependabot" and len(entry["at"]) == 3
+    assert "source" not in ledger["pr:b:1:s:d:dispatch"], "an unsourced entry is as before"
+    day_ago = NOW - _dt.timedelta(hours=24)
+    assert fix_ledger.sent_since(ledger, "dependabot", day_ago) == 2
+    assert fix_ledger.sent_since(ledger, "other", day_ago) == 0
+    for _ in range(fix_ledger.AT_KEEP + 2):
+        fix_ledger.record(path, "dependabot:a:0:?:d:dispatch", "n", NOW, source="dependabot")
+    kept = fix_ledger.read_ledger(path)["dependabot:a:0:?:d:dispatch"]["at"]
+    assert len(kept) == fix_ledger.AT_KEEP
+
+
+def test_a_free_action_stamped_under_a_source_is_not_counted_as_a_session(tmp_path):
+    """Before `fix_budget.source` left them unsourced, branch updates were stamped as
+    Dependabot sends; a ledger that still holds them must not spend the cap on them."""
+    path = tmp_path / "dispatch.json"
+    for action in (*fix_plan.NO_SESSION, fix_plan.RESOLVE):
+        fix_ledger.record(path, f"pr:c:446:s:d:{action}", "n", NOW, source="dependabot")
+    since = NOW - _dt.timedelta(hours=24)
+    assert fix_ledger.sent_since(fix_ledger.read_ledger(path), "dependabot", since) == 1
+
+
 def test_a_corrupt_ledger_is_empty_rather_than_a_traceback(tmp_path):
     path = tmp_path / "dispatch.json"
     path.write_text("{not json", encoding="utf-8")
@@ -154,6 +258,33 @@ def test_attempts_count_every_commit_of_one_problem(tmp_path):
     assert fix_ledger.attempts(later, ledger) == 2
     unrelated = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=9),))
     assert fix_ledger.attempts(unrelated, ledger) == 0
+
+
+def test_a_refused_intent_is_its_trees_problem_not_its_projects(tmp_path):
+    """A refused COMMIT is keyed by its branch (`target`), so every refusal one hook
+    gives a project is not one problem: social-scraper's intent of 10-08 was escalated
+    as "2 fixer session(s) left it red and unchanged" on the strength of two sessions
+    sent at other intents, in other trees, on 10-03 and 10-05 -- and none at it. The
+    same holds for an entry whose problem is derived from its key."""
+    path = tmp_path / "dispatch.json"
+    refused = ("commit stage refused at fixers: fixers refused: Detect secrets....Failed",)
+
+    def intent(tree: str) -> fix_plan.Decision:
+        fields = {"kind": fix_plan.COMMIT, "number": 0, "head": tree, "sha": f"{tree}-digest"}
+        return fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(**fields, signature=refused),))
+
+    for tree in ("worktree-a", "worktree-b"):
+        earlier = intent(tree)
+        fix_ledger.record(
+            path, fix_ledger.decision_key(earlier), "n", NOW, fix_ledger.problem_key(earlier)
+        )
+    ledger = fix_ledger.read_ledger(path)
+    new = intent("worktree-c")
+    assert fix_ledger.attempts(new, ledger) == 0
+    assert fix_ledger.attempts(earlier, ledger) == 1, "each intent still counts its own"
+    unrecorded = {k: {"when": v["when"], "sent": v["sent"]} for k, v in ledger.items()}
+    assert fix_ledger.attempts(new, unrecorded) == 0, "nor when derived from the key"
+    assert fix_ledger.problem_of(fix_ledger.decision_key(new), {}) == fix_ledger.problem_key(new)
 
 
 def test_a_blocked_report_stands_after_the_sha_moves(tmp_path):
@@ -209,6 +340,45 @@ def test_a_dead_session_frees_its_key_at_once_and_is_marked_once(tmp_path):
     assert fix_ledger.already_sent(decision, fix_ledger.read_ledger(path), NOW) == ""
 
 
+def test_a_session_a_restart_took_frees_its_key_and_spends_no_attempt(tmp_path):
+    """#480 and #482's resolvers died in a power-off, and the send each had counted as
+    its conflict's one blind attempt: both PRs were escalated with nobody having tried."""
+    path = tmp_path / "dispatch.json"
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    key = fix_ledger.decision_key(decision)
+    fix_ledger.record(path, key, "n", NOW)
+    fix_ledger.record(path, key, "n", NOW)
+    assert fix_ledger.mark_interrupted(path, key, "stopped by a restart")
+    assert not fix_ledger.mark_interrupted(path, key, "stopped by a restart"), "one verdict"
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.already_sent(decision, ledger, NOW) == ""
+    assert fix_ledger.attempts(decision, ledger) == 1, "the first send still counts"
+    fix_ledger.record(path, key, "n", NOW)
+    assert fix_ledger.attempts(decision, fix_ledger.read_ledger(path)) == 2
+    assert not fix_ledger.mark_interrupted(path, "never-sent", "stopped by a restart")
+
+
+def test_a_send_taken_back_comes_off_the_daily_cap_too(tmp_path):
+    """social-scraper #90 and #91's fixers were both refused at login on 2026-10-18: their
+    sends came back to `attempts` but stayed in `sent_since`, and the Dependabot cap held
+    both PRs -- every Dependabot red on the machine -- for the rest of the day."""
+    path = tmp_path / "dispatch.json"
+    decision = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    key = fix_ledger.decision_key(decision)
+    day = NOW - _dt.timedelta(hours=24)
+    fix_ledger.record(path, key, "n", NOW - _dt.timedelta(hours=8), source=fix_plan.DEPENDABOT)
+    fix_ledger.record(path, key, "n", NOW, source=fix_plan.DEPENDABOT)
+    assert fix_ledger.sent_since(fix_ledger.read_ledger(path), fix_plan.DEPENDABOT, day) == 2
+    assert fix_ledger.mark_interrupted(path, key, "logged out")
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.sent_since(ledger, fix_plan.DEPENDABOT, day) == 1, "the earlier send stands"
+    assert fix_ledger.sends(ledger[key]) == 1
+    unsourced = "pr:carameli:7:abc:d:dispatch"
+    fix_ledger.record(path, unsourced, "n", NOW)
+    assert fix_ledger.mark_interrupted(path, unsourced, "logged out"), "no `at` to take from"
+    assert "at" not in fix_ledger.read_ledger(path)[unsourced]
+
+
 def test_since_makes_everything_before_a_resolved_escalation_history(tmp_path):
     """Once the devkit session resolves what a problem was escalated as, the problem
     starts over: its sessions, its block and its in-flight entry are all before it."""
@@ -226,6 +396,23 @@ def test_since_makes_everything_before_a_resolved_escalation_history(tmp_path):
     assert fix_ledger.already_sent(decision, ledger, NOW, resolved) == ""
     before = (NOW - _dt.timedelta(hours=1)).isoformat(timespec="seconds")
     assert fix_ledger.attempts(decision, ledger, before) == 1, "only what came before it"
+
+
+def test_a_wait_is_remembered_per_problem_newest_first_and_is_not_a_block(tmp_path):
+    path = tmp_path / "dispatch.json"
+    first = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="a1"),))
+    later = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(sha="b2"),))
+    assert not fix_ledger.mark_waiting(path, fix_ledger.decision_key(first), "u/1")
+    fix_ledger.record(path, fix_ledger.decision_key(first), "n", NOW)
+    fix_ledger.record(path, fix_ledger.decision_key(later), "n", NOW + _dt.timedelta(hours=1))
+    assert fix_ledger.waiting_on(later, fix_ledger.read_ledger(path)) == ""
+    assert fix_ledger.mark_waiting(path, fix_ledger.decision_key(first), "u/1")
+    assert fix_ledger.mark_waiting(path, fix_ledger.decision_key(later), "u/2")
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.waiting_on(first, ledger) == "u/2", "the newest session's word"
+    assert fix_ledger.blocked_reason(first, ledger) == ""
+    resolved = (NOW + _dt.timedelta(hours=2)).isoformat(timespec="seconds")
+    assert fix_ledger.waiting_on(first, ledger, resolved) == ""
 
 
 def test_a_blocked_dispatch_is_remembered_with_its_reason_until_its_escalation_resolves(tmp_path):

@@ -12,25 +12,30 @@ split into the ones every installer owes and the ones only a job does.
 
 So the properties are asserted for every installer at once, found rather than listed:
 
-1. `installers.py` discovers it, so the scheduled pass reaches it.
+1. `installers.py` discovers it, so the scheduled pass reaches it -- bar the one in
+   `ELEVATED_EXEMPTION`, which no unelevated pass can install.
 2. It answers `--check` and `--yes`, and `--check` answers 1 when nothing is registered.
 3. If it registers a job, it says which group that job belongs to, it checks through the
    one shared implementation, and it consults the ledger so a stood-down job lands
    disabled.
 4. `harness-switch.py`'s list of delivery jobs is exactly the installers that say so.
 5. The README's jobs table names it.
+6. Its task runs under `log-wrap.py --always`, so every failure lands on the
+   harness-events ledger -- or it is in `OFF_THE_LEDGER` with the reason.
 """
 
 from __future__ import annotations
 
 import inspect
 import re
+from xml.sax.saxutils import unescape
 
 import pytest
-from support import REPO_ROOT, load_script
+from support import ELEVATED_EXEMPTION, REPO_ROOT, load_script
 
 installers = load_script("scripts/installers.py")
 switch = load_script("scripts/harness-switch.py")
+log_wrap = load_script("scripts/log-wrap.py")
 
 INSTALLERS = sorted(REPO_ROOT.glob("scripts/install-*.py"))
 MODULES = [(path.name, load_script(f"scripts/{path.name}")) for path in INSTALLERS]
@@ -47,14 +52,22 @@ def source_of(name: str) -> str:
 
 def test_there_are_installers_to_hold_to_this():
     assert len(MODULES) >= 10, IDS
-    scheduleless = {"install-git-policy.py", "install-wt-profile.py"}
+    scheduleless = {"install-agent-env.py", "install-git-policy.py", "install-wt-profile.py"}
     assert {name for name, module in MODULES if not getattr(module, "TASK_NAME", "")} == (
         scheduleless
     ), "an installer that registers no job is a deliberate exception; name it here"
 
 
 def test_every_installer_is_discovered_by_the_pass():
-    assert [p.name for p in installers.discover(REPO_ROOT)] == IDS
+    """Every one but `ELEVATED_EXEMPTION`, which needs an administrator this pass is not."""
+    assert [p.name for p in installers.discover(REPO_ROOT)] == [
+        name for name in IDS if name not in ELEVATED_EXEMPTION
+    ]
+
+
+def test_the_pass_holds_out_exactly_the_elevated_exemption():
+    assert installers.HELD_OUT == set(ELEVATED_EXEMPTION)
+    assert all(reason.strip() for reason in ELEVATED_EXEMPTION.values())
 
 
 @pytest.mark.parametrize("name", IDS)
@@ -184,6 +197,130 @@ def test_every_job_is_registrable_without_elevation(name, module, monkeypatch):
     assert "<BootTrigger>" not in registered, name
     for trigger in re.findall(r"<LogonTrigger>.*?</LogonTrigger>", registered, re.S):
         assert "<UserId>" in trigger, name
+    # A principal at the highest level is the third shape only an administrator may
+    # register. This installer is the one exemption, and its reason is beside its name.
+    assert ("<RunLevel>HighestAvailable" in registered) == (name in ELEVATED_EXEMPTION), name
+
+
+def test_only_the_exempt_installer_can_spell_an_elevated_task():
+    """Read off every script rather than off what each `--check` happens to build, so a
+    helper that gained the spelling, or a task built some other way, fails here too."""
+    spelled = {
+        path.name
+        for path in (REPO_ROOT / "scripts").rglob("*.py")
+        if "HighestAvailable" in path.read_text(encoding="utf-8")
+    }
+    assert spelled == set(ELEVATED_EXEMPTION)
+
+
+# --- every failure of every job reaches the ledger ------------------------------------
+#
+# Four jobs ran under `log-wrap.py --always`, which files a `scheduled-job-failed` event
+# per failed run; the other eight were seen only through `fix_loop.job_findings`, which
+# reads the scheduler's *current* `Last Result` once per fix pass. A failure the next run
+# overwrote was lost: `logs/reconcile.failed.log` held a 2026-10-02 exit-1 reconcile
+# that never reached the ledger. Read off the document each installer's own `--check`
+# hands the shared check, so the wrapping is asserted where it is registered.
+
+# A job whose task is not wrapped, and why. The reason is the whole exemption.
+OFF_THE_LEDGER: dict[str, str] = {
+    "devkit-tray": (
+        "resident, not a pass: it starts at logon and runs until logoff, so the wrapper "
+        "would hold everything it prints in memory for the whole session and could report "
+        "only once it exits. Its one failure with no other signal -- not starting -- is "
+        "what tray.py writes logs/tray.log for, and schedule_health reads its Last Result"
+    ),
+    "devkit-fix-pass": (
+        "files its own: the pass files every step that fails, and the watchdog files a "
+        "pass that crashed, hung or ran stale (file_once). It exits non-zero mostly for "
+        "outcomes already on the ledger, so a wrapper filed each a second time under a "
+        "generic group. Its own crash, the one thing neither files, is a failed run of an "
+        "unwrapped job, which fix_loop.job_findings files off the scheduler"
+    ),
+    "devkit-elevated": (
+        "runs nothing from a checkout, as support.ELEVATED_EXEMPTION says, and log-wrap.py "
+        "is checkout code. A failed or refused run goes in the worker's results file, which "
+        "fix_elevated.py files from every pass, so it outlasts the exit code the next fire "
+        "overwrites"
+    ),
+}
+
+LEDGER_WRAPPED = re.compile(
+    r'^"(?P<wrapper>[^"]*[\\/]scripts[\\/]log-wrap\.py)"\s+--always\s+"(?P<label>[^"]+)"'
+    r'\s+--\s+"(?P<python>[^"]+)"\s+\S'
+)
+
+
+def checked_document(module, monkeypatch) -> str:
+    """The task document `module`'s `--check` hands the shared check, with the scheduler
+    kept out of it (see `test_every_job_is_registrable_without_elevation`)."""
+    monkeypatch.setattr(module, "WINDOWS", True)
+    monkeypatch.setattr(module.subprocess, "run", _never_spawn)
+    seen: dict[str, str] = {}
+
+    def run_check(task_name, document, run):
+        seen["document"] = document
+        return 1, "not current"
+
+    monkeypatch.setattr(module.devkit_schtasks, "run_check", run_check)
+    kwargs = (
+        {"runner": _never_spawn} if "runner" in inspect.signature(module.main).parameters else {}
+    )
+    module.main(["--check"], **kwargs)
+    return seen["document"]
+
+
+def _slashed(path: str) -> str:
+    """A Windows path compared the way the scheduler compares it: case and separator
+    blind. The documents are built on CI's Linux runner too."""
+    return path.replace("\\", "/").rstrip("/").lower()
+
+
+@pytest.mark.parametrize(("name", "module"), JOBS, ids=JOB_IDS)
+def test_every_job_files_each_failure_on_the_ledger(name, module, monkeypatch):
+    document = checked_document(module, monkeypatch)
+    registered = module.devkit_schtasks.parse_task(document)
+    assert registered is not None, name
+    wrapped = LEDGER_WRAPPED.match(registered.arguments)
+    if module.TASK_NAME in OFF_THE_LEDGER:
+        assert wrapped is None, f"{name} is wrapped now; drop its OFF_THE_LEDGER entry"
+        assert OFF_THE_LEDGER[module.TASK_NAME].strip()
+        return
+    assert wrapped, (
+        f"{name} registers `{registered.arguments}`, which is not run under "
+        f"`log-wrap.py --always`: a failed run is then recorded nowhere but the "
+        f"scheduler's Last Result, which the next run overwrites. Build the arguments "
+        f"with devkit_schtasks.logged, or add the job to OFF_THE_LEDGER with the reason."
+    )
+    assert not wrapped["python"].lower().endswith("pythonw.exe"), (
+        f"{name} wraps a pythonw.exe; log-wrap spawns it with CREATE_NO_WINDOW, which "
+        f"Windows ignores for a GUI-subsystem child (scripts/windowless-jobs.md)"
+    )
+    # `log-wrap.py` resolves `logs/` -- the artifact the ledger row names -- from the cwd,
+    # and a task with no `<WorkingDirectory>` starts in `system32`.
+    working = re.search(r"<WorkingDirectory>(.*?)</WorkingDirectory>", document, re.S)
+    assert working, f"{name} has no <WorkingDirectory>, so log-wrap writes into system32"
+    checkout = _slashed(wrapped["wrapper"]).removesuffix("/scripts/log-wrap.py")
+    assert _slashed(unescape(working.group(1))) == checkout, name
+
+
+def test_no_two_jobs_wrap_into_one_artifact(monkeypatch):
+    """`log-wrap.py` names its files after the label. Two jobs sharing one would overwrite
+    each other's kept failure, and a label slugging to a runner's own artifact would
+    replace that runner's account of its run with the captured console."""
+    artifacts = {module.ARTIFACT for _name, module in JOBS}
+    seen: dict[str, str] = {}
+    for name, module in JOBS:
+        registered = module.devkit_schtasks.parse_task(checked_document(module, monkeypatch))
+        wrapped = LEDGER_WRAPPED.match(registered.arguments)
+        if wrapped is None:
+            continue
+        written = f"logs/{log_wrap.slug(wrapped['label'])}.log"
+        assert written not in seen, f"{name} and {seen.get(written)} both write {written}"
+        seen[written] = name
+        assert written == module.ARTIFACT or written not in artifacts, (
+            f"{name}'s wrapper writes {written}, which another job's runner owns"
+        )
 
 
 @pytest.mark.parametrize(("name", "module"), JOBS, ids=JOB_IDS)

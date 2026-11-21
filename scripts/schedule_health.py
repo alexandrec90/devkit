@@ -86,6 +86,8 @@ NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # `schtasks` writes this when a task has never run. It is not a date to reason about.
 NEVER = "N/A"
+# `Schedule Type` values of a trigger that fires on an event rather than a clock.
+EVENT_TRIGGERS = frozenset({"At logon time", "At system start up", "On event", "At idle time"})
 
 # The other spelling of "never ran", and the one that actually turned up: Windows fills
 # both fields with sentinels rather than leaving them empty. `11/30/1999` is the epoch
@@ -115,6 +117,14 @@ SCHED_REFUSED_ALREADY_RUNNING_UNSIGNED = 2147946720  # the same bits, unsigned
 OVERLAPPING = frozenset({SCHED_REFUSED_ALREADY_RUNNING, SCHED_REFUSED_ALREADY_RUNNING_UNSIGNED})
 
 NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) | OVERLAPPING
+
+# A job that fires every two minutes outlives one fire whenever a ship takes its time, and
+# the fire it skips loses nothing: the running one, or the next, ships what is there.
+# Saying "its runs are overlapping" would file a finding over the schedule working.
+# `devkit-medium-tier` is the same by design: a pass works through every project origin
+# moved past, for up to `tier-pass.DEFAULT_PASS_MINUTES`, on a 15-minute cadence, and the
+# next pass reads every tip again (74329698 filed its 12:15 skip as a defect).
+OVERLAP_EXPECTED = frozenset({"devkit-ship", "devkit-medium-tier"})
 
 # How many intervals a job may miss before it is worth a line. One is noise: a laptop
 # asleep at 04:00 misses a daily run and catches it the next night, which is the system
@@ -147,7 +157,83 @@ ARTIFACTS: dict[str, str] = {
     "devkit-workspace-status": "logs/scheduled-workspace-status.log",
     "devkit-installers": "logs/installers.log",
     "devkit-fix-pass": "logs/fix-pass.log",
+    "devkit-ship": "logs/ship-pass.log",
+    "devkit-collectors": "logs/collectors.log",
+    "devkit-local-e2e": "logs/scheduled-local-e2e.log",
+    "devkit-medium-tier": "logs/scheduled-medium-tier.log",
+    "devkit-after-merge": "logs/scheduled-after-merge.log",
+    # Absolute, the one job here that may not write in a checkout (`elevated_worker.py`).
+    "devkit-elevated": "C:/ProgramData/devkit/elevated/worker.log",
 }
+
+
+# A job that keeps the step its run is in *now*, beside a per-run artifact it writes only
+# once the run ends (`reconcile_journal.RUNNING`). When that artifact is an earlier run's,
+# this is the one file that says where the run in question was: 1f44005c's sweep had
+# "an earlier run's account" and nothing else to read about the 00:30 pass.
+IN_FLIGHT: dict[str, str] = {
+    "devkit-worktree-reconcile": "logs/reconcile.running.json",
+}
+
+
+def in_flight_hint(name: str, root: Path, in_flight: dict[str, str] | None = None) -> str:
+    """`"; see <marker> ..."` when `name` keeps an in-flight marker and one is on disk."""
+    path = (IN_FLIGHT if in_flight is None else in_flight).get(name, "")
+    if not path or not (root / path).is_file():
+        return ""
+    return f"; see {path} for the step a pass still running, or one that died, was last in"
+
+
+def failure_artifact(
+    name: str,
+    artifacts: dict[str, str] | None = None,
+    root: Path | None = None,
+    since: _dt.datetime | None = None,
+) -> str:
+    """The artifact to cite for `name`'s run at `since`: its `.failed` copy when that run
+    wrote one, else the per-run artifact ("" for a job with none).
+
+    The per-run artifact belongs to whichever pass ran last, and a job that fails once and
+    passes fifteen minutes later has erased the only account of the failure before any
+    sweep reads it -- 3a8c74a3 was `devkit-worktree-reconcile` failing at 22:30, filed
+    pointing at `logs/reconcile.log`, and read beside the next pass's `exit=0`. `log-wrap.py`
+    and `worktree.write_reconcile_log` keep `<stem>.failed.log` for exactly this, written
+    only on a failure; a copy older than `since` is an earlier failure's, not this one's.
+    """
+    path = (ARTIFACTS if artifacts is None else artifacts).get(name, "")
+    if not path.endswith(".log"):
+        return path
+    kept = path[: -len(".log")] + ".failed.log"
+    target = (REPO_ROOT if root is None else root) / kept
+    try:
+        written = _dt.datetime.fromtimestamp(target.stat().st_mtime)
+    except OSError:
+        return path
+    return kept if since is None or written >= since else path
+
+
+def run_artifact(
+    name: str,
+    artifacts: dict[str, str] | None = None,
+    root: Path | None = None,
+    since: _dt.datetime | None = None,
+) -> str:
+    """`failure_artifact`'s choice when the file there is the account of the run at
+    `since` -- present, not empty, and written no earlier than it -- else "".
+
+    What a finding may cite as evidence: `artifact_hint` tells a reader in words that a
+    file is missing, empty or an earlier run's, but a ledger `evidence=` is read as the
+    run's own account by whoever triages it.
+    """
+    path = failure_artifact(name, artifacts, root, since)
+    if not path:
+        return ""
+    try:
+        stat = ((REPO_ROOT if root is None else root) / path).stat()
+    except OSError:
+        return ""
+    written = _dt.datetime.fromtimestamp(stat.st_mtime)
+    return path if stat.st_size and (since is None or written >= since) else ""
 
 
 def artifact_hint(
@@ -191,8 +277,17 @@ def artifact_hint(
     *scheduled* result, which a hand-run pass never updates. Not newer -- or unknown --
     means the run itself recorded nothing, and the job's own console output is the only
     remaining place to look.
+
+    The pointer names `failure_artifact`'s choice, so a run that kept a `.failed` copy is
+    read from that rather than from the pass that overwrote it.
+
+    **A full artifact written before `since` is an earlier run's**, and `see` would send
+    the reader to it as this run's account. 631737a8 was that: social-scraper's 13:30
+    fire was skipped because the 13:00 run was still going, and two minutes later the
+    pointer named the log the 12:30 run had left -- the 13:00 run writes only once it
+    ends, which is after the fire it overlapped.
     """
-    path = (ARTIFACTS if artifacts is None else artifacts).get(name, "")
+    path = failure_artifact(name, artifacts, root, since)
     if not path:
         return ""
     base = REPO_ROOT if root is None else root
@@ -202,8 +297,13 @@ def artifact_hint(
         written = _dt.datetime.fromtimestamp(target.stat().st_mtime)
     except OSError:
         return f" -- no {path}: the run predates it, or died before writing one"
-    if size:
+    if size and (since is None or written >= since):
         return f" -- see {path}"
+    if size:
+        return (
+            f" -- {path} was last written {written:%Y-%m-%d %H:%M}, before this run: an "
+            f"earlier run's account, so this one had not finished or died before writing"
+        ) + in_flight_hint(name, base)
     if since is not None and written > since:
         return (
             f" -- {path} is empty and was rewritten {written:%Y-%m-%d %H:%M}, after this "
@@ -222,6 +322,9 @@ class Job:
     last_run: _dt.datetime | None = None
     next_run: _dt.datetime | None = None
     command: str = ""
+    # Every trigger is an event (logon, boot), none a clock: no next run time ever, so a
+    # first run not yet made is the event not yet happened, not a run missed.
+    event_only: bool = False
 
     @property
     def interpreter(self) -> str:
@@ -287,8 +390,12 @@ def parse_time(raw: str) -> _dt.datetime | None:
     return None
 
 
-def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
-    """Every `prefix` job in `schtasks /Query /FO CSV /V` output.
+def parse_tasks(stdout: str, prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]:
+    """Every `prefix` job in `schtasks /Query /FO CSV /V` output, plus any named in `also`.
+
+    `also` is how the tray asks about the scheduled collectors in the same query: they
+    are named after their project, not `devkit-`, because they are not devkit's jobs --
+    which is also why `report`, and the fix pass behind it, never pass it.
 
     The header repeats between tasks in some Windows builds, so rows whose values equal
     the column names are dropped -- without that, one phantom job per task appears with
@@ -310,7 +417,7 @@ def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
     merged: dict[str, Job] = {}
     for row in csv.DictReader(io.StringIO(stdout)):
         name = (row.get("TaskName") or "").lstrip("\\")
-        if not name.startswith(prefix) or name == "TaskName":
+        if not (name.startswith(prefix) or name in also) or name == "TaskName":
             continue
         raw_result = (row.get("Last Result") or "").strip()
         try:
@@ -324,14 +431,20 @@ def parse_tasks(stdout: str, prefix: str = PREFIX) -> list[Job]:
             last_run=parse_time(row.get("Last Run Time") or ""),
             next_run=parse_time(row.get("Next Run Time") or ""),
             command=(row.get("Task To Run") or "").strip(),
+            event_only=(row.get("Schedule Type") or "").strip() in EVENT_TRIGGERS,
         )
         seen = merged.get(name)
-        if seen is None:
-            merged[name] = job
-            continue
-        if job.next_run is not None and (seen.next_run is None or job.next_run < seen.next_run):
-            merged[name] = replace(seen, next_run=job.next_run)
+        merged[name] = job if seen is None else merge_triggers(seen, job)
     return list(merged.values())
+
+
+def merge_triggers(seen: Job, row: Job) -> Job:
+    """One task's rows, one per trigger, as one job: the earliest next run (see
+    `parse_tasks`), and event-only only when every trigger is an event."""
+    seen = replace(seen, event_only=seen.event_only and row.event_only)
+    if row.next_run is not None and (seen.next_run is None or row.next_run < seen.next_run):
+        seen = replace(seen, next_run=row.next_run)
+    return seen
 
 
 def virtualenv_interpreter(job: Job) -> Path | None:
@@ -393,6 +506,8 @@ def problems(
     jobs: list[Job],
     now: _dt.datetime | None = None,
     deliberate: frozenset[str] = frozenset(),
+    root: Path | None = None,
+    artifacts: dict[str, str] | None = None,
 ) -> list[str]:
     """One line per job that needs attention; [] when they are all healthy.
 
@@ -403,64 +518,83 @@ def problems(
     The registration check goes last for that reason and not because it matters least: a
     misregistered command is permanent, so it is still there to report next session,
     while a failing run is the thing that may not be.
+
+    `root` is the checkout whose `logs/` the jobs write, `REPO_ROOT` when None. A pass
+    run from a tree cut off that checkout passes it: 104d356c was filed from a
+    supervisor's tree as "no logs/reconcile.log" beside evidence naming the checkout's
+    own kept copy, because the hint stat'ed the tree's empty `logs/`.
+
+    `artifacts` replaces `ARTIFACTS` for the pointers, for a caller judging jobs that
+    table does not list -- the tray's scheduled collectors.
     """
     moment = now or _dt.datetime.now()
-    found: list[str] = []
-    for job in sorted(jobs, key=lambda item: item.name):
-        if not job.enabled:
-            if job.name in deliberate:
-                # Stood down through `harness-switch.py --off jobs`, which wrote the
-                # name to the ledger `deliberate` came from. A state someone chose is
-                # not a fault, and `--status` is where it is reported; saying it again
-                # here as a problem is what trains a reader to skim this whole block.
-                continue
-            found.append(f"{job.name}: disabled -- nothing is running it")
-            continue
-        if job.last_run is None:
-            # A job registered an hour ago and due tonight has never run and is
-            # perfectly healthy. Only a *missed* first run is worth a line, and the
-            # scheduler says which that is: its next run is already in the past.
-            if job.next_run is None or job.next_run < moment:
-                found.append(f"{job.name}: registered but has never run")
-            continue
-        if job.last_result in OVERLAPPING:
-            # Not a failure, but not silence either: a job whose pass outlives its own
-            # interval is running essentially continuously, and that background cost is
-            # invisible everywhere else.
-            found.append(
-                f"{job.name}: a run was still going at "
-                f"{job.last_run:%Y-%m-%d %H:%M}, so the scheduled fire was skipped -- "
-                f"its runs are overlapping"
-                f"{artifact_hint(job.name, since=job.last_run)}"
-            )
-            continue
-        if job.last_result not in NOT_A_FAILURE:
-            found.append(
-                f"{job.name}: last run failed (exit {job.last_result}) at "
-                f"{job.last_run:%Y-%m-%d %H:%M}"
-                f"{artifact_hint(job.name, since=job.last_run)}"
-            )
-            continue
-        interval = job.interval
-        if interval and moment - job.last_run > interval * STALE_INTERVALS:
-            missed = (moment - job.last_run) / interval
-            found.append(
-                f"{job.name}: has not run since {job.last_run:%Y-%m-%d %H:%M} "
-                f"({missed:.0f} intervals ago)"
-            )
-            continue
-        base = virtualenv_interpreter(job)
-        if base is not None:
-            found.append(
-                f"{job.name}: runs {job.interpreter}, a virtualenv stub that defers to "
-                f"{base} -- under uv it spawns that as a child, and Windows gives the "
-                f"child of a console-less task a visible console. Re-run the job's "
-                f"installer with --yes to re-register it against the base interpreter"
-            )
-    return found
+    found = (
+        job_problem(job, moment, deliberate, root, artifacts)
+        for job in sorted(jobs, key=lambda item: item.name)
+    )
+    return [line for line in found if line is not None]
 
 
-def query(prefix: str = PREFIX) -> list[Job]:
+def job_problem(
+    job: Job,
+    moment: _dt.datetime,
+    deliberate: frozenset[str],
+    root: Path | None,
+    artifacts: dict[str, str] | None,
+) -> str | None:
+    """`problems`' line for one job, in its order of precedence; None when it is healthy."""
+    if not job.enabled:
+        if job.name in deliberate:
+            # Stood down through `harness-switch.py --off jobs`, which wrote the
+            # name to the ledger `deliberate` came from. A state someone chose is
+            # not a fault, and `--status` is where it is reported; saying it again
+            # here as a problem is what trains a reader to skim this whole block.
+            return None
+        return f"{job.name}: disabled -- nothing is running it"
+    if job.last_run is None:
+        # A job registered an hour ago and due tonight has never run and is
+        # perfectly healthy. Only a *missed* first run is worth a line, and the
+        # scheduler says which that is: its next run is already in the past.
+        if job.event_only:
+            return None  # it fires on its event, which has not come round yet
+        if job.next_run is None or job.next_run < moment:
+            return f"{job.name}: registered but has never run"
+        return None
+    if job.last_result in OVERLAPPING and job.name not in OVERLAP_EXPECTED:
+        # Not a failure, but not silence either: a job whose pass outlives its own
+        # interval is running essentially continuously, and that background cost is
+        # invisible everywhere else.
+        return (
+            f"{job.name}: a run was still going at "
+            f"{job.last_run:%Y-%m-%d %H:%M}, so the scheduled fire was skipped -- "
+            f"its runs are overlapping"
+            f"{artifact_hint(job.name, artifacts, root=root, since=job.last_run)}"
+        )
+    if job.last_result not in NOT_A_FAILURE:
+        return (
+            f"{job.name}: last run failed (exit {job.last_result}) at "
+            f"{job.last_run:%Y-%m-%d %H:%M}"
+            f"{artifact_hint(job.name, artifacts, root=root, since=job.last_run)}"
+        )
+    interval = job.interval
+    if interval and moment - job.last_run > interval * STALE_INTERVALS:
+        missed = (moment - job.last_run) / interval
+        return (
+            f"{job.name}: has not run since {job.last_run:%Y-%m-%d %H:%M} "
+            f"({missed:.0f} intervals ago)"
+        )
+    base = virtualenv_interpreter(job)
+    if base is None:
+        return None
+    return (
+        f"{job.name}: runs {job.interpreter}, a virtualenv stub that defers to "
+        f"{base} -- under uv it spawns that as a child, and Windows gives the "
+        f"child of a console-less task a visible console. Re-run the job's "
+        f"installer with --yes to re-register it against the base interpreter"
+    )
+
+
+def query(prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]:
     """Ask the scheduler. [] on any failure, including not being Windows at all."""
     try:
         result = subprocess.run(
@@ -475,7 +609,7 @@ def query(prefix: str = PREFIX) -> list[Job]:
         return []
     if result.returncode != 0:
         return []
-    return parse_tasks(result.stdout, prefix)
+    return parse_tasks(result.stdout, prefix, also)
 
 
 def report(prefix: str = PREFIX, now: _dt.datetime | None = None) -> list[str]:

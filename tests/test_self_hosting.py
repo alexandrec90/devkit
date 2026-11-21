@@ -28,6 +28,8 @@ from support import (
     load_script,
 )
 
+import project_settings
+
 SETTINGS = REPO_ROOT / ".claude" / "settings.json"
 TEMPLATE_SETTINGS = TEMPLATES / "core" / "dot-claude" / "settings.json.tmpl"
 
@@ -47,6 +49,40 @@ def test_no_agent_hook_is_wired_in_devkit_or_the_template():
     assert "hooks" not in _settings(), "devkit's own settings wire an agent hook"
     template = json.loads(TEMPLATE_SETTINGS.read_text(encoding="utf-8"))
     assert "hooks" not in template, "the template wires an agent hook into every project"
+
+
+def test_claude_worktrees_borrow_the_checkouts_venv():
+    """A `claude --worktree` tree of devkit arrives with a working `.venv`.
+
+    Claude Code runs its own git with `core.hooksPath=/dev/null`, so the global
+    `post-checkout`/`post-index-change` provisioner never fires for its trees, and the
+    only seam it offers instead is an agent hook, which is not wired. Twice a devkit
+    session started in such a tree, hit `No module named pytest`, and spent turns
+    provisioning by hand. `worktree.symlinkDirectories` links the checkout's `.venv` in
+    at creation, which is a setting, not a hook.
+
+    Borrowing is only correct while devkit installs no package of its own: an editable
+    install in a shared venv points at the checkout's source, and the tree's tests would
+    silently import the wrong code. And the link must be gitignored as a link -- `.venv/`
+    matches directories only, so it would leave `.venv` in every `git status`.
+    """
+    assert ".venv" in _settings().get("worktree", {}).get("symlinkDirectories", []), (
+        "devkit's settings no longer link .venv into claude --worktree trees"
+    )
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["uv"]["package"] is False, (
+        "devkit now installs a package: a borrowed .venv would import the checkout's "
+        "source in every claude --worktree tree -- drop the symlink and provision instead"
+    )
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".venv" in ignored or "/.venv" in ignored, (
+        ".gitignore ignores .venv only as a directory, so the symlinked one is untracked"
+    )
+    # 513c55e5: nothing pulls into devkit itself, so what a pull adds is written here.
+    assert project_settings.with_borrowed_env(_settings()) == (_settings(), []), (
+        "a `uv run` in a tree would sync the checkout's .venv through the link, and write "
+        "the tree's path into its console scripts"
+    )
 
 
 # Settings that belong to whoever is *driving* the session, not to the repo being
@@ -184,6 +220,23 @@ def test_pytest_scope_keeps_the_vendored_tier_separate():
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     testpaths = data["tool"]["pytest"]["ini_options"]["testpaths"]
     assert testpaths == ["tests"], f"testpaths is {testpaths!r}"
+
+
+def test_a_scripts_module_imports_whatever_file_is_collected_first():
+    """0929-8 wrote `import fix_plan` in a test: green in the whole suite, where another
+    module had already put `scripts/` on the path, and a collection error alone or on the
+    first xdist worker to reach it."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "scripts" in data["tool"]["pytest"]["ini_options"]["pythonpath"]
+
+
+def test_a_hung_test_names_itself_before_the_tool_call_times_out():
+    """0929-7's own lock test spun; its run was killed at the tool's limit, and the session
+    sat 20 minutes idle on an output file that `| tail` kept empty. faulthandler dumps
+    the hung test's stack at this many seconds, without failing anything."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    timeout = data["tool"]["pytest"]["ini_options"]["faulthandler_timeout"]
+    assert 0 < timeout <= 300
 
 
 def test_pytest_is_never_quiet_by_default_here_or_in_a_generated_project():

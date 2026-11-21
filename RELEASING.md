@@ -161,9 +161,9 @@ tag exists**.
    consumer pins, so it must never name a commit whose suite was red. It then proves
    the tag carries the published pre-commit hooks.
 
-   Then re-run the gate on `main` (`gh workflow run pr-gate.yml --ref main`). The
-   merge's own run checked out `main` before the tag existed, so it is red by
-   construction, and it stays the branch's last verdict until the next push. The
+   Then re-run the gate on `main` (`gh workflow run pr-gate.yml --ref main`), so the
+   branch's last verdict is on the tag. The merge's own run came before the tag and
+   passes only because the test recognises a release commit by its subject. The
    pipeline does this itself (`regate_default_branch`).
 
 The workflow refuses a version that already exists, so a double-run is a safe no-op

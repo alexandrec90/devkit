@@ -8,7 +8,11 @@ them pins the individual decisions.
 
 import datetime as dt
 import json
+import os
 import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -911,6 +915,35 @@ def test_sync_never_rewrites_history():
     assert not any(step[0] in {"rebase", "reset", "push"} for step in steps)
 
 
+def test_sync_takes_the_pass_s_checkout_to_green_and_never_past_it():
+    """Reconcile syncs every checkout every 15 minutes. Taken to the tip, the checkout the
+    pass runs from would reach the commit a bad merge just broke, which following `green`
+    exists to prevent, and `merge --ff-only` could not bring it back."""
+    state = replace(on_default(behind=3), follows="origin/green")
+    merges = [step for step in sweep.sync_plan(state, sweep.NEEDS_PULL).steps if step[0] == "merge"]
+    assert merges == [("merge", "--ff-only", "origin/green")]
+
+
+def test_sync_takes_any_other_checkout_to_its_default_branch():
+    merges = [
+        step
+        for step in sweep.sync_plan(on_default(behind=3), sweep.NEEDS_PULL).steps
+        if step[0] == "merge"
+    ]
+    assert merges == [("merge", "--ff-only", "origin/main")]
+
+
+def test_follows_names_green_only_for_devkit_s_own_checkout(tmp_path):
+    def answering(code: int):
+        return lambda *args: subprocess.CompletedProcess(args, code, "", "")
+
+    assert sweep.follows(tmp_path, answering(0)) == "", "a project's checkout is only read"
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "devkit_manifest.py").write_text("", encoding="utf-8")
+    assert sweep.follows(tmp_path, answering(0)) == "origin/green"
+    assert sweep.follows(tmp_path, answering(1)) == "", "before its gate has ever passed"
+
+
 def test_sync_reaps_merged_task_branches_it_is_not_standing_on():
     state = on_default(merged_task_branches=("claude/a-0701", "claude/b-0702"))
     steps = sweep.sync_plan(state, sweep.CLEAN).steps
@@ -1117,6 +1150,83 @@ def test_sync_records_the_home_branch_for_linked_worktrees_only():
 def test_sync_skips_the_fetch_when_asked():
     steps = sweep.sync_plan(on_default(), sweep.CLEAN, fetch=False).steps
     assert not any(step[0] == "fetch" for step in steps)
+
+
+def test_sync_restores_a_phantom_before_the_checkout_and_the_merge():
+    """Ten scheduled reconciles failed on ibkr_trader in a row: its nightly job rewrote
+    `tickers.txt` with CRLF endings, the checkout read as clean, and `merge --ff-only`
+    refused over the file anyway."""
+    state = on_feature(ahead=0, unpushed=0, phantom_dirty=1, phantom_files=("tickers.txt",))
+    steps = sweep.sync_plan(state, sweep.SPENT).steps
+    restore = ("checkout", "--", "tickers.txt")
+    assert steps.index(restore) < steps.index(("checkout", "main"))
+    assert steps.index(restore) < steps.index(("merge", "--ff-only", "origin/main"))
+
+
+def test_sync_restores_nothing_on_a_checkout_with_no_phantom():
+    steps = sweep.sync_plan(on_default(behind=2), sweep.NEEDS_PULL).steps
+    assert not any(step[:2] == ("checkout", "--") for step in steps)
+
+
+def test_only_an_unstaged_phantom_is_restorable():
+    """A staged phantom's index entry is the one copy of something; a real edit and an
+    untracked file are work. Only the ` M` line no diff backs is safe to restore."""
+    porcelain = " M tickers.txt\nMM staged.txt\n M app.py\n?? new.txt\n"
+    kept = sweep.real_changes(porcelain, ["app.py"])
+    assert sweep.restorable_phantoms(porcelain, kept) == ("tickers.txt",)
+
+
+def test_inspect_names_the_restorable_phantom(tmp_path):
+    state = inspect_with(
+        tmp_path,
+        {
+            **INSPECT_REPLIES,
+            ("status", "--porcelain"): " M tickers.txt\n M app.py\n",
+            ("diff", "--name-only", "HEAD"): "app.py",
+        },
+    )
+    assert state.phantom_files == ("tickers.txt",)
+
+
+def test_inspect_restores_nothing_when_the_diff_could_not_run(tmp_path):
+    """Fails towards keeping work: with no diff every porcelain path is real."""
+    state = inspect_with(tmp_path, {**INSPECT_REPLIES, ("status", "--porcelain"): " M a.txt\n"})
+    assert state.phantom_files == ()
+
+
+def test_the_sync_plan_merges_over_a_crlf_rewrite_in_a_real_repo(tmp_path):
+    """The reconcile failure end to end: git refuses the fast-forward over a file whose
+    only change is its line endings, and the plan's steps get it through losslessly."""
+    upstream, clone = tmp_path / "up", tmp_path / "co"
+    upstream.mkdir()
+
+    def git(where: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(where), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    git(upstream, "init", "-q", "-b", "main")
+    (upstream / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+    (upstream / "t.txt").write_bytes(b"A\nB\nC\n")
+    git(upstream, "add", "-A")
+    git(upstream, "commit", "-q", "-m", "one")
+    git(tmp_path, "clone", "-q", str(upstream), str(clone))
+    (upstream / "t.txt").write_bytes(b"A\nB\nD\n")
+    git(upstream, "commit", "-q", "-am", "two")
+    git(clone, "fetch", "-q", "origin")
+    (clone / "t.txt").write_bytes(b"A\r\nB\r\nC\r\n")
+
+    state = sweep.inspect("co", clone, fetch=False)
+    assert (state.dirty, state.phantom_files) == (0, ("t.txt",))
+    refused = git(clone, "merge", "--ff-only", "origin/main")
+    assert "would be overwritten by merge" in refused.stderr
+
+    for step in sweep.sync_plan(state, sweep.NEEDS_PULL, fetch=False).steps:
+        assert git(clone, *step).returncode == 0, step
+    assert (clone / "t.txt").read_bytes() == b"A\nB\nD\n"
 
 
 # --- the "nothing stranded" contract ----------------------------------------
@@ -1468,6 +1578,194 @@ def test_a_failing_step_stops_the_rest():
     assert ("branch", "-d", "gone") not in git.calls
 
 
+class RacedGit(FakeGit):
+    """Fails each step in `raced` once, as git does when another process moved the ref."""
+
+    def __init__(self, raced: str, error: str):
+        super().__init__()
+        self.raced, self.error, self.done = raced, error, False
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        if not self.done and self.raced in " ".join(args):
+            self.done = True
+            return subprocess.CompletedProcess(["git", *args], 128, "", self.error)
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+
+def test_a_step_that_lost_a_race_for_a_ref_is_run_once_more():
+    """85ef9bc3: VS Code's own `git pull` fast-forwarded ibkr_trader in the middle of
+    reconcile's merge, and reconcile said the state needed a human. Git writes nothing
+    when it cannot take the lock, so the step is run again."""
+    error = (
+        "fatal: update_ref failed for ref 'HEAD': cannot lock ref 'HEAD': is at "
+        "25a9da439efd573c14b1c75e795fc5f8c7912d4b but expected ceca15e8b8dcd14d76475964382c747545f92fbe"
+    )
+    paused: list[float] = []
+    git = RacedGit("merge", error)
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=paused.append)
+    assert result.ok
+    assert git.calls.count(("merge", "--ff-only", "origin/main")) == 2
+    assert paused == [sweep.REF_RACE_PAUSE]
+    lock = RacedGit("checkout", "fatal: Unable to create 'C:/x/.git/index.lock': File exists.")
+    assert sweep.apply_plan("proj", Path("."), PLAN, git=lock, pause=paused.append).ok
+
+
+SCHANNEL = (
+    "fatal: unable to access 'https://github.com/alexandrec90/ibkr_trader.git/': "
+    "schannel: failed to receive handshake, SSL/TLS connection failed"
+)
+EMPTY_REPLY = (
+    "fatal: unable to access 'https://github.com/alexandrec90/roguelike.git/': "
+    "Empty reply from server"
+)
+
+
+def test_a_step_that_failed_on_the_network_is_asked_again():
+    """f1373302: the scheduled reconcile's fetch broke off in a TLS handshake and the
+    run said the state needed a human; the same fetch went through minutes later."""
+    paused: list[float] = []
+    git = RacedGit("fetch", SCHANNEL)
+    plan = sweep.Plan(
+        steps=(("fetch", "--prune", "origin"), ("merge", "--ff-only", "origin/main")), anchor=""
+    )
+    result = sweep.apply_plan("proj", Path("."), plan, git=git, pause=paused.append)
+    assert result.ok
+    assert git.calls.count(("fetch", "--prune", "origin")) == 2
+    assert paused == [sweep.NETWORK_PAUSE]
+
+
+def test_a_fetch_github_closed_without_answering_is_asked_again():
+    """ce9a7cce: the scheduled reconcile's fetch of roguelike got an empty reply and the
+    run said the state needed a human, without asking again."""
+    paused: list[float] = []
+    git = RacedGit("fetch", EMPTY_REPLY)
+    plan = sweep.Plan(steps=(("fetch", "--prune", "origin"),), anchor="")
+    assert sweep.apply_plan("proj", Path("."), plan, git=git, pause=paused.append).ok
+    assert git.calls.count(("fetch", "--prune", "origin")) == 2
+    assert paused == [sweep.NETWORK_PAUSE]
+
+
+def test_a_network_that_stays_down_fails_after_every_retry():
+    paused: list[float] = []
+    calls: list[tuple[str, ...]] = []
+
+    def down(*args: str):
+        calls.append(args)
+        return subprocess.CompletedProcess(["git", *args], 128, "", SCHANNEL)
+
+    assert sweep.run_step(down, ("fetch",), paused.append).returncode == 128
+    assert len(calls) == 1 + sweep.NETWORK_RETRIES
+    assert paused == [sweep.NETWORK_PAUSE] * sweep.NETWORK_RETRIES
+
+
+def test_any_other_refusal_is_not_retried():
+    paused: list[float] = []
+    git = FakeGit(fail_on="merge")
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=paused.append)
+    assert not result.ok and paused == []
+    assert git.calls.count(("merge", "--ff-only", "origin/main")) == 1
+
+
+def test_run_step_reads_a_race_off_stdout_too_and_passes_a_success_straight_through():
+    paused: list[float] = []
+    calls: list[tuple[str, ...]] = []
+
+    def raced_on_stdout(*args: str):
+        calls.append(args)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(["git", *args], 1, "error: cannot lock ref", "")
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+    assert sweep.run_step(raced_on_stdout, ("fetch",), paused.append).returncode == 0
+    assert calls == [("fetch",), ("fetch",)] and paused == [sweep.REF_RACE_PAUSE]
+    clean = FakeGit()
+    assert sweep.run_step(clean, ("status",), paused.append).returncode == 0
+    assert clean.calls == [("status",)] and len(paused) == 1, "a success is not rerun"
+
+
+class ReapedGit(FakeGit):
+    """Every branch named in `gone` was deleted by another process after the plan was read."""
+
+    def __init__(self, gone: set[str]):
+        super().__init__()
+        self.gone = gone
+
+    def __call__(self, *args: str):
+        self.calls.append(args)
+        if args[:3] == ("rev-parse", "--verify", "--quiet") and args[3][len("refs/heads/") :] in (
+            self.gone
+        ):
+            return subprocess.CompletedProcess(["git", *args], 1, "", "")
+        if args[:2] == ("branch", "-d") and args[2] in self.gone:
+            return subprocess.CompletedProcess(
+                ["git", *args], 1, "", f"error: branch '{args[2]}' not found"
+            )
+        if args[:2] == ("branch", "--unset-upstream") and args[2] in self.gone:
+            return subprocess.CompletedProcess(
+                ["git", *args], 128, "", f"fatal: branch '{args[2]}' has no upstream information"
+            )
+        return subprocess.CompletedProcess(["git", *args], 0, "", "")
+
+
+def test_a_branch_another_process_already_deleted_is_a_reap_done_not_a_failure():
+    """3f2e8171: a box reaper deleted `agent/auto/devkit-upgrade-v0-11-56-1009` between
+    reconcile's inspection of social-scraper and its `branch -d`, and the pass reported
+    "git refused, the state needs a human" over a branch that was exactly as gone as the
+    plan wanted it. The steps after it still run."""
+    plan = sweep.Plan(
+        steps=(
+            ("branch", "--unset-upstream", "agent/a"),
+            ("branch", "-d", "agent/a"),
+            ("branch", "-d", "agent/b"),
+        ),
+        anchor="",
+    )
+    git = ReapedGit({"agent/a"})
+    result = sweep.apply_plan("proj", Path("."), plan, git=git, pause=lambda _: None)
+    assert result.ok, result.error
+    assert ("branch", "-d", "agent/b") in git.calls
+    assert result.ran == [
+        "git branch --unset-upstream agent/a -- the branch was already deleted",
+        "git branch -d agent/a -- the branch was already deleted",
+        "git branch -d agent/b",
+    ]
+
+
+def test_a_branch_delete_refused_while_the_branch_still_exists_still_fails():
+    """Only a branch git confirms is gone is carried past: `not fully merged` on a branch
+    that is still there is the refusal `-d` exists to make."""
+    git = FakeGit(fail_on="branch -d")
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=lambda _: None)
+    assert not result.ok
+    assert result.failed == "git branch -d gone"
+    assert ("rev-parse", "--verify", "--quiet", "refs/heads/gone") in git.calls
+
+
+def test_branch_already_gone_asks_only_about_branch_reap_steps():
+    git = ReapedGit({"agent/a"})
+    assert sweep.branch_already_gone(git, ("branch", "-d", "agent/a"))
+    assert not sweep.branch_already_gone(git, ("branch", "-d", "agent/b"))
+    assert not sweep.branch_already_gone(git, ("checkout", "agent/a"))
+    assert not sweep.branch_already_gone(git, ("merge", "--ff-only", "origin/main"))
+    assert git.calls == [
+        ("rev-parse", "--verify", "--quiet", "refs/heads/agent/a"),
+        ("rev-parse", "--verify", "--quiet", "refs/heads/agent/b"),
+    ]
+
+
+def test_a_race_lost_twice_still_fails():
+    class Always(FakeGit):
+        def __call__(self, *args: str):
+            self.calls.append(args)
+            return subprocess.CompletedProcess(["git", *args], 128, "", "cannot lock ref 'HEAD'")
+
+    git = Always()
+    result = sweep.apply_plan("proj", Path("."), PLAN, git=git, pause=lambda _s: None)
+    assert not result.ok and "cannot lock ref" in result.error
+    assert git.calls == [("checkout", "main")] * 2
+
+
 class FakeGh:
     """A `gh(*args)` stand-in. `existing` is the URL `pr view` reports, "" for none."""
 
@@ -1525,10 +1823,63 @@ def test_an_existing_pr_is_reused_rather_than_recreated():
     assert not any(call[:2] == ("pr", "create") for call in gh.calls)
 
 
+def test_a_pr_the_view_missed_is_reused_from_the_refusal_that_names_it():
+    """12b705c9: the view said no PR, and `gh pr create` then refused with this, so the
+    ship was filed as failed while agent-terminal's #7 stood open on the branch."""
+    refusal = (
+        'a pull request for branch "worktree-unified-swimming-quilt" into branch "main" '
+        "already exists:\nhttps://github.com/alexandrec90/agent-terminal/pull/7"
+    )
+    calls = []
+
+    def gh(*args):
+        calls.append(args)
+        refused = args[:2] in (("pr", "view"), ("pr", "create"))
+        said = refusal if args[:2] == ("pr", "create") else ""
+        return subprocess.CompletedProcess(["gh", *args], int(refused), "", said)
+
+    url, created, error = sweep.ensure_pr(gh, LABELED_PLAN)
+    assert (url, created) == ("https://github.com/alexandrec90/agent-terminal/pull/7", False)
+    assert error == ""
+    assert ("pr", "edit", "agent/upgrade", "--add-label", "automerge") in calls
+
+
 def test_a_failed_pr_creation_is_reported_not_swallowed():
     _, created, error = sweep.ensure_pr(FakeGh(create_fails="gh: not authenticated"), SHIP_PLAN)
     assert not created
     assert "not authenticated" in error
+
+
+@pytest.mark.parametrize(
+    ("said", "transient"),
+    [
+        # a0287c8b, 4d942641: how `gh` and a push each word GitHub's own 500.
+        ("HTTP 500 (https://api.github.com/repos/o/r/labels/automerge)", True),
+        (
+            "remote: Internal Server Error\n ! [remote rejected] x -> x (Internal Server Error)",
+            True,
+        ),
+        ("gh: not authenticated", False),
+        ("! [rejected] x -> x (non-fast-forward)", False),
+        # f1373302: Windows' schannel on a fetch that broke off mid-handshake.
+        (SCHANNEL, True),
+        # ce9a7cce: curl's words for a connection GitHub closed before answering, and
+        # for one dropped mid-read (curl 52 and 56).
+        (EMPTY_REPLY, True),
+        ("error: RPC failed; curl 56 Recv failure: Connection was reset", True),
+        ("fatal: unable to access 'https://github.com/o/r.git/': error: 403", False),
+        # 9c48bdc9, 9cde3743: two carameli ships in one pass, each through on the next.
+        (
+            "pull request create failed: GraphQL: Something went wrong while executing your "
+            "query on 2026-11-05T16:03:03Z. Please include `39F5:2DD702` when reporting",
+            True,
+        ),
+        ("remote: fatal error in commit_refs\n ! [remote rejected] x -> x (failure)", True),
+        ("GraphQL: Resource not accessible by integration (createPullRequest)", False),
+    ],
+)
+def test_transient_tells_githubs_failure_from_a_refusal(said, transient):
+    assert sweep.transient(said) is transient
 
 
 LABELED_PLAN = sweep.Plan(
@@ -1577,6 +1928,38 @@ def test_a_reused_pr_still_gets_its_labels():
     url, created, error = sweep.ensure_pr(gh, LABELED_PLAN)
     assert (url, created, error) == ("https://github.com/o/r/pull/2", False, "")
     assert ("pr", "edit", "agent/upgrade", "--add-label", "automerge") in gh.calls
+
+
+def test_a_label_call_the_network_dropped_is_retried_not_failed(monkeypatch):
+    """Supervision 2026-10-01: #482 already wore `automerge`, the `--add-label` that
+    re-applied it lost its connection, and the ship was filed as failed while the PR went
+    on to merge. Both label calls are idempotent, so a dropped one is asked again."""
+    monkeypatch.setattr(sweep, "GH_RETRY_DELAYS", (0, 0))
+    dropped = (
+        'Post "https://api.github.com/graphql": read tcp 172.16.0.2:51964->140.82.114.5:443: '
+        "wsarecv: An established connection was aborted by the software in your host machine."
+    )
+
+    class Flaky(FakeGh):
+        def __init__(self, fails: int, said: str):
+            super().__init__(existing="https://github.com/o/r/pull/2")
+            self.fails, self.said = fails, said
+
+        def __call__(self, *args: str):
+            if args[:2] == ("pr", "edit") and self.fails:
+                self.fails -= 1
+                self.calls.append(args)
+                return subprocess.CompletedProcess(["gh", *args], 1, "", self.said)
+            return super().__call__(*args)
+
+    gh = Flaky(2, dropped)
+    assert sweep.ensure_pr(gh, LABELED_PLAN)[2] == ""
+    assert sum(call[:2] == ("pr", "edit") for call in gh.calls) == 3
+    gh = Flaky(3, dropped)
+    assert "wsarecv" in sweep.ensure_pr(gh, LABELED_PLAN)[2], "retries run out"
+    gh = Flaky(1, "could not add label: 'automerge' not found")
+    assert "not found" in sweep.ensure_pr(gh, LABELED_PLAN)[2]
+    assert sum(call[:2] == ("pr", "edit") for call in gh.calls) == 1, "a refusal is not retried"
 
 
 def test_an_unlabelled_plan_issues_no_label_calls():
@@ -1629,6 +2012,27 @@ def test_a_pr_only_plan_is_still_applied():
     assert plan.acts
     result = sweep.apply_plan("proj", Path("."), plan, git=FakeGit(), gh=FakeGh())
     assert result.ok and result.pr_url
+
+
+def test_the_report_is_a_row_per_checkout_then_the_plans_then_the_shared_remotes():
+    url = "https://github.com/o/proj"
+    ready = sweep.Result(
+        on_feature(dirty=2, remote_url=url), sweep.READY, "2 uncommitted", ["commit"]
+    )
+    clean = sweep.Result(on_default(name="proj-b", remote_url=url), sweep.CLEAN, "clean")
+    lines = sweep.render([ready, clean]).splitlines()
+    assert lines[0].split() == ["PROJECT", "BRANCH", "DIRTY", "vs", "BASE", "VERDICT"]
+    assert lines[2].split() == ["proj", "claude/thing-0727", "2", "-0/+1", sweep.READY]
+    assert lines[3].split() == ["proj-b", "main", "0", "-0/+0", sweep.CLEAN]
+    assert "1 checkout(s) need action:" in lines
+    assert "    1. commit" in lines
+    assert lines[-1] == f"  proj, proj-b -> {url}"
+
+
+def test_a_report_with_nothing_to_do_says_so():
+    text = sweep.render([sweep.Result(State(name="p", is_git=False), sweep.SKIPPED, "n/a")])
+    assert text.splitlines()[2].split() == ["p", "n/a", "-", "-", sweep.SKIPPED]
+    assert text.endswith("Nothing stranded -- every checkout is clean.")
 
 
 def test_the_ship_dry_run_shows_the_pr_it_would_open():
@@ -2049,19 +2453,165 @@ def test_shared_remotes_are_called_out():
     assert sweep.dedupe_note(results) == {url: ["carameli", "carameli-b"]}
 
 
-def test_gh_for_runs_gh_in_the_checkout_without_raising_or_a_window(monkeypatch, tmp_path):
+def test_gh_for_runs_gh_in_the_checkout_bounded(monkeypatch, tmp_path):
     """`gh` has no `-C`, so the binding is the working directory; a refusal is returned,
-    never raised, because every caller reads `returncode` itself."""
+    never raised, because every caller reads `returncode` itself. Every call is bounded:
+    the scheduled reconcile runs it, and an unbounded one held the job past its next
+    fires until the scheduler's hour limit ended it (fb1f5465)."""
     seen: list = []
 
-    def run(argv, **kwargs):
-        seen.append((argv, kwargs))
+    def run(argv, timeout, **kwargs):
+        seen.append((argv, timeout, kwargs))
         return subprocess.CompletedProcess(argv, 1, "", "no")
 
-    monkeypatch.setattr(sweep.subprocess, "run", run)
+    monkeypatch.setattr(sweep, "run_bounded", run)
     done = sweep.gh_for(tmp_path)("pr", "list")
     assert done.returncode == 1
-    [(argv, kwargs)] = seen
+    [(argv, timeout, kwargs)] = seen
     assert argv == ["gh", "pr", "list"]
-    assert kwargs["cwd"] == str(tmp_path) and kwargs["check"] is False
-    assert kwargs["creationflags"] == sweep.NO_WINDOW
+    assert kwargs["cwd"] == str(tmp_path) and timeout == sweep.GH_TIMEOUT
+
+
+@pytest.mark.parametrize(
+    ("verb", "bounded"), [("fetch", True), ("ls-remote", True), ("status", False)]
+)
+def test_git_for_bounds_what_talks_to_the_remote(monkeypatch, tmp_path, verb, bounded):
+    """fb1f5465: `sweep.inspect`'s `git fetch` had no timeout, so a fetch stalled on the
+    network or an invisible credential prompt held the scheduled reconcile for hours.
+    A local verb stays unbounded: a push through a pre-push gate legitimately runs long."""
+    seen: list = []
+    monkeypatch.setattr(
+        sweep, "run_bounded", lambda argv, timeout, **kw: seen.append(timeout) or done_ok(argv)
+    )
+    sweep.git_for(tmp_path)(verb)
+    assert seen == [sweep.NETWORK_TIMEOUT if bounded else None]
+
+
+def done_ok(argv):
+    return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def test_a_bounded_run_ends_a_grandchild_holding_its_pipes():
+    """The Windows half of fb1f5465: `subprocess.run(timeout=)` kills only the child and
+    then waits, unbounded, for its pipes -- which `git fetch`'s `git-remote-https` still
+    holds. The whole tree is ended, so the call returns at its timeout."""
+    grandchild = "import time; time.sleep(60)"
+    child = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}]); time.sleep(60)"
+    )
+    started = time.monotonic()
+    done = sweep.run_bounded([sys.executable, "-c", child], 2)
+    assert time.monotonic() - started < 30
+    assert done.returncode == sweep.TIMED_OUT and "timed out after 2s" in done.stderr
+
+
+def test_a_command_is_over_when_it_exits_whatever_child_it_left_holding_its_output():
+    """A pipe stays open while anything holds its write end, so `run_bounded` reads a
+    command that started a server and exited 0 as a hang until its timeout."""
+    child = "import time; time.sleep(8)"
+    leaves = (
+        "import subprocess, sys; print('started'); sys.stdout.flush(); "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+        "stdout=sys.stdout, stderr=sys.stderr)"
+    )
+    started = time.monotonic()
+    done = sweep.run_to_files([sys.executable, "-c", leaves], 30)
+    assert time.monotonic() - started < 6
+    assert done.returncode == 0 and "started" in done.stdout
+
+
+def test_a_command_still_running_at_its_timeout_is_ended_with_what_it_said():
+    hang = "import time; print('working', flush=True); time.sleep(60)"
+    started = time.monotonic()
+    done = sweep.run_to_files([sys.executable, "-c", hang], 2)
+    assert time.monotonic() - started < 30
+    assert done.returncode == sweep.TIMED_OUT and "timed out after 2s" in done.stderr
+    assert "working" in done.stdout
+
+
+def test_until_ends_a_call_at_its_deadline_whatever_the_call_allows():
+    """2e2e7804: a fix-pass step made `gh` calls each bounded at 600 s, and the step ran
+    past the watchdog's stop. Inside `until`, the deadline ends the call -- a local git
+    call with no timeout of its own included -- and past it nothing is started."""
+    hang = [sys.executable, "-c", "import time; time.sleep(60)"]
+    started = time.monotonic()
+    with sweep.until(time.monotonic() + 1):
+        done = sweep.run_bounded(hang, sweep.GH_TIMEOUT)
+    with sweep.until(time.monotonic() + 1):
+        unbounded = sweep.run_bounded(hang, None)
+    assert time.monotonic() - started < 45
+    assert done.returncode == unbounded.returncode == sweep.TIMED_OUT
+    with sweep.until(time.monotonic() - 1):
+        late = sweep.run_bounded(["no-such-program-devkit"], None)
+    assert late.returncode == sweep.TIMED_OUT and "not started" in late.stderr
+
+
+def test_until_keeps_the_earlier_deadline_and_restores_the_outer_one():
+    assert sweep._until is None
+    with sweep.until(100.0):
+        with sweep.until(200.0):
+            assert sweep._until == 100.0
+        with sweep.until(50.0):
+            assert sweep._until == 50.0
+        with sweep.until(None):
+            assert sweep._until == 100.0
+        assert sweep._until == 100.0
+    assert sweep._until is None
+
+
+@pytest.mark.parametrize("later", [200.0, 50.0])
+def test_until_blocks_that_end_out_of_order_leave_no_deadline_behind(later):
+    """Two threads' blocks interleave -- A enters, B enters, A leaves, B leaves -- as
+    `test_job_claims`' racing claimers do. Restoring what each saw on entry put A's
+    deadline back when B left, and every later test on that worker inherited it: the
+    PR gate and the v0.11.87 release run both failed on it (2026-11-11)."""
+    first, second = sweep.until(100.0), sweep.until(later)
+    first.__enter__()
+    second.__enter__()
+    assert sweep._until == min(100.0, later)
+    first.__exit__(None, None, None)
+    assert sweep._until == later, "the block still open keeps its own deadline"
+    second.__exit__(None, None, None)
+    assert sweep._until is None
+
+
+def test_until_bounds_a_worker_thread_started_inside_it():
+    """The bound is the process's, not the thread's: `fix_visibility` and
+    `pr_mergeability` make their `gh` calls from a pool inside a bounded step."""
+    with sweep.until(100.0), ThreadPoolExecutor(1) as pool:
+        assert pool.submit(lambda: sweep._until).result() == 100.0
+
+
+def test_a_bounded_run_returns_what_a_finished_command_said():
+    done = sweep.run_bounded([sys.executable, "-c", "print('hi')"], 30)
+    assert (done.returncode, done.stdout.strip()) == (0, "hi")
+
+
+@pytest.mark.parametrize("timeout", [None, 30])
+def test_a_bounded_run_reads_git_s_utf8_whatever_the_locale(monkeypatch, timeout):
+    """caff6e06: git and gh write UTF-8, and `text=True` decoded it with the locale's
+    codec -- cp1252 on Windows outside UTF-8 mode, which a scheduled job and an
+    interactive session both run in. `canonical_history` read the em dash in a committed
+    task's detail as mojibake, so the publish took devkit's own change for a live edit.
+    A byte no codec maps is replaced, not raised from inside `communicate`."""
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp1252")
+    child = "import sys; sys.stdout.buffer.write('a\N{EM DASH}b'.encode() + bytes([255]))"
+    done = sweep.run_bounded([sys.executable, "-c", child], timeout)
+    assert (done.returncode, done.stdout) == (0, "a\N{EM DASH}b\N{REPLACEMENT CHARACTER}")
+
+
+def test_git_for_inherits_the_environment_unless_a_push_hands_it_one(tmp_path):
+    """`env=` is how the fix pass's clean-merge push skips the pre-push gate; without it
+    git runs in the process's own environment, as every other caller expects."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    git = sweep.git_for(tmp_path)
+    plain = git("config", "--get", "devkit.probe")
+    assert plain.returncode == 1, "nothing set: the process environment carries no config"
+    probe = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "devkit.probe",
+        "GIT_CONFIG_VALUE_0": "yes",
+    }
+    handed = git("config", "--get", "devkit.probe", env={**os.environ, **probe})
+    assert (handed.returncode, handed.stdout.strip()) == (0, "yes")

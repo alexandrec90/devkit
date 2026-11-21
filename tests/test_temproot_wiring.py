@@ -278,6 +278,77 @@ def test_loading_the_plugin_needs_both_halves_in_either_spelling(addopts, python
     assert wiring.loads_plugin(addopts, pythonpath) is expected
 
 
+# --- a `-q` in a consumer's own addopts (8bbdd581) -------------------------------------
+# An agent adds its own `-q`; on top of the one in `addopts` that is `-qq`, which prints
+# no "N passed" line, and `-v` is cancelled to a per-file dot row. social-scraper, still
+# rendered with the template's old `addopts = "-q ..."`, cost a session two re-runs of
+# unchanged tests to see a result the output never held.
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("-q -p devkit_temproot", "-p devkit_temproot"),
+        ('-p devkit_temproot -m "not paid" -q', '-p devkit_temproot -m "not paid"'),
+        ("--quiet -qq -p devkit_temproot", "-p devkit_temproot"),
+        ("-q", ""),
+    ],
+)
+def test_a_quiet_flag_is_dropped_from_a_pyproject_addopts(value, expected):
+    text = ROGUELIKE.replace('addopts = "-q"', f"addopts = '{value}'")
+    dropped = wiring.drop_quiet_pyproject(text)
+    assert options(dropped)["addopts"] == expected
+    assert dropped.replace(f"addopts = '{expected}'", "") == text.replace(
+        f"addopts = '{value}'", ""
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '[tool.pytest.ini_options]\naddopts = "-p devkit_temproot --quick"\n',
+        '[tool.pytest.ini_options]\naddopts = ["-q"]\n',
+        '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
+        '[project]\nname = "x"\n',
+    ],
+    ids=["no-quiet-word", "array", "no-addopts", "no-table"],
+)
+def test_a_pyproject_with_no_quiet_string_to_drop_is_left_byte_for_byte(text):
+    assert wiring.drop_quiet_pyproject(text) == text
+
+
+def test_a_quiet_flag_is_dropped_from_a_continued_pytest_ini_value():
+    text = "[pytest]\naddopts = -q -p devkit_temproot\n    --strict-markers -q\n    -q\nx = 1\n"
+    dropped = wiring.drop_quiet_ini(text)
+    assert dropped == "[pytest]\naddopts = -p devkit_temproot\n    --strict-markers\nx = 1\n"
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read_string(dropped)
+    assert parser["pytest"]["addopts"].split() == ["-p", "devkit_temproot", "--strict-markers"]
+
+
+def test_a_pytest_ini_with_no_quiet_flag_is_left_byte_for_byte():
+    ini = CARAMELI_INI.replace('"not paid"', '"not paid" -p devkit_temproot')
+    assert wiring.drop_quiet_ini(ini) == ini
+    assert wiring.drop_quiet_ini("[tool:pytest]\naddopts = -q\n") == "[tool:pytest]\naddopts = -q\n"
+
+
+def test_unquiet_edits_the_config_pytest_reads_and_keeps_its_line_endings(tmp_path):
+    root = project(tmp_path, pyproject=ROGUELIKE.replace('"-q"', '"-q -p devkit_temproot"'))
+    assert wiring.unquiet(root) == wiring.UNQUIETED
+    raw = (root / "pyproject.toml").read_bytes()
+    assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
+    assert options(raw.decode().replace("\r\n", "\n"))["addopts"] == "-p devkit_temproot"
+    assert wiring.unquiet(root) == wiring.NOT_QUIET
+    (root / "pytest.ini").write_text("[pytest]\naddopts = -q\n", encoding="utf-8")
+    assert wiring.unquiet(root) == wiring.UNQUIETED
+    assert (root / "pytest.ini").read_text(encoding="utf-8") == "[pytest]\naddopts =\n"
+
+
+def test_unquiet_with_no_config_says_so_and_writes_nothing(tmp_path):
+    assert wiring.unquiet(tmp_path) == wiring.NOT_QUIET
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_the_command_line_says_what_it_did(tmp_path, capsys):
     root = project(tmp_path, pyproject=None)
     assert wiring.main([str(root)]) == 1

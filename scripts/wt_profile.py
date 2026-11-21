@@ -300,3 +300,23 @@ def window_note(settings: dict[str, Any], elevated: bool) -> str:
 def launch_note(local_app_data: str | os.PathLike[str] | None = None) -> str:
     """`window_note` for this machine and this process. The other thing a launcher calls."""
     return window_note(read_settings(settings_path(local_app_data)), is_elevated())
+
+
+# The daily workspace status's line for an elevating default profile. The launchers'
+# note reaches only a tab devkit opens; an operator's own `claude --worktree`, typed
+# into a window of that profile, runs elevated and writes its tree (`.git`,
+# `.pytest_cache`, `logs/`) as `BUILTIN\Administrators`, which the unelevated fix pass
+# can neither own nor clean. `git_trust` and `fix_trees.locked_caches` each route
+# around one symptom, and nothing told the operator the cause (1ee03f0f).
+ELEVATED_DEFAULT_LINE = (
+    'Windows Terminal\'s default profile has "elevate": every agent session started '
+    "from a window you open runs as Administrators, and the worktrees it cuts are ones "
+    "the unelevated fix pass cannot own, clean or reap "
+    '(fix: drop "elevate" from the default profile, or elevate only a separate profile)'
+)
+
+
+def status_lines(local_app_data: str | os.PathLike[str] | None = None) -> list[str]:
+    """`[ELEVATED_DEFAULT_LINE]` when this machine's default profile elevates, else []."""
+    settings = read_settings(settings_path(local_app_data))
+    return [ELEVATED_DEFAULT_LINE] if default_elevates(settings) else []

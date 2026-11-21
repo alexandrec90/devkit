@@ -1,0 +1,764 @@
+"""`scripts/fix_dependabot.py`: what Dependabot cannot do, as one failure per project.
+
+The shapes are GitHub's own, cut down from ibkr_trader's on 2026-10-04: update runs that
+all died on `"data-lake" at /pyproject.toml`, and 39 open alerts no PR answered.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import fix_dependabot as fd
+import fix_plan
+
+NOW = _dt.datetime(2026, 10, 4, 12, 0, tzinfo=_dt.UTC)
+OLD = "2026-10-02T22:08:45Z"
+
+UNFETCHABLE_LOG = (
+    "Dependabot\tUNKNOWN STEP\t2026-10-04T11:03:56.6Z updater | 2026/10/04 11:03:56 ERROR "
+    "<job_1607644272> Error during file fetching; aborting: The following path based "
+    'dependencies could not be retrieved: "data-lake" at /pyproject.toml\n'
+    "Dependabot\tUNKNOWN STEP\t2026-10-04T11:03:57.5Z ##[error]Dependabot encountered an error\n"
+)
+HANDLED_LOG = (
+    "updater | 2026/09/28 11:02:57 INFO <job_1595087814> Handled error whilst updating "
+    'sqlalchemy: dependency_file_content_not_changed {message: "Content did not change!"}\n'
+)
+
+
+def run(job: str, conclusion: str, number: int, url: str = "") -> dict:
+    return {
+        "databaseId": number,
+        "conclusion": conclusion,
+        "status": "completed",
+        "url": url or f"https://github.com/o/r/actions/runs/{number}",
+        "displayTitle": f"{job} - Update #{number}",
+    }
+
+
+def alert(package: str, patched: str | None, created: str = OLD, number: int = 1) -> dict:
+    return {
+        "number": number,
+        "created_at": created,
+        "html_url": f"https://github.com/o/r/security/dependabot/{number}",
+        "dependency": {
+            "package": {"ecosystem": "pip", "name": package},
+            "manifest_path": "uv.lock",
+        },
+        "security_vulnerability": {
+            "first_patched_version": {"identifier": patched} if patched else None
+        },
+        "security_advisory": {"summary": f"{package} is vulnerable"},
+    }
+
+
+def test_only_the_newest_run_of_each_update_job_decides_whether_it_is_failing():
+    runs = [
+        run("uv in /. for urllib3", "failure", 9),
+        run("pip in /.", "success", 8),
+        run("uv in /. for urllib3", "success", 7),
+        run("pip in /.", "failure", 6),
+        run("github_actions in /.", "cancelled", 5),
+    ]
+    assert fd.update_job(runs[0]) == "uv in /. for urllib3"
+    assert [r["databaseId"] for r in fd.failing_updates(runs)] == [9]
+
+
+def test_a_failing_job_carries_how_many_runs_in_a_row_it_has_failed():
+    """dd07a7ab: data-lake's `uv in /.` failed on sqlalchemy five weeks running, and each
+    fixer read only the newest run."""
+    runs = [
+        {**run("uv in /.", "failure", 9), "createdAt": "2026-10-11T20:26:59Z"},
+        run("github_actions in /.", "success", 8),
+        {**run("uv in /.", "failure", 7), "createdAt": "2026-10-04T20:22:50Z"},
+        {**run("uv in /.", "timed_out", 6), "createdAt": "2026-09-27T20:22:52Z"},
+        {**run("uv in /.", "success", 5), "createdAt": "2026-09-20T20:22:00Z"},
+        {**run("uv in /.", "failure", 4), "createdAt": "2026-09-13T20:22:54Z"},
+    ]
+    assert fd.streak(runs, "uv in /.") == (3, "2026-09-27T20:22:52Z")
+    assert fd.streak(runs, "github_actions in /.") == (0, "")
+    assert fd.streak(runs, "pip in /.") == (0, "")
+    (failing,) = fd.failing_updates(runs)
+    assert failing["databaseId"] == 9
+    assert (failing["failedRuns"], failing["failingSince"]) == (3, "2026-09-27T20:22:52Z")
+    assert fd.recurring(failing) == "; its last 3 runs failed, the first at 2026-09-27T20:22:52Z"
+
+
+def test_a_first_failure_says_its_count_too():
+    """homelab: the prompt says the evidence counts each job's failures in a row, and a
+    job's first failure -- a registry's 429, gone by the next run -- said nothing at all."""
+    assert fd.recurring({"failedRuns": 1, "failingSince": "x"}) == "; 1 run in a row failed"
+    assert fd.recurring({}) == ""
+    assert fd.recurring({"failedRuns": "3"}) == "", "a shape the pass did not write"
+
+
+REGISTRY_LOG = (
+    "updater | 2026/11/11 11:03:08 INFO <job_1695635861> Handled error whilst updating "
+    'immich-app/immich-server: registry_error {status: 429, msg: "Registry request failed '
+    'with status 429"}\n'
+)
+
+
+def test_a_handled_errors_detail_is_read_beside_its_entry():
+    """The entry stays the package and kind, so the signature is stable across runs; the
+    detail -- the registry's status and message -- is what the fixer needs to see."""
+    entry = "run immich-app/immich-server: registry_error"
+    assert fd.run_errors(REGISTRY_LOG) == [entry]
+    assert fd.error_details(REGISTRY_LOG) == {
+        entry: 'status: 429, msg: "Registry request failed with status 429"'
+    }
+    assert fd.error_details("nothing here\n") == {}
+    bare = "INFO <job_1> Handled error whilst updating x: unknown_error\n"
+    assert fd.error_details(bare) == {}, "a kind with no detail adds no line"
+
+
+def test_still_said_keeps_the_unanswered_and_records_a_fully_answered_run():
+    ran = data_lake_run()
+    entry = "run sqlalchemy: dependency_file_content_not_changed"
+    other = "run Something else broke"
+    assert fd.still_said(ran, [entry, other], [PR_50]) == ([other], "")
+    assert fd.still_said(ran, [], [PR_50]) == ([], ""), "a silent log is still failing"
+    live, note = fd.still_said(ran, [entry], [PR_50])
+    assert live == [] and note.endswith("and #50 answered it since")
+    live, note = fd.still_said(ran, [entry], None)
+    assert live == [] and note.endswith(f"and {fd.UNREAD}")
+
+
+def test_the_evidence_carries_a_handled_errors_detail(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    runs = [{**run("docker_compose in /stacks/*", "failure", 7), "createdAt": RAN}]
+    gh, _ = gh_world(runs, logs={"7": REGISTRY_LOG})
+    failure, _ = fd.read_project("homelab", checkout, tmp_path / "ev", NOW, gh)
+    assert failure is not None
+    assert failure.signature == ("run immich-app/immich-server: registry_error",)
+    text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
+    assert (
+        '  - run immich-app/immich-server: registry_error -- status: 429, msg: "Registry '
+        'request failed with status 429"' in text
+    ), text
+    assert "1 run in a row failed" in text
+
+
+def test_the_evidence_says_a_job_has_failed_run_after_run(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    runs = [
+        {**data_lake_run("2026-10-11T20:26:59Z"), "databaseId": 9},
+        {**data_lake_run(), "databaseId": 8},
+    ]
+    gh, _ = gh_world(runs, logs={"9": HANDLED_LOG}, merged=[PR_50])
+    failure, _ = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, gh)
+    assert failure is not None, "#50 merged before the newest run, so it answers nothing"
+    text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
+    assert f"its last 2 runs failed, the first at {RAN})" in text
+
+
+def test_an_unfetchable_path_dependency_is_one_entry_named_by_the_dependency():
+    """Every job that dies on it says the same thing, so it is one entry, not one per job."""
+    assert fd.run_errors(UNFETCHABLE_LOG + UNFETCHABLE_LOG) == [
+        f"{fix_plan.UNFETCHABLE_ENTRY}data-lake"
+    ]
+
+
+def test_a_handled_error_is_its_package_and_kind_and_any_other_error_its_text():
+    assert fd.run_errors(HANDLED_LOG) == ["run sqlalchemy: dependency_file_content_not_changed"]
+    other = "updater | ERROR <job_1> Something else broke for job 1\n"
+    assert fd.run_errors(other) == ["run Something else broke for job 1"]
+    assert fd.run_errors("nothing here\n") == []
+
+
+def test_an_alert_no_open_pr_names_is_unanswered_at_its_highest_patched_version():
+    alerts = [
+        alert("urllib3", "2.6.0", number=1),
+        alert("urllib3", "2.8.0", number=2),
+        alert("GitPython", "3.1.62", number=3),
+        alert("mlflow", None, number=4),  # no fix exists yet: nothing to bump to
+        alert("aiohttp", "3.14.3", created="2026-10-04T08:00:00Z", number=5),  # in grace
+    ]
+    assert fd.package_of(alerts[2]) == "gitpython"
+    assert fd.unanswered(alerts, [], NOW) == {"urllib3": "2.8.0", "gitpython": "3.1.62"}
+
+
+def test_a_pr_naming_the_package_answers_its_alert_whoever_opened_it():
+    """Dependabot's own branch, or a fixer's hand bump that names it in its title."""
+    alerts = [alert("urllib3", "2.8.0"), alert("requests", "2.33.0", number=2)]
+    by_bot = {"headRefName": "dependabot/uv/urllib3-2.8.0", "title": "", "body": ""}
+    by_hand = {"headRefName": "agent/fix", "title": "Bump requests to 2.33.0", "body": ""}
+    assert fd.unanswered(alerts, [by_bot, by_hand], NOW) == {}
+
+
+def test_a_name_inside_another_packages_name_answers_nothing():
+    alerts = [alert("requests", "2.33.0")]
+    oauth = {"headRefName": "dependabot/pip/requests-oauthlib-2.0.0", "title": "", "body": ""}
+    assert fd.unanswered(alerts, [oauth], NOW) == {"requests": "2.33.0"}
+
+
+def test_the_signature_puts_the_alerts_first_and_says_whether_a_session_can_act():
+    unfetchable = f"{fix_plan.UNFETCHABLE_ENTRY}data-lake"
+    sig = fd.signature([unfetchable], {"urllib3": "2.8.0"})
+    assert sig == (f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0", unfetchable)
+    assert fd.actionable(sig)
+    assert fd.unfetchable(sig) == ["data-lake"]
+    assert not fd.actionable((unfetchable,)), "no session can make Dependabot fetch a sibling"
+    assert fd.actionable(("run sqlalchemy: dependency_file_content_not_changed",))
+
+
+def gh_world(runs=(), alerts=None, prs=(), logs=None, merged=()):
+    """A fake `gh` answering the five calls `read_project` makes; `alerts=None` is the
+    403 a repository with alerts switched off answers."""
+    asked: list = []
+
+    def gh(*args):
+        asked.append(args)
+        if args[:2] == ("run", "list"):
+            return subprocess.CompletedProcess(args, 0, json.dumps(list(runs)), "")
+        if args[0] == "api":
+            if alerts is None:
+                return subprocess.CompletedProcess(args, 1, "", "HTTP 403: alerts are disabled")
+            return subprocess.CompletedProcess(args, 0, json.dumps(alerts), "")
+        if args[:4] == ("pr", "list", "--state", "merged"):
+            return subprocess.CompletedProcess(args, 0, json.dumps(list(merged)), "")
+        if args[:2] == ("pr", "list"):
+            return subprocess.CompletedProcess(args, 0, json.dumps(list(prs)), "")
+        if args[:2] == ("run", "view"):
+            return subprocess.CompletedProcess(args, 0, (logs or {}).get(args[2], ""), "")
+        raise AssertionError(args)
+
+    return gh, asked
+
+
+def project(tmp_path: Path, monkeypatch) -> Path:
+    checkout = tmp_path / "ibkr_trader"
+    checkout.mkdir()
+    (checkout / "pyproject.toml").write_text(
+        '[tool.uv.sources]\ndata-lake = { path = "../data-lake", editable = true }\n',
+        encoding="utf-8",
+    )
+    workflows = checkout / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "pr-gate.yml").write_text(
+        "jobs:\n  t:\n    steps:\n      - uses: actions/checkout@v7\n"
+        "        with:\n          repository: o/data-lake\n          ref: 430536af\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fd.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+    monkeypatch.setattr(fd.sweep, "git_for", lambda _path: git_world())
+    return checkout
+
+
+def git_world(files: dict[str, str] | None = None, asked: list | None = None):
+    """A fake `git` whose `origin/main` holds `files`; the default holds none, so every
+    alert is read as no lock answers it."""
+
+    def git(*args):
+        if asked is not None:
+            asked.append(args)
+        if args[0] == "show" and (text := (files or {}).get(args[1])) is not None:
+            return subprocess.CompletedProcess(args, 0, text, "")
+        return subprocess.CompletedProcess(args, 0 if args[0] == "fetch" else 128, "", "")
+
+    return git
+
+
+def test_alerts_and_a_failing_job_are_one_failure_with_its_evidence_on_disk(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    runs = [run("uv in /. for urllib3", "failure", 9, "https://run/9")]
+    gh, _ = gh_world(runs, [alert("urllib3", "2.8.0")], logs={"9": UNFETCHABLE_LOG})
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, gh)
+    assert note == ""
+    assert failure is not None and failure.kind == fix_plan.DEPENDABOT
+    assert failure.signature == (
+        f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0",
+        f"{fix_plan.UNFETCHABLE_ENTRY}data-lake",
+    )
+    assert failure.url == "https://run/9" and failure.base == "main" and failure.number == 0
+    assert failure.title.startswith("Dependabot in ibkr_trader: 1 package(s)")
+    text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
+    assert "urllib3: bump to 2.8.0" in text and "https://run/9" in text
+    assert "data-lake: declared as a [tool.uv.sources] path, ../data-lake" in text
+    assert "the PR gate checks it out at 430536af" in text
+
+
+def test_a_path_dependency_alone_with_every_alert_answered_is_a_note_and_no_failure(
+    tmp_path, monkeypatch
+):
+    """Nothing a session can do makes Dependabot fetch the sibling, and a skip standing
+    for a day is filed as a stall -- which would send the devkit session instead."""
+    checkout = project(tmp_path, monkeypatch)
+    runs = [run("uv in /. for urllib3", "failure", 9)]
+    pr = {"headRefName": "dependabot/uv/urllib3-2.8.0", "title": "", "body": ""}
+    gh, _ = gh_world(runs, [alert("urllib3", "2.8.0")], [pr], {"9": UNFETCHABLE_LOG})
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, gh)
+    assert failure is None
+    assert "cannot fetch the path dependency data-lake" in note
+
+
+def test_a_repository_with_alerts_off_and_no_runs_says_nothing(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    gh, asked = gh_world()
+    assert fd.read_project("devkit", checkout, tmp_path / "ev", NOW, gh) == (None, "")
+    assert not [a for a in asked if a[:2] == ("pr", "list")], "no alert, no PR read"
+
+
+def test_a_failed_job_whose_log_names_nothing_still_has_a_signature(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([run("uv in /.", "failure", 3)])
+    failure, _ = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, gh)
+    assert failure is not None and failure.signature == ("run uv in /.: failed",)
+
+
+def test_only_the_newest_failing_jobs_logs_are_read(tmp_path, monkeypatch):
+    """Ten alerts are ten jobs failing for one reason: a pass reads a few, not all."""
+    checkout = project(tmp_path, monkeypatch)
+    runs = [run(f"uv in /. for p{n}", "failure", n) for n in range(6)]
+    gh, asked = gh_world(runs, logs={str(n): UNFETCHABLE_LOG for n in range(6)})
+    failure, _ = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, gh)
+    read = [a[2] for a in asked if a[:2] == ("run", "view")]
+    assert read == ["0", "1", "2"] and len(read) == fd.LOGS_READ
+    assert failure is None, "every job died on the sibling, and no alert waits"
+
+
+RAN = "2026-10-04T20:22:50Z"
+PR_50 = {
+    "number": 50,
+    "title": "Bump sqlalchemy 2.0.51 -> 2.1.3 in uv.lock",
+    "headRefName": "agent/fix-dependabot-updates-1004",
+    "body": "",
+    "mergedAt": "2026-10-04T22:18:14Z",
+}
+
+
+def data_lake_run(created: str = RAN) -> dict:
+    """data-lake's run 37231865680, on 135bfa8, before #50 bumped sqlalchemy."""
+    return {**run("uv in /.", "failure", 7), "createdAt": created, "headSha": "135bfa8" + "1" * 33}
+
+
+def test_a_handled_error_a_bump_merged_since_answers_sends_no_fixer(tmp_path, monkeypatch):
+    """6b4570a4: the pass sent a fixer at run 37231865680 a day after #50 had bumped the
+    package it named; the job does not run again until Dependabot's next week."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, asked = gh_world([data_lake_run()], logs={"7": HANDLED_LOG}, merged=[PR_50])
+    failure, note = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, gh)
+    assert failure is None
+    assert note == (
+        "data-lake -- Dependabot Updates: uv in /. failed (run on 135bfa8 at "
+        f"{RAN}), and #50 answered it since"
+    )
+    assert ("pr", "list", "--state", "merged", "--limit", "30", "--json", fd.MERGED_FIELDS) in asked
+
+
+@pytest.mark.parametrize(
+    "merged",
+    [
+        [{**PR_50, "mergedAt": "2026-10-04T19:00:00Z"}],
+        [{**PR_50, "title": "Bump pydantic", "headRefName": "agent/x"}],
+        [],
+    ],
+    ids=["merged-before-the-run", "another-package", "none"],
+)
+def test_a_handled_error_no_later_merge_answers_is_still_a_failure(tmp_path, monkeypatch, merged):
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([data_lake_run()], logs={"7": HANDLED_LOG}, merged=merged)
+    failure, note = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, gh)
+    assert note == ""
+    assert failure is not None
+    assert failure.signature == ("run sqlalchemy: dependency_file_content_not_changed",)
+    text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
+    assert f"(run on 135bfa8 at {RAN}; 1 run in a row failed)" in text, (
+        "the fixer can tell a stale run itself, and a first failure from a streak"
+    )
+
+
+def test_read_runs_keeps_what_no_merge_answered_and_counts_only_live_runs():
+    """A run's answered error is dropped and its others kept; a run left saying nothing
+    leaves the count, and a run whose log was never read stays in it."""
+    both = HANDLED_LOG + "x ERROR <job_1> Something else broke\n"
+    runs = [data_lake_run(), {**run("pip in /.", "failure", 8), "createdAt": RAN}]
+    runs += [run(f"npm in /{n}", "failure", 10 + n) for n in range(3)]
+    gh, _ = gh_world(runs, logs={"7": both, "8": HANDLED_LOG}, merged=[PR_50])
+    failing, counted, notes = fd.read_runs(gh)
+    assert [(r["databaseId"], said) for r, said in failing] == [
+        (7, ["run Something else broke"]),
+        (10, []),
+    ]
+    assert [r["databaseId"] for r in counted] == [7, 10, 11, 12]
+    assert notes == [
+        f"pip in /. failed (run on an unknown commit at {RAN}), and #50 answered it since"
+    ]
+
+
+def test_only_a_handled_error_asks_for_merged_prs(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    gh, asked = gh_world([data_lake_run()], logs={"7": UNFETCHABLE_LOG}, merged=[PR_50])
+    fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, gh)
+    assert not [a for a in asked if a[:4] == ("pr", "list", "--state", "merged")]
+
+
+def test_answered_since_needs_a_package_entry_and_a_run_time():
+    assert fd.answered_since("run sqlalchemy: x_y", data_lake_run(), [PR_50]) == "#50"
+    assert fd.answered_since("run Error during fetching", data_lake_run(), [PR_50]) == ""
+    assert fd.answered_since("run sqlalchemy: x", data_lake_run(created=""), [PR_50]) == ""
+    assert fd.ran_on({}) == "run on an unknown commit at an unknown time"
+
+
+def test_the_reads_of_what_is_wrong_answer_empty_on_a_gh_that_cannot():
+    def broken(*args):
+        return subprocess.CompletedProcess(args, 1, "", "offline")
+
+    assert fd.update_runs(broken) == [] and fd.open_alerts(broken) == []
+    assert fd.failed_log(broken, {"databaseId": 1}) == ""
+
+
+def test_the_reads_of_what_answers_it_say_none_on_a_gh_that_cannot():
+    """Read as empty, they call every failure unanswered (793d4a3d)."""
+
+    def broken(*args):
+        return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
+
+    def garbled(*args):
+        return subprocess.CompletedProcess(args, 0, "{}", "")
+
+    assert fd.open_prs(broken) is None and fd.merged_prs(broken) is None
+    assert fd.open_prs(garbled) is None and fd.merged_prs(garbled) is None
+    gh, _ = gh_world(prs=[PR_50, "not a row"], merged=[])
+    assert fd.open_prs(gh) == [PR_50] and fd.merged_prs(gh) == []
+
+
+def failing_read(gh, read: tuple[str, ...]):
+    """`gh`, with the one call opening with `read` failing as an outage does."""
+
+    def flaky(*args):
+        if args[: len(read)] == read:
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 502: Bad Gateway")
+        return gh(*args)
+
+    return flaky
+
+
+def test_a_handled_error_is_held_when_the_merged_prs_cannot_be_read(tmp_path, monkeypatch):
+    """793d4a3d: data-lake's run on d32d4d5 read as answered by #70 at 03:00 and 04:00,
+    and the 03:30 pass, whose merged-PR read came back empty, sent a fixer at it."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([data_lake_run()], logs={"7": HANDLED_LOG}, merged=[PR_50])
+    flaky = failing_read(gh, ("pr", "list", "--state", "merged"))
+    failure, note = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, flaky)
+    assert failure is None
+    assert note == (
+        f"data-lake -- Dependabot Updates: uv in /. failed (run on 135bfa8 at {RAN}), "
+        f"and {fd.UNREAD}"
+    )
+
+
+def test_an_unread_merge_list_holds_only_the_handled_errors():
+    """An error naming no package is not one a merge is matched against, so it is sent."""
+    both = HANDLED_LOG + "x ERROR <job_1> Something else broke\n"
+    gh, _ = gh_world([data_lake_run()], logs={"7": both})
+    failing, counted, notes = fd.read_runs(failing_read(gh, ("pr", "list", "--state", "merged")))
+    assert [(r["databaseId"], said) for r, said in failing] == [(7, ["run Something else broke"])]
+    assert [r["databaseId"] for r in counted] == [7] and notes == []
+
+
+def test_alerts_are_held_when_the_open_prs_cannot_be_read(tmp_path, monkeypatch):
+    """Read as no PR, every alert is unanswered, though Dependabot's own PR may name it."""
+    checkout = project(tmp_path, monkeypatch)
+    pr = {"headRefName": "dependabot/uv/urllib3-2.8.0", "title": "", "body": ""}
+    gh, _ = gh_world([], [alert("urllib3", "2.8.0")], [pr])
+    flaky = failing_read(gh, ("pr", "list", "--state", "open"))
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, flaky)
+    assert failure is None
+    assert note == (
+        "ibkr_trader -- Dependabot Updates: the open PRs could not be read, so its alerts wait"
+    )
+
+
+def test_a_failing_job_is_still_sent_when_only_the_open_prs_cannot_be_read(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    runs = [run("uv in /.", "failure", 3)]
+    gh, _ = gh_world(runs, [alert("urllib3", "2.8.0")])
+    flaky = failing_read(gh, ("pr", "list", "--state", "open"))
+    failure, note = fd.read_project("data-lake", checkout, tmp_path / "ev", NOW, flaky)
+    assert failure is not None and failure.signature == ("run uv in /.: failed",)
+    assert note.endswith("the open PRs could not be read, so its alerts wait")
+
+
+def test_evidence_text_names_every_job_and_alert():
+    text = fd.evidence_text(
+        "p",
+        [(run("uv in /.", "failure", 1, "https://run/1"), [])],
+        [alert("urllib3", "2.8.0")],
+        {"urllib3": "2.8.0"},
+    )
+    assert "(no error line in the log)" in text
+    assert "https://github.com/o/r/security/dependabot/1 urllib3 is vulnerable" in text
+
+
+def test_collect_reads_every_registered_checkout_and_skips_a_missing_one(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([run("uv in /.", "failure", 3)])
+    workspace = tmp_path / "w.code-workspace"
+    failures, notes = fd.collect(
+        workspace, ["ibkr_trader", "absent"], NOW, gh_for=lambda d: gh if d == checkout else None
+    )
+    assert [f.project for f in failures] == ["ibkr_trader"] and notes == []
+
+
+UV_LOCK = """version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "certifi"
+version = "2026.10.19"
+
+[[package]]
+name = "Pillow"
+version = "13.0.0"
+
+[[package]]
+name = "numpy"
+version = "2.3.0"
+
+[[package]]
+name = "numpy"
+version = "1.26.4"
+"""
+
+
+def test_locked_versions_reads_every_package_table_and_nothing_else():
+    locked = fd.locked_versions(UV_LOCK)
+    assert locked["certifi"] == ["2026.10.19"] and locked["pillow"] == ["13.0.0"]
+    assert locked["numpy"] == ["2.3.0", "1.26.4"], "a forked resolution locks it twice"
+    assert fd.locked_versions("not = [toml") == {}
+    assert fd.locked_versions('[tool.uv.sources]\nx = { path = "../x" }\n') == {}
+
+
+@pytest.mark.parametrize(
+    ("version", "floor", "expected"),
+    [
+        ("13.0.0", "13.0.0", True),
+        ("13.1", "13.0.0", True),
+        ("2026.10.19", "2026.10.19", True),
+        ("12.3.0", "13.0.0", False),
+        ("13.0.0rc1", "13.0.0", False),
+        ("13.0.0", "13.0.0rc1", True),
+        ("13.0.0.post1", "13.0.0", True),
+        ("13.0.0", "13.0.0.post1", False),
+        ("13.0.0rc2", "13.0.0rc1", False),
+        ("", "13.0.0", False),
+    ],
+)
+def test_at_least_answers_false_whenever_it_is_unsure(version, floor, expected):
+    assert fd.at_least(version, floor) is expected
+
+
+def test_an_alert_is_patched_on_base_only_where_every_lock_of_it_is_past_the_fix():
+    locks = {"uv.lock": fd.locked_versions(UV_LOCK)}
+    assert fd.patched_on_base(alert("certifi", "2026.10.19"), locks)
+    assert fd.patched_on_base(alert("pillow", "13.0.0"), locks), "names compare normalized"
+    assert not fd.patched_on_base(alert("numpy", "2.0.0"), locks), "1.26.4 is locked too"
+    assert not fd.patched_on_base(alert("urllib3", "2.8.0"), locks), "not locked at all"
+    assert not fd.patched_on_base(alert("certifi", None), locks), "no fix exists yet"
+    assert not fd.patched_on_base(alert("certifi", "2026.10.19"), {}), "no lock read"
+    assert fd.manifest_of(alert("certifi", "1")) == "uv.lock" and fd.manifest_of({}) == ""
+    kept = [alert("urllib3", "2.8.0")]
+    assert fd.unlanded("p", "main", kept, locks) == (kept, ""), "nothing landed, no line"
+
+
+IBKR_ALERTS = [alert("certifi", "2026.10.19", number=51), alert("Pillow", "13.0.0", number=52)]
+
+
+def test_alerts_a_merged_bump_already_answered_send_no_fixer(tmp_path, monkeypatch):
+    """3090c3ed: ibkr_trader's #138 bumped certifi and pillow in uv.lock at 09:02, the
+    alerts stayed open until Dependabot rescanned, and the 15:00 pass sent a fixer at
+    them that found nothing left to bump."""
+    checkout = project(tmp_path, monkeypatch)
+    runs = [run("uv in /. for certifi", "failure", 9)]
+    gh, asked = gh_world(runs, IBKR_ALERTS, logs={"9": UNFETCHABLE_LOG})
+    looked: list = []
+    git = git_world({"origin/main:uv.lock": UV_LOCK}, looked)
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, gh, git)
+    assert failure is None
+    assert "cannot fetch the path dependency data-lake" in note
+    assert note.endswith(
+        "ibkr_trader -- Dependabot Updates: origin/main already locks certifi, pillow past "
+        "its open alerts, which close when Dependabot rescans"
+    )
+    assert looked[0] == ("fetch", "--quiet", "origin", "main"), "read off a fresh tip"
+    assert not [a for a in asked if a[:2] == ("pr", "list")], "nothing left to answer"
+
+
+def test_only_the_alerts_the_base_has_not_answered_are_sent(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    alerts = [*IBKR_ALERTS, alert("urllib3", "2.8.0", number=53)]
+    gh, _ = gh_world([], alerts)
+    git = git_world({"origin/main:uv.lock": UV_LOCK})
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, gh, git)
+    assert failure is not None
+    assert failure.signature == (f"{fix_plan.ALERT_ENTRY}urllib3 >= 2.8.0",)
+    text = (Path(failure.evidence) / fd.EVIDENCE_FILE).read_text(encoding="utf-8")
+    assert "urllib3: bump to 2.8.0" in text and "certifi" not in text
+    assert note.endswith(
+        "already locks certifi, pillow past its open alerts, which close when Dependabot rescans"
+    )
+
+
+def test_an_alert_whose_lock_cannot_be_read_is_sent_as_before(tmp_path, monkeypatch):
+    """A lock `git` cannot show answers nothing: an alert wrongly kept costs a fixer,
+    one wrongly dropped is a hole nobody is sent at."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([], IBKR_ALERTS)
+    failure, note = fd.read_project("ibkr_trader", checkout, tmp_path / "ev", NOW, gh, git_world())
+    assert note == ""
+    assert failure is not None and len(failure.signature) == 2
+    assert fd.base_locks(git_world(), "main", []) == {}
+    assert fd.base_locks(git_world(), "main", [{"dependency": {}}]) == {}, "no file named"
+
+
+PHOTOLAB_CONFIG = """\
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+  # No npm entry: this repository has no `frontend/` yet.
+  - package-ecosystem: github-actions
+    directory: /
+  - package-ecosystem: docker
+    directory: /
+"""
+NPM_RAN = "2026-11-02T17:46:49Z"
+
+
+def photolab_runs() -> list[dict]:
+    """Its rounds of 11-04 and 11-02, cut down: #3 deleted the npm entry between them, so
+    the job's newest run is its last one, and that run failed."""
+    return [
+        run("github_actions in /.", "success", 9),
+        run("docker in /.", "success", 8),
+        run("uv in /.", "success", 7),
+        {
+            **run("npm_and_yarn in /frontend", "failure", 6),
+            "createdAt": NPM_RAN,
+            "headSha": "1047013" + "1" * 33,
+        },
+        {**run("npm_and_yarn in /frontend", "failure", 5), "createdAt": "2026-11-02T03:22:24Z"},
+    ]
+
+
+def test_a_job_whose_entry_left_the_config_sends_no_fixer(tmp_path, monkeypatch):
+    """bc515247: photolab's #3 deleted the npm entry, the job never ran again, and its
+    last failed run stood as `1 update job(s) failing` on every pass after."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, asked = gh_world(photolab_runs(), logs={"6": "x ERROR <job_1> No package.json\n"})
+    git = git_world({"origin/main:.github/dependabot.yml": PHOTOLAB_CONFIG})
+    failure, note = fd.read_project("photolab", checkout, tmp_path / "ev", NOW, gh, git)
+    assert failure is None
+    assert note == (
+        "photolab -- Dependabot Updates: npm_and_yarn in /frontend failed (run on 1047013 at "
+        f"{NPM_RAN}), and origin/main's config no longer runs it"
+    )
+    assert not [a for a in asked if a[:2] == ("run", "view")], "no log read for a retired job"
+
+
+def test_a_job_the_config_still_runs_is_sent_as_before(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([run("uv in /.", "failure", 3)])
+    git = git_world({"origin/main:.github/dependabot.yml": PHOTOLAB_CONFIG})
+    failure, note = fd.read_project("photolab", checkout, tmp_path / "ev", NOW, gh, git)
+    assert failure is not None and failure.signature == ("run uv in /.: failed",)
+    assert note == ""
+
+
+def test_a_config_git_cannot_show_retires_nothing(tmp_path, monkeypatch):
+    """An unread config says nothing about a job: one wrongly kept costs a fixer, one
+    wrongly dropped is a red nobody is sent at."""
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world(photolab_runs())
+    failure, note = fd.read_project("photolab", checkout, tmp_path / "ev", NOW, gh, git_world())
+    assert failure is not None and failure.signature == ("run npm_and_yarn in /frontend: failed",)
+    assert note == ""
+
+
+def test_a_green_project_never_fetches_for_a_config_it_has_no_use_for(tmp_path, monkeypatch):
+    checkout = project(tmp_path, monkeypatch)
+    gh, _ = gh_world([run("uv in /.", "success", 3)])
+    looked: list = []
+    git = git_world({}, looked)
+    assert fd.read_project("photolab", checkout, tmp_path / "ev", NOW, gh, git) == (None, "")
+    assert looked == []
+
+
+def test_a_retired_job_leaves_a_log_slot_to_the_jobs_that_still_run():
+    """`LOGS_READ` caps what a pass reads, so a retired job must not take a slot."""
+    runs = [run(f"npm_and_yarn in /old{n}", "failure", n) for n in range(fd.LOGS_READ)]
+    gh, asked = gh_world([*runs, run("uv in /.", "failure", 9)])
+    failing, counted, notes = fd.read_runs(gh, lambda: [("uv", "/")], "main")
+    assert [r["databaseId"] for r, _ in failing] == [9]
+    assert [r["databaseId"] for r in counted] == [9] and len(notes) == fd.LOGS_READ
+    assert [a[2] for a in asked if a[:2] == ("run", "view")] == ["9"]
+
+
+def test_drop_retired_splits_the_runs_and_keeps_their_order():
+    runs = [run("docker in /.", "failure", 2), run("uv in /.", "failure", 1)]
+    kept, notes = fd.drop_retired(runs, [("uv", "/")], "trunk")
+    assert kept == [runs[1]]
+    assert notes == [
+        "docker in /. failed (run on an unknown commit at an unknown time), "
+        "and origin/trunk's config no longer runs it"
+    ]
+    assert fd.drop_retired(runs, [], "trunk") == (runs, [])
+
+
+def test_the_config_is_read_off_a_fresh_tip_under_either_of_its_names():
+    looked: list = []
+    git = git_world({"origin/main:.github/dependabot.yaml": PHOTOLAB_CONFIG}, looked)
+    assert ("uv", "/") in fd.base_entries(git, "main")
+    assert looked[0] == ("fetch", "--quiet", "origin", "main")
+    assert fd.base_entries(git_world(), "main") == []
+
+
+ENTRIES = [("uv", "/"), ("npm", "/frontend/"), ("github-actions", "/"), ("gomod", "/./svc")]
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        "uv in /.",
+        "npm_and_yarn in /frontend",
+        "github_actions in /.",
+        "go_modules in /svc",
+    ],
+)
+def test_a_job_an_entry_names_is_not_retired_under_either_spelling(job):
+    assert not fd.retired(job, ENTRIES)
+
+
+@pytest.mark.parametrize(
+    "job",
+    ["npm_and_yarn in /other", "docker in /.", "uv in /frontend", "go_modules in /."],
+)
+def test_a_job_no_entry_names_is_retired(job):
+    assert fd.retired(job, ENTRIES)
+
+
+@pytest.mark.parametrize(
+    ("job", "entries", "why"),
+    [
+        ("docker in /.", [], "no config read"),
+        ("npm_and_yarn in /gone for lodash", ENTRIES, "a security job runs off an alert"),
+        ("brand_new_manager in /.", ENTRIES, "an ecosystem this table cannot spell"),
+        ("Something else entirely", ENTRIES, "not a job title at all"),
+    ],
+)
+def test_what_the_config_cannot_speak_for_is_kept(job, entries, why):
+    assert not fd.retired(job, entries), why
+
+
+def test_an_entry_with_no_single_directory_answers_for_its_whole_ecosystem():
+    """`directories:` takes a list or a glob, whose jobs this cannot spell."""
+    assert not fd.retired("npm_and_yarn in /apps/web", [("npm", "")])
+    assert fd.retired("uv in /apps/web", [("npm", "")])

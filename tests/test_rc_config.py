@@ -73,6 +73,49 @@ def test_a_setting_that_is_neither_list_nor_object_is_ignored():
     assert rc_config.parse_config(workspace_text("devkit")) == rc_config.Config()
 
 
+def held_text(setting: object, folders: tuple[str, ...], held: list[str]) -> str:
+    payload = json.loads(workspace_text(setting, folders))
+    payload["settings"]["devkit.onHold"] = held
+    return json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [rc_config.ALL_PROJECTS, {"projects": rc_config.ALL_PROJECTS, "spawn": "worktree"}],
+    ids=["bare", "object"],
+)
+def test_all_serves_every_folder_in_the_workspace(setting):
+    """A list is a second copy of the registry, and a project plugged in after it was
+    written got no server. `all` reads the folders on every fire instead."""
+    text = workspace_text(setting, ("devkit", "carameli", "freshly-plugged"))
+    assert rc_config.parse_config(text).projects == ("devkit", "carameli", "freshly-plugged")
+
+
+def test_all_keeps_the_object_form_s_knobs():
+    text = workspace_text({"projects": rc_config.ALL_PROJECTS, "spawn": "worktree"})
+    assert rc_config.parse_config(text).spawn == "worktree"
+
+
+def test_all_still_serves_a_project_on_hold():
+    """The phone matches the machine's workspace, always. Subtracting `devkit.onHold`
+    here once left three of seven checkouts unreachable from the phone with nothing in
+    the artifact saying why -- a hold pauses adoption and box reporting, not this."""
+    text = held_text(rc_config.ALL_PROJECTS, ("devkit", "carameli"), ["carameli"])
+    config = rc_config.parse_config(text)
+    assert config.projects == ("devkit", "carameli")
+    assert rc_config.selected(config, ["devkit", "carameli"]) == (["devkit", "carameli"], [])
+
+
+def test_all_in_a_workspace_with_no_folders_serves_nothing():
+    assert rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS, ())).projects == ()
+
+
+def test_an_explicit_list_serves_a_held_project_it_names():
+    text = held_text(["devkit", "carameli"], ("devkit", "carameli"), ["carameli"])
+    config = rc_config.parse_config(text)
+    assert rc_config.selected(config, ["devkit", "carameli"]) == (["devkit", "carameli"], [])
+
+
 def test_non_string_project_names_are_dropped_not_stringified():
     assert rc_config.parse_config(
         workspace_text({"projects": ["devkit", 7, None, ""]})
@@ -140,25 +183,127 @@ def test_the_daily_update_is_timed_after_the_pass_that_owns_the_agent_clis():
 def test_a_name_that_is_not_a_checkout_is_reported_not_skipped_silently():
     """A typo that served nothing would look exactly like a working machine with nothing
     to do, which is the one answer this job must never give wrongly."""
-    serve, notes = rc_config.selected(rc_config.Config(("devkit", "typo")), ["devkit"], frozenset())
+    serve, notes = rc_config.selected(rc_config.Config(("devkit", "typo")), ["devkit"])
     assert serve == ["devkit"]
     assert len(notes) == 1 and "typo" in notes[0]
 
 
-def test_a_project_on_hold_gets_no_server():
+def test_everything_known_is_served_with_nothing_to_report():
     serve, notes = rc_config.selected(
-        rc_config.Config(("devkit",)), ["devkit"], frozenset({"devkit"})
-    )
-    assert serve == []
-    assert "on hold" in notes[0]
-
-
-def test_everything_known_and_running_is_served_with_nothing_to_report():
-    serve, notes = rc_config.selected(
-        rc_config.Config(("devkit", "carameli")), ["devkit", "carameli"], frozenset()
+        rc_config.Config(("devkit", "carameli")), ["devkit", "carameli"]
     )
     assert serve == ["devkit", "carameli"]
     assert notes == []
+
+
+# --- hosts and assigned_here ------------------------------------------------
+
+
+def test_without_hosts_every_machine_serves_its_own_checkouts():
+    """A one-PC workspace has nothing to assign, so absent keeps the old reading."""
+    config = rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS))
+    assert config.hosts == ()
+    assert rc_config.assigned_here(config, ["devkit", "carameli"], "anyone") == (
+        ["devkit", "carameli"],
+        [],
+    )
+
+
+def test_a_bare_host_string_assigns_every_project_to_that_machine():
+    """Spelled as `harness_events.host_name` spells it: any case, MagicDNS suffix off."""
+    config = rc_config.parse_config(
+        workspace_text({"projects": "all", "hosts": "Desktop-A.tail1234.ts.net"})
+    )
+    assert config.hosts == (("*", "desktop-a"),)
+    assert rc_config.assigned_here(config, ["devkit", "carameli"], "desktop-a") == (
+        ["devkit", "carameli"],
+        [],
+    )
+
+
+def test_a_machine_another_is_assigned_to_serves_nothing_and_says_who_does():
+    """The point of `hosts`: the workspace file is the same on every PC, and without it
+    the phone listed each project once per machine."""
+    config = rc_config.parse_config(workspace_text({"projects": "all", "hosts": "desktop-a"}))
+    here, elsewhere = rc_config.assigned_here(config, ["devkit"], "desktop-b")
+    assert here == []
+    assert elsewhere == ["devkit: served by desktop-a, not here (desktop-b)"]
+
+
+def test_parse_hosts_is_the_one_reading_every_hosts_knob_shares():
+    """`devkit.localE2e` assigns its nightly run with this same parser, and says what
+    it does with a project in its own verb."""
+    assert rc_config.parse_hosts("Desktop-A") == (("*", "desktop-a"),)
+    assert rc_config.parse_hosts({"carameli": "pc-b"}) == (("carameli", "pc-b"),)
+    config = rc_config.Config(hosts=rc_config.parse_hosts("desktop-a"))
+    _, elsewhere = rc_config.assigned_here(config, ["devkit"], "desktop-b", verb="tested")
+    assert elsewhere == ["devkit: tested by desktop-a, not here (desktop-b)"]
+
+
+def test_setting_hosts_reads_any_settings_hosts_and_nothing_else():
+    """The one reading `e2e-pass.py` and the fix pass share for `devkit.localE2e`."""
+    text = json.dumps({"settings": {rc_config.LOCAL_E2E_SETTING: {"hosts": "PC-A"}}})
+    assert rc_config.setting_hosts(text, rc_config.LOCAL_E2E_SETTING).hosts == (("*", "pc-a"),)
+    assert rc_config.setting_hosts(text, rc_config.RC_SETTING).hosts == ()
+
+
+@pytest.mark.parametrize("text", ["{", "[]", '{"settings": []}', '{"settings": {"s": "pc"}}'])
+def test_setting_hosts_of_a_broken_or_absent_setting_assigns_nobody(text):
+    assert rc_config.setting_hosts(text, "s").hosts == ()
+
+
+def test_a_project_named_in_hosts_overrides_the_default_machine():
+    config = rc_config.parse_config(
+        workspace_text({"projects": "all", "hosts": {"*": "desktop-a", "carameli": "desktop-b"}})
+    )
+    assert rc_config.assigned_here(config, ["devkit", "carameli"], "desktop-b")[0] == ["carameli"]
+    assert rc_config.assigned_here(config, ["devkit", "carameli"], "desktop-a")[0] == ["devkit"]
+
+
+def test_a_project_hosts_leaves_unassigned_is_served_nowhere_out_loud():
+    """No `*` and no entry of its own: no machine serves it, and every machine says so
+    rather than each quietly assuming another one has it."""
+    config = rc_config.parse_config(workspace_text({"projects": "all", "hosts": {"devkit": "a"}}))
+    here, elsewhere = rc_config.assigned_here(config, ["devkit", "carameli"], "b")
+    assert here == []
+    assert "carameli" in elsewhere[1] and "served nowhere" in elsewhere[1]
+
+
+@pytest.mark.parametrize(
+    "hosts",
+    [{"devkit": 7}, {"devkit": ""}, {"devkit": "..."}, {"": "desktop-a"}, ["desktop-a"], 3],
+    ids=["non-string-host", "empty-host", "no-name-left", "empty-project", "list", "int"],
+)
+def test_an_unusable_hosts_entry_is_dropped(hosts):
+    config = rc_config.parse_config(workspace_text({"projects": ["devkit"], "hosts": hosts}))
+    assert config.hosts == ()
+
+
+@pytest.mark.parametrize(
+    ("typed", "key"),
+    [
+        ("desktop-a", "desktop-a"),
+        ("  Desktop-A.tail1234.ts.net ", "desktop-a"),
+        ("DESKTOP-B9FC8VP", "desktop-b9fc8vp"),
+        ("", ""),
+        ("...", ""),
+    ],
+    ids=["already-a-key", "case-suffix-and-space", "upper-case", "empty", "no-name-left"],
+)
+def test_host_key_spells_a_typed_host_as_the_ledger_spells_the_machine(typed, key):
+    assert rc_config.host_key(typed) == key
+
+
+def test_host_for_prefers_a_project_s_own_entry_over_the_default():
+    config = rc_config.Config(hosts=(("*", "desktop-a"), ("carameli", "desktop-b")))
+    assert rc_config.host_for(config, "carameli") == "desktop-b"
+    assert rc_config.host_for(config, "devkit") == "desktop-a"
+
+
+def test_host_for_is_empty_for_a_project_nothing_assigns():
+    config = rc_config.Config(hosts=(("devkit", "desktop-a"),))
+    assert rc_config.host_for(config, "carameli") == ""
+    assert rc_config.host_for(rc_config.Config(), "devkit") == ""
 
 
 # --- valid_time and due_for_update ------------------------------------------

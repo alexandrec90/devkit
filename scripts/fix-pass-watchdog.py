@@ -38,12 +38,17 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
+import fix_switch
 import harness_events
 import worktree_tiers
 
@@ -57,8 +62,10 @@ EVENT = "fix-pass-finding"
 # Under the task's half-hour interval, so two passes never overlap.
 TIMEOUT = _dt.timedelta(minutes=25)
 MIN_RERUN = _dt.timedelta(minutes=5)
+# `fix-pass.WINDOW_ENV`, spelled here because this file imports nothing the pass does: the
+# seconds this run of the pass has before it is stopped, which it launches no session past.
+WINDOW_ENV = "DEVKIT_FIX_PASS_SECONDS"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-MODE = re.compile(r'"devkit\.fixPass"\s*:\s*"(\w+)"')
 RESCUE_PREFIX = "agent/fix-pass-rescue"
 INTENT = Path("logs") / "ship-intent.md"
 # `fix_reports.ORIGIN_FILE`, spelled here because this file imports nothing the pass
@@ -71,28 +78,59 @@ AUTOMERGE_LABEL = "automerge"  # sweep.AUTOMERGE_LABEL
 STALE = 75
 # How the pass reports on the world, as opposed to failing itself.
 REPORTED = (0, 1, STALE)
+# `git_trust.AUTH_SETTING`, spelled here because this file imports nothing the pass does, and
+# because self-update fetches before the pass has set it anywhere: GitHub answers a
+# blocked address's anonymous fetch 403, which git never takes to its credential helper,
+# so a fetch of a public repository failed while pushes went through (902dad3f).
+GITHUB_AUTH = ("-c", "http.https://github.com/.proactiveAuth=basic")
+
+
+# Seconds any one `git` or `gh` call of the watchdog's own may take before it is ended with
+# its whole tree (`bounded`); its returncode is then `TIMED_OUT`, `timeout(1)`'s spelling.
+# Unbounded, the 20:30 fire of 2026-10-09 spent 41 minutes in its own git calls before its
+# pass started at 21:11, and the 21:00 fire was skipped behind it (ebf74c37).
+CALL_TIMEOUT = 120
+TIMED_OUT = 124
+
+
+def bounded(
+    argv: list[str], cwd: Path, timeout: float = CALL_TIMEOUT
+) -> subprocess.CompletedProcess[str]:
+    """`argv` run in `cwd`, its output decoded as UTF-8, ended with every process under
+    it past `timeout` seconds. The output goes to temporary files and the wait is on the
+    process, for `run_pass`'s reason: `git fetch`'s `git-remote-https` and a credential
+    helper hold a pipe after `subprocess.run(timeout=)` has killed `git` alone."""
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            creationflags=NO_WINDOW,
+            start_new_session=sys.platform != "win32",
+        )
+        try:
+            code = process.wait(timeout=timeout)
+            ended = ""
+        except subprocess.TimeoutExpired:
+            end_tree(process)
+            code, ended = TIMED_OUT, f"\ntimed out after {timeout:g}s; ended it and its children"
+        out.seek(0)
+        err.seek(0)
+        said = [f.read().decode("utf-8", "replace").replace("\r\n", "\n") for f in (out, err)]
+    return subprocess.CompletedProcess(argv, code, said[0], (said[1] + ended).lstrip("\n"))
 
 
 def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-        creationflags=NO_WINDOW,
-    )
+    return bounded(["git", *GITHUB_AUTH, *args], root)
 
 
 def mode_of(argv: list[str], workspace: Path) -> str:
     """`--mode` when the caller passed one, else the workspace file's switch, else off."""
     if "--mode" in argv and argv.index("--mode") + 1 < len(argv):
         return argv[argv.index("--mode") + 1]
-    try:
-        found = MODE.search(workspace.read_text(encoding="utf-8"))
-    except OSError:
-        return "off"
-    return found.group(1) if found else "off"
+    return fix_switch.workspace_mode(workspace)
 
 
 def workspace_of(argv: list[str]) -> Path | None:
@@ -113,6 +151,24 @@ def default_branch(root: Path) -> str:
 FETCH_ATTEMPTS = 2
 FETCH_PAUSE_SECONDS = 5.0
 _SHA = re.compile(r"\b[0-9a-f]{7,40}\b")
+# How self-update says a fetch failed, and how many fires running it must before it is
+# filed. The fetch is the one step that needs the network, and each of the four
+# `pass-stale` rows it has filed (7599a153, a 2026-10-02 TLS reset, 6d06634e) healed at a
+# later fire on its own, each after sending a session at nothing. The pass still runs and
+# the note is still in its record; the next fire is the fix, and only one that is not
+# says anything about the machine. Two fires are half an hour, which a stall can span:
+# 2026-11-05 two fires running timed out up to 02:30 local and the next one's went through
+# (bb04d04d), its cause never found. Six are three hours: a lost login or remote still
+# files, and a stall that lasts that long is worth a session.
+FETCH_FAILED = "could not fetch"
+FETCH_STREAK = "fetch_failures"
+FETCH_FIRES = 6
+
+# The branch `dependabot-automerge.yml` keeps at the newest commit whose gate passed.
+GREEN = "green"
+# How far it may trail the default branch before that is filed. A day: a red `main` gets a
+# fixer within a pass and fix-or-revert within hours, so a day means the gate itself stopped.
+GREEN_STALE_SECONDS = 24 * 60 * 60
 
 
 def fetch(root: Path, base: str) -> str:
@@ -122,7 +178,12 @@ def fetch(root: Path, base: str) -> str:
     holds `refs/remotes/origin/<base>`'s lock: at 06:00 on 2026-09-27, with #430 merged a
     minute before and a fixer mid-verification, the watchdog's fetch failed and was filed
     as a stale pass with no reason on record (7599a153). The reason is git's own last
-    line, shas masked, so one cause is one ledger detail."""
+    line, shas masked, so one cause is one ledger detail.
+
+    A fetch that timed out is not retried: that second try is for a lock released in
+    seconds, and a bound of minutes spent twice comes straight out of the pass's window.
+    The 23:00 fire of 2026-11-03 began its pass nine minutes late, and the deadline then
+    cut it off mid-ship."""
     said = ""
     for attempt in range(FETCH_ATTEMPTS):
         if attempt:
@@ -132,7 +193,77 @@ def fetch(root: Path, base: str) -> str:
             return ""
         lines = (done.stderr or "").strip().splitlines()
         said = _SHA.sub("<sha>", lines[-1].strip()) if lines else f"git exited {done.returncode}"
+        if done.returncode == TIMED_OUT:
+            break
     return said
+
+
+def worth_filing(
+    state: dict, ok: bool, what: str, cut_off: Callable[[str], bool] | None = None
+) -> bool:
+    """Whether this fire's self-update result is a finding: any failure but a fetch, and
+    a fetch that has now failed `FETCH_FIRES` fires running (`state` counts them).
+
+    A fetch that failed because this machine has no network (`cut_off`, by default
+    `harness_events.cut_off`) neither counts nor files: fc172488 was filed on 2026-11-12
+    after six fires of a night without DNS, which no session could act on."""
+    if ok or not what.startswith(FETCH_FAILED):
+        state.pop(FETCH_STREAK, None)
+        return not ok
+    if (cut_off or harness_events.cut_off)(what):
+        return False
+    state[FETCH_STREAK] = state.get(FETCH_STREAK, 0) + 1
+    return state[FETCH_STREAK] >= FETCH_FIRES
+
+
+def update_target(root: Path, base: str) -> str:
+    """The ref the checkout follows: `origin/green` once it exists, else `origin/<base>`.
+
+    Merging no longer means tested, and the pass is what repairs a bad merge: running one
+    would break the repair of itself. `green` is the newest commit whose gate passed, so a
+    red `main` leaves the pass on code that works and the fixers it sends cut from `main`.
+    A repository with no `green` yet is one whose gate has not passed since it was added.
+
+    Decided by the ref being known here, not by this fetch: a fetch that failed for a
+    moment must leave the checkout on the last `green`, never move it to the unjudged tip.
+
+    The refspec's source is spelled in full. `+green:...` exits 0 and writes no ref when
+    the commit is already here, which it always is: `green` trails what `main` fetched.
+    """
+    ref = f"refs/remotes/origin/{GREEN}"
+    git(root, "fetch", "--quiet", "origin", f"+refs/heads/{GREEN}:{ref}")
+    known = git(root, "rev-parse", "--verify", "--quiet", ref)
+    return f"origin/{GREEN}" if known.returncode == 0 else f"origin/{base}"
+
+
+def stale_green(
+    root: Path,
+    base: str,
+    limit: float = GREEN_STALE_SECONDS,
+    clock: Callable[[], float] = time.time,
+) -> str:
+    """What to file when a commit has waited more than `limit` to reach `green`, else "".
+
+    Following `green` means a broken gate stops the machine updating, quietly. Nothing
+    should act on the tip while that lasts, but past this the wait stops being the safe
+    answer and becomes the failure.
+
+    Measured from the oldest commit `green` has not reached, against the clock. The gap
+    between the two commits would call a quiet weekend followed by one merge days stale
+    while that merge's gate was still running. Filed apart from `self_update`, whose False
+    would also stop the rerun: the checkout is up to date with everything judged good.
+    """
+    ref = f"refs/remotes/origin/{GREEN}"
+    if git(root, "rev-parse", "--verify", "--quiet", ref).returncode != 0:
+        return ""
+    waiting = git(root, "log", "--reverse", "--format=%ct", f"{ref}..origin/{base}").stdout.split()
+    try:
+        oldest = int(waiting[0]) if waiting else 0
+    except ValueError:
+        return ""
+    if not oldest or clock() - oldest <= limit:
+        return ""
+    return f"origin/{base} has commits {GREEN} has not reached in a day: its gate is not passing"
 
 
 def self_update(root: Path) -> tuple[bool, str]:
@@ -150,12 +281,30 @@ def self_update(root: Path) -> tuple[bool, str]:
     if git(root, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         return False, "the checkout the pass runs from has uncommitted changes"
     if failed := fetch(root, base):
-        return False, f"could not fetch origin/{base} -- {failed}"
+        return False, f"{FETCH_FAILED} origin/{base} -- {failed}"
     before = git(root, "rev-parse", "HEAD").stdout.strip()
-    if git(root, "merge", "--ff-only", "--quiet", f"origin/{base}").returncode != 0:
-        return False, f"{base} has diverged from origin/{base}"
+    target = update_target(root, base)
+    if git(root, "merge", "--ff-only", "--quiet", target).returncode != 0:
+        return False, f"{base} has diverged from {target}"
     after = git(root, "rev-parse", "HEAD").stdout.strip()
-    return True, "current" if before == after else f"updated {before[:9]}..{after[:9]}"
+    if before != after:
+        return True, f"updated {before[:9]}..{after[:9]}"
+    return True, "current" + trailing(root, base, target)
+
+
+def trailing(root: Path, base: str, target: str) -> str:
+    """What a checkout current with `green` still lacks of `origin/<base>`, or "".
+
+    "current" alone read as running main's code: on 2026-11-11 the record said it all
+    evening while the checkout sat a merged fix behind main, `green` held back by a release
+    whose tag had not landed, and the scheduled job that fix was for kept failing on the
+    code it replaced (c6c538d9)."""
+    if target == f"origin/{base}":
+        return ""
+    counted = git(root, "rev-list", "--count", f"HEAD..origin/{base}").stdout.strip()
+    if not counted.isdigit() or counted == "0":
+        return ""
+    return f" with {target}; {counted} commit(s) on origin/{base} wait for its gate"
 
 
 # --- 2 and 3. run and judge ---------------------------------------------------------------
@@ -177,32 +326,71 @@ def run_pass(argv: list[str], timeout: _dt.timedelta = TIMEOUT) -> tuple[int | N
 
     The pass runs in UTF-8 mode: dozens of its runners use `text=True` with no encoding,
     and on a cp1252 console a child's `”` killed their reader thread and lost output.
+    It is told `timeout` too, so it can finish inside it rather than be stopped.
+
+    Its output goes to a temporary file, and the wait is on the pass, never on an
+    end-of-file: `subprocess.run(timeout=)` ends the child alone on Windows and then reads
+    its pipes with no bound, and a `git commit` hook or a `claude --bg` launch the pass
+    started holds them for as long as it runs. fd5af1b1: no pass recorded anything from
+    05:39 to 09:37 local on 2026-10-08, and the 09:30 fire was skipped with this run
+    still going -- `ship_intent._run_bounded`'s cause (#580), here in the watchdog.
     """
-    try:
-        done = subprocess.run(
+    window = str(int(timeout.total_seconds()))
+    with tempfile.TemporaryFile() as spool:
+        process = subprocess.Popen(
             [console_python(), str(PASS), *argv],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env={**os.environ, "PYTHONUTF8": "1"},
-            check=False,
-            timeout=timeout.total_seconds(),
+            stdout=spool,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "PYTHONUTF8": "1", WINDOW_ENV: window},
             creationflags=NO_WINDOW,
+            start_new_session=sys.platform != "win32",
         )
-    except subprocess.TimeoutExpired as exc:
-        return None, _text(exc.stdout) + _text(exc.stderr)
-    return done.returncode, (done.stdout or "") + (done.stderr or "")
+        try:
+            code: int | None = process.wait(timeout=timeout.total_seconds())
+        except subprocess.TimeoutExpired:
+            end_tree(process)
+            code = None
+        spool.seek(0)
+        output = spool.read().decode("utf-8", "replace").replace("\r\n", "\n")
+    return code, output
 
 
-def run_current(argv: list[str], mode: str, notes: list[str]) -> tuple[int | None, str]:
+def end_tree(process: subprocess.Popen) -> None:
+    """End `process` and everything under it that is still attached, then reap it by its
+    exit. A copy of `ship_intent._end_tree`, since this file imports nothing the pass does."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                check=False,
+                timeout=60,
+                creationflags=NO_WINDOW,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def run_current(
+    argv: list[str], mode: str, notes: list[str], started: float | None = None
+) -> tuple[int | None, str]:
     """Run the pass, and once more on the new code when it exits `STALE`.
 
-    Only inside what is left of this fire's budget, so two passes still never overlap:
-    short of `MIN_RERUN`, the first run's record stands and the next fire routes it.
+    Only inside what is left of this fire's budget, counted from `started` (the fire's
+    own `time.monotonic()`, now when None) so self-update's minutes are in it too and two
+    passes still never overlap: the pass gets at least `MIN_RERUN`, and short of that for
+    a rerun, the first run's record stands and the next fire routes it.
     """
-    started = time.monotonic()
-    code, output = run_pass(argv)
+    started = time.monotonic() if started is None else started
+    spent = _dt.timedelta(seconds=time.monotonic() - started)
+    code, output = run_pass(argv, max(TIMEOUT - spent, MIN_RERUN))
     if code != STALE or mode == "off":
         return code, output
     left = TIMEOUT - _dt.timedelta(seconds=time.monotonic() - started)
@@ -215,17 +403,14 @@ def run_current(argv: list[str], mode: str, notes: list[str]) -> tuple[int | Non
     return run_pass(argv, left) if ok else (code, output)
 
 
-def _text(stream: str | bytes | None) -> str:
-    """A timed-out child's partial output, which `subprocess` may hand back as bytes."""
-    if isinstance(stream, bytes):
-        return stream.decode("utf-8", "replace")
-    return stream or ""
-
-
 THREAD_TRACE = re.compile(
     r"^Exception in thread [^\n]*\nTraceback \(most recent call last\):\n(?:[ \t][^\n]*\n)*(\S[^\n]*)",
     re.MULTILINE,
 )
+# Python's own, which starts at column 0. The words alone are not one: a finding the pass
+# files can quote a project's traceback on a line of the record, and the 01:30 fire of
+# 2026-11-05 finished cleanly, filed one, and had a rescue sent at it for doing so.
+TRACEBACK = re.compile(r"^Traceback \(most recent call last\):", re.MULTILINE)
 # What a session is sent at: the pass stopped. A refusal needs something outside the
 # repository and a thread error left the pass running, so both are only filed.
 RESCUED = ("pass-crashed", "pass-hung")
@@ -239,13 +424,13 @@ def judge(code: int | None, output: str) -> tuple[str, str]:
             f"the fix pass ran past {int(TIMEOUT.total_seconds() // 60)} minutes and was stopped",
         )
     threads = THREAD_TRACE.findall(output)
-    if code in REPORTED and "Traceback (most recent call last)" not in THREAD_TRACE.sub("", output):
+    if code in REPORTED and not TRACEBACK.search(THREAD_TRACE.sub("", output)):
         # A background thread's traceback -- a reader thread that could not decode a
         # child's output -- lost output but did not stop the pass: filed, not rescued.
         return ("pass-thread-error", threads[0].strip()[:240]) if threads else ("", "")
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     last = lines[-1] if lines else f"exit {code}"
-    kind = "pass-refused" if code == 2 and "Traceback" not in output else "pass-crashed"
+    kind = "pass-refused" if code == 2 and not TRACEBACK.search(output) else "pass-crashed"
     return kind, re.sub(r"\s+", " ", last)[:240]
 
 
@@ -280,13 +465,20 @@ def file_once(
 
 
 def rescue_prompt(kind: str, detail: str, branch: str) -> str:
+    """What the rescue session is told. It retires the finding `file_once` filed, against
+    its own branch: unretired, the pass's next ledger sweep was sent at the same defect
+    while the rescue's PR was in review (755ee62b, #564)."""
     return (
         f"The scheduled fix pass itself is failing ({kind}): {detail}. Its full output is in "
         f"{FAILURE_LOG.as_posix()} in this worktree, which is devkit on the fresh branch "
         f"{branch} off the default branch. You are the fix pass's own repair: find why "
         "scripts/fix-pass.py, or a module it loads, fails this way; fix it with a regression "
         "test that fails without the fix; then ship it with the ship skill and stop. Nothing "
-        "else is in scope, and nothing else is shipped until the pass runs again."
+        "else is in scope, and nothing else is shipped until the pass runs again. Once the "
+        f"fix is in your intent, retire the {EVENT} group whose detail starts `{kind}:` -- "
+        "its id is in python scripts/harness_triage.py's output -- with python "
+        "scripts/harness_triage.py --resolve-like <id> --note <what fixed it> --pr "
+        f"{branch}, so no ledger session is sent at it while your PR is open."
     )
 
 
@@ -402,10 +594,7 @@ def ship_rescues(root: Path) -> list[str]:
                 "--label",
                 AUTOMERGE_LABEL,
             ]
-            made = subprocess.run(
-                pr, cwd=tree, capture_output=True, text=True, check=False, creationflags=NO_WINDOW
-            )
-            failed = "" if made.returncode == 0 else "gh pr create"
+            failed = "" if bounded(pr, tree).returncode == 0 else "gh pr create"
         if not failed:
             intent.replace(intent.with_name("ship-intent.shipped.md"))
         shipped.append(f"{branch}: {'shipped' if not failed else 'FAILED at ' + failed}")
@@ -416,6 +605,7 @@ def ship_rescues(root: Path) -> list[str]:
 
 
 def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
+    began = time.monotonic()
     now = now or _dt.datetime.now(_dt.UTC)
     workspace = workspace_of(argv)
     mode = mode_of(argv, workspace) if workspace else "off"
@@ -428,11 +618,14 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
     if mode != "off":
         ok, what = self_update(REPO_ROOT)
         notes.append(f"watchdog: self-update -- {what}")
-        if not ok:
+        if worth_filing(state, ok, what):
             file_once(
                 state, signature("pass-stale", what, head), "pass-stale", what, str(REPO_ROOT), now
             )
-    code, output = run_current(argv, mode, notes)
+        if stale := stale_green(REPO_ROOT, default_branch(REPO_ROOT)):
+            sig = signature("green-stale", stale, head)
+            file_once(state, sig, "green-stale", stale, str(REPO_ROOT), now)
+    code, output = run_current(argv, mode, notes, began)
     print(output, end="")  # pythonw.exe runs this job with sys.stdout None
     kind, detail = judge(code, output)
     if kind:
@@ -451,6 +644,15 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
     if notes:
         _write(ARTIFACT, "\n".join(notes).rstrip() + "\n", "a")
         print("\n".join(notes))
+    return exit_code(code, kind)
+
+
+def exit_code(code: int | None, kind: str) -> int:
+    """What the scheduler's Last Result says of this fire: the pass's own report, `2`
+    for a pass that failed itself -- and `0` for a `STALE` one left to the next fire,
+    which routes it: nothing failed, and `75` read as a failed run."""
+    if code == STALE and not kind:
+        return 0
     return code if code in REPORTED and kind not in RESCUED else 2
 
 

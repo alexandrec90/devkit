@@ -14,7 +14,6 @@ scripts/docker-maint.py::find_delegate
 scripts/docker-maint.py::generic_down
 scripts/docker-maint.py::generic_up
 scripts/docker-maint.py::poll_engine
-scripts/docker-maint.py::stop_docker
 scripts/git-merge-default.py::fetch
 scripts/git-merge-default.py::held_in_the_stash
 scripts/git-merge-default.py::merge_around_local_changes
@@ -63,7 +62,6 @@ scripts/merge-dependabot-prs.py::open_prs
 scripts/merge-dependabot-prs.py::prs_for_branch
 scripts/merge-dependabot-prs.py::verdict
 scripts/new-project.py::build_context
-scripts/new-project.py::create_remote
 scripts/new-project.py::register_slot_hint
 scripts/new-project.py::scripted_setup_env
 scripts/precommit/check_harness_drift.py::is_same_repo
@@ -82,7 +80,6 @@ scripts/release-pipeline.py::dispatch_tag_workflow
 scripts/release-pipeline.py::download_failing_tests
 scripts/release-pipeline.py::main_fallback
 scripts/release-pipeline.py::newest_workflow_run
-scripts/release-pipeline.py::open_release_pr
 scripts/release-pipeline.py::parse_version
 scripts/release-pipeline.py::pr_rollup
 scripts/release.py::main_fallback
@@ -120,9 +117,7 @@ scripts/sync-devkit.py::retired_present
 scripts/upgrade-project.py::run_pull
 scripts/upgrade-project.py::run_scoped
 scripts/upgrade-project.py::verify_pull
-scripts/workspace-status.py::behind_line
 scripts/workspace-status.py::schedule_lines
-scripts/workspace-status.py::stranded_line
 scripts/worktree-guard.py::current_branch
 scripts/worktree-guard.py::deliver
 scripts/worktree-guard.py::edited_path_key
@@ -136,7 +131,6 @@ scripts/worktree-guard.py::route_to_own_box
 scripts/worktree-guard.py::tool_input
 scripts/worktree.py::Reconciliation
 scripts/worktree.py::branch_is_merged
-scripts/worktree.py::compose_down
 scripts/worktree.py::has_stack
 scripts/worktree.py::inspect_box
 scripts/worktree.py::lease_file
@@ -146,5 +140,3 @@ scripts/worktree.py::pr_head_branch
 scripts/worktree.py::recovered_slot
 scripts/worktree.py::render_preview
 scripts/worktree.py::render_reap
-scripts/worktree.py::run_steps
-scripts/worktree.py::seed_env

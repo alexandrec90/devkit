@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 import sys
 
+import pytest
 import support
 from support import git_policy
 
@@ -98,6 +99,57 @@ def test_pre_commit_rejects_default_branch_and_detached_head_without_network():
     decision = git_policy.evaluate_pre_commit(detached)
     assert not decision.ok
     assert any("detached HEAD" in error for error in decision.errors)
+    assert not any("symbolic-ref" in error for error in decision.errors)
+
+
+def test_a_detached_head_mid_merge_is_told_how_to_branch_without_losing_the_merge():
+    """86eaa68b: a supervisor's merge in a `--detach` tree was refused, `git switch -c`
+    then refused mid-merge, and `git checkout -b` would have dropped MERGE_HEAD."""
+    responses = git_responses(branch="")
+    responses[("git", "rev-parse", "-q", "--verify", "MERGE_HEAD")] = completed(
+        ["git"], stdout="abc123\n"
+    )
+    decision = git_policy.evaluate_pre_commit(FakeRunner(responses))
+    assert not decision.ok
+    (error,) = decision.errors
+    assert error == git_policy.branch.detached_head_error(FakeRunner(responses))
+    assert git_policy.branch.detached_head_error(FakeRunner()) == git_policy.branch.DETACHED_HEAD
+    assert "mid-merge" in error
+    assert "git branch <new-name> HEAD && git symbolic-ref HEAD refs/heads/<new-name>" in error
+
+
+def test_the_mid_merge_remedy_keeps_the_merge_in_a_real_repo(tmp_path):
+    """The spelling the refusal names, run for real: on a branch, still merging."""
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "core.hooksPath=", *args],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def commit(body):
+        (tmp_path / "f").write_text(body)
+        git("add", "f")
+        git("commit", "-qm", body)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    commit("a")
+    git("switch", "-qc", "side")
+    commit("b")
+    git("switch", "-q", "main")
+    commit("c")
+    git("switch", "-q", "--detach")
+    git("merge", "side")
+    assert (tmp_path / ".git" / "MERGE_HEAD").exists()
+    git("branch", "carried", "HEAD")
+    git("symbolic-ref", "HEAD", "refs/heads/carried")
+    assert git("branch", "--show-current").stdout.strip() == "carried"
+    assert (tmp_path / ".git" / "MERGE_HEAD").exists()
 
 
 def test_pre_commit_allows_the_default_branch_when_there_is_no_remote():
@@ -425,6 +477,71 @@ def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatc
     assert runner.calls.index(("pre-commit-test", "run", "--hook-stage", "pre-commit")) < (
         runner.calls.index(("project-hook-test",))
     )
+
+
+def _commit_responses(tmp_path):
+    """A commit the policy lets through in a project with a framework and a project hook."""
+    responses = git_responses()
+    responses.update(merged_response("claude/fresh", []))
+    responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("git", "rev-parse", "--show-toplevel")] = completed(["git"], stdout=f"{tmp_path}\n")
+    responses[("git", "config", "--get", "devkit.branchPolicy.projectHooksPath")] = completed(
+        ["git"], returncode=1
+    )
+    responses[("project-hook-test",)] = completed(["project-hook-test"])
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    project_hook = tmp_path / ".githooks" / "pre-commit"
+    project_hook.parent.mkdir()
+    project_hook.write_text("# project hook\n", encoding="utf-8")
+    return responses
+
+
+def test_the_framework_skip_waives_the_framework_and_nothing_else(tmp_path, monkeypatch):
+    """The direct flow's commit: no formatter, and the rest of the hook as it was."""
+    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
+    monkeypatch.setattr(
+        git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
+    )
+    runner = FakeRunner(_commit_responses(tmp_path))
+    env = {git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
+    # `_pre_commit_command` answering None is a refusal unless the framework is not reached.
+    assert git_policy.run_hook("pre-commit", [], runner=runner, env=env) == 0
+    assert ("git", "branch", "--show-current") in runner.calls
+    assert ("project-hook-test",) in runner.calls
+
+
+def test_the_framework_skip_keeps_the_retired_branch_refusal(tmp_path, capsys):
+    """`ship_intent._commit_carrying` moves a commit off a retired name only because this
+    refusal reaches it. `--no-verify` would lose it along with the framework."""
+    responses = _commit_responses(tmp_path)
+    responses.update(merged_response("claude/fresh", [{"url": "https://github.com/acme/w/pull/1"}]))
+    env = {git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
+    assert git_policy.run_hook("pre-commit", [], runner=FakeRunner(responses), env=env) == 1
+    assert "is permanently retired because its PR merged" in capsys.readouterr().err
+
+
+def test_the_framework_skip_covers_the_push_stage_too(tmp_path, monkeypatch):
+    """`pre-commit` refusing a push, or absent from a tree nobody provisioned, stands
+    between a direct-flow session and its PR as much as at the commit."""
+    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
+    responses = _push_responses(tmp_path)
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    raw = "refs/heads/claude/fresh aaa refs/heads/claude/fresh 0000\n"
+    env = {git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
+    code = git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=FakeRunner(responses))
+    assert code == 1, "unset, the missing framework still refuses"
+    runner = FakeRunner(responses)
+    assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner, env=env) == 0
+
+
+def test_the_framework_skip_reads_off_values_as_off(tmp_path):
+    for value in ("", "0", "false", "no", "off", " Off "):
+        assert not git_policy.framework_skipped({git_policy.FRAMEWORK_SKIP_ENV_VAR: value}), value
+    for value in ("1", "true", "yes"):
+        assert git_policy.framework_skipped({git_policy.FRAMEWORK_SKIP_ENV_VAR: value}), value
+    assert not git_policy.framework_skipped({})
 
 
 def _push_responses(tmp_path):
@@ -806,6 +923,28 @@ def test_a_worktree_with_its_own_venv_keeps_using_it(tmp_path):
     inner.write_text("", encoding="utf-8")
     assert git_policy.framework._pre_commit_command(box, _common_dir(checkout / ".git")) == [
         str(inner)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("launcher", "python"),
+    [("Scripts/pre-commit.exe", "Scripts/python.exe"), ("bin/pre-commit", "bin/python")],
+)
+def test_a_venv_with_its_interpreter_runs_pre_commit_as_a_module(tmp_path, launcher, python):
+    """Not the console script: uv writes the interpreter's absolute path into each
+    launcher, so one written from a tree that has since been deleted dies with `uv
+    trampoline failed to canonicalize script path`. A `claude --worktree` tree syncs
+    through the checkout's linked `.venv`, and every devkit commit was refused that way
+    once the tree that last synced was removed. The venv's interpreter reads
+    `pyvenv.cfg` and survives it."""
+    venv = tmp_path / ".venv"
+    for name in (launcher, python):
+        (venv / name).parent.mkdir(parents=True, exist_ok=True)
+        (venv / name).write_text("", encoding="utf-8")
+    assert git_policy.framework._pre_commit_command(tmp_path, _common_dir(tmp_path / ".git")) == [
+        str(venv / python),
+        "-m",
+        "pre_commit",
     ]
 
 

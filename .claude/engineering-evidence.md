@@ -101,6 +101,25 @@ Moved here from `engineering.md` on 2026-09-26: the always-loaded tier had 12 to
 headroom, and this table is read only by a session waiting on a gate, which
 `session-scope.md` keeps project sessions from doing at all.
 
+### The foreground call Claude Code moves
+
+A `timeout` of 590000 does not keep a Bash call in the foreground: Claude Code answers
+`Command was moved to the background (ID: …) after running for 180s`, names an output file
+and promises a notice. A top-level session takes the notice and stops. A subagent cannot
+stop: ending its turn is returning, so it reads nothing after that. One `until` loop on
+that file, in the foreground, is the wait left to it, and
+`session_friction.MOVED_TO_BACKGROUND` excuses exactly that loop (ledger `2d4d52ac`).
+
+**The notice does reach a subagent that is still working.** A sweep's subagent on Claude
+Code 2.1.322 (ledger `977b93dc`) had a background command's and a `Monitor`'s
+`<task-notification>` delivered between two of its own `Read` calls, and acted on it. So
+a subagent with other work to do backgrounds the job and keeps working, as a top-level
+session would; only one left with nothing but the wait needs the foreground loop. A
+leading `sleep` is never that loop: `Start-Sleep 170; Get-Content <the task file>` was
+refused with "Blocked: Start-Sleep 170 followed by: Get-Content ... To wait for a
+condition, use Monitor with an until-loop", and three turns went to finding the shape
+the rule had already named.
+
 ### devkit#180: "no checks reported" was a gate that would never start
 
 GitHub builds a `pull_request` run against the *merge* ref, and a PR that has gone
@@ -141,6 +160,16 @@ git -C "$HOME/…/eager-kindling-russell" rev-parse → C:/Users/…/eager-kindl
 The tilde is never expanded before the check — the path predicate rejects any string
 containing `~` outright, alongside `/proc/self`, `/dev/fd` and a leading `/../`.
 
+`$HOME` resolves as an *argument*, not as the program. For an interpreter the script is
+the program, so the same variable is refused one operand earlier (10-08, a supervisor
+session):
+
+```
+python scripts/harness_triage.py --agent "$HOME/x"           → runs
+python "$HOME/…/devkit/scripts/harness_triage.py" --agent claude → refused: "a computed
+    argument goes after the script or --"
+```
+
 The substring match is the expensive one. A statement the parser cannot reduce to a
 simple list is tested against `/git/i` over the entire line, unanchored:
 
@@ -156,6 +185,60 @@ has a branch for exactly that shape. The two wrong ones pointed the wrong way: a
 reading them avoids `$HOME` for the tilde, which is the one spelling that is actually
 refused. Nothing gates a sentence like that, which is why it survived until a session
 ran the commands instead of believing it.
+
+## A container's command line, read as the host's
+
+Both tools judge the text of a `docker exec … sh -c "…"` as if the host would run it. A
+carameli session (ledger groups `9a2a5478` and its Bash twin, 2026-10-27) met each in
+turn:
+
+```
+Bash:       docker exec mutmut-probe sh -c '… tar --exclude=./.git …'
+            → "hands sh text naming git in a plain command … Refusing to run it"
+PowerShell: docker exec … mutmut-probe sh -c "rm -rf mutants; …"
+            → "Remove-Item on system path '/work' is blocked. This path is protected
+               from removal."
+```
+
+The second is the PowerShell tool's own protected-path check, not the isolation guard
+and not devkit: it reads `rm` as the `Remove-Item` alias and the container's `/work` as a
+host root. The rule's "PowerShell for a compound statement" sends a session straight
+into it. What passes both is what the session found: write the container's commands to a
+script file with the Write tool and run that file with `sh` in the container (a
+bind-mounted path, or `docker cp` first), so neither tool sees the text.
+
+The same check reads the whole call, not the `Remove-Item`'s own arguments. Reproduced
+2026-11-06 (ledger `1da8bf60`, `a8f9b83e`) on a scratch path that did not exist, the
+literal spelling and a `;` between the statements settling nothing:
+
+```
+Remove-Item -Recurse -Force 'C:\…\tmp\nope'; robocopy 'C:\…\a' 'C:\…\b' /E /L
+    → "Remove-Item on system path '/E' is blocked. This path is protected from removal."
+Remove-Item -Recurse -Force "$s\hl"; Start-Process -FilePath "C:\Program Files\…"
+    → "system path '"C:\Program'"
+```
+
+So a removal goes in a call of its own, which also leaves the rest of the call to run.
+
+## An `rm` whose target is built from variables
+
+Neither the isolation guard nor devkit: a built-in Claude Code safety check, on a target
+it cannot show stays away from the filesystem root. Reproduced 2026-11-04 (ledger
+`b945aedf`), each line a separate Bash call on a scratch path that did not exist:
+
+```
+for f in a b; do rm -f $A/$f/x; done            → "Dangerous rm operation detected … a
+                                                   shell variable expansion"
+for f in a b; do rm -f "$A/$f/x"; done          → the same; quoting does not settle it
+for f in a b; do rm -f "${A:?}/${f:?}/x"; done  → runs
+A=…; rm -f $A/x                                 → runs
+```
+
+The refusal names both ways through: the `:?` form, which stops the shell when a variable
+is empty, and a literal absolute path. Take one of those. The rule's "PowerShell for a
+compound statement" does not apply here: the refusal says not to re-issue the removal
+through another tool or shell, and when it offers no rewrite the removal is left for a
+person to do, and the report says so.
 
 ## Git Bash rewrites a `rev:path` whose path starts with a dot
 
@@ -268,8 +351,16 @@ tests pass by agreeing that nothing happened.
 
 Not the guard, and not devkit: Claude Code's Bash tool delivers a doubled backslash as a
 single one, inside `<<'EOF'` as well as in a single-quoted argument, so a Python patch
-script written that way arrives with its escapes changed. Its `assert old in text` fails,
+script written that way arrives with its escapes changed. The one spelling it leaves
+alone is a run of backslashes ending at a `"` (`"\\"` arrives intact, `'\\'` does not),
+which is why the same write is damaged in one file and not the next. Its `assert old in text` fails,
 or worse, the replacement writes a different regex than the one reviewed. On 2026-09-26
 alone five sessions filed it (ledger `f5f07c62`, `c979d748`, `f0997a7c`, `b957e0cf`, and
 the session that retired those), each after the rule already said "use Write or Edit"
 without saying why. What devkit owns is putting the reason where the instruction is read.
+
+With no `assert`, nothing fails at all. A d2-trader session on 2026-11-06 (ledger
+`c04b397c`) patched with `s.replace('''…"\\\\_"…''', …)`, so the tool's halving left a
+search text the file did not hold, `replace` changed nothing, and it took three more
+heredocs to see why. That session was typed by a person, so it had the rule and not
+`agent_tabs.FILE_WRITES`, which only a launch through devkit carries.

@@ -130,6 +130,25 @@ def test_a_resolution_retires_exactly_the_item_it_names():
     assert [i.detail for i in triage.open_items(items)] == ["two"]
 
 
+def test_target_reads_the_project_and_the_pr_a_resolution_names():
+    assert triage.target("#402") == ("devkit", "402")
+    assert triage.target("https://github.com/o/carameli/pull/12.") == ("carameli", "12")
+    assert triage.target("agent/fix-x-0919") == ("", "agent/fix-x-0919")
+    assert triage.target("-") == ("", "")
+
+
+def test_recent_returns_a_resolution_for_each_fix_still_to_verify():
+    """Only a standing resolution naming a PR, from inside the window, is one to check."""
+    named = _line("triage-resolved", ref="aaaabbbb", pr="agent/fix-x-0919", note="one")
+    unnamed = _line("triage-resolved", ref="ccccdddd", pr="-", note="two")
+    items = triage.read_items("\n".join([named, unnamed]))
+    now = datetime.fromisoformat(STAMP) + timedelta(hours=1)
+    made = triage.resolved_at(items[0])
+    expected = triage.Resolution("aaaabbbb", made, "agent/fix-x-0919", "one")
+    assert triage.recent(items, now) == [expected]
+    assert triage.recent(items, now + timedelta(days=365)) == []
+
+
 def test_resolved_refs_names_every_ref_and_ignores_the_refless():
     items = triage.read_items(
         "\n".join(
@@ -456,6 +475,143 @@ def test_a_defect_back_after_a_resolution_is_marked_as_a_fix_that_did_not_hold()
     assert "RECURRED" not in triage.render(triage.open_items(fresh), fresh)
 
 
+def test_a_reopened_row_says_why_and_which_resolution_it_undid():
+    """3355a63a read `RECURRED ... last: <an older, unrelated note>`, while what had
+    happened was that its own resolution named `agent/fix-harness-ledger-0927`, the fix
+    merged as #439 from the name it was carried to, and `fix_verify` reopened it saying
+    to resolve again with the PR's number. The session learned that from the raw ledger."""
+    first = _line("scheduled-job-failed", stamp=_STAMPS[0], message="job failed")
+    ref = triage.item_id(first)
+    held = _line(
+        "triage-resolved", stamp=_STAMPS[1], ref=ref, pr="agent/x", note="pushed past the gate"
+    )
+    undone = _line(
+        "triage-reopened", stamp="2026-08-24T12:00:03+00:00", ref=ref, note="no PR from agent/x"
+    )
+    history = triage.read_items("\n".join((first, held, undone)))
+    assert triage.reopened(history) == {
+        ref: "no PR from agent/x; the resolution it undid (pr=agent/x): pushed past the gate"
+    }
+    text = triage.render(triage.open_items(history), history)
+    assert f"  REOPENED {ref} -- no PR from agent/x; the resolution it undid" in text
+    # Resolved again after the reopening: it stands, and nothing is reopened.
+    again = _line("triage-resolved", stamp="2026-08-24T12:00:04+00:00", ref=ref, note="#439")
+    assert triage.reopened(triage.read_items("\n".join((first, held, undone, again)))) == {}
+    # A reopening with no resolution on record still says why.
+    bare = triage.read_items("\n".join((first, undone)))
+    assert triage.reopened(bare) == {
+        ref: "no PR from agent/x; the resolution it undid: none on record"
+    }
+
+
+def test_verdict_lines_prefer_a_fix_in_flight_to_a_recurrence():
+    old, a, b = (
+        triage.read_items(_line("triage-resolved", stamp=_STAMPS[1], ref=r, pr=p, note=n))[0]
+        for r, p, n in (("r0", "6", "old"), ("r1", "7", "a"), ("r2", "-", "b"))
+    )
+    assert triage.verdict_lines(None, None) == []
+    assert triage.verdict_lines("", []) == []
+    assert triage.verdict_lines("410", [old])[0].startswith("  PENDING on 410 --")
+    assert triage.verdict_lines(None, [a, b]) == [
+        "  RECURRED after 2 resolutions -- last: b -- that fix did not hold; "
+        "fix the cause so it cannot come back",
+        f"    tried  {_STAMPS[1]}  pr=7  refs r1 -- a",
+        f"    tried  {_STAMPS[1]}  pr=-  refs r2 -- b",
+    ]
+
+
+def test_a_recurred_group_lists_every_fix_tried_with_its_refs_and_pr():
+    """cab2dfdd: a group read `RECURRED after 10 resolutions -- last: ...`, and the
+    session sent at it grepped the ledger for the group id to read the other nine. That
+    id is a hash of the newest row and is written nowhere, so it matched nothing. Each
+    fix tried is listed under the verdict -- once per `--resolve-like`, not once per row
+    it wrote -- with the refs a grep does find, the PR and when it was made."""
+    one = _line("session-friction", stamp=_STAMPS[0], detail="No module named pytest")
+    two = _line("session-friction", stamp=_STAMPS[1], detail="No module named pytest")
+    refs = [triage.item_id(one), triage.item_id(two)]
+    first = [
+        _line("triage-resolved", stamp=f"2026-08-24T13:00:0{n}+00:00", ref=r, pr="11", note="uv")
+        for n, r in enumerate(refs)
+    ]
+    again = _line(
+        "session-friction", stamp="2026-08-25T09:00:00+00:00", detail="No module named pytest"
+    )
+    later = _line(
+        "triage-resolved",
+        stamp="2026-08-26T09:00:00+00:00",
+        ref=triage.item_id(again),
+        pr="agent/y",
+        note="provision in post-checkout",
+        resolved="2026-08-25T23:00:00+00:00",
+    )
+    back = _line(
+        "session-friction", stamp="2026-08-27T09:00:00+00:00", detail="No module named pytest"
+    )
+    history = triage.read_items("\n".join((one, two, *first, again, later, back)))
+    text = triage.render(triage.open_items(history), history)
+    assert "  RECURRED after 3 resolutions -- last: provision in post-checkout --" in text
+    assert f"    tried  2026-08-24T13:00:00+00:00  pr=11  refs {' '.join(refs)} -- uv" in text
+    assert (
+        f"    tried  2026-08-25T23:00:00+00:00  pr=agent/y  refs {triage.item_id(again)} "
+        "-- provision in post-checkout"
+    ) in text, "a re-pointed fix is dated when it was made"
+    assert text.index("pr=11") < text.index("pr=agent/y"), "oldest fix first"
+
+
+def test_a_long_recurrence_lists_the_newest_fixes_and_points_at_the_rest():
+    """This ledger's worst group had 13 fixes, one retiring 24 rows: listed whole, the
+    verdict outgrew the group it describes."""
+    shown, refs = triage.TRIED_SHOWN, triage.REFS_SHOWN
+    rows = triage.read_items(
+        "\n".join(
+            _line(
+                "triage-resolved",
+                stamp=f"2026-08-{10 + n:02d}T00:00:00+00:00",
+                ref=f"f{n}r{k}",
+                pr=str(n),
+                note=f"fix {n}",
+            )
+            for n in range(shown + 2)
+            for k in range(refs + 1 if n == shown + 1 else 1)
+        )
+    )
+    lines = triage.verdict_lines(None, rows)
+    assert lines[1] == (
+        "    ...    2 older fix(es) since 2026-08-10T00:00:00+00:00: grep the ledger for ref=f0r0"
+    )
+    assert len(lines) == 2 + shown
+    assert lines[2].startswith("    tried  2026-08-12T00:00:00+00:00  pr=2  refs f2r0 -- fix 2")
+    newest = " ".join(f"f{shown + 1}r{k}" for k in range(refs))
+    assert lines[-1].endswith(f"refs {newest} +1 more -- fix {shown + 1}")
+
+
+def test_fixes_tried_is_one_line_per_pr_and_per_note_without_one():
+    """`fix_verify` retired 13 rows filed while PR 578 waited once per resolution in
+    flight, each with its own note: keyed on the note, one merged PR read as six fixes."""
+    stamps = (*_STAMPS, *(f"2026-08-24T12:00:0{n}+00:00" for n in range(3, 7)))
+    rows = triage.read_items(
+        "\n".join(
+            _line("triage-resolved", stamp=stamps[i], ref=ref, pr=pr, note=note)
+            for i, (ref, pr, note) in enumerate(
+                (
+                    ("r0", "578", "the fix"),
+                    ("r1", "-", "same"),
+                    ("r0", "578", "filed while the fix for [x] was in flight"),
+                    ("r2", "578", "filed while the fix for [y] was in flight"),
+                    ("r3", "", "same"),
+                    ("r4", "", "other"),
+                )
+            )
+        )
+    )
+    assert triage.fixes_tried(rows) == [
+        (stamps[0], "578", ["r0", "r2"], "the fix"),
+        (stamps[1], "", ["r1", "r3"], "same"),
+        (stamps[5], "", ["r4"], "other"),
+    ]
+    assert triage.fixes_tried([]) == []
+
+
 def test_past_fixes_counts_only_resolutions_still_standing():
     """A resolution the pass reopened (its branch never merged) was no fix at all."""
     first = _line("agent-report", stamp=_STAMPS[0], message="m")
@@ -463,7 +619,8 @@ def test_past_fixes_counts_only_resolutions_still_standing():
     held = _line("triage-resolved", stamp=_STAMPS[1], ref=ref, note="fixed the hook")
     undone = _line("triage-reopened", stamp="2026-08-24T12:00:03+00:00", ref=ref, note="no merge")
     signature = triage.read_items(first)[0].signature
-    assert triage.past_fixes(triage.read_items(first + "\n" + held)) == {
+    found = triage.past_fixes(triage.read_items(first + "\n" + held))
+    assert {sig: [r.fields["note"] for r in rows] for sig, rows in found.items()} == {
         signature: ["fixed the hook"]
     }
     assert triage.past_fixes(triage.read_items("\n".join((first, held, undone)))) == {}
@@ -580,6 +737,52 @@ def test_the_count_line_splits_pending_from_open():
     )
     assert triage.count_line([a, b], {}) == "2 open"
     assert triage.count_line([a, b], {a.signature: "9"}) == "1 open, 1 pending an unmerged fix"
+    assert triage.count_line([a, b], {a.signature: "9"}, {a.signature: "reboot"}) == (
+        "1 open, 1 awaiting a person"
+    ), "a person's step outranks a fix in flight: no merge takes it"
+
+
+def test_a_group_whose_newest_row_names_a_persons_step_awaits_that_person():
+    """aa6a9022, 28a97046: a hung `WslService` sent a fixer that could not restart it."""
+    step = triage.PERSON_STEP
+    older = _line(
+        "scheduled-job-failed", stamp=_STAMPS[0], message="job failed", cause="error: hung"
+    )
+    newer = _line(
+        "scheduled-job-failed",
+        stamp=_STAMPS[1],
+        message="job failed",
+        cause="error: hung",
+        said=f"error: hung -- {step} restart WslService from an elevated prompt, or reboot",
+    )
+    other = _line("agent-report", stamp=_STAMPS[0], message="unrelated")
+    items = triage.open_items(triage.read_items("\n".join((older, newer, other))))
+    head = next(i for i in items if i.id == triage.item_id(newer))
+    assert triage.person_step(head) == "restart WslService from an elevated prompt, or reboot"
+    assert triage.awaiting_person(items) == {
+        head.signature: "restart WslService from an elevated prompt, or reboot"
+    }
+    text = triage.render(items, items)
+    block = next(blk for blk in text.split("\n\n") if "job failed" in blk)
+    assert triage.awaiting_line(head.id, "reboot") in text.replace(
+        "restart WslService from an elevated prompt, or reboot", "reboot"
+    )
+    assert "AWAITS A PERSON -- restart WslService" in block
+    assert f"--resolve-like {head.id}" in block
+    assert "AWAITS" not in next(blk for blk in text.split("\n\n") if "unrelated" in blk)
+    assert "1 open, 2 awaiting a person" in text
+    # Only the newest row speaks for its group: a later failure no person is named for is
+    # a fixer's again.
+    later = _line(
+        "scheduled-job-failed",
+        stamp="2026-08-25T00:00:00+00:00",
+        message="job failed",
+        cause="error: hung",
+    )
+    assert triage.awaiting_person(triage.open_items(triage.read_items(f"{newer}\n{later}"))) == {}
+    # `cause` alone is read when the run's line needed no `said`.
+    bare = triage.read_items(_line("scheduled-job-failed", cause=f"x -- {step} start it"))[0]
+    assert triage.person_step(bare) == "start it"
 
 
 def test_a_group_reports_its_count_and_every_id(tmp_path):
@@ -595,6 +798,98 @@ def test_the_backlog_is_persisted_as_an_artifact(tmp_path):
     written = triage.write_artifact("body\n", root=tmp_path)
     assert written == tmp_path / triage.ARTIFACT
     assert written.read_text(encoding="utf-8") == "body\n"
+
+
+# --- groups a dispatched session holds -----------------------------------------
+
+
+def _handed(root, name: str, text: str):
+    """A dispatched tree under `root` holding `text` as the backlog the pass handed it."""
+    tree = root / ".claude" / "worktrees" / name
+    slot = tree / "logs" / "gate" / "devkit-ledger-main"
+    slot.mkdir(parents=True)
+    (slot / triage.ARTIFACT.name).write_text(text, encoding="utf-8")
+    return tree
+
+
+def test_handed_ids_reads_every_head_and_every_recurrence_off_a_rendered_backlog():
+    a = _line("agent-report", stamp=_STAMPS[0], message="same")
+    b = _line("agent-report", stamp=_STAMPS[1], message="same")
+    c = _line("session-friction", stamp=_STAMPS[0], detail="other")
+    text = triage.render(triage.open_items(triage.read_items("\n".join([a, b, c]))))
+    assert triage.handed_ids(text) == {triage.item_id(a), triage.item_id(b), triage.item_id(c)}
+    assert triage.handed_ids("  detail mentions [abcd1234] in passing\n") == set()
+
+
+def test_a_group_a_live_session_was_sent_at_is_in_hand_and_says_where(tmp_path):
+    """a6c2b36e: a supervisor read the backlog fourteen minutes after the pass sent
+    1010-7 at 62606423, saw it open, and fixed it a second time on another branch."""
+    a = _line("session-friction", stamp=_STAMPS[0], detail="poll noise")
+    b = _line("session-friction", stamp=_STAMPS[1], detail="poll noise")
+    other = _line("session-friction", stamp=_STAMPS[0], detail="not handed")
+    first = triage.render(triage.open_items(triage.read_items(a)))
+    busy = _handed(tmp_path, "fix-harness-ledger-1010-7", first)
+    gone = _handed(
+        tmp_path,
+        "fix-harness-ledger-1010-6",
+        triage.render(triage.open_items(triage.read_items(other))),
+    )
+    held = triage.held_groups(tmp_path, live=lambda tree: tree == busy, own=tmp_path / "x")
+    assert held == {triage.item_id(a): busy}, "a quiet tree holds nothing"
+    assert gone not in held.values()
+    # A later recurrence still reads as the group the session was sent at.
+    text = triage.render(triage.open_items(triage.read_items(f"{a}\n{b}\n{other}")), held=held)
+    blocks = text.split("\n\n")
+    assert f"IN HAND at {busy}" in next(blk for blk in blocks if "poll noise" in blk)
+    assert "IN HAND" not in next(blk for blk in blocks if "not handed" in blk)
+
+
+def test_head_lines_names_the_group_its_newest_row_and_every_id():
+    a = _line("agent-report", stamp=_STAMPS[0], message="same", cwd="C:/tree")
+    b = _line("agent-report", stamp=_STAMPS[1], message="same", cwd="C:/tree")
+    bucket = triage.open_items(triage.read_items(f"{a}\n{b}"))
+    lines = triage.head_lines("agent-report  [claude]  carameli", bucket)
+    assert lines[0] == (
+        f"=== agent-report  [claude]  carameli  [{bucket[0].id}] (x2, since {_STAMPS[0]}) ==="
+    )
+    assert "  cwd    C:/tree" in lines
+    assert lines[-1] == f"  ids    {bucket[0].id} {bucket[1].id}"
+    alone = triage.open_items(triage.read_items(_line("agent-report", message="one")))
+    assert triage.head_lines("t", alone)[-1] == "  detail one", "one row lists no ids"
+
+
+def test_the_tree_asking_never_reads_its_own_groups_as_another_sessions(tmp_path):
+    a = _line("session-friction", detail="mine")
+    tree = _handed(tmp_path, "me", triage.render(triage.open_items(triage.read_items(a))))
+    assert triage.held_groups(tmp_path, live=lambda _tree: True, own=tree) == {}
+    assert triage.held_groups(tmp_path / "nowhere", live=lambda _tree: True) == {}
+
+
+def test_the_cli_marks_a_group_in_hand(tmp_path, monkeypatch, capsys):
+    a = _line("session-friction", detail="poll noise")
+    monkeypatch.setenv("DEVKIT_DIR", str(_ledger(tmp_path, a)))
+    monkeypatch.setattr(triage, "REPO_ROOT", tmp_path / "asker")
+    busy = _handed(tmp_path, "busy", triage.render(triage.open_items(triage.read_items(a))))
+    monkeypatch.setattr(triage, "at_work", lambda _now: lambda tree: tree == busy)
+    assert triage.main([]) == 0
+    assert f"IN HAND at {busy}" in capsys.readouterr().out
+    assert "IN HAND" in (tmp_path / "asker" / triage.ARTIFACT).read_text(encoding="utf-8")
+
+
+def test_at_work_is_the_pass_s_own_live_transcript_test(tmp_path, monkeypatch):
+    seen = []
+
+    def active(tree, now):
+        seen.append((tree, now))
+        return tree if tree.name == "live" else None
+
+    import fix_reports
+
+    monkeypatch.setattr(fix_reports, "active_transcript", active)
+    now = datetime(2026, 10, 11, tzinfo=UTC)
+    live = triage.at_work(now)
+    assert live(tmp_path / "live") is True and live(tmp_path / "quiet") is False
+    assert seen[0] == (tmp_path / "live", now)
 
 
 # --- the CLI ------------------------------------------------------------------
@@ -842,6 +1137,24 @@ def test_a_job_failing_for_a_new_cause_is_a_new_group_not_a_recurrence():
     assert "cause  KeyError: 'tag'" in rendered
 
 
+def test_the_cause_as_said_is_printed_and_splits_no_group():
+    """718f71c4: the folded cause dropped the host and the 403, and the sweep went to the
+    kept log for them. `said` is printed under it and stays out of the signature."""
+    message = "unattended task 'Scheduled: Devkit Release' failed"
+    cause = "fatal: unable to access 'https:/p.git/': error: N"
+    first = _line("scheduled-job-failed", message=message, cause=cause, said="error: 403")
+    second = _line(
+        "scheduled-job-failed",
+        stamp="2026-09-29T00:00:00+00:00",
+        message=message,
+        cause=cause,
+        said="error: 502",
+    )
+    items = triage.read_items("\n".join((first, second)))
+    assert len({item.signature for item in items}) == 1
+    assert "  said   error: 403" in triage.render(items, items)
+
+
 # --- a resolution that did not hold -------------------------------------------------------
 
 
@@ -866,6 +1179,107 @@ def test_a_later_reopening_undoes_a_resolution_and_a_later_resolution_redoes_it(
     assert triage.verdicts(triage.read_items(reopened))[ref][0] == triage.REOPENED_EVENT
 
 
+def test_carried_names_the_resolutions_written_on_the_retired_branch_after_the_cut():
+    """A session in a tree cut on `agent/x-0928` -- a name whose PR had merged the day
+    before -- resolved its groups `pr=agent/x-0928`, and its fix went out as
+    `agent/x-0928-6` when the ship carried the intent. `fix_verify` rightly discounts the
+    old PR, which merged before those resolutions, so they sat pending until reopened."""
+    ours = _line("agent-report", message="ours")
+    theirs = _line("agent-report", message="theirs")
+    elsewhere = _line("agent-report", message="elsewhere")
+    undone = _line("agent-report", message="undone")
+    lines = [
+        _line(
+            "triage-resolved",
+            stamp="2026-09-28T10:00:00+00:00",
+            ref=triage.item_id(theirs),
+            pr="agent/x-0928",
+            note="the merged PR's own fix",
+        ),
+        _line(
+            "triage-resolved",
+            stamp="2026-09-29T02:00:00+00:00",
+            ref=triage.item_id(ours),
+            pr="agent/x-0928",
+            note="ours",
+        ),
+        _line(
+            "triage-resolved",
+            stamp="2026-09-29T02:00:00+00:00",
+            ref=triage.item_id(elsewhere),
+            pr="agent/y-0928",
+            note="another branch",
+        ),
+        _line(
+            "triage-resolved",
+            stamp="2026-09-29T02:00:00+00:00",
+            ref=triage.item_id(undone),
+            pr="agent/x-0928",
+            note="undone",
+        ),
+        _line(
+            triage.REOPENED_EVENT,
+            stamp="2026-09-29T03:00:00+00:00",
+            ref=triage.item_id(undone),
+            note="closed",
+        ),
+    ]
+    items = triage.read_items("\n".join(lines))
+    # The cut: main's tip when the tree was made, after the old PR merged -- in another
+    # zone, as `git log %cI` gives it.
+    since = "2026-09-28T20:00:00-04:00"
+    assert triage.carried(items, "agent/x-0928", since) == [
+        (triage.item_id(ours), "ours", "2026-09-29T02:00:00+00:00")
+    ]
+    assert triage.carried(items, "agent/x-0928", "not a time") == []
+
+
+def test_repoint_resolves_again_on_the_new_branch_so_its_pr_settles_it(tmp_path):
+    report = _line("agent-report", message="one")
+    ref = triage.item_id(report)
+    resolved = _line(
+        "triage-resolved", stamp="2026-09-29T02:00:00+00:00", ref=ref, pr="agent/x-0928", note="n"
+    )
+    _ledger(tmp_path, report, resolved)
+    assert triage.repoint(
+        "agent/x-0928", "agent/x-0928-6", "2026-09-29T00:00:00+00:00", root=tmp_path
+    ) == [ref]
+    items = triage.load(tmp_path)
+    assert triage.open_items(items) == []
+    now = datetime.now(UTC)
+    [latest] = triage.recent(items, now, timedelta(days=3650))
+    # Written again now, but still the resolution of 02:00: `fix_verify.covered` retires
+    # the rows filed between it and the merge, and would otherwise start at the carry.
+    assert (latest.ref, latest.pr, latest.note, latest.stamp) == (
+        ref,
+        "agent/x-0928-6",
+        "n",
+        "2026-09-29T02:00:00+00:00",
+    )
+
+
+def test_a_resolution_carried_twice_keeps_the_time_it_was_first_made(tmp_path):
+    report = _line("agent-report", message="one")
+    ref = triage.item_id(report)
+    first = _line(
+        "triage-resolved", stamp="2026-09-29T02:00:00+00:00", ref=ref, pr="agent/x-0928", note="n"
+    )
+    carried = _line(
+        "triage-resolved",
+        stamp="2026-09-29T05:00:00+00:00",
+        ref=ref,
+        pr="agent/x-0928-6",
+        note="n",
+        resolved="2026-09-29T02:00:00+00:00",
+    )
+    _ledger(tmp_path, report, first, carried)
+    assert triage.repoint(
+        "agent/x-0928-6", "agent/x-0928-7", "2026-09-29T00:00:00+00:00", root=tmp_path
+    ) == [ref]
+    [again] = triage.recent(triage.load(tmp_path), datetime.now(UTC), timedelta(days=3650))
+    assert (again.pr, again.stamp) == ("agent/x-0928-7", "2026-09-29T02:00:00+00:00")
+
+
 def test_reopen_appends_one_event_per_id(tmp_path):
     report = _line("agent-report", message="one")
     _ledger(tmp_path, report)
@@ -875,3 +1289,40 @@ def test_reopen_appends_one_event_per_id(tmp_path):
     assert triage.reopen([ref], "no PR was ever opened from agent/x", root=tmp_path) == [ref]
     [back] = triage.open_items(triage.load(tmp_path))
     assert back.id == ref
+
+
+# d32ffcc2's own row, cut down: it named the open #629's branch in its detail, and the
+# evidence path holds a tree's slug that is not a branch.
+_NAMES_A_BRANCH = _line(
+    "agent-report",
+    project="devkit",
+    message="toolchain.align_path_sources (agent/fix-harness-ledger-1011-9) re-aligns per "
+    "run, which closes the sequential case only; seen on data-lake and in #116.",
+    evidence="C:/p/C--Users-alexa-vs-code-ibkr-trader--claude-worktrees-stateless-weaving-"
+    "feather/f0.jsonl#L82-L94",
+)
+
+
+def test_named_branches_reads_task_and_worktree_branches_out_of_a_groups_text():
+    said = _line("session-friction", detail="see worktree-gentle-shimmying-phoenix.", cause="-")
+    bucket = triage.open_items(triage.read_items(f"{_NAMES_A_BRANCH}\n{said}"))
+    assert sorted(triage.named_branches(bucket)) == [
+        "agent/fix-harness-ledger-1011-9",
+        "worktree-gentle-shimmying-phoenix",
+    ], "no hyphenated word, PR number or path slug reads as a branch"
+    plain = triage.open_items(triage.read_items(_line("agent-report", message="re-aligns")))
+    assert triage.named_branches(plain) == []
+
+
+def test_a_group_naming_a_branch_with_an_open_pr_names_the_pr():
+    """e3d8cb27: the text handed to d32ffcc2's session named #629's branch and never
+    said it was an open PR -- red on its own diff, and the fix the group extended."""
+    items = triage.open_items(triage.read_items(_NAMES_A_BRANCH))
+    prs = {"agent/fix-harness-ledger-1011-9": "#629 https://x/pull/629 -- its gate is red"}
+    text = triage.render(items, prs=prs)
+    assert (
+        "  OPEN PR  #629 https://x/pull/629 -- its gate is red on "
+        "agent/fix-harness-ledger-1011-9 -- this group names a fix not merged yet"
+    ) in text
+    assert "OPEN PR" not in triage.render(items), "no lookup, no line"
+    assert triage.open_pr_lines(items, {"agent/other": "#1"}) == []

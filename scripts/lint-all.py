@@ -28,6 +28,9 @@ Usage:
     python scripts/lint-all.py            # whole repo
     python scripts/lint-all.py --changed  # working-tree diff vs HEAD, plus untracked
     python scripts/lint-all.py --paths a.py b.md  # exactly these (/ship's branch diff)
+
+A narrowed run (`--changed`, `--paths`) also runs the commit stage's `detect-secrets`
+hook over every file it names, Python or not, unless `--no-secrets` is given.
 """
 
 from __future__ import annotations
@@ -49,8 +52,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # where every linter was skipped produced no sections and printed `lint-all: clean`. That
 # is a false negative on every rule at once, and it is indistinguishable at a glance from
 # the real thing. The node tools are genuinely optional (nothing here declares them), so
-# they keep the old behaviour; these two do not.
-REQUIRED_TOOLS = ("ruff", "mypy")
+# they keep the old behaviour; these do not. `detect-secrets` runs through pre-commit,
+# which the same dev group declares, and is only attempted where the config declares it.
+REQUIRED_TOOLS = ("ruff", "mypy", "detect-secrets")
 
 # Names passed to `run_tool` that were skipped for want of the tool. Module-level because
 # `run_tool` is called from eight places and threading an accumulator through all of them
@@ -94,9 +98,13 @@ DOTENV_CMD = [
 
 
 def changed_paths() -> list[str]:
-    """Every tracked-but-modified plus untracked path, relative to the repo root."""
-    tracked = _git("diff", "--name-only", "HEAD")
+    """Every tracked-but-modified plus untracked path, relative to the repo root.
+
+    `ls-files` asks first: refused a repository, it names the refusal, where `diff`
+    falls back to `--no-index` and prints its usage instead.
+    """
     untracked = _git("ls-files", "--others", "--exclude-standard")
+    tracked = _git("diff", "--name-only", "HEAD")
     return sorted({n for n in (tracked + untracked) if (REPO_ROOT / n).exists()})
 
 
@@ -142,9 +150,70 @@ def env_files(limit_to: list[str] | None = None) -> list[str]:
     return found if limit_to is None else [p for p in found if p in set(limit_to)]
 
 
+# The commit-stage hook a narrowed run also runs, through pre-commit so its `exclude` and
+# the `# pragma: allowlist secret` convention are the commit's own. Without it every check
+# a fixer runs before `/ship` passed a hard-coded key that the commit then refused, which
+# cost a whole second fixer dispatch to learn (08654413). Not named `SECRETS_*`: the
+# scanner reads any assignment to a name holding that word as a keyword secret.
+SCAN_HOOK_ID = "detect-secrets"
+PRECOMMIT_CONFIG = ".pre-commit-config.yaml"
+
+
+def secrets_targets(selected: list[str], skip: bool) -> list[str]:
+    """The files the secrets pass scans: every selected one, of any type, or none.
+
+    None when `skip` (`--no-secrets`, which the Stop hook sends on every turn) or when
+    this repo's pre-commit config does not declare the hook -- a repo without it has no
+    secrets pass to mirror, and pre-commit would fail the run naming a missing hook id.
+    Narrowed runs only: a whole-repo run is CI's, where pre-commit runs every hook.
+    """
+    config = REPO_ROOT / PRECOMMIT_CONFIG
+    if skip or not selected or not config.is_file():
+        return []
+    declared = re.search(rf"id:\s*{SCAN_HOOK_ID}\s*$", config.read_text(encoding="utf-8"), re.M)
+    return selected if declared else []
+
+
+def secrets_section(paths: list[str]) -> str:
+    """The detect-secrets section for `paths`, run as the commit hook would run it."""
+    if not paths:
+        return ""
+    cmd = [sys.executable, "-m", "pre_commit", "run", SCAN_HOOK_ID, "--files", *paths]
+    hint = "remove the secret, or mark a false positive `# pragma: allowlist secret`"
+    return run_tool(SCAN_HOOK_ID, cmd, hint)
+
+
+class GitFailed(RuntimeError):
+    """git could not say what changed, so the `--changed` set is unknown, not empty."""
+
+
 def _git(*args: str) -> list[str]:
-    result = subprocess.run(["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True)
-    return result.stdout.splitlines() if result.returncode == 0 else []
+    """git's output lines; `GitFailed` when git could not answer.
+
+    It used to return `[]` on any non-zero exit, so a refusal -- `detected dubious
+    ownership` in a tree an elevated process made -- read as a clean tree with nothing
+    changed, and `--changed` printed "nothing to do" over a modified file (9feac8aa).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *args], capture_output=True, text=True
+        )
+    except OSError as exc:
+        raise GitFailed(f"`git {' '.join(args)}` could not start: {exc}") from exc
+    if result.returncode != 0:
+        why = (
+            " ".join((result.stderr or result.stdout).split())[:300] or f"exit {result.returncode}"
+        )
+        raise GitFailed(f"`git {' '.join(args)}` failed: {why}")
+    return result.stdout.splitlines()
+
+
+def scope_unknown(exc: GitFailed) -> int:
+    """Report a `--changed` run that could not learn its scope: a failure, never a skip."""
+    print(f"lint-all: FAILED — {exc}")
+    print(f"  nothing was linted; name the files with --paths. Details in {ARTIFACT.name}")
+    _write_artifact(f"# git\n# fix: make git work in this tree, or pass --paths\n{exc}\n\n")
+    return 1
 
 
 def _missing_module(cmd: list[str]) -> bool:
@@ -172,6 +241,8 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 # Wall-clock bound on one linter, in seconds. See the template's copy for why.
 TOOL_TIMEOUT = 600.0
+# The head of the block `ruff check --fix --show-fixes` lists its fixes under.
+FIXED_HEAD = re.compile(r"^Fixed \d+ errors?:$")
 
 
 def run_tool(name: str, cmd: list[str], fix_hint: str, timeout: float = TOOL_TIMEOUT) -> str:
@@ -189,7 +260,16 @@ def run_tool(name: str, cmd: list[str], fix_hint: str, timeout: float = TOOL_TIM
         print(f"  {name}: not installed — skipped")
         return ""
     try:
-        result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, timeout=timeout)
+        # ruff and mypy write UTF-8 whatever the console's code page, and `text=True` read
+        # it as cp1252 on Windows: ruff's multiplication sign came out as two letters.
+        result = subprocess.run(
+            cmd,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
     except FileNotFoundError:
         _SKIPPED.append(name)
         print(f"  {name}: not installed — skipped")
@@ -240,6 +320,60 @@ def not_clean_reason() -> str:
     )
 
 
+def applied_fixes(output: str) -> list[str]:
+    """`path -- <count> <times> <rule> (<name>), ...` per file the `--show-fixes` block of
+    a `ruff check --fix` run names; none when it fixed nothing.
+
+    An unsafe fix changes code, not layout: F841 deleted an assignment from a test being
+    written, and the run said only "ruff: ok" (802b5602). Each change is printed so a
+    rewrite is never silent, as the commit stage's own fixers are not. Read with the
+    colour stripped: under `FORCE_COLOR` the head arrives wrapped in escape codes.
+    """
+    rows = ANSI.sub("", output).splitlines()
+    start = next((i for i, row in enumerate(rows) if FIXED_HEAD.match(row)), len(rows))
+    files: list[tuple[str, list[str]]] = []
+    for row in rows[start + 1 :]:
+        if not row.strip():
+            break
+        if row.startswith("- "):
+            files.append((row[2:].rstrip(":"), []))
+        elif files:
+            files[-1][1].append(row.strip())
+    return [f"{path} -- {', '.join(codes)}" for path, codes in files]
+
+
+def python_sections(targets: list[str]) -> str:
+    """The ruff and mypy sections for `targets`, the whole repo when empty."""
+    scope = targets or ["."]
+    # Auto-fix first, then report. Both ruff passes mutate the same files, so they
+    # must stay sequential relative to each other. No `--exclude` guard here: see the
+    # module docstring — devkit formats its own harness, and CI's `ruff format --check`
+    # is what would fail if it did not.
+    fixed = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes", "--show-fixes"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    for line in applied_fixes(fixed.stdout or ""):
+        print(f"  ruff --fix changed {line}")
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "format", *scope],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    return run_tool(
+        "ruff",
+        [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
+        "ruff check . --fix --unsafe-fixes",
+    ) + run_tool(
+        "mypy",
+        [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
+        f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     _SKIPPED.clear()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -251,14 +385,13 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="lint exactly these files, scoped as --changed is (used by /ship for the branch diff)",
     )
-    # Accepted, and a no-op here: devkit has no detect-secrets pass to skip. The Stop
-    # hook passes `--no-secrets` unconditionally — see the same argument in
+    # The Stop hook passes `--no-secrets` unconditionally — see the same argument in
     # `templates/core/scripts/lint-all.py.tmpl` for why, and why *parsing* it is part
-    # of the contract rather than optional politeness.
+    # of the contract rather than optional politeness. Here it skips `secrets_section`.
     parser.add_argument(
         "--no-secrets",
         action="store_true",
-        help="skip the secrets pass (accepted for Stop-hook compatibility; no-op here)",
+        help="skip the detect-secrets pass a --changed or --paths run makes",
     )
     args = parser.parse_args(argv)
 
@@ -267,49 +400,28 @@ def main(argv: list[str] | None = None) -> int:
     scoped = args.changed or bool(args.paths)
     selected: list[str] = []
     if scoped:
-        selected = explicit_paths(args.paths) if args.paths else changed_paths()
+        try:
+            selected = explicit_paths(args.paths) if args.paths else changed_paths()
+        except GitFailed as exc:
+            return scope_unknown(exc)
     changed = selected if scoped else None
     targets = python_targets(selected)
     envs = env_files(changed)
-    if scoped and not (targets or envs):
+    secrets = secrets_targets(selected, args.no_secrets)
+    if scoped and not (targets or envs or secrets):
         print("lint-all: no changed files this run lints; nothing to do.")
         _write_artifact("")
         return 0
-    scope = targets or ["."]
 
     label = f"{len(selected)} file(s)" if scoped else "whole repo"
     print(f"lint-all: {label}")
 
     sections = ""
-    # A narrowed run with only an `.env` edit leaves `targets` empty, and `scope` then
+    # A narrowed run with only an `.env` edit leaves `targets` empty, and the scope then
     # falls back to `["."]` — which would silently widen a per-turn check into a
     # whole-repo pass. Gate the Python passes on having Python to lint.
     if targets or not scoped:
-        # Auto-fix first, then report. Both ruff passes mutate the same files, so they
-        # must stay sequential relative to each other. No `--exclude` guard here: see the
-        # module docstring — devkit formats its own harness, and CI's `ruff format --check`
-        # is what would fail if it did not.
-        subprocess.run(
-            [sys.executable, "-m", "ruff", "check", *scope, "--fix", "--unsafe-fixes"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        )
-        subprocess.run(
-            [sys.executable, "-m", "ruff", "format", *scope],
-            cwd=REPO_ROOT,
-            capture_output=True,
-        )
-
-        sections += run_tool(
-            "ruff",
-            [sys.executable, "-m", "ruff", "check", *scope, "--output-format=full"],
-            "ruff check . --fix --unsafe-fixes",
-        )
-        sections += run_tool(
-            "mypy",
-            [sys.executable, "-m", "mypy", *(targets or MYPY_SCOPE), "--show-error-codes"],
-            f"mypy {' '.join(MYPY_SCOPE)} --show-error-codes",
-        )
+        sections += python_sections(targets)
 
     # A real executable rather than a `-m` module, so run_tool's FileNotFoundError
     # branch is what degrades a missing one to a terminal note. The workflow files are
@@ -317,7 +429,12 @@ def main(argv: list[str] | None = None) -> int:
     # builds the binary itself, instead of being a note on every machine without it.
     if envs:
         sections += run_tool("dotenv-linter", [*DOTENV_CMD, *envs], " ".join([*DOTENV_CMD, *envs]))
+    sections += secrets_section(secrets)
+    return report(sections)
 
+
+def report(sections: str) -> int:
+    """Write the artifact, print the status line, and return the run's exit code."""
     _write_artifact(sections)
 
     if unusable := not_clean_reason():

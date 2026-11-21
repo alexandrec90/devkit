@@ -16,6 +16,10 @@ the one still on disk when the push is refused, plus one CI has no use for:
   3. `pytest scripts/hooks/tests/` -- the vendored harness tier
   4. `scripts/posix-rehearsal.py` -- the suite again, with the host's platform faked
 
+The wrappers write their own artifacts. Step 3 is the one bare pytest, so this file has it
+write CI's `logs/junit-hooks.xml`, and clears the last run's first: a refused push always
+has something on disk naming what failed, and never a stale report that says it passed.
+
 Lint is first because it auto-fixes: anything that can rewrite a file has to come after
 it, or the later step reports clean on what the earlier one just repaired. The two test
 tiers' order is free, and is deliberately not CI's -- the gate stops at the first failure,
@@ -39,8 +43,9 @@ wrappers are project-owned (`.claude/rules/engineering.md`, "a missing one is a 
 skip by design"), and a project that has not adopted the vendored tier has no hook tests.
 
 Runs with the consuming repo as cwd, the way every hook in this directory does, and
-spawns the project's own interpreter through `project_python` when the project ships it,
-so a push from a shell that never activated the venv still runs the venv's tools.
+spawns the project's own interpreter through `project_python` -- the project's copy, or
+devkit's beside this hook -- so a push from a shell that never activated the venv still
+runs the venv's tools.
 `SKIP=devkit-push-gate git push` is pre-commit's own bypass for a deliberate WIP push.
 
 Stdlib only. Tested in `tests/test_run_push_gate.py`.
@@ -48,6 +53,8 @@ Stdlib only. Tested in `tests/test_run_push_gate.py`.
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
 import os
 import re
 import subprocess
@@ -74,36 +81,82 @@ class Step:
     argv: tuple[str, ...]
     # The repo-relative path without which the step has nothing to run.
     requires: str
+    # The report this gate has the step write. Empty for a wrapper, which is project-owned
+    # and names its own artifact: this file has no business promising what one is called.
+    artifact: str = ""
 
+
+# The name CI's own run of this tier writes and uploads (`tests/test_gate_parity.py`), so
+# what reads that report reads this one. Handed over in `run_gate` beside `--basetemp`
+# rather than spelled in `argv`, where a second path would make the step's parity
+# signature ambiguous.
+HOOK_TESTS_ARTIFACT = "logs/junit-hooks.xml"
 
 STEPS: tuple[Step, ...] = (
     Step("lint", ("scripts/lint-all.py",), "scripts/lint-all.py"),
     Step("tests", ("scripts/run-tests.py",), "scripts/run-tests.py"),
-    Step("hook tests", ("-m", "pytest", "scripts/hooks/tests/", "-q"), "scripts/hooks/tests"),
+    Step(
+        "hook tests",
+        ("-m", "pytest", "scripts/hooks/tests/", "-q"),
+        "scripts/hooks/tests",
+        HOOK_TESTS_ARTIFACT,
+    ),
     Step("posix rehearsal", ("scripts/posix-rehearsal.py",), "scripts/posix-rehearsal.py"),
 )
 
 
-def interpreter(root: Path) -> str:
+# devkit's own copy, beside this hook in pre-commit's clone of devkit. It is not in the
+# MANIFEST, so no consumer ships one, and without this fallback the pytest step ran on
+# whatever interpreter pushed: a bare workstation Python refused productivity-tracker's
+# first push on `No module named pytest`, after lint and the suite had passed.
+BUNDLED_HELPER = Path(__file__).resolve().parents[1] / "project_python.py"
+
+
+def venv_python(root: Path) -> Path:
+    """The interpreter inside `root`'s `.venv`, spelled for this platform."""
+    if os.name == "nt":
+        return root / ".venv" / "Scripts" / "python.exe"
+    return root / ".venv" / "bin" / "python"
+
+
+def _this_has_pytest() -> bool:
+    return importlib.util.find_spec("pytest") is not None
+
+
+def interpreter(
+    root: Path,
+    bundled: Path = BUNDLED_HELPER,
+    has_pytest: Callable[[], bool] = _this_has_pytest,
+) -> str:
     """The interpreter to run the project's tooling with.
 
-    The project's `scripts/project_python.py` when it has one -- that module knows about
-    the venv, and about borrowing a checkout's venv from a worktree that has none -- and
-    otherwise the interpreter running this hook. The wrappers re-exec themselves through
-    the same helper, so the pytest step is the one that needs the answer here.
+    `project_python.interpreter` answers it -- that module knows about the venv, and about
+    borrowing a checkout's venv from a worktree that has none. The project's own copy
+    wins when it has one, then devkit's `bundled` one, which answers for any `root`. The
+    wrappers re-exec themselves (through that helper, or the vendored `toolchain`), so
+    the pytest step is the one that needs the answer here.
+
+    With neither helper loadable, this interpreter answers while it has pytest, and the
+    project's `.venv` when it does not. pre-commit runs this hook under an environment of
+    its own with no pytest in it, so answering `sys.executable` there failed the hook
+    tier with `No module named pytest` on a project whose `.venv` had it (8448080a).
     """
-    helper = root / "scripts" / "project_python.py"
-    if not helper.is_file():
-        return sys.executable
-    try:
-        module = load_by_path("project_python", helper)
-    except (ImportError, OSError, SyntaxError):
-        # Unloadable, unreadable or unparsable: the interpreter question is then the
-        # only thing the helper was going to answer, and this one is the fallback its
-        # own callers use. Anything else the helper raises is a defect worth the
-        # traceback, and a refused push is the right place to read it.
-        return sys.executable
-    return str(module.interpreter(root, "pytest"))
+    for helper in (root / "scripts" / "project_python.py", bundled):
+        if not helper.is_file():
+            continue
+        try:
+            module = load_by_path("project_python", helper)
+        except (ImportError, OSError, SyntaxError):
+            # Unloadable, unreadable or unparsable: the interpreter question is then the
+            # only thing the helper was going to answer, so ask the next one. Anything
+            # else a helper raises is a defect worth the traceback, and a refused push is
+            # the right place to read it.
+            continue
+        return str(module.interpreter(root, "pytest"))
+    venv = venv_python(root)
+    if not has_pytest() and venv.is_file():
+        return str(venv)
+    return sys.executable
 
 
 # Git exports these into every hook's environment, naming the repository the push is
@@ -332,6 +385,26 @@ def plan(root: Path) -> list[tuple[Step, list[str] | None]]:
     ]
 
 
+def clear_artifact(root: Path, step: Step) -> None:
+    """Drop the last run's report, so a step that dies before writing leaves none to misread.
+
+    An unlink that cannot run is left for pytest to report: this happens before the step,
+    and must not be the thing that fails the push.
+    """
+    if step.artifact:
+        with contextlib.suppress(OSError):
+            (root / step.artifact).unlink(missing_ok=True)
+
+
+def read_from(root: Path, step: Step) -> str:
+    """Where a refusal sends the reader for `step`: only ever a file that is really there."""
+    if not step.artifact:
+        return "the artifact under logs/"
+    if (root / step.artifact).is_file():
+        return step.artifact
+    return f"the output above (the step wrote no {step.artifact})"
+
+
 def run_gate(
     root: Path, runner: Runner = subprocess.run, release_prepare: str | None = None
 ) -> int:
@@ -362,17 +435,18 @@ def run_gate(
             print(f"push-gate: {step.name}: no {step.requires} in this project -- skipped")
             continue
         print(f"push-gate: {step.name}: {' '.join(command[1:])}", flush=True)
+        clear_artifact(root, step)
         # The one bare pytest here gets a temp root of its own, as `run-tests.py` gives
         # its suite: under the machine-wide one, another session's run holding its
         # `pytest-current` link failed a green suite at pytest's exit (97d20f01).
         with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as tmp:
             if step.name == PYTEST_STEP:
-                command = [*command, f"--basetemp={tmp}"]
+                command = [*command, f"--basetemp={tmp}", f"--junit-xml={step.artifact}"]
             result = runner(command, cwd=root, check=False, env=env)
         if result.returncode:
             print(
-                f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from the "
-                f"artifact under logs/, or push anyway with SKIP={HOOK_ID}."
+                f"push-gate: {step.name} failed (exit {result.returncode}). Fix it from "
+                f"{read_from(root, step)}, or push anyway with SKIP={HOOK_ID}."
             )
             return int(result.returncode)
     print("push-gate: clean")

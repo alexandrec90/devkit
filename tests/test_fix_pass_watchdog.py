@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import datetime as _dt
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
-from support import load_script
+from support import REPO_ROOT, load_script
 
 watchdog = load_script("scripts/fix-pass-watchdog.py")
 triage = load_script("scripts/harness_triage.py")
@@ -44,6 +46,30 @@ def test_the_pass_reporting_is_told_from_the_pass_failing(code, output, kind):
 
 def test_a_crash_is_named_by_its_last_line():
     assert watchdog.judge(1, TRACE)[1] == "TypeError: run() got an unexpected keyword 'x'"
+
+
+# What the 01:30 fire of 2026-11-05 printed: a filed finding's detail, quoting a project's
+# traceback on the one line of the record that names it.
+QUOTED_TRACE = (
+    "filed    productivity-tracker environment: ModuleNotFoundError: No module named 'psutil' "
+    "Traceback (most recent call last): File\n"
+    "ledger   7 open on the harness-defect ledger\n"
+    "fix-pass: record at logs/fix-pass.log\n"
+)
+
+
+@pytest.mark.parametrize(("code", "kind"), [(0, ""), (1, ""), (2, "pass-refused")])
+def test_a_traceback_quoted_in_the_record_is_not_the_pass_crashing(code, kind):
+    """The pass finished, and a finding it filed quoted a traceback from a project. The
+    watchdog read those words as the pass's own, called "record at ..." the crash, and
+    cut a rescue at a pass that had nothing wrong with it. Python starts a traceback at
+    column 0; a line of the record never does."""
+    assert watchdog.judge(code, QUOTED_TRACE)[0] == kind
+
+
+def test_a_crash_after_a_quoted_traceback_is_still_a_crash():
+    assert watchdog.judge(1, QUOTED_TRACE + TRACE)[0] == "pass-crashed"
+    assert watchdog.judge(2, QUOTED_TRACE + TRACE)[0] == "pass-crashed"
 
 
 THREAD_TRACE = (
@@ -117,7 +143,7 @@ def watched(tmp_path, monkeypatch):
     monkeypatch.setattr(
         watchdog, "git", lambda root, *a: subprocess.CompletedProcess(a, 0, "abc123\n", "")
     )
-    monkeypatch.setattr(watchdog, "run_pass", lambda argv: seen["outcome"])
+    monkeypatch.setattr(watchdog, "run_pass", lambda argv, timeout: seen["outcome"])
 
     def update(root):
         seen["updates"] += 1
@@ -144,6 +170,22 @@ def test_a_pass_that_reports_is_passed_through_untouched(watched):
     assert watchdog.watch(watched["argv"], NOW) == 1
     assert findings(watched["devkit"]) == [] and watched["rescues"] == []
     assert watched["updates"] == 1, "kept current before every pass"
+
+
+def test_a_stale_pass_left_to_the_next_fire_is_no_failure(watched, monkeypatch):
+    """`STALE` short of the budget to rerun means "the next fire routes it": nothing
+    failed. Passed through as 75, the scheduler's Last Result read it as a failed run,
+    and the pass filed `devkit-fix-pass: last run failed (exit 75)` off it."""
+    monkeypatch.setattr(watchdog, "MIN_RERUN", watchdog.TIMEOUT * 2)
+    watched["outcome"] = (watchdog.STALE, "held     carameli #395\n")
+    assert watchdog.watch(watched["argv"], NOW) == 0
+    assert findings(watched["devkit"]) == []
+
+
+def test_exit_code_passes_a_report_through_and_a_self_failure_as_2():
+    assert watchdog.exit_code(1, "") == 1
+    assert watchdog.exit_code(watchdog.STALE, "") == 0
+    assert watchdog.exit_code(None, "pass-hung") == 2
 
 
 def test_the_watch_survives_the_none_stdout_pythonw_gives_it(watched, monkeypatch):
@@ -241,6 +283,67 @@ def test_a_checkout_that_cannot_be_kept_current_is_filed(watched, monkeypatch):
     assert watchdog.watch(watched["argv"], NOW) == 0
     [found] = findings(watched["devkit"])
     assert found.detail == "pass-stale: the checkout is on agent/x, not main"
+
+
+FETCH_DOWN = "could not fetch origin/main -- timed out after 120s; ended it and its children"
+
+
+def test_worth_filing_counts_only_fetches_and_only_in_a_row(monkeypatch):
+    monkeypatch.setattr(watchdog.harness_events, "resolves", lambda **_: True)
+    state: dict = {}
+    assert not watchdog.worth_filing(state, False, FETCH_DOWN)
+    assert not watchdog.worth_filing(state, True, "current")
+    for _ in range(watchdog.FETCH_FIRES - 1):
+        assert not watchdog.worth_filing(state, False, FETCH_DOWN), "the count restarted"
+    assert watchdog.worth_filing(state, False, FETCH_DOWN)
+    assert watchdog.worth_filing({}, False, "on agent/x, not main"), "no network in that one"
+
+
+def test_a_stall_across_two_half_hourly_fires_files_nothing():
+    """bb04d04d: two fires running timed out on 2026-11-05, the next one's fetch went
+    through, and the filing sent a session to find nothing. A stale pass that lasts is
+    what this finding is for, and three hours is that."""
+    state: dict = {}
+    assert not any(watchdog.worth_filing(state, False, FETCH_DOWN) for _ in range(2))
+    assert watchdog.FETCH_FIRES * 30 >= 3 * 60, "minutes of half-hourly fires before it files"
+
+
+def test_a_fetch_that_fails_on_one_fire_alone_files_nothing(watched, monkeypatch):
+    """6d06634e: the same fetch went through at the next fire, as each of its forebears
+    had. The note is in the pass's record; the ledger waits for a fire that repeats it."""
+    outcomes = iter([(False, FETCH_DOWN), (True, "current"), (False, FETCH_DOWN)])
+    monkeypatch.setattr(watchdog, "self_update", lambda root: next(outcomes))
+    for _ in range(3):
+        assert watchdog.watch(watched["argv"], NOW) == 0
+    assert findings(watched["devkit"]) == [], "a success between two failures restarts the count"
+
+
+def test_a_fetch_that_fails_fire_after_fire_is_filed(watched, monkeypatch):
+    monkeypatch.setattr(watchdog, "self_update", lambda root: (False, FETCH_DOWN))
+    for _ in range(watchdog.FETCH_FIRES):
+        assert watchdog.watch(watched["argv"], NOW) == 0
+    [found] = findings(watched["devkit"])
+    assert found.detail == f"pass-stale: {FETCH_DOWN}"
+
+
+FETCH_UNRESOLVED = (
+    "could not fetch origin/main -- fatal: unable to access "
+    "'https://github.com/o/devkit.git/': Could not resolve host: github.com"
+)
+
+
+def test_a_fetch_failing_fire_after_fire_on_a_machine_cut_off_is_not_filed(watched, monkeypatch):
+    """fc172488: six fires of a night without DNS filed a stale pass no session could act
+    on. Offline, a failed fetch neither counts nor files; back online, the count starts
+    from nothing."""
+    monkeypatch.setattr(watchdog, "self_update", lambda root: (False, FETCH_UNRESOLVED))
+    monkeypatch.setattr(watchdog.harness_events, "resolves", lambda **_: False)
+    for _ in range(watchdog.FETCH_FIRES + 1):
+        assert watchdog.watch(watched["argv"], NOW) == 0
+    assert findings(watched["devkit"]) == []
+    state: dict = {}
+    assert not watchdog.worth_filing(state, False, FETCH_UNRESOLVED, cut_off=lambda what: True)
+    assert watchdog.FETCH_STREAK not in state, "nothing counted"
 
 
 # --- repair -------------------------------------------------------------------------------
@@ -350,9 +453,9 @@ def test_a_rescue_intent_is_shipped_by_the_watchdog_while_the_pass_cannot(tmp_pa
     monkeypatch.setattr(watchdog, "git", git)
     made = []
     monkeypatch.setattr(
-        watchdog.subprocess,
-        "run",
-        lambda argv, **k: made.append(argv) or subprocess.CompletedProcess(argv, 0),
+        watchdog,
+        "bounded",
+        lambda argv, cwd: made.append(argv) or subprocess.CompletedProcess(argv, 0),
     )
     assert watchdog.ship_rescues(tmp_path) == ["agent/fix-pass-rescue-0926-1200: shipped"]
     assert steps == ["rev-parse", "add", "commit", "push"]
@@ -414,6 +517,93 @@ def test_a_clean_checkout_on_its_default_branch_is_fast_forwarded(checkout):
     assert watchdog.self_update(checkout) == (True, "current")
 
 
+def _publish_green(checkout: Path, sha: str) -> None:
+    _git(checkout, "push", "--quiet", "origin", f"{sha}:refs/heads/green")
+
+
+def test_a_checkout_follows_green_and_not_the_tip(checkout):
+    """Merging no longer means tested, and the pass is what repairs a bad merge. Running
+    one would break the repair of itself."""
+    start = _git(checkout, "rev-parse", "HEAD")
+    _publish_green(checkout, start)
+    ok, what = watchdog.self_update(checkout)
+    # c6c538d9: a bare "current" read as running main's code while a fix waited behind green.
+    assert (ok, what) == (
+        True,
+        "current with origin/green; 1 commit(s) on origin/main wait for its gate",
+    )
+    assert (checkout / "a.txt").read_text(encoding="utf-8") == "1\n", "main is ahead, unjudged"
+
+
+def test_a_checkout_current_with_green_at_mains_tip_is_plainly_current(checkout):
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    _publish_green(checkout, _git(checkout, "rev-parse", "origin/main"))
+    watchdog.self_update(checkout)
+    assert watchdog.self_update(checkout) == (True, "current")
+    assert watchdog.trailing(checkout, "main", "origin/main") == "", "main itself trails nothing"
+
+
+def test_a_checkout_moves_when_green_does(checkout):
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    tip = _git(checkout, "rev-parse", "origin/main")
+    _publish_green(checkout, tip)
+    ok, what = watchdog.self_update(checkout)
+    assert ok and what.startswith("updated")
+    assert (checkout / "a.txt").read_text(encoding="utf-8") == "2\n"
+
+
+def test_no_green_yet_follows_the_default_branch(checkout):
+    assert watchdog.update_target(checkout, "main") == "origin/main"
+
+
+def test_a_failed_green_fetch_stays_on_the_last_green(checkout, monkeypatch):
+    """A moment's network trouble must not move the pass onto a commit nobody judged."""
+    start = _git(checkout, "rev-parse", "HEAD")
+    _publish_green(checkout, start)
+    watchdog.update_target(checkout, "main")
+    real = watchdog.git
+
+    def down(root, *args):
+        if args[0] == "fetch":
+            return subprocess.CompletedProcess(args, 1, "", "fatal: unable to access\n")
+        return real(root, *args)
+
+    monkeypatch.setattr(watchdog, "git", down)
+    assert watchdog.update_target(checkout, "main") == "origin/green"
+
+
+def test_a_green_a_day_behind_is_filed_while_the_checkout_stays_on_it(checkout):
+    start = _git(checkout, "rev-parse", "HEAD")
+    _publish_green(checkout, start)
+    watchdog.update_target(checkout, "main")
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    assert watchdog.stale_green(checkout, "main") == "", "a commit minutes old is just waiting"
+    a_day_on = time.time() + watchdog.GREEN_STALE_SECONDS + 60
+    said = watchdog.stale_green(checkout, "main", clock=lambda: a_day_on)
+    assert "has not reached" in said
+    assert watchdog.self_update(checkout)[0] is True, "filed apart, or the rerun would stop"
+
+
+def test_a_quiet_weekend_before_one_merge_is_not_stale(checkout):
+    """Measured between the two commits, Friday's green and Monday's merge read as 63 hours
+    behind while Monday's gate was still running."""
+    start = _git(checkout, "rev-parse", "HEAD")
+    _publish_green(checkout, start)
+    watchdog.update_target(checkout, "main")
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    tip = int(_git(checkout, "log", "-1", "--format=%ct", "origin/main"))
+    an_hour_on = tip + 3600
+    assert watchdog.stale_green(checkout, "main", clock=lambda: an_hour_on) == ""
+
+
+def test_no_green_or_nothing_waiting_is_never_stale(checkout):
+    assert watchdog.stale_green(checkout, "main", limit=-1, clock=lambda: 1e12) == ""
+    _git(checkout, "fetch", "--quiet", "origin", "main")
+    _publish_green(checkout, _git(checkout, "rev-parse", "origin/main"))
+    watchdog.update_target(checkout, "main")
+    assert watchdog.stale_green(checkout, "main", limit=-1, clock=lambda: 1e12) == ""
+
+
 def test_a_dirty_checkout_is_left_and_said(checkout):
     (checkout / "a.txt").write_text("local\n", encoding="utf-8")
     assert watchdog.self_update(checkout) == (
@@ -436,7 +626,7 @@ def test_a_fetch_that_fails_once_is_tried_again(checkout, monkeypatch):
     real, fetches = watchdog.git, []
 
     def flaky(root, *args):
-        if args[0] == "fetch":
+        if args[:3] == ("fetch", "--quiet", "origin") and args[-1] == "main":
             fetches.append(args)
             if len(fetches) == 1:
                 lock = "error: cannot lock ref 'refs/remotes/origin/main': is at 1a2b3c4d5e6f7a8b"
@@ -446,6 +636,24 @@ def test_a_fetch_that_fails_once_is_tried_again(checkout, monkeypatch):
     monkeypatch.setattr(watchdog, "git", flaky)
     ok, what = watchdog.self_update(checkout)
     assert ok and what.startswith("updated") and len(fetches) == 2
+
+
+def test_a_fetch_that_timed_out_is_not_tried_again(checkout, monkeypatch):
+    """The retry is for a lock released in seconds. A second two-minute wait came out of
+    the pass's window on the evening 6d06634e was filed, and the deadline cut it short."""
+    monkeypatch.setattr(watchdog, "FETCH_PAUSE_SECONDS", 0)
+    real, fetches = watchdog.git, []
+
+    def hung(root, *args):
+        if args[0] == "fetch":
+            fetches.append(args)
+            said = "timed out after 120s; ended it and its children"
+            return subprocess.CompletedProcess(args, watchdog.TIMED_OUT, "", said)
+        return real(root, *args)
+
+    monkeypatch.setattr(watchdog, "git", hung)
+    assert watchdog.self_update(checkout)[1] == FETCH_DOWN
+    assert len(fetches) == 1
 
 
 def test_a_fetch_that_keeps_failing_says_why_without_its_shas(checkout, monkeypatch):
@@ -465,6 +673,74 @@ def test_a_fetch_that_keeps_failing_says_why_without_its_shas(checkout, monkeypa
         "could not fetch origin/main -- error: cannot lock ref "
         "'refs/remotes/origin/main': is at <sha>",
     )
+
+
+def test_every_git_call_asks_github_s_credentials_up_front(tmp_path, monkeypatch):
+    """902dad3f: self-update's fetch got GitHub's 403 for an anonymous request, which git
+    never retries with its helper. The key is the one `git_trust` sets for the pass."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    import git_trust
+
+    argvs = []
+    monkeypatch.setattr(
+        watchdog,
+        "bounded",
+        lambda argv, cwd: argvs.append(argv) or subprocess.CompletedProcess(argv, 0, "", ""),
+    )
+    watchdog.git(tmp_path, "fetch", "--quiet", "origin", "main")
+    assert argvs == [
+        [
+            "git",
+            "-c",
+            f"{git_trust.AUTH_SETTING}={git_trust.AUTH}",
+            "fetch",
+            "--quiet",
+            "origin",
+            "main",
+        ]
+    ]
+
+
+def test_a_call_whose_child_holds_its_output_ends_at_its_bound(tmp_path):
+    """ebf74c37: the 20:30 fire spent 41 minutes in its own git calls before its pass
+    started, and the 21:00 fire was skipped. A `git fetch` hands its pipes to
+    `git-remote-https`; here a grandchild holds the output for 30 s, and the call comes
+    back at its bound, saying so, with what was said before it."""
+    holder = "import time; time.sleep(30)"
+    script = (
+        "import subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', {holder!r}])\n"
+        "print('fetching', flush=True)\n"
+        f"exec({holder!r})\n"
+    )
+    started = time.monotonic()
+    done = watchdog.bounded([sys.executable, "-c", script], tmp_path, timeout=2)
+    assert time.monotonic() - started < 20, "waited on the grandchild's pipe"
+    assert done.returncode == watchdog.TIMED_OUT
+    assert done.stdout.strip() == "fetching"
+    assert done.stderr == "timed out after 2s; ended it and its children"
+
+
+def test_a_bounded_call_keeps_its_exit_and_both_streams(tmp_path):
+    script = "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)"
+    done = watchdog.bounded([sys.executable, "-c", script], tmp_path)
+    assert (done.returncode, done.stdout, done.stderr) == (3, "out\n", "err\n")
+
+
+def test_the_pass_is_given_what_self_update_left_of_the_fire(watched, monkeypatch):
+    """The 25 minutes are the fire's, not the pass's: a self-update that took ten of them
+    leaves fifteen, so a slow fetch cannot carry the run past the next fire. The pass
+    always gets `MIN_RERUN`."""
+    timeouts: list = []
+    monkeypatch.setattr(
+        watchdog, "run_pass", lambda argv, timeout: timeouts.append(timeout) or (0, "")
+    )
+    began = time.monotonic() - 10 * 60
+    watchdog.run_current([], "dispatch", [], began)
+    assert watchdog.TIMEOUT - _dt.timedelta(minutes=11) < timeouts[0]
+    assert timeouts[0] <= watchdog.TIMEOUT - _dt.timedelta(minutes=10)
+    watchdog.run_current([], "dispatch", [], time.monotonic() - 60 * 60)
+    assert timeouts[1] == watchdog.MIN_RERUN
 
 
 def test_a_fetch_that_says_nothing_is_named_by_its_exit(tmp_path, monkeypatch):
@@ -488,8 +764,37 @@ def test_the_pass_is_run_and_a_hang_is_cut_off(tmp_path, monkeypatch):
     script.write_text(
         "import time\nprint('started', flush=True)\ntime.sleep(30)\n", encoding="utf-8"
     )
-    code, _ = watchdog.run_pass([], _dt.timedelta(seconds=2))
+    code, output = watchdog.run_pass([], _dt.timedelta(seconds=2))
     assert code is None
+    assert output == "started\n", "what it said before the stop is kept"
+
+
+def test_a_pass_stopped_at_its_timeout_is_not_waited_on_through_an_orphan(tmp_path, monkeypatch):
+    """fd5af1b1: `subprocess.run(timeout=)` ended the pass alone and then read its pipes
+    with no bound, held open by a process the pass had started whose own parent had
+    exited -- so no kill reached it -- and the watchdog ran on for hours, skipping fires.
+    The orphan here holds the pass's output for 30 s; the stop comes back well before."""
+    script = tmp_path / "pass.py"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        'orphaner = \'import subprocess, sys; subprocess.Popen([sys.executable, "-c", '
+        '"import time; time.sleep(30)"])\'\n'
+        "subprocess.run([sys.executable, '-c', orphaner])\n"
+        "print('started', flush=True)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(watchdog, "PASS", script)
+    started = time.monotonic()
+    code, output = watchdog.run_pass([], _dt.timedelta(seconds=3))
+    assert code is None and "started" in output
+    assert time.monotonic() - started < 20, "waited on the orphan's pipe"
+
+
+def test_ending_a_tree_that_is_already_gone_raises_nothing():
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait()
+    watchdog.end_tree(process)
 
 
 def test_the_pass_runs_in_utf8_mode_so_no_runner_decodes_with_the_console_page(
@@ -508,6 +813,17 @@ def test_the_pass_runs_in_utf8_mode_so_no_runner_decodes_with_the_console_page(
     )
     monkeypatch.setattr(watchdog, "PASS", script)
     assert watchdog.run_pass([]) == (0, "1 '\\u201d'\n")
+
+
+def test_the_pass_is_told_how_long_it_has(tmp_path, monkeypatch):
+    """The pass stops launching sessions before this stop rather than being killed in the
+    middle of one (2026-10-08 01:00), so it has to know the stop -- a rerun's included,
+    which gets only what is left of the fire. `fix-pass.WINDOW_ENV`, spelled here."""
+    script = tmp_path / "pass.py"
+    script.write_text("import os\nprint(os.environ['DEVKIT_FIX_PASS_SECONDS'])\n", encoding="utf-8")
+    monkeypatch.setattr(watchdog, "PASS", script)
+    assert watchdog.run_pass([], _dt.timedelta(minutes=7)) == (0, "420\n")
+    assert load_script("scripts/fix-pass.py").WINDOW_ENV == watchdog.WINDOW_ENV
 
 
 def test_a_signature_is_filed_once_and_the_state_survives_corruption(tmp_path, monkeypatch):
@@ -535,6 +851,15 @@ def test_the_rescue_prompt_names_the_failure_the_log_and_the_one_way_out():
     assert "(pass-hung): ran past 25 minutes" in text
     assert "logs/fix-pass.watchdog.log" in text and "agent/fix-pass-rescue-x" in text
     assert "regression test" in text and "ship skill" in text
+
+
+def test_the_rescue_retires_its_own_finding_against_its_branch():
+    """755ee62b: the pass sent a ledger sweep at a `pass-hung` finding whose fix (#564)
+    the rescue had already shipped, because nothing marked the group as in hand."""
+    text = watchdog.rescue_prompt("pass-hung", "ran past 25 minutes", "agent/fix-pass-rescue-x")
+    assert f"retire the {watchdog.EVENT} group whose detail starts `pass-hung:`" in text
+    assert "--resolve-like <id>" in text and "--pr agent/fix-pass-rescue-x" in text
+    assert text.index("ship skill") < text.index("--resolve-like"), "after the fix, not before"
 
 
 def test_the_marks_spelled_here_are_the_ones_the_pass_reads():

@@ -4,7 +4,8 @@
 The hook scripts (`stop.py`, and later the rest of `scripts/hooks/`) are meant to
 be **vendored unchanged into every project**. Everything that differs between
 projects -- the control-env prefix, the DB credentials/ports/service names, the
-frontend layout, and the source-tree shape --
+frontend layout, the desktop app's solution and installer identity, and the
+source-tree shape --
 lives here, read from a committed `.devkit.toml` at the repo root. The
 scripts stay shape-agnostic; a new project drops in a manifest instead of forking
 the code.
@@ -64,6 +65,29 @@ class FrontendConfig:
     skin: str = "frontend/src/skins"  # subtree whose change triggers a typecheck
     test_cmd: tuple[str, ...] = ("run", "test:run")
     typecheck_cmd: tuple[str, ...] = ("run", "typecheck")
+
+
+@dataclass(frozen=True)
+class DesktopConfig:
+    """The desktop tier: a .NET app shipped to users as an installer that updates itself.
+
+    `enabled=False` skips every desktop check and keeps `scripts/desktop.py` -- the
+    gated tier's build, test and release driver -- out of the project entirely.
+
+    `solution` is what lint and test run over, `project` the app's `.csproj` that a
+    release publishes. `pack_id` is the installer's identity on users' machines: an
+    installed copy only accepts an update carrying the id it was installed with, so it
+    never changes after the first release. Empty derives it from `project`'s file name,
+    as `pack_title` (the name users see) falls back to `pack_id`. `runtime` is the .NET
+    runtime identifier the release is published for.
+    """
+
+    enabled: bool = False
+    solution: str = ""
+    project: str = ""
+    pack_id: str = ""
+    pack_title: str = ""
+    runtime: str = "win-x64"
 
 
 # Floor for `invoke-capped.py --max-bytes`, enforced there and quoted by
@@ -217,7 +241,10 @@ class WorktreeConfig:
     the console, which reads as an application bug rather than as a box that was
     provisioned half-configured.
 
-    Ports are the only thing devkit knows generically, so this is a template map
+    A seeded value naming the source's published port on a local host (`127.0.0.1:5433`)
+    is moved onto the box's port without a template (`worktree.rebase_seeded_ports`);
+    this map is for the rest -- a value whose port is implied, or one that must differ in
+    shape. Ports are the only thing devkit knows generically, so this is a template map
     rather than a fixed key: `${NAME}` expands against the managed env devkit
     already writes -- `COMPOSE_PROJECT_NAME` and one `<SERVICE>_HOST_PORT` per
     service in the port registry. A template naming something else is left out
@@ -244,6 +271,18 @@ class WorktreeConfig:
 
 
 @dataclass(frozen=True)
+class DeliveryConfig:
+    """How a finished session's work reaches the default branch.
+
+    `flow` is `gated` -- a PR the gate decides -- or `direct`, which merges first and
+    runs every check after the merge. Devkit's fix pass and ship task are what read it,
+    from each project's checkout; the field is here so the manifest's schema names it.
+    """
+
+    flow: str = "gated"
+
+
+@dataclass(frozen=True)
 class Config:
     """Shape of the project the harness scripts operate on."""
 
@@ -255,12 +294,14 @@ class Config:
     unit_tests: str = "tests/unit"
     db: DbConfig = field(default_factory=DbConfig)
     frontend: FrontendConfig = field(default_factory=FrontendConfig)
+    desktop: DesktopConfig = field(default_factory=DesktopConfig)
     python: PythonConfig = field(default_factory=PythonConfig)
     bash: BashConfig = field(default_factory=BashConfig)
     docker: DockerConfig = field(default_factory=DockerConfig)
     worktree: WorktreeConfig = field(default_factory=WorktreeConfig)
     test_contract: TestContractConfig = field(default_factory=TestContractConfig)
     structure: StructureConfig = field(default_factory=StructureConfig)
+    delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
 
     def env(self, suffix: str) -> str:
         """The prefixed control-env name, e.g. env("SKIP_STOP_VERIFY")."""
@@ -306,6 +347,20 @@ def _frontend_from(raw: dict[str, Any], default: FrontendConfig) -> FrontendConf
         skin=str(raw.get("skin", default.skin)),
         test_cmd=_as_str_tuple(raw.get("test_cmd"), default.test_cmd),
         typecheck_cmd=_as_str_tuple(raw.get("typecheck_cmd"), default.typecheck_cmd),
+    )
+
+
+def _desktop_from(raw: dict[str, Any], default: DesktopConfig) -> DesktopConfig:
+    return replace(
+        default,
+        # `is True`, as `[docker] auto_stop` reads it: this key vendors a release driver
+        # into the project, so a typo ("yes") must read as the default, not as truthy.
+        enabled=raw.get("enabled", default.enabled) is True,
+        solution=str(raw.get("solution", default.solution)),
+        project=str(raw.get("project", default.project)),
+        pack_id=str(raw.get("pack_id", default.pack_id)),
+        pack_title=str(raw.get("pack_title", default.pack_title)),
+        runtime=str(raw.get("runtime", default.runtime)),
     )
 
 
@@ -434,6 +489,13 @@ def _worktree_from(raw: dict[str, Any], default: WorktreeConfig) -> WorktreeConf
     )
 
 
+def _delivery_from(raw: dict[str, Any], default: DeliveryConfig) -> DeliveryConfig:
+    # An unknown word is the default: the other flow takes a gate away, so nothing but
+    # its exact name selects it.
+    flow = raw.get("flow")
+    return replace(default, flow=flow) if flow in ("gated", "direct") else default
+
+
 def from_dict(data: dict[str, Any]) -> Config:
     """Build a Config from an already-parsed manifest dict. Pure; never raises."""
     default = Config()
@@ -441,12 +503,14 @@ def from_dict(data: dict[str, Any]) -> Config:
     paths = data.get("paths", {}) if isinstance(data.get("paths"), dict) else {}
     db_raw = data.get("db", {}) if isinstance(data.get("db"), dict) else {}
     fe_raw = data.get("frontend", {}) if isinstance(data.get("frontend"), dict) else {}
+    desk_raw = data.get("desktop", {}) if isinstance(data.get("desktop"), dict) else {}
     py_raw = data.get("python", {}) if isinstance(data.get("python"), dict) else {}
     bash_raw = data.get("bash", {}) if isinstance(data.get("bash"), dict) else {}
     docker_raw = data.get("docker", {}) if isinstance(data.get("docker"), dict) else {}
     wt_raw = data.get("worktree", {}) if isinstance(data.get("worktree"), dict) else {}
     tc_raw = data.get("test_contract", {}) if isinstance(data.get("test_contract"), dict) else {}
     st_raw = data.get("structure", {}) if isinstance(data.get("structure"), dict) else {}
+    deliv_raw = data.get("delivery", {}) if isinstance(data.get("delivery"), dict) else {}
     return Config(
         env_prefix=str(project.get("env_prefix", default.env_prefix)),
         app_dir=str(paths.get("app", default.app_dir)),
@@ -454,12 +518,14 @@ def from_dict(data: dict[str, Any]) -> Config:
         unit_tests=str(paths.get("unit_tests", default.unit_tests)),
         db=_db_from(db_raw, default.db),
         frontend=_frontend_from(fe_raw, default.frontend),
+        desktop=_desktop_from(desk_raw, default.desktop),
         python=_python_from(py_raw, default.python),
         bash=_bash_from(bash_raw, default.bash),
         docker=_docker_from(docker_raw, default.docker),
         worktree=_worktree_from(wt_raw, default.worktree),
         test_contract=_test_contract_from(tc_raw, default.test_contract),
         structure=_structure_from(st_raw, default.structure),
+        delivery=_delivery_from(deliv_raw, default.delivery),
     )
 
 

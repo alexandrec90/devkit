@@ -21,7 +21,7 @@ gate, and fails the moment the two drift in either direction.
 from __future__ import annotations
 
 import pytest
-from support import REPO_ROOT, load_script
+from support import REPO_ROOT, checks_a_red_check_skips, load_script
 
 gate = load_script("scripts/precommit/run_push_gate.py")
 
@@ -301,3 +301,45 @@ def test_a_red_vendored_suite_in_devkits_own_gate_uploads_what_failed():
     assert "pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml" in gate
     upload = gate.split("name: test-failures", 1)[1].split("\n\n", 1)[0]
     assert "logs/junit-hooks.xml" in upload and "logs/test-failures.log" in upload
+
+
+def test_the_push_gate_writes_the_report_ci_uploads_for_the_same_tier():
+    """45259a3b: one tier, one report. Whatever reads CI's `junit-hooks.xml` reads a
+    refused push's, so the local name may not wander off the workflow's."""
+    assert f"--junit-xml={gate.HOOK_TESTS_ARTIFACT}" in PR_GATE.read_text(encoding="utf-8")
+
+
+def test_a_red_check_does_not_hide_the_checks_after_it():
+    """f07541c7: the hook-script step failed, the `run-tests.py` step after it was
+    skipped, and the fixer was sent with `junit-hooks.xml` alone -- a third red
+    (`test_install_tray`) surfaced only from a local run. f872ef7c: a red mypy skipped
+    both test tiers, so main's log named 2 of its 4 reds. Every check runs whenever the
+    environment did, so one gate cycle names every red -- in the nightly too, whose
+    failures reach a fixer the same way."""
+    for workflow in (PR_GATE, PR_GATE.with_name("nightly.yml")):
+        parsed = _yaml().safe_load(workflow.read_text(encoding="utf-8"))
+        assert not checks_a_red_check_skips(parsed), (
+            f"{workflow.name}: a red check skips the one after it, so that check's "
+            f"failures reach the fix pass a gate cycle late: {checks_a_red_check_skips(parsed)}"
+        )
+
+
+def test_the_skipped_check_check_is_not_vacuous():
+    """Two tiers with no `if:` are what f07541c7 shipped, and a lint then a tier with no
+    `if:` what f872ef7c did; the helper must name the second of each, and accept it once
+    it runs after the first one's failure."""
+    lint = {"name": "lint", "run": "uv run python scripts/lint-all.py"}
+    hooks = {"name": "hooks", "run": "pytest scripts/hooks/tests/ -q"}
+    suite = {"name": "suite", "run": "python scripts/run-tests.py"}
+    assert checks_a_red_check_skips({"jobs": {"t": {"steps": [hooks, suite]}}}) == ["t / suite"]
+    assert checks_a_red_check_skips({"jobs": {"t": {"steps": [lint, hooks]}}}) == ["t / hooks"]
+    fixed = [
+        {**hooks, "id": "hooks"},
+        {**suite, "if": "success() || steps.hooks.outcome == 'failure'"},
+    ]
+    assert checks_a_red_check_skips({"jobs": {"t": {"steps": fixed}}}) == []
+    after_any = "${{ !cancelled() && steps.env.outcome == 'success' }}"
+    steps = [lint, {**hooks, "if": after_any}, {**suite, "if": after_any}]
+    assert checks_a_red_check_skips({"jobs": {"t": {"steps": steps}}}) == []
+    # One check, or both in one `run:` block, has nothing to skip.
+    assert checks_a_red_check_skips({"jobs": {"t": {"steps": [suite]}}}) == []

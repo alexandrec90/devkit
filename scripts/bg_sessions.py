@@ -11,7 +11,7 @@ the conversation, and `claude attach <id>` reopens it.
 Only a background session that is idle, in a tree whose stamped session is finished or
 dead, is stopped -- never an interactive one, and never one still working. The same
 listing says which trees a session is busy in (`working`), which the pass holds a
-dispatch off.
+dispatch off, and which recent transcripts belong to a session that has left (`gone`).
 
 Tested in `tests/test_bg_sessions.py`.
 """
@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable, Iterable
+from pathlib import Path
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
@@ -43,12 +44,46 @@ def listed(runner: Runner) -> list[dict]:
 def finished_in(rows: Iterable[dict], trees: Iterable[str]) -> list[dict]:
     """The idle background sessions whose working directory is one of `trees`."""
     wanted = {_key(tree) for tree in trees}
+    return [row for row in rows if stoppable(row) and _key(str(row.get("cwd", ""))) in wanted]
+
+
+# A background row's `state`s that mean nothing is in flight. `claude agents --json`
+# gives an interactive row `status` (`idle`/`busy`); a background row always carries
+# `state`, and `status` and `pid` only while its process lives (`alive`), so reading
+# `status` alone saw no 2.1.296 background row idle, or busy, ever.
+IDLE_STATES = frozenset({"idle", "done", "blocked"})
+
+
+def status(row: dict) -> str:
+    """`idle` or `busy` for `row`, from its `status` or else its `state`; "" when it has
+    neither. A state not in `IDLE_STATES` is busy: never stopped, never raced."""
+    if "status" in row:
+        return str(row["status"])
+    if "state" not in row:
+        return ""
+    return "idle" if str(row["state"]) in IDLE_STATES else "busy"
+
+
+def alive(row: dict) -> bool:
+    """Whether a process stands behind `row`. `claude agents --json` keeps listing a
+    background session whose process has gone, with no `pid` (c476bac3, 2026-10-09):
+    it holds no memory and no directory, and `claude stop` cannot confirm stopping it."""
+    return row.get("kind") != "background" or "pid" in row
+
+
+def stoppable(row: dict) -> bool:
+    """Whether the pass may stop this session: a live background one with nothing in
+    flight. One with no process is never asked (d95eb347): there is nothing to stop."""
+    return row.get("kind") == "background" and alive(row) and status(row) == "idle"
+
+
+def in_tree(rows: Iterable[dict], tree: object) -> list[dict]:
+    """Every session working in `tree` or under it."""
+    root = _key(str(tree))
     return [
         row
         for row in rows
-        if row.get("kind") == "background"
-        and row.get("status") == "idle"
-        and _key(str(row.get("cwd", ""))) in wanted
+        if (cwd := _key(str(row.get("cwd", "")))) == root or cwd.startswith(root + "/")
     ]
 
 
@@ -62,13 +97,27 @@ def working(rows: Iterable[dict], kinds: tuple[str, ...] = ()) -> frozenset[str]
     return frozenset(
         _key(str(row.get("cwd", "")))
         for row in rows
-        if row.get("status") == "busy" and (not kinds or row.get("kind") in kinds)
+        if status(row) == "busy" and (not kinds or row.get("kind") in kinds)
     )
 
 
 def busy_in(dirs: frozenset[str], tree: object) -> bool:
     """Whether `tree` is one of the directories `working` returned."""
     return _key(str(tree)) in dirs
+
+
+def gone(rows: Iterable[dict], tree: object, transcript: Path) -> bool:
+    """Whether the listing shows `transcript`'s session has left `tree`: it lists a live
+    session, none of them in `tree` and none of them `transcript`'s own.
+
+    A transcript's age is a guess at presence for `QUIET_AFTER`: a person's session
+    that ended twenty minutes ago held data-lake #66 and ibkr_trader #116 as "a session
+    is working in" a tree nobody was in. An empty listing is one that could not say, so
+    the guess stands; so does any live row in the tree, whose own id the stem may not be.
+    """
+    live = [row for row in rows if alive(row)]
+    own = any(row.get("sessionId") == transcript.stem for row in live)
+    return bool(live) and not own and not in_tree(live, tree)
 
 
 def _key(path: str) -> str:
@@ -82,7 +131,15 @@ def stop_finished(trees: Iterable[str], runner: Runner) -> list[str]:
     stopped = []
     for row in finished_in(listed(runner), trees):
         ident = str(row.get("id", ""))
-        done = runner(["claude", "stop", ident], check=False, capture_output=True, text=True)
-        if done.returncode == 0:
+        if stop(ident, runner):
             stopped.append(f"{ident} in {row.get('cwd', '')}")
     return stopped
+
+
+def stop(ident: str, runner: Runner) -> bool:
+    """`claude stop <ident>`, which keeps the conversation; whether it answered yes."""
+    try:
+        done = runner(["claude", "stop", ident], check=False, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0

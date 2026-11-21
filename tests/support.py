@@ -18,7 +18,9 @@ then importing `devkit_ports` separately would work — until the import sorter 
 makes the dependency explicit and immune to reordering.
 """
 
+import argparse
 import importlib.util
+import itertools
 import os
 import subprocess
 import sys
@@ -28,6 +30,21 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = REPO_ROOT / "templates"
+
+# The one job exempt from "scheduled jobs run unelevated", by installer, with the reason.
+# `tests/test_installer_contract.py` and `tests/test_scheduled_jobs.py` read this and
+# nothing else: a second name here is a second elevated job, which is a design change.
+ELEVATED_EXEMPTION: dict[str, str] = {
+    "install-elevated-worker.py": (
+        "Ending a stuck WSLService is refused to every unelevated token (its DACL grants no "
+        "start or stop), and that recovery otherwise waits on a person. A central admin "
+        "dispatcher was refused because it would run merged code as admin. So this one job "
+        "has one verb, run from a copy in an admin-only folder, under an interpreter copied "
+        "there too, and takes no input but a file name. An administrator registers it once "
+        "per PC, so nothing unelevated maintains it; it runs nothing from a checkout, so it "
+        "cannot be wrapped by log-wrap.py or write logs/."
+    ),
+}
 
 # The harness kill switch, cleared for this whole process. `scripts/hooks/tests/` does the
 # same thing in its `conftest.py` and for the same reason: the variable lives in a
@@ -110,15 +127,27 @@ box_teardown = worktree.box_teardown
 # The live multi-root registry: a workstation file that sits *beside* the checkout, so
 # it exists on the desktop this harness drives and never in a CI clone. The handful of
 # tests that assert against the real file (rather than a fixture) carry the marker
-# below; without it they fail on GitHub with a FileNotFoundError naming a path no
-# runner could have. Skipping is deliberate — the coverage they add is "the registry on
-# *this* machine is intact", which is exactly the thing CI has no opinion about.
+# below: `local` keeps them off a runner, where `addopts` deselects it, and the skip is
+# for a by-hand `-m local` on a machine without the file. The coverage they add is "the
+# registry on *this* machine is intact", which is exactly the thing CI has no opinion about.
 LIVE_WORKSPACE = devkit_project.DEFAULT_WORKSPACE
 
-needs_live_workspace = pytest.mark.skipif(
+_live_workspace_skip = pytest.mark.skipif(
     not LIVE_WORKSPACE.exists(),
     reason=f"{LIVE_WORKSPACE.name} is a workstation-local registry, not part of the checkout",
 )
+
+# What the two markers below add beside their skip: the test is in the end-to-end tier
+# `scripts/e2e.py` runs nightly on this workstation, and `addopts` deselects it from every
+# other run. Before it each such test ran only when a person happened to run the suite on
+# `main`; the marker is what gives it a runner, and putting it inside the same decorator
+# means no test can be skipped for wanting this machine without also being run on it.
+local = pytest.mark.local
+
+
+def needs_live_workspace(test):
+    """Skip without the live registry, and run in the nightly local tier (`local`)."""
+    return local(_live_workspace_skip(test))
 
 
 def on_a_task_branch(root: Path) -> bool:
@@ -179,18 +208,24 @@ def in_an_ephemeral_box(root: Path) -> bool:
 # checkout's canonical copy. The live workspace is rendered from the static checkout once
 # a branch merges, so from a box the comparison reads a file describing merged `main`
 # against a canonical copy carrying an un-merged edit -- and reports the edit as drift.
-# It began as the drift check alone, and the registration/retirement pair in
-# `test_devkit_project.py` was added to it after a branch that introduced a picker made
-# both of them assert that its own un-merged edit had already landed.
+# It holds the registration/retirement pair in `test_devkit_project.py`, after a branch
+# that introduced a picker made both of them assert that its own un-merged edit had
+# already landed; the drift check itself now reads `origin/<default>` from a box instead.
 # Every task that touches `workspace.jsonc` therefore failed the Stop gate at the finish
 # line, with the failure's own first suggestion (`--adopt-workspace`) being the one move
 # that deletes the branch's edit. Rendering early is not the answer either: the live file
 # would then point VS Code at a task shape the *static* checkout's scripts cannot serve
 # until the same branch merges. So the check stays exactly where it means something.
-needs_the_static_checkout = pytest.mark.skipif(
+_static_checkout_skip = pytest.mark.skipif(
     in_an_ephemeral_box(REPO_ROOT) or on_a_task_branch(REPO_ROOT),
     reason="the live workspace is rendered from the static checkout after a branch merges",
 )
+
+
+def needs_the_static_checkout(test):
+    """Skip outside the static checkout's default branch, and run in the `local` tier."""
+    return local(_static_checkout_skip(test))
+
 
 __all__ = [
     "LIVE_WORKSPACE",
@@ -208,6 +243,7 @@ __all__ = [
     "harness_state",
     "in_an_ephemeral_box",
     "load_script",
+    "local",
     "needs_live_workspace",
     "needs_the_static_checkout",
     "on_a_task_branch",
@@ -256,6 +292,40 @@ def gh_steps_without_repo_context(workflow: dict) -> list[str]:
     return offenders
 
 
+TEST_TIER_MARKERS = ("scripts/run-tests.py", "scripts/hooks/tests/")
+LINT_MARKERS = ("scripts/lint-all.py", "ruff format", "ruff check")
+# An `if:` holding one of these runs the step after any red step before it.
+RUNS_AFTER_ANY_RED = ("!cancelled()", "always()")
+
+
+def checks_a_red_check_skips(workflow: dict) -> list[str]:
+    """Names of check steps -- a lint or a test tier -- that a red check before them in
+    the job would skip.
+
+    A step with no `if:` runs only on `success()`, so with two checks in one job a red
+    first one leaves the second unrun, and the failure artifact names half the reds:
+    a red vendored tier hid the devkit suite (ledger f07541c7), and a red mypy hid both
+    test tiers (f872ef7c). Each later check must also run when the one before it failed:
+    `!cancelled()` in its `if:`, or `success() || steps.<that check's id>.outcome ==
+    'failure'`, which is enough where nothing earlier in the job can fail.
+    """
+    offenders = []
+    for job_name, job in (workflow.get("jobs") or {}).items():
+        checks = [
+            step
+            for step in job.get("steps") or []
+            if any(m in str(step.get("run", "")) for m in TEST_TIER_MARKERS + LINT_MARKERS)
+        ]
+        for before, step in itertools.pairwise(checks):
+            condition = str(step.get("if", ""))
+            wanted = f"steps.{before.get('id')}.outcome == 'failure'"
+            if any(clause in condition for clause in RUNS_AFTER_ANY_RED):
+                continue
+            if "id" not in before or wanted not in condition:
+                offenders.append(f"{job_name} / {step.get('name', '<unnamed>')}")
+    return offenders
+
+
 def vendor_manifest(root: Path) -> None:
     """Copy devkit's MANIFEST into a rendered tree, the way the generator does.
 
@@ -285,6 +355,11 @@ def vendor_manifest(root: Path) -> None:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
+    # The pull's settings pass too, which is how a tree gets what its shape implies but no
+    # template can spell: a project that installs no package of its own (the desktop
+    # shape) has Claude Code link its `.venv` into every worktree, and the template is
+    # strict JSON before rendering, with no room for a block that only one shape carries.
+    load_script("scripts/project_settings.py").settings_pass(root)
 
 
 def windows_layout(tmp_path, *names: str):
@@ -336,3 +411,51 @@ def load_script(relpath: str):
         del sys.modules[name]
         raise
     return module
+
+
+def make_args(**overrides):
+    """The argparse namespace `new-project.py`'s `plan()` expects, with the CLI's defaults."""
+    new_project = load_script("scripts/new-project.py")
+    base = {
+        "name": "demo_project",
+        "description": "A demo.",
+        "display_name": "",
+        "parent": "",
+        "github_owner": "alexandrec90",
+        "python_version": "3.12",
+        "default_branch": "main",
+        "devkit_ref": "v0.1.0",
+        "db_url_scheme": "postgresql+psycopg",
+        "src_layout": False,
+        "preset": None,
+        "remote": True,
+        "register": True,
+        "dry_run": True,
+        **{f: False for f in new_project.FEATURES},
+    }
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def registry():
+    return devkit_ports.load(REPO_ROOT)
+
+
+def generate(tmp_path: Path, features: dict) -> Path:
+    """Render the tree for one feature set into tmp_path and return the root.
+
+    Here rather than in `test_new_project.py` so a test file that checks the generated
+    tree as a whole can be run alone: `run-tests.py` names `test_generated_tree.py` for
+    any template change, and the generator's own tests take minutes.
+    """
+    new_project = load_script("scripts/new-project.py")
+    args = make_args(parent=str(tmp_path), **features)
+    # The generator's own resolution, so a test cannot render a shape `main` would refuse.
+    new_project.resolve_features(args)
+    the_plan = new_project.plan(args, registry())
+    the_plan.root.mkdir(parents=True, exist_ok=True)
+    new_project.render_tree(the_plan, dry_run=False)
+    new_project.write_package(the_plan, dry_run=False)
+    # Both tiers, because a real project is both. See `vendor_manifest`.
+    vendor_manifest(the_plan.root)
+    return the_plan.root

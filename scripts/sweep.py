@@ -59,10 +59,15 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable, Iterable
+import tempfile
+import threading
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -188,6 +193,181 @@ Git = Callable[..., "subprocess.CompletedProcess[str]"]
 NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def run_windowless(*args, **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` with `NO_WINDOW` ORed in: the default for an injectable runner.
+
+    A `runner=subprocess.run` default is a spawn no call-site scan can see, and one put
+    a Windows Terminal window on screen per project the upgrade pass wired
+    (`temproot_wiring.wire`'s `uv lock`, 2026-09-28). ORed rather than set, so a caller
+    that passes its own flags keeps them instead of raising on a duplicate keyword.
+    """
+    flags = kwargs.pop("creationflags", 0)
+    return subprocess.run(*args, creationflags=flags | NO_WINDOW, **kwargs)
+
+
+# Seconds a git call that talks to the remote (`NETWORK_VERBS`) and any `gh` call may
+# take. Unbounded, a fetch stalled on the network or on a credential prompt nobody can
+# see held the scheduled reconcile from 01:04 to 05:15, so every fire between was skipped
+# or ended by the scheduler's own hour limit with no log written (fb1f5465).
+NETWORK_TIMEOUT = 300
+GH_TIMEOUT = 600
+NETWORK_VERBS = frozenset({"fetch", "ls-remote", "pull"})
+# `run_bounded`'s returncode for a call it ended, `timeout(1)`'s spelling.
+TIMED_OUT = 124
+# How long the ended tree is given to close its pipes before its output is abandoned.
+KILL_GRACE = 10
+
+
+# The `time.monotonic()` past which no `run_bounded` call runs on, whatever its own
+# timeout: a caller's own stop, set with `until`. None outside one. Always the earliest
+# of `_deadlines`, the open `until` blocks' own, which `_deadlines_lock` guards.
+_until: float | None = None
+_deadlines: list[float] = []
+_deadlines_lock = threading.Lock()
+
+
+@contextmanager
+def until(deadline: float | None) -> Iterator[None]:
+    """Every `run_bounded` inside -- each `gh_for` and `git_for` call -- ends by
+    `deadline` (a `time.monotonic()`), or is not started past it (`TIMED_OUT` either
+    way); None adds no bound. Nested, the earlier deadline holds.
+
+    A per-call timeout bounds one call, not a step that makes many: on 2026-10-08 the
+    fix pass's `verify` read took eleven minutes and its `collect` read was still running
+    twelve minutes later, each `gh` call inside its own 600 s, and the watchdog stopped
+    the pass with no record written (2e2e7804).
+
+    The bound is the process's, so a pool's workers inside a block are held to it. Each
+    block adds and removes only its own deadline: restoring what it saw on entry left a
+    racing thread's deadline set for good once two blocks ended out of order, and every
+    later test on that worker inherited it (2026-11-11).
+    """
+    if deadline is None:
+        yield
+        return
+    global _until
+    with _deadlines_lock:
+        _deadlines.append(deadline)
+        _until = min(_deadlines)
+    try:
+        yield
+    finally:
+        with _deadlines_lock:
+            _deadlines.remove(deadline)
+            _until = min(_deadlines, default=None)
+
+
+def past_until() -> bool:
+    """Whether `until`'s deadline has passed: what a `TIMED_OUT` inside it owes to the
+    clock rather than to the call."""
+    return _until is not None and time.monotonic() >= _until
+
+
+def _within_until(timeout: float | None) -> float | None:
+    """`timeout` cut to what is left before `until`'s deadline; never below zero."""
+    if _until is None:
+        return timeout
+    left = max(_until - time.monotonic(), 0.0)
+    return left if timeout is None else min(timeout, left)
+
+
+def run_bounded(
+    argv: list[str], timeout: float | None, **kwargs
+) -> subprocess.CompletedProcess[str]:
+    """`argv` run captured, window-less and unchecked, ended **with its whole process
+    tree** at `timeout` seconds (returncode `TIMED_OUT`); `None` is unbounded. Inside
+    `until`, the deadline bounds it too, and past it the call is not started.
+
+    Not `subprocess.run(timeout=)`: on its timeout that kills the direct child only and
+    then reads its pipes to the end, unbounded, on Windows -- and `git fetch`'s
+    `git-remote-https`, or the `gh` a wrapper started, still holds them. The bound would
+    stop the clock and leave the wait.
+
+    Decoded as UTF-8, which is what git and gh write, never with the locale's codec:
+    outside UTF-8 mode on Windows that is cp1252, and `canonical_history` read every
+    em dash in a committed task as mojibake (caff6e06).
+    """
+    timeout = _within_until(timeout)
+    if timeout is not None and timeout <= 0:
+        said = "not started: past the caller's deadline"
+        return subprocess.CompletedProcess(argv, TIMED_OUT, "", said)
+    kwargs = {"encoding": "utf-8", "errors": "replace", **kwargs}
+    if timeout is None:
+        return run_windowless(argv, capture_output=True, check=False, **kwargs)
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=NO_WINDOW,
+        start_new_session=sys.platform != "win32",
+        **kwargs,
+    )
+    try:
+        out, err = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _end_tree(process)
+        try:
+            out, err = process.communicate(timeout=KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        said = f"{err or ''}\ntimed out after {timeout:g}s; ended it and its children"
+        return subprocess.CompletedProcess(argv, TIMED_OUT, out or "", said.strip())
+    return subprocess.CompletedProcess(argv, process.returncode, out, err)
+
+
+def run_to_files(
+    argv: str | list[str], timeout: float, **kwargs
+) -> subprocess.CompletedProcess[str]:
+    """`run_bounded` for a command whose children may outlive it: the output goes to
+    temporary files and the wait is on the process, not on its pipes.
+
+    A pipe stays open while anything holds its write end, so a command that exits 0 and
+    leaves a server running looked like a command still running, until its timeout called
+    a success a failure. `kwargs` go to `Popen`; a process still running at `timeout` is
+    ended with its tree, returncode `TIMED_OUT`.
+    """
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            creationflags=NO_WINDOW,
+            start_new_session=sys.platform != "win32",
+            **kwargs,
+        )
+        try:
+            code = process.wait(timeout=timeout)
+            ended = ""
+        except subprocess.TimeoutExpired:
+            _end_tree(process)
+            code, ended = TIMED_OUT, f"\ntimed out after {timeout:g}s; ended it and its children"
+        out.seek(0)
+        err.seek(0)
+        said = [f.read().decode("utf-8", "replace").replace("\r\n", "\n") for f in (out, err)]
+    return subprocess.CompletedProcess(argv, code, said[0], (said[1] + ended).lstrip("\n"))
+
+
+def _end_tree(process: subprocess.Popen) -> None:
+    """End `process` and every descendant: `taskkill /T` on Windows, the session's
+    process group elsewhere (`run_bounded` started it as a group leader)."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                timeout=60,
+                check=False,
+                creationflags=NO_WINDOW,
+            )
+        else:
+            os.killpg(process.pid, 9)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    process.kill()
+
+
 def console_python() -> str:
     """The console interpreter beside `sys.executable`, for spawning a Python child.
 
@@ -282,6 +462,8 @@ class State:
     is_git: bool = True
     host: str = "other"
     default_branch: str = ""
+    # The ref a sync fast-forwards to when it is not `origin/<default_branch>`: see `follows`.
+    follows: str = ""
     branch: str = ""
     dirty: int = 0
     # The changed paths behind `dirty`, for the generated PR body. Empty is a
@@ -294,6 +476,9 @@ class State:
     # box this file calls clean is one git refuses to remove. See
     # `worktree.reap_plan`, which is the only reader.
     phantom_dirty: int = 0
+    # The unstaged (` M`) half of those phantoms, by path: what `sync_plan` restores
+    # before its merge, which git refuses over them as it does over a real edit.
+    phantom_files: tuple[str, ...] = ()
     behind: int = 0
     ahead: int = 0
     upstream: str = ""
@@ -348,13 +533,18 @@ class Result:
 # authorization rather than a request.
 AUTOMERGE_LABEL = "automerge"
 AUTOFIX_LABEL = "autofix"
+# A project in the direct flow (`delivery.py`): merge with no gate consulted, where
+# `automerge` means once the gate passes. The drain job is what acts on it.
+MERGE_NOW_LABEL = "merge-now"
 
 # Colour and description per label `ensure_pr` may need to create. The `automerge`
 # spelling matches `dependabot-automerge.yml`'s `gh label create` exactly -- both
-# use `--force`, so two spellings would flip the label back and forth per run.
+# use `--force`, so two spellings would flip the label back and forth per run. Anything
+# else that creates `merge-now` has to spell it exactly as this does, for the same reason.
 LABEL_SPECS: dict[str, tuple[str, str]] = {
     AUTOMERGE_LABEL: ("0e8a16", "PR the harness may merge once the gate passes"),
     AUTOFIX_LABEL: ("1d76db", "Mechanical changes produced by a repository task"),
+    MERGE_NOW_LABEL: ("d93f0b", "PR the harness merges now, with no gate consulted"),
 }
 
 
@@ -567,6 +757,24 @@ def real_changes(porcelain: str, diffed: Iterable[str]) -> tuple[str, ...]:
     """
     keep = {_unquote(path) for path in diffed if path.strip()} | untracked_paths(porcelain)
     return tuple(path for path in parse_porcelain(porcelain) if path in keep)
+
+
+def restorable_phantoms(porcelain: str, kept: Iterable[str]) -> tuple[str, ...]:
+    """The phantoms `real_changes` dropped that `git checkout -- <path>` loses nothing on.
+
+    Only a ` M` line qualifies: the index matches HEAD and the working file differs from
+    it in bytes git's own filters erase, so restoring it from the index rewrites the line
+    endings and nothing else. A staged phantom (`MM`, `M `) is left alone, because the
+    index is then the one copy of something.
+
+    `merge --ff-only` refuses over these exactly as over a real edit -- "Your local
+    changes to the following files would be overwritten by merge" -- so a checkout this
+    file calls clean was one the scheduled reconcile failed to sync on every run, ten in
+    a row on ibkr_trader, whose nightly job rewrote `tickers.txt` with CRLF endings.
+    """
+    kept_set = set(kept)
+    lines = [line for line in porcelain.splitlines() if line.startswith(" M ")]
+    return tuple(path for path in parse_porcelain("\n".join(lines)) if path not in kept_set)
 
 
 def parse_worktree_branches(text: str) -> tuple[str, ...]:
@@ -1053,22 +1261,37 @@ def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
     steps: list[tuple[str, ...]] = []
     if fetch:
         steps.append(("fetch", "--prune", "origin"))
+    if state.phantom_files:
+        # Before the checkout and the merge, either of which git refuses over them --
+        # see `restorable_phantoms` for why this discards nothing.
+        steps.append(("checkout", "--", *state.phantom_files))
     if state.branch != home:
         steps.append(("checkout", home))
     # Unconditional: `behind` was measured against the *old* HEAD, so after a
     # checkout it says nothing about where `home` sits. `--ff-only` makes an
     # already-current branch a no-op and a diverged one an error, never a merge.
-    steps.append(("merge", "--ff-only", f"origin/{state.default_branch}"))
+    steps.append(("merge", "--ff-only", state.follows or f"origin/{state.default_branch}"))
+    steps += _reap_steps(state, verdict, home)
 
-    # Everything merged, plus the spent branch we are standing on (trivially
-    # merged, so `-d` takes it). Never `home` itself, and never `-D`: an unmerged
-    # branch surviving this is the correct outcome, not a failure to force past.
-    #
-    # Never a branch a *sibling* worktree is on either. Reaping is repo-wide while
-    # a checkout is per-worktree, so `carameli-b` sees the branch `carameli` is
-    # working on, merged into origin/master, and reads it as abandoned. Git would
-    # refuse the delete, but a plan that proposes it is a plan that reports a
-    # failure on a healthy workspace -- and the dry run stops being trustworthy.
+    # Only linked worktrees need the record: a primary can always fall back to the
+    # default branch, so storing it there would just be a value that can go stale.
+    return Plan(steps=tuple(steps), anchor=home if state.linked else "")
+
+
+def _reap_steps(state: State, verdict: str, home: str) -> list[tuple[str, ...]]:
+    """`sync_plan`'s branch deletes, run once the checkout stands on `home`.
+
+    Everything merged, plus the spent branch we are standing on (trivially
+    merged, so `-d` takes it). Never `home` itself, and never `-D`: an unmerged
+    branch surviving this is the correct outcome, not a failure to force past.
+
+    Never a branch a *sibling* worktree is on either. Reaping is repo-wide while
+    a checkout is per-worktree, so `carameli-b` sees the branch `carameli` is
+    working on, merged into origin/master, and reads it as abandoned. Git would
+    refuse the delete, but a plan that proposes it is a plan that reports a
+    failure on a healthy workspace -- and the dry run stops being trustworthy.
+    """
+    steps: list[tuple[str, ...]] = []
     live_elsewhere = {b for b in state.worktree_branches if b != state.branch}
     doomed: list[str] = []
     for candidate in (*state.merged_task_branches, state.branch if verdict == SPENT else ""):
@@ -1096,10 +1319,7 @@ def sync_plan(state: State, verdict: str, fetch: bool = True) -> Plan:
         if branch in state.ahead_of_upstream:
             steps.append(("branch", "--unset-upstream", branch))
         steps.append(("branch", "-d", branch))
-
-    # Only linked worktrees need the record: a primary can always fall back to the
-    # default branch, so storing it there would just be a value that can go stale.
-    return Plan(steps=tuple(steps), anchor=home if state.linked else "")
+    return steps
 
 
 def dedupe_branch_names(pairs: list[tuple[State, Plan]]) -> list[Plan]:
@@ -1209,15 +1429,15 @@ def exit_code(results: list[Result]) -> int:
 
 
 def git_for(path: Path) -> Git:
-    """A `git(*args)` callable bound to one checkout."""
+    """A `git(*args)` callable bound to one checkout; `env=` replaces the environment, as
+    a push that skips the pre-push gate needs (`release.push_env`)."""
 
-    def git(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
+    def git(*args: str, env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        # Only what talks to the remote is bounded: a push runs the pre-push gate.
+        return run_bounded(
             ["git", "-C", str(path), *args],
-            capture_output=True,
-            text=True,
-            check=False,
-            creationflags=NO_WINDOW,
+            NETWORK_TIMEOUT if args and args[0] in NETWORK_VERBS else None,
+            env=None if env is None else dict(env),
         )
 
     return git
@@ -1345,6 +1565,35 @@ def has_open_pr(gh: Git, branch: str) -> bool:
     return isinstance(payload, list) and bool(payload)
 
 
+def _dirty_files(git: Git, porcelain: str) -> tuple[str, ...]:
+    """`porcelain`'s paths that hold work, for `inspect`.
+
+    Only asks git for a diff when status claims there is one -- and only trusts the
+    answer when the call succeeded, so a checkout with no HEAD keeps every path. See
+    `real_changes` for what the two commands disagree about and what that cost.
+    """
+    dirty_files = parse_porcelain(porcelain)
+    if dirty_files:
+        diff = git("diff", "--name-only", "HEAD")
+        if diff.returncode == 0:
+            dirty_files = real_changes(porcelain, (diff.stdout or "").splitlines())
+    return dirty_files
+
+
+def follows(path: Path, git: Git) -> str:
+    """`origin/green` for devkit's own checkout once that ref exists, else "".
+
+    That checkout is the code the pass runs, and `fix-pass-watchdog.update_target` holds it
+    on the newest commit whose gate passed, so a bad merge cannot break the pass that
+    repairs it. This job syncs every checkout, so taking this one to the tip would undo
+    that every fifteen minutes. A project's checkout is only what a person reads.
+    """
+    if not (path / "scripts" / "devkit_manifest.py").is_file():
+        return ""
+    known = git("rev-parse", "--verify", "--quiet", "refs/remotes/origin/green")
+    return "origin/green" if known.returncode == 0 else ""
+
+
 def inspect(
     name: str,
     path: Path,
@@ -1365,15 +1614,7 @@ def inspect(
     default_branch = tb.detect_default_branch(git, fallback="")
     branch = _out(git("branch", "--show-current"))
     porcelain = git("status", "--porcelain").stdout or ""
-    dirty_files = parse_porcelain(porcelain)
-    if dirty_files:
-        # Only ask git for a diff when status claims there is one -- and only trust the
-        # answer when the call succeeded, so a checkout with no HEAD keeps every path.
-        # See `real_changes` for what the two commands disagree about and what that
-        # disagreement cost.
-        diff = git("diff", "--name-only", "HEAD")
-        if diff.returncode == 0:
-            dirty_files = real_changes(porcelain, (diff.stdout or "").splitlines())
+    dirty_files = _dirty_files(git, porcelain)
 
     behind = ahead = 0
     if default_branch:
@@ -1454,13 +1695,14 @@ def inspect(
     return State(
         name=name,
         path=str(path),
-        is_git=True,
         host=remote_host(remote_url),
         default_branch=default_branch,
+        follows=follows(path, git),
         branch=branch,
         dirty=len(dirty_files),
         dirty_files=dirty_files,
         phantom_dirty=len(parse_porcelain(porcelain)) - len(dirty_files),
+        phantom_files=restorable_phantoms(porcelain, dirty_files),
         behind=behind,
         ahead=ahead,
         upstream=upstream,
@@ -1491,16 +1733,42 @@ def gh_for(path: Path) -> Git:
     """
 
     def gh(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["gh", *args],
-            cwd=str(path),
-            capture_output=True,
-            text=True,
-            check=False,
-            creationflags=NO_WINDOW,
-        )
+        return run_bounded(["gh", *args], GH_TIMEOUT, cwd=str(path))
 
     return gh
+
+
+# GitHub failing on its own side, or the network between: a server error, as `gh`
+# (`HTTP 500`) or a push (`remote: Internal Server Error`) words it, a timeout, a dropped
+# or refused connection. Asking again may answer it; a refusal -- a 4xx, a rejected
+# ref -- is the same answer every time. bc1ec6d1 (a dispatch), a0287c8b and 4d942641
+# (a ship's PR and push) each filed a minute's outage as a harness defect. A TLS handshake
+# that broke off is the network's too: f1373302, Windows' schannel on a reconcile fetch
+# that went through when run again minutes later. So is a connection GitHub closed with
+# no answer, or dropped mid-read -- curl's 52 and 56: ce9a7cce, roguelike's reconcile
+# fetch, never asked again because these words were missing here. GitHub also fails with
+# no status at all: GraphQL's catch-all, and the ref store's own fatal on a push --
+# 9c48bdc9 and 9cde3743, two carameli ships filed as defects, each through on the next pass.
+_TRANSIENT = re.compile(
+    r"\bHTTP 5\d\d\b|internal server error|bad gateway|service unavailable"
+    r"|timeout|timed out|error connecting|connection (?:was )?reset|could not resolve host"
+    r"|failed to receive handshake|SSL/TLS connection failed"
+    r"|empty reply from server|recv failure"
+    r"|something went wrong while executing your query|fatal error in commit_refs",
+    re.I,
+)
+
+
+def transient(said: str) -> bool:
+    """Whether a `gh` or `git` call failed on GitHub's side or the network's, not on the
+    request."""
+    return bool(_TRANSIENT.search(said))
+
+
+# `gh pr create`'s refusal for a head that already has an open PR, which names it.
+PR_ALREADY_EXISTS = re.compile(
+    r"a pull request for branch .* already exists:\s*(?P<url>https://\S+/pull/\d+)"
+)
 
 
 def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
@@ -1547,27 +1815,62 @@ def ensure_pr(gh: Git, plan: Plan) -> tuple[str, bool, str]:
         *label_args,
     )
     if created.returncode != 0:
-        return "", False, (created.stderr or created.stdout or "").strip()
+        return _reuse_named(gh, plan, (created.stderr or created.stdout or "").strip())
     # `gh pr create` prints the URL as its last line of output.
     lines = [line.strip() for line in created.stdout.splitlines() if line.strip()]
     return (lines[-1] if lines else ""), True, ""
 
 
+def _reuse_named(gh: Git, plan: Plan, said: str) -> tuple[str, bool, str]:
+    """`ensure_pr`'s answer to a refused `gh pr create`. The view before it can miss a PR
+    GitHub already has -- one a moment old, or a view the network dropped -- and the
+    refusal then names it (12b705c9): that is the PR the call was looking for, so it is
+    reused like one the view found. Any other refusal is the error."""
+    if found := PR_ALREADY_EXISTS.search(said):
+        return found["url"], False, _apply_labels(gh, plan, found["url"])
+    return "", False, said
+
+
 def _ensure_label(gh: Git, label: str):
     """Create `label` in the repo, idempotently -- `--force` also makes an existing
     label converge on this spelling of its colour and description."""
+    return gh(*_label_args(label))
+
+
+def _label_args(label: str) -> tuple[str, ...]:
     color, description = LABEL_SPECS.get(label, ("ededed", ""))
-    return gh("label", "create", label, "--force", "--color", color, "--description", description)
+    return ("label", "create", label, "--force", "--color", color, "--description", description)
+
+
+# Seconds before each retry of an idempotent `gh` call that lost its connection, and the
+# words that say it did: Go's `wsarecv`/`read tcp` on Windows, a reset or a timeout
+# elsewhere. #482 already wore `automerge` when re-applying it dropped on 2026-10-01, and
+# the ship was filed as failed while the PR went on to merge.
+GH_RETRY_DELAYS = (2.0, 5.0)
+GH_DROPPED = ("wsarecv", "read tcp", "connection", "timeout", "timed out", "eof", "tls handshake")
+
+
+def _gh_retrying(gh: Git, *args: str):
+    """`gh(*args)`, asked again after each delay while its failure is a dropped connection.
+    Only for a call that is safe to repeat."""
+    done = gh(*args)
+    for delay in GH_RETRY_DELAYS:
+        said = (done.stderr or done.stdout or "").lower()
+        if done.returncode == 0 or not any(word in said for word in GH_DROPPED):
+            break
+        time.sleep(delay)
+        done = gh(*args)
+    return done
 
 
 def _apply_labels(gh: Git, plan: Plan, url: str) -> str:
     """Add `plan.pr_labels` to an existing PR; "" on success, the failure otherwise."""
     for label in plan.pr_labels:
-        ensured = _ensure_label(gh, label)
+        ensured = _gh_retrying(gh, *_label_args(label))
         if ensured.returncode != 0:
             detail = (ensured.stderr or ensured.stdout or "").strip()
             return f"PR exists at {url}, but creating label `{label}` failed: {detail}"
-        added = gh("pr", "edit", plan.pr_head, "--add-label", label)
+        added = _gh_retrying(gh, "pr", "edit", plan.pr_head, "--add-label", label)
         if added.returncode != 0:
             detail = (added.stderr or added.stdout or "").strip()
             return f"PR exists at {url}, but labelling it `{label}` failed: {detail}"
@@ -1591,12 +1894,70 @@ class Applied:
         return not self.failed and not self.plan.refusal
 
 
+# A step refused because another git process held or moved a ref under it. Git writes
+# nothing when it cannot take the lock, so running the step once more is safe.
+# 85ef9bc3: VS Code's `git pull --tags origin main` fast-forwarded ibkr_trader at
+# 10:51:23 while reconcile's `merge --ff-only origin/main` was under way, and reconcile
+# reported "git refused, the state needs a human" over a checkout already up to date.
+REF_RACE = re.compile(
+    r"cannot lock ref|is at [0-9a-f]+ but expected [0-9a-f]+|Unable to create '[^']*\.lock'",
+    re.I,
+)
+REF_RACE_PAUSE = 2.0
+# A step that failed on the network (`transient`) is asked again this many times,
+# `NETWORK_PAUSE` apart, before it counts as failed. f1373302: the scheduled reconcile's
+# `fetch` of ibkr_trader broke off in a TLS handshake, and the run said "git refused,
+# which means the state needs a human" over a fetch that worked when run again.
+NETWORK_RETRIES = 2
+NETWORK_PAUSE = 15.0
+
+
+def _said(completed: subprocess.CompletedProcess[str]) -> str:
+    return f"{completed.stderr or ''}\n{completed.stdout or ''}"
+
+
+def run_step(git: Git, step: tuple[str, ...], pause: Callable[[float], None] = time.sleep):
+    """`git(*step)`, run once more after `REF_RACE_PAUSE` when another process raced it
+    for a ref (`REF_RACE`), and up to `NETWORK_RETRIES` more after `NETWORK_PAUSE` when it
+    failed on the network (`transient`)."""
+    completed = git(*step)
+    if completed.returncode != 0 and REF_RACE.search(_said(completed)):
+        pause(REF_RACE_PAUSE)
+        completed = git(*step)
+    for _ in range(NETWORK_RETRIES):
+        if completed.returncode == 0 or not transient(_said(completed)):
+            break
+        pause(NETWORK_PAUSE)
+        completed = git(*step)
+    return completed
+
+
+# The steps that reap a branch. The other half of losing a race: a box reaper deleted the
+# branch between `inspect` and the step, so the step finds nothing to act on.
+BRANCH_REAP_STEPS = (("branch", "-d"), ("branch", "--unset-upstream"))
+
+
+def branch_already_gone(git: Git, step: tuple[str, ...]) -> bool:
+    """Whether `step` reaps a branch git now says does not exist.
+
+    Asked of git rather than read off the error: `--unset-upstream` on a missing branch
+    says "has no upstream information", the same words as on a branch that is there.
+    3f2e8171: a box reaper deleted social-scraper's adoption branch mid-pass, and the
+    sync's `branch -d` failed the scheduled reconcile over a branch already gone.
+    """
+    return (
+        step[:2] in BRANCH_REAP_STEPS
+        and git("rev-parse", "--verify", "--quiet", f"refs/heads/{step[2]}").returncode != 0
+    )
+
+
 def apply_plan(
     name: str,
     path: Path,
     plan: Plan,
     git: Git | None = None,
     gh: Git | None = None,
+    pause: Callable[[float], None] = time.sleep,
 ) -> Applied:
     """Run a plan's steps in order, stopping at the first failure.
 
@@ -1604,15 +1965,20 @@ def apply_plan(
     the earlier ones succeeded (nothing is deleted before the checkout that moved
     off it), so continuing past a failure is how a safe plan turns unsafe. The PR
     is the last thing of all, for the same reason: a PR opened on a branch whose
-    push failed points at a ref the remote does not have.
+    push failed points at a ref the remote does not have. A step that lost a race for a
+    ref is run once more (`run_step`) before it counts as failed, and one that reaps a
+    branch another process already deleted (`branch_already_gone`) counts as done.
     """
     result = Applied(name=name, plan=plan)
     if plan.refusal:
         return result
     git = git or git_for(path)
     for step in plan.steps:
-        completed = git(*step)
+        completed = run_step(git, step, pause)
         rendered = "git " + " ".join(step)
+        if completed.returncode != 0 and branch_already_gone(git, step):
+            result.ran.append(f"{rendered} -- the branch was already deleted")
+            continue
         if completed.returncode != 0:
             result.failed = rendered
             result.error = (completed.stderr or completed.stdout or "").strip()

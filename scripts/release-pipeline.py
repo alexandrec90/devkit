@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -80,7 +81,9 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))  # the vendored tier
 import gate_evidence
+import harness_events
 import precommit_store
 import release
 import sweep
@@ -499,11 +502,10 @@ def tag_missing(devkit: Path, version: str) -> str:
 def regate_default_branch(devkit: Path, branch: str = "") -> str:
     """Re-run the gate on the default branch now the tag exists; what to say about it.
 
-    The merge's own gate ran before the tag was pushed, so `EXPECTED_RED_TEST` failed
-    there by construction and left the default branch red on GitHub until the next push
-    (v0.11.31). The pass reads that red as green once the commit is tagged; this makes
-    the gate say so too. Not waited on, and a dispatch that fails is said, not fatal:
-    the release is cut either way.
+    The merge's own gate ran before the tag was pushed, and `EXPECTED_RED_TEST` excuses
+    that only by recognising the commit's subject. A run with the tag in place compares
+    the constant for real, and that is the verdict worth leaving on the branch. Not waited
+    on, and a dispatch that fails is said, not fatal: the release is cut either way.
     """
     branch = branch or task_branch.detect_default_branch(sweep.git_for(devkit), fallback="main")
     done = _run(["gh", "workflow", "run", gate_evidence.GATE_WORKFLOW, "--ref", branch], cwd=devkit)
@@ -586,12 +588,131 @@ def main_fallback(devkit: Path) -> str:
     return release.bump_fallback(result.stdout, "unused")[1] or ""
 
 
+def release_pr(devkit: Path, branch: str) -> tuple[int, str]:
+    """`(number, state)` of the newest PR from `branch`; `(0, "")` when there is none."""
+    data = _gh_json(["pr", "view", branch, "--json", "number,state"], devkit)
+    if not isinstance(data, dict):
+        return 0, ""
+    return int(data.get("number") or 0), str(data.get("state") or "")
+
+
 def open_release_pr(devkit: Path, branch: str) -> int:
     """The number of the open PR for `branch`, or 0 when there is none."""
-    data = _gh_json(["pr", "view", branch, "--json", "number,state"], devkit)
-    if not isinstance(data, dict) or data.get("state") != "OPEN":
+    number, state = release_pr(devkit, branch)
+    return number if state == "OPEN" else 0
+
+
+def never_had_a_pr(devkit: Path, branch: str) -> bool:
+    """Whether `branch` has never had a PR, open or closed. False when `gh` cannot say.
+
+    The one state in which a pushed release branch is safe to open a PR from unasked:
+    a closed PR is somebody's decision, and an unanswered question is not "never".
+    """
+    history = ["pr", "list", "--head", branch, "--state", "all", "--json", "number"]
+    return _gh_json(history, devkit) == []
+
+
+def resume_refusal(devkit: Path, version: str, state: str) -> str:
+    """Why origin's branch for `version` must be prepared afresh; `""` to resume it.
+
+    `state` is `release_pr`'s answer. `release.unresumable` says whether the branch is
+    exactly the bump `prepare` would push; `never_had_a_pr` then makes sure the empty
+    `state` was "no PR" and not a `gh pr view` that could not answer -- asked last, so
+    a normal run, whose branch is not on origin yet, costs no second `gh` call.
+    """
+    if state:
+        return f"its PR is {state}"
+    why = release.unresumable(devkit, version, _run)
+    if why or never_had_a_pr(devkit, release.branch_for(version)):
+        return why
+    return "gh cannot show that it never had a PR"
+
+
+# `prepare_pr`'s number when another run owns this release: not a PR, and not a failure.
+ANOTHER_RUN = -1
+
+
+def lost_the_push_race(devkit: Path, branch: str, refusal: str) -> bool:
+    """Whether a failed `prepare` lost to another run cutting the same release.
+
+    `refusal` is `resume_refusal`'s answer from before the prepare: only a branch origin
+    did not hold then, and holds now, was pushed by somebody else in between. On
+    2026-10-11 two runs cut release/v0.11.58 within seconds; one opened #619 and carried
+    the release through, while the other's push was rejected as `reference already
+    exists` and filed a failure for a release that went out. A branch that was on origin
+    *before* is a stranded or foreign push, and stays the failure `prepare` reports.
+    """
+    return refusal == release.NOT_ON_ORIGIN and bool(release.pushed_to_origin(devkit, branch, _run))
+
+
+def prepare_outcome(number: int, failure: str) -> int:
+    """`run_pipeline`'s exit code when `prepare_pr` returned no PR to drive.
+
+    0 when another run owns the release -- driving its PR too would merge and tag twice
+    -- and 2, the failed step, otherwise.
+    """
+    if number == ANOTHER_RUN:
+        _say(
+            f"{failure}; that run carries the release, so this one stops here -- its PR "
+            "says which machine and job started it"
+        )
         return 0
-    return int(data.get("number") or 0)
+    print(f"release-pipeline: {failure}", file=sys.stderr)
+    return 2
+
+
+def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
+    """The prepare PR's number, pushing and opening it as needed; `(0, why)` on failure.
+
+    Reuses an open PR; otherwise opens one for a branch an earlier run pushed and died
+    before its PR (`resume_refusal` says when that branch is safe to reuse), and
+    only failing both cuts the branch afresh. A branch whose PR was *closed* is never
+    resumed: closing it was somebody's decision, and `prepare` refuses it out loud.
+    `(ANOTHER_RUN, why)` when a concurrent run pushed the branch first.
+    """
+    branch = release.branch_for(version)
+    number, state = release_pr(devkit, branch)
+    if state == "OPEN":
+        _say(f"reusing the open prepare PR #{number} for {branch}")
+        # A PR left open by an earlier run carries the main it was cut from. Its gate
+        # judges that tree, so a red since fixed on main stays red there for good (#762).
+        refreshed = _run(["gh", "pr", "update-branch", str(number)], cwd=devkit)
+        if refreshed.returncode != 0:
+            detail = (refreshed.stderr or refreshed.stdout).strip()
+            return 0, f"could not bring #{number} up to date with main: {detail}"
+        return number, ""
+    if not (refusal := resume_refusal(devkit, version, state)):
+        _say(f"{branch} is on origin with no PR -- an earlier run stopped before opening it")
+    else:
+        _say(f"preparing {branch}")
+        ok, detail = release.prepare(devkit, version, _run, _say)
+        if not ok and lost_the_push_race(devkit, branch, refusal):
+            return ANOTHER_RUN, f"another run pushed {branch} while this one prepared it"
+        if not ok:
+            return 0, f"prepare failed: {detail}"
+    created = _run(
+        [
+            "gh",
+            "pr",
+            "create",
+            "--base",
+            "main",
+            "--head",
+            branch,
+            "--title",
+            f"Release {version}",
+            "--body",
+            PR_BODY.format(version=version, expected=EXPECTED_RED_TEST, origin=started_by()),
+        ],
+        cwd=devkit,
+    )
+    if created.returncode != 0:
+        return 0, f"pushed {branch} but the PR failed: {(created.stderr or created.stdout).strip()}"
+    number = pr_number_from_url(created.stdout) or open_release_pr(devkit, branch)
+    if not number:
+        return 0, f"opened a PR for {branch} but could not read its number"
+    _say(f"opened PR #{number}")
+    return number, ""
 
 
 def wait_for_checks(devkit: Path, number: int) -> None:
@@ -682,6 +803,31 @@ def newest_workflow_run(devkit: Path, workflow: str = RELEASE_WORKFLOW) -> int:
     return 0
 
 
+def tag_run_in_flight(devkit: Path) -> int:
+    """The `release.yml` run still going, or 0; 0 too where `gh` cannot say.
+
+    A bump on main with no tag reads as a release to resume, and is one just as much
+    while another run's tag workflow is testing the commit: the job fires at 02:00 on
+    every workstation, and that gap has neither a PR nor a tag to see (28102da8)."""
+    runs = _gh_json(
+        [
+            "run",
+            "list",
+            "--workflow",
+            RELEASE_WORKFLOW,
+            "--limit",
+            "5",
+            "--json",
+            "databaseId,status",
+        ],
+        devkit,
+    )
+    for run in runs if isinstance(runs, list) else []:
+        if isinstance(run, dict) and run.get("status") != "completed":
+            return int(run.get("databaseId") or 0)
+    return 0
+
+
 def dispatch_tag_workflow(devkit: Path, version: str) -> tuple[int, str]:
     """Dispatch `release.yml phase=tag` and return `(run_id, error)`.
 
@@ -728,6 +874,32 @@ def _stop(message: str) -> int:
     return 1
 
 
+def push_tag(devkit: Path, version: str) -> int | None:
+    """Have `release.yml` tag `version` and see it through: None once it did, else the
+    code the pipeline ends on -- 0 when another run got there first."""
+    _say(f"dispatching {RELEASE_WORKFLOW} phase=tag -- it tests the tagged commit before pushing")
+    run_id, error = dispatch_tag_workflow(devkit, version)
+    if error:
+        print(f"release-pipeline: {error}", file=sys.stderr)
+        return 2
+    watched = _run(["gh", "run", "watch", str(run_id), "--exit-status"], cwd=devkit, capture=False)
+    if watched.returncode != 0:
+        # Two runs dispatched in the same seconds both pass `tag_run_in_flight`, and the
+        # slower fails on "releases are immutable" with the release it wanted cut.
+        if not tag_missing(devkit, version):
+            _say(f"run {run_id} failed, but another run pushed {version} -- leaving the rest to it")
+            return 0
+        return _stop(
+            f"the tag workflow failed -- {version} was NOT pushed. "
+            f"`gh run view {run_id} --log-failed` has the reason."
+        )
+
+    if missing := tag_missing(devkit, version):
+        return _stop(missing)
+    _say(f"{version} is tagged; {regate_default_branch(devkit)}.")
+    return None
+
+
 def run_pipeline(
     devkit: Path,
     version: str,
@@ -736,50 +908,18 @@ def run_pipeline(
     projects: Sequence[str] = (),
 ) -> int:
     """Execute the release. 0 done, 1 refused, 2 a step failed."""
-    branch = release.branch_for(version)
-
     if main_fallback(devkit) == version:
         # Resumable: the prepare PR has already merged, so the bump is on main and only
         # the tag is missing. Re-running the task after a network failure at step 7
         # should finish the release, not refuse it as half-done.
         _say(f"{release.FALLBACK_CONST} already names {version} on main -- skipping to the tag")
+        if another := tag_run_in_flight(devkit):
+            _say(f"{RELEASE_WORKFLOW} run {another} is already at it -- leaving the rest to that")
+            return 0
     else:
-        number = open_release_pr(devkit, branch)
-        if number:
-            _say(f"reusing the open prepare PR #{number} for {branch}")
-        else:
-            _say(f"preparing {branch}")
-            ok, detail = release.prepare(devkit, version, _run, _say)
-            if not ok:
-                print(f"release-pipeline: prepare failed: {detail}", file=sys.stderr)
-                return 2
-            created = _run(
-                [
-                    "gh",
-                    "pr",
-                    "create",
-                    "--base",
-                    "main",
-                    "--head",
-                    branch,
-                    "--title",
-                    f"Release {version}",
-                    "--body",
-                    PR_BODY.format(version=version, expected=EXPECTED_RED_TEST),
-                ],
-                cwd=devkit,
-            )
-            if created.returncode != 0:
-                print(
-                    f"release-pipeline: pushed {branch} but the PR failed: "
-                    f"{(created.stderr or created.stdout).strip()}",
-                    file=sys.stderr,
-                )
-                return 2
-            number = pr_number_from_url(created.stdout) or open_release_pr(devkit, branch)
-            if not number:
-                return _stop(f"opened a PR for {branch} but could not read its number")
-            _say(f"opened PR #{number}")
+        number, failure = prepare_pr(devkit, version)
+        if number <= 0:
+            return prepare_outcome(number, failure)
 
         _say(f"waiting for the gate on #{number} (one blocking call; this takes minutes)")
         wait_for_checks(devkit, number)
@@ -809,21 +949,8 @@ def run_pipeline(
             return 2
         _say(f"merged #{number}")
 
-    _say(f"dispatching {RELEASE_WORKFLOW} phase=tag -- it tests the tagged commit before pushing")
-    run_id, error = dispatch_tag_workflow(devkit, version)
-    if error:
-        print(f"release-pipeline: {error}", file=sys.stderr)
-        return 2
-    watched = _run(["gh", "run", "watch", str(run_id), "--exit-status"], cwd=devkit, capture=False)
-    if watched.returncode != 0:
-        return _stop(
-            f"the tag workflow failed -- {version} was NOT pushed. "
-            f"`gh run view {run_id} --log-failed` has the reason."
-        )
-
-    if missing := tag_missing(devkit, version):
-        return _stop(missing)
-    _say(f"{version} is tagged; {regate_default_branch(devkit)}.")
+    if (ended := push_tag(devkit, version)) is not None:
+        return ended
 
     if not adopt:
         _say("skipping adoption (--no-adopt); consumers stay on the previous release")
@@ -844,16 +971,52 @@ def run_pipeline(
     ]
     if workspace is not None:
         command += ["--workspace", str(workspace)]
+    upgrade = upgrade_module()
+    # Emptied first, so a pass that dies before writing its own leaves nothing that
+    # `adoption_outcome` could read as the previous run's verdict.
+    upgrade.write_artifact(upgrade.REPO_ROOT, "")
     adopted = _run(command, cwd=devkit, capture=False)
-    if adopted.returncode != 0:
-        # Not a release failure: the release is cut and tagged. Adoption is a separate
-        # per-consumer act with its own artifact, and `logs/upgrade.log` says which.
-        return _stop(
-            f"{version} is released, but the adoption pass exited {adopted.returncode} "
-            f"-- see logs/upgrade.log, then re-run `upgrade-project.py {scope} --yes`"
+    return adoption_outcome(
+        version, scope, adopted.returncode, read_text(upgrade.REPO_ROOT / upgrade.ARTIFACT)
+    )
+
+
+def read_text(path: Path) -> str:
+    """`path`'s text, or "" when it cannot be read."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def adoption_outcome(version: str, scope: str, code: int, artifact: str) -> int:
+    """The exit code of a release run whose adoption pass exited `code`.
+
+    **Main moving on while the release was cut is not a failure of this run.**
+    `upgrade-project.py` exits 1 when devkit main carries a vendored change the new tag
+    does not, and that is routine here: a PR merged between the release PR and the
+    adoption is untagged by construction. On 2026-10-11 #629 merged while v0.11.62 was
+    cut, every consumer's adoption PR opened, and the run was filed as a failed
+    scheduled job anyway. The next `--if-needed` run cuts the release that change
+    needs, so the warning is said and the run succeeds. An `--all` adoption already
+    exits 0 on it (`upgrade-project.run_code`), so the artifact is read whatever the code.
+    """
+    if code in (0, 1) and upgrade_module().owes_only_a_release(artifact):
+        _say(
+            f"{version} released and up for adoption everywhere. Main moved on while it "
+            "was cut, so it carries vendored changes no tag delivers yet (logs/upgrade.log "
+            "names them); the next `--if-needed` run releases them."
         )
-    _say(f"{version} released and up for adoption everywhere.")
-    return 0
+        return 0
+    if code == 0:
+        _say(f"{version} released and up for adoption everywhere.")
+        return 0
+    # Not a release failure: the release is cut and tagged. Adoption is a separate
+    # per-consumer act with its own artifact, and `logs/upgrade.log` says which.
+    return _stop(
+        f"{version} is released, but the adoption pass exited {code} "
+        f"-- see logs/upgrade.log, then re-run `upgrade-project.py {scope} --yes`"
+    )
 
 
 PR_BODY = """Bumps `FALLBACK_DEVKIT_REF` to `{version}` so a project generated before the
@@ -862,7 +1025,28 @@ tag exists still pins something resolvable.
 Opened by `scripts/release-pipeline.py`. **`{expected}` is expected to fail on this PR**
 — it compares the constant against `git describe --tags`, and `{version}` is not tagged
 until this merges. The pipeline verifies that it is the *only* failure before merging.
+
+{origin}
 """
+
+# `log-wrap.py`'s `JOB_ENV`, spelled here because a hyphenated script is not importable;
+# a test holds the two spellings together.
+JOB_ENV = "DEVKIT_JOB"
+
+
+def started_by(env: Mapping[str, str] | None = None) -> str:
+    """The machine and the job that started this run, as one sentence. Pure given `env`.
+
+    A run's `log-wrap.py` record stays in the `logs/` of the machine it ran on. On
+    2026-10-11 release/v0.11.58 was cut and #619 opened by a run that left no record
+    on the machine reading the ledger -- the nightly job there lost the push race to
+    it -- and nothing said which machine or job it was. The release PR is the one thing
+    every machine can read, so it carries the answer.
+    """
+    source = os.environ if env is None else env
+    job = (source.get(JOB_ENV) or "").strip()
+    by = f"the `{job}` job" if job else "hand (no `log-wrap.py` job named it)"
+    return f"Started on `{harness_events.host_name(source)}` by {by}."
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -965,7 +1149,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"release-pipeline: releasing because {reason}")
 
-    print(f"release-pipeline: {version} ({args.level})")
+    print(f"release-pipeline: {version} ({args.level}). {started_by()}")
     for index, step in enumerate(plan_steps(version, args.adopt, projects), 1):
         print(f"  {index}. {step}")
     if args.dry_run:

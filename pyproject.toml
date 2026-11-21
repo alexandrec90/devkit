@@ -14,8 +14,8 @@ dependencies = []
 # extra: extras belong to a *distribution*, and devkit is not one (see [tool.uv] below).
 # `uv sync --all-groups` — what `.claude/hooks/session-start.sh` runs — installs this.
 dev = [
-  "ruff>=0.16.9",
-  "mypy>=2.3.1",
+  "ruff>=0.17.0",
+  "mypy>=2.4.0",
   # 9.1: it applies `pythonpath` before loading `addopts`' `-p devkit_temproot`.
   "pytest>=9.1",
   # The push gate runs pytest three times -- the suite, the vendored hook tier, and the
@@ -27,7 +27,7 @@ dev = [
   # devkit publishes pre-commit hooks (.pre-commit-hooks.yaml) and runs them on itself
   # (.pre-commit-config.yaml), so the runner is part of the host toolchain. It also
   # brings PyYAML, which the tests covering those config files parse with.
-  "pre-commit>=4.6.2",
+  "pre-commit>=4.7.0",
 ]
 
 [tool.uv]
@@ -44,15 +44,23 @@ package = false
 testpaths = ["tests"]
 # No `-q` here: an agent adds its own, and `-qq` drops the "N passed" line -- sessions ran
 # the suite again and again looking for a verdict that was never printed.
-addopts = '-m "not paid" -p devkit_temproot'
+# `local` is deselected like `paid`: the tier that needs this workstation includes a run
+# that drives VS Code for half an hour, and the push gate runs this suite on this machine.
+# `scripts/e2e.py` selects it by name, nightly, once the PC is idle.
+addopts = '-m "not paid and not local" -p devkit_temproot'
 # The vendored plugin that gives each run a temp root of its own; `-p` above loads it.
 # What makes it importable: pytest applies this before it loads a `-p` plugin, which is
-# also why the floor above is 9.1.
-pythonpath = ["scripts/pytest-plugins"]
+# also why the floor above is 9.1. `scripts` too, so a test's `import fix_plan` does not
+# depend on another module having put it on the path first (`tests/support.py` does).
+pythonpath = ["scripts/pytest-plugins", "scripts"]
+# A test that hangs prints its stack after this many seconds instead of silently running
+# until a tool call's limit kills it. Dumps only; nothing fails on it.
+faulthandler_timeout = 120
 markers = [
   "claude_live: paid opt-in smoke tests that launch an authenticated Claude Code CLI session",
   "codex_live: paid opt-in smoke tests that launch an authenticated Codex CLI session",
   "paid: tests that may consume paid live infrastructure and are excluded by default",
+  "local: needs this workstation, not a runner; deselected by addopts, run nightly by scripts/e2e.py",
 ]
 
 [tool.mypy]
@@ -64,8 +72,9 @@ python_version = "3.12"
 # resolves it by happening to check that directory too. `lint-all.py --changed` passes
 # only the changed files, so the same import became "Cannot find implementation or
 # library stub" -- a gate that failed on exactly the files that had been edited, which
-# is every time it matters.
-mypy_path = ["scripts", "scripts/hooks", "scripts/precommit"]
+# is every time it matters. `tests/vscode_e2e` likewise, for the `receipt` module
+# `tests/test_vscode_tasks_e2e.py` imports the same way.
+mypy_path = ["scripts", "scripts/hooks", "scripts/precommit", "tests/vscode_e2e"]
 warn_unused_ignores = true
 warn_redundant_casts = true
 # The one note mypy prints for every untyped function it skipped, on a clean run too:

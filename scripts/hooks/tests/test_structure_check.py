@@ -55,6 +55,14 @@ def test_every_rule_has_a_remedy():
     assert set(sc.REMEDIES) == set(sc.RULES)
 
 
+def test_the_skip_remedy_and_the_local_tier_rule_name_each_other():
+    """A fixer writing the local tier was refused a `pytest.skip`, with a remedy that said
+    only un-skip or delete, under a rule that read as if a skip were the tier's shape."""
+    assert "local-e2e.md" in sc.REMEDIES["skipped_tests"]
+    rule = (REPO_ROOT / ".claude" / "rules" / "local-e2e.md").read_text(encoding="utf-8")
+    assert "`skipped_tests`" in rule
+
+
 def test_config_errors_name_an_unknown_limit_and_an_unknown_rule():
     errors = sc.config_errors(config(limits={"file_lnies": 1}, disabled=("orpan",)))
     assert any("file_lnies" in e for e in errors)
@@ -192,6 +200,25 @@ def test_vendored_paths_leave_the_gated_tier_out_where_the_frontend_is_off(tmp_p
     write(tmp_path, ".devkit.toml", OFF)
     assert sc.vendored_paths(tmp_path) == {"a.py"}
     (tmp_path / ".devkit.toml").unlink()
+    assert sc.vendored_paths(tmp_path) == {"a.py"}
+
+
+DESKTOP_SCRIPT = (
+    'MANIFEST: tuple[str, ...] = (\n    "a.py",\n)\n'
+    "GATED_MANIFEST: dict[str, tuple[str, ...]] = {\n"
+    '    "frontend": ("port.ts",),\n'
+    '    "desktop": ("scripts/desktop.py",),\n}\n'
+)
+
+
+def test_vendored_paths_include_the_desktop_gate_from_the_repo_root(tmp_path):
+    """The desktop gate's files are named from the root, so they are exempt where they
+    landed; the frontend gate, still off, contributes nothing."""
+    write(tmp_path, "DEVKIT_VERSION", "abc\n")
+    write(tmp_path, "scripts/sync-devkit.py", DESKTOP_SCRIPT)
+    write(tmp_path, ".devkit.toml", "[desktop]\nenabled = true\n")
+    assert sc.vendored_paths(tmp_path) == {"a.py", "scripts/desktop.py"}
+    write(tmp_path, ".devkit.toml", "[desktop]\nenabled = false\n")
     assert sc.vendored_paths(tmp_path) == {"a.py"}
 
 
@@ -515,6 +542,33 @@ def test_findings_are_keyed_deduped_and_sorted(tmp_path):
     assert [(f.key, f.value) for f in found] == [("function_params::src/main.py::alpha", 3)]
 
 
+def test_a_module_only_imported_for_its_types_is_not_an_orphan(tmp_path):
+    """a745fee7: photolab's `frontend/src/api/types.ts`, all types and imported by everyone
+    with `import type`, read as dead code because the graph is built for cycles."""
+    write(tmp_path, "src/main.ts", 'import type { Foo } from "./types";\nmain();\n')
+    write(tmp_path, "src/types.ts", "export type Foo = string;\n")
+    assert not [f.key for f in sc.findings(tmp_path, config()) if f.rule == "orphan"]
+
+
+def test_a_python_module_only_imported_under_type_checking_is_not_an_orphan(tmp_path):
+    write(
+        tmp_path,
+        "src/main.py",
+        "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from src import shapes\n",
+    )
+    write(tmp_path, "src/shapes.py", "x = 1\n")
+    assert not [f.key for f in sc.findings(tmp_path, config()) if f.rule == "orphan"]
+    write(tmp_path, "src/unused.py", "x = 1\n")
+    found = [f.key for f in sc.findings(tmp_path, config()) if f.rule == "orphan"]
+    assert found == ["orphan::src/unused.py"], "the rule still finds what nothing uses"
+
+
+def test_type_only_imports_still_close_no_cycle(tmp_path):
+    write(tmp_path, "src/a.ts", 'import type { B } from "./b";\nexport type A = B;\n')
+    write(tmp_path, "src/b.ts", 'import { a } from "./a";\nexport type B = typeof a;\n')
+    assert not [f for f in sc.findings(tmp_path, config()) if f.rule == "cycle"]
+
+
 def test_findings_honour_disabled_rules(tmp_path):
     write(tmp_path, "src/dead.py", "x = 1  # noqa\n")
     assert [f.rule for f in sc.findings(tmp_path, config())] == ["orphan", "suppressions"]
@@ -728,6 +782,38 @@ def test_tighten_carries_the_record_log_through(tmp_path):
     assert "kept through a tighten" in sc.baseline_path(tmp_path).read_text(encoding="utf-8")
 
 
+OLD_HEADER = "# Structural findings, as worded when this project adopted the gate.\n#\n# Older.\n"
+
+
+def test_tighten_keeps_the_header_the_file_already_had(tmp_path):
+    """The regression. A consumer seeded under an older `BASELINE_HEADER` ran `--tighten`
+    to drop one stale `dependency::` line, and the rewrite replaced its header with
+    devkit's current wording too -- a tighten-only change carrying a paragraph of
+    unrelated prose. The diff of a tighten is the lines it moved and nothing else."""
+    write(tmp_path, "src/main.py", "x = 1  # noqa\n")
+    path = write(
+        tmp_path,
+        sc.BASELINE_NAME,
+        OLD_HEADER + "orphan::src/gone.py = 1\nsuppressions::src/main.py = 1\n",
+    )
+
+    assert sc.tighten(tmp_path, config()) == (1, 0)
+
+    assert path.read_text(encoding="utf-8") == OLD_HEADER + "suppressions::src/main.py = 1\n"
+
+
+def test_record_keeps_the_header_the_file_already_had(tmp_path):
+    _oversized(tmp_path)
+    path = write(tmp_path, sc.BASELINE_NAME, OLD_HEADER)
+
+    sc.record(tmp_path, config(limits={"function_lines": 10}), "the split is its own PR")
+    sc.record(tmp_path, config(limits={"function_lines": 10}), "x")  # nothing new: no write
+
+    body = path.read_text(encoding="utf-8")
+    assert body.startswith(OLD_HEADER + "function_lines::src/big.py::f = ")
+    assert "the split is its own PR" in body
+
+
 def test_a_recorded_baseline_still_reads_back_as_numbers(tmp_path):
     """The log is comments, so `read_baseline` must be blind to it."""
     _oversized(tmp_path)
@@ -883,6 +969,153 @@ def test_main_tighten_then_judges(project, capsys):
     assert "clean (0 known" in out
 
 
+def test_a_tighten_that_leaves_growth_says_it_failed_and_names_the_one_call(project, capsys):
+    """6e2a36b2: `--tighten && --record --reason ...` tightened, printed `1 worse, 0
+    stale`, and recorded nothing. That line was the tighten's own verdict, and its exit 1
+    ended the `&&` before `--record` ran -- which read as `--record` silently doing
+    nothing. The verdict now says whose it is and what records the growth."""
+    root = project(limits={"function_lines": 10})
+    _oversized(root)
+    write(root, sc.BASELINE_NAME, "orphan::src/gone.py = 1\n")
+    assert sc.main(["--tighten"]) == 1
+    out = capsys.readouterr().out
+    assert "worse, 0 stale after --tighten" in out
+    assert "--tighten --record --reason" in out
+
+
+def test_failed_line_names_the_one_call_only_after_a_tighten_that_left_growth():
+    grew = [sc.Finding("function_lines", "src/big.py", 41, "f")]
+    plain = sc.failed_line(grew, [], "logs/x.log", tightened=False)
+    assert plain == "structure-check: 1 worse, 0 stale -- see logs/x.log"
+    assert "--tighten --record --reason" in sc.failed_line(grew, [], "logs/x.log", True)
+    stale_only = sc.failed_line([], [("k", 2, 1)], "logs/x.log", tightened=True)
+    assert stale_only == "structure-check: 0 worse, 1 stale -- see logs/x.log"
+
+
+def test_tighten_and_record_share_one_call(project, capsys):
+    root = project(limits={"function_lines": 10})
+    _oversized(root)
+    write(root, sc.BASELINE_NAME, "orphan::src/gone.py = 1\n")
+    assert sc.main(["--tighten", "--record", "--reason", "the split is its own PR"]) == 0
+    out = capsys.readouterr().out
+    assert "recorded function_lines::src/big.py::f" in out
+    assert "dropped 1 line(s)" in out
+    assert "orphan::src/gone.py" not in sc.read_baseline(sc.baseline_path(root))
+
+
+def _renamed(root) -> None:
+    """`f` in `src/big.py` was `old_name` in `src/was.py` when the baseline was written."""
+    _oversized(root)
+    write(
+        root,
+        sc.BASELINE_NAME,
+        "function_lines::src/was.py::old_name = 42\norphan::src/big.py = 1\n",
+    )
+
+
+def test_a_rename_is_named_with_the_one_call_that_moves_it(project, capsys):
+    """c03808d0: a pure rename reads as one new line and one stale one, because a baseline
+    key is `rule::path::symbol`. The stale half said `--tighten`, which left the gate red,
+    and nothing named `--tighten --record --reason` until that had already failed."""
+    root = project(limits={"function_lines": 10})
+    _renamed(root)
+    assert sc.main([]) == 1
+    out = capsys.readouterr().out
+    assert "1 worse, 1 stale" in out and "--tighten --record --reason" in out
+    body = (root / sc.ARTIFACT).read_text(encoding="utf-8")
+    moved = "function_lines::src/was.py::old_name -> function_lines::src/big.py::f"
+    assert moved in body and "--tighten --record --reason" in body
+
+
+def test_the_named_call_clears_a_rename(project, capsys):
+    root = project(limits={"function_lines": 10})
+    _renamed(root)
+    assert sc.main(["--tighten", "--record", "--reason", "renamed old_name to f"]) == 0
+    assert sc.read_baseline(sc.baseline_path(root)) == {
+        "function_lines::src/big.py::f": 42,
+        "orphan::src/big.py": 1,
+    }
+
+
+def test_a_line_that_grew_past_the_gone_line_is_not_a_rename(tmp_path):
+    """Grown past what the gone line recorded is growth, whatever its name, and a growth
+    told it was a rename would be recorded with the wrong reason."""
+    _oversized(tmp_path, lines=60)
+    write(tmp_path, sc.BASELINE_NAME, "function_lines::src/was.py::old_name = 41\n")
+    worse, stale = sc.verdict(tmp_path, config(limits={"function_lines": 10}))
+    assert worse and stale
+    assert sc.renames(tmp_path, worse, stale) == []
+
+
+def test_a_rename_that_shrank_still_pairs_and_the_tightest_line_wins(tmp_path):
+    write(tmp_path, sc.BASELINE_NAME, "")
+    new = sc.Finding("function_lines", "src/b.py", 41, "g")
+    stale = [
+        ("function_lines::src/a.py::loose", 90, None),
+        ("function_lines::src/a.py::tight", 50, None),
+        ("complexity::src/a.py::other", 90, None),
+        ("function_lines::src/a.py::shrank", 60, 45),
+    ]
+    assert sc.renames(tmp_path, [new], stale) == [("function_lines::src/a.py::tight", new)]
+
+
+def test_a_line_already_in_the_baseline_is_growth_never_a_rename(tmp_path):
+    write(tmp_path, sc.BASELINE_NAME, "function_lines::src/b.py::g = 30\n")
+    grew = sc.Finding("function_lines", "src/b.py", 41, "g")
+    gone = [("function_lines::src/a.py::f", 50, None)]
+    assert sc.renames(tmp_path, [grew], gone) == []
+
+
+def test_one_gone_line_answers_for_one_new_line(tmp_path):
+    write(tmp_path, sc.BASELINE_NAME, "")
+    new = [
+        sc.Finding("function_lines", "src/b.py", 41, "g"),
+        sc.Finding("function_lines", "src/b.py", 44, "h"),
+    ]
+    pairs = sc.renames(tmp_path, new, [("function_lines::src/a.py::f", 50, None)])
+    assert [finding.symbol for _, finding in pairs] == ["h"]
+
+
+def test_a_counter_moved_with_its_file_is_recorded_though_a_new_one_never_is(tmp_path):
+    """`--record` refuses a counter, so a renamed file holding a `noqa` had no working
+    call at all. The count did not grow, and the file it was charged to is gone."""
+    write(tmp_path, "src/new.py", "x = 1  # noqa\n")
+    write(tmp_path, sc.BASELINE_NAME, "suppressions::src/old.py = 1\n")
+    recorded, refused = sc.record(tmp_path, config(), "renamed old.py to new.py")
+    assert "suppressions::src/new.py" in [f.key for f in recorded] and refused == []
+
+
+def test_a_counter_cleared_from_a_living_file_does_not_excuse_a_new_one(tmp_path):
+    """Moving a suppression between two files that both still exist is a new decision to
+    suppress, which is exactly what `UNRECORDABLE` refuses."""
+    write(tmp_path, "src/old.py", "x = 1\n")
+    write(tmp_path, "src/new.py", "x = 1  # noqa\n")
+    write(tmp_path, sc.BASELINE_NAME, "suppressions::src/old.py = 1\n")
+    worse, stale = sc.verdict(tmp_path, config())
+    assert sc.renames(tmp_path, worse, stale) == []
+    recorded, refused = sc.record(tmp_path, config(), "moved it")
+    assert recorded == [] and [f.key for f in refused] == ["suppressions::src/new.py"]
+
+
+def test_rename_note_is_empty_without_a_pair_and_names_every_pair_with_one():
+    assert sc.rename_note([]) == ""
+    new = sc.Finding("orphan", "src/b.py", 1)
+    note = sc.rename_note([("orphan::src/a.py", new)])
+    assert "orphan::src/a.py -> orphan::src/b.py" in note
+    assert "--tighten --record --reason" in note
+
+
+def test_failed_line_names_the_rename_call_only_when_something_reads_as_one():
+    grew = [sc.Finding("function_lines", "src/big.py", 41, "f")]
+    pair = [("function_lines::src/a.py::g", grew[0])]
+    gone = [("function_lines::src/a.py::g", 41, None)]
+    said = sc.failed_line(grew, gone, "logs/x.log", tightened=False, moved=pair)
+    assert said.startswith("structure-check: 1 worse, 1 stale; 1 read(s) as a rename")
+    assert "--tighten --record --reason" in said and said.endswith("see logs/x.log")
+    plain = sc.failed_line(grew, gone, "logs/x.log", tightened=False)
+    assert plain == "structure-check: 1 worse, 1 stale -- see logs/x.log"
+
+
 def test_main_exits_two_on_a_configuration_error(project, capsys):
     project(limits={"nope": 1})
     assert sc.main([]) == 2
@@ -907,19 +1140,23 @@ def test_the_manifest_configures_the_gate_correctly():
 
 @adopted
 def test_nothing_is_new_or_worse_than_the_baseline():
-    worse, _ = sc.verdict(REPO_ROOT, sc.CFG)
+    worse, stale = sc.verdict(REPO_ROOT, sc.CFG)
     lim = sc.limits(sc.CFG)
-    assert not worse, "fix the code, do not add to the baseline:\n" + "\n".join(
-        sc.describe(f, lim) for f in worse
+    note = sc.rename_note(sc.renames(REPO_ROOT, worse, stale))
+    assert not worse, (
+        "fix the code, do not add to the baseline:\n"
+        + "\n".join(sc.describe(f, lim) for f in worse)
+        + note
     )
 
 
 @adopted
 def test_the_baseline_holds_only_what_the_code_still_earns():
-    _, stale = sc.verdict(REPO_ROOT, sc.CFG)
+    worse, stale = sc.verdict(REPO_ROOT, sc.CFG)
     assert not stale, (
         f"run `python scripts/hooks/structure_check.py --tighten` to drop these from {sc.BASELINE_NAME}: "
         + ", ".join(key for key, _, _ in stale)
+        + sc.rename_note(sc.renames(REPO_ROOT, worse, stale))
     )
 
 

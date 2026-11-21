@@ -10,10 +10,12 @@ a new key when it is still red. The user chose click-only over a scheduled dispa
 precisely because a session costs real money and a loop that spent one silently would
 be the worst outcome here.
 
-Three things an entry can say beyond "sent": that it is old enough to look at again
+Four things an entry can say beyond "sent": that it is old enough to look at again
 (`RESEND_AFTER`, because a session that died can leave nothing but its entry), that the
-pass found its session dead (`mark_dead`, which frees it at once), and that the session
-reported itself blocked (`mark_blocked`).
+pass found its session dead (`mark_dead`, which frees it at once; `mark_interrupted`
+when a restart killed it, which also takes the send back), that the session
+reported itself blocked (`mark_blocked`), and that its fix waits on another PR's merge
+(`mark_waiting`), which holds the problem until that PR closes rather than escalating it.
 
 And one thing the entries say together: how many sessions one *problem* has had
 (`problem_key`, the key less its commit). A failure that survives `ATTEMPTS` fixers
@@ -63,6 +65,10 @@ ATTEMPTS = 2
 # A problem with no evidence cannot show progress: its one session is all it gets.
 BLIND_ATTEMPTS = 1
 
+# The third field of a medium tier red's key, which a local end-to-end red shares the kind
+# and base with: it is what tells a project's open medium tier session from any other.
+MEDIUM_TARGET = "medium"
+
 
 # --- the keys -------------------------------------------------------------------------
 
@@ -71,9 +77,28 @@ def failure_key(failure: fix_plan.Failure) -> str:
     """What one dispatch is remembered as: the failure, at the commit it was seen on."""
     digest = hashlib.sha256("\n".join(failure.signature).encode("utf-8")).hexdigest()
     # A nightly is keyed at its base's tip when that is known: a re-run of an old red
-    # run is made once per tip, and made again once the tip moves.
-    at = failure.tip or failure.sha or failure.run_id or "?"
-    return f"{failure.kind}:{failure.project}:{failure.number}:{at}:{digest[:KEY_DIGEST]}"
+    # run is made once per tip, and made again once the tip moves. A medium tier red that
+    # came back is keyed where it was first seen, or every merge after it is a new key
+    # and a second session sent while the first still works.
+    at = failure.first_seen or failure.tip or failure.sha or failure.run_id or "?"
+    return f"{failure.kind}:{failure.project}:{target(failure)}:{at}:{digest[:KEY_DIGEST]}"
+
+
+def target(failure: fix_plan.Failure) -> str:
+    """The key's third field, which says *what* is red: a PR's number, or for a refused
+    commit -- which has none -- its branch. git refuses a `:` in a ref name, so a branch
+    cannot shift the fields after it.
+
+    Every refused commit used to be `0`, so one project's refusals sharing a hook's
+    line were one problem: social-scraper's happy-drifting-sprout was refused by
+    detect-secrets on 2026-10-08, and was filed fixers-exhausted with no fixer ever sent
+    at it, its `ATTEMPTS` spent on 10-03 and 10-05 at other trees' refusals (787d0750).
+    """
+    if failure.kind == fix_plan.COMMIT and failure.head:
+        return failure.head
+    if failure.workflow == fix_plan.MEDIUM_TIER:
+        return MEDIUM_TARGET
+    return str(failure.number)
 
 
 def key_kind(key: str) -> str:
@@ -155,23 +180,67 @@ def _write(path: Path, ledger: dict[str, dict]) -> None:
 
 
 def record(
-    path: Path, key: str, note: str, now: _dt.datetime | None = None, problem: str = ""
+    path: Path,
+    key: str,
+    note: str,
+    now: _dt.datetime | None = None,
+    problem: str = "",
+    source: str = "",
 ) -> None:
     """One more session sent under `key`: the newest time, how many so far, and the
-    `problem_key` it counts against when the caller knows it."""
+    `problem_key` it counts against when the caller knows it.
+
+    A `source` (`fix_plan.DEPENDABOT`) is a family of sends with a daily cap: its entries
+    keep every send's time (`AT_KEEP` of them), because `when` is only the newest and a
+    key re-sent after `RESEND_AFTER` is two sends in one day.
+    """
     ledger = read_ledger(path)
+    old = ledger.get(key)
     when = (now or _dt.datetime.now(_dt.UTC)).isoformat(timespec="seconds")
-    entry = {"when": when, "what": note, "sent": sends(ledger.get(key)) + 1}
-    ledger[key] = {**entry, "problem": problem} if problem else entry
+    entry: dict = {"when": when, "what": note, "sent": sends(old) + 1}
+    if problem:
+        entry["problem"] = problem
+    if source:
+        earlier = old.get("at", []) if isinstance(old, dict) else []
+        entry["source"] = source
+        entry["at"] = [*(earlier if isinstance(earlier, list) else []), when][-AT_KEEP:]
+    ledger[key] = entry
     _write(path, ledger)
 
 
+# How many send times a sourced entry keeps: more than one key can be sent in any day.
+AT_KEEP = 8
+
+
+def sent_since(ledger: dict[str, dict], source: str, since: _dt.datetime) -> int:
+    """How many sessions of `source` the ledger records at or after `since`.
+
+    An entry keyed under a free action (`fix_plan.NO_SESSION`) is no session: older
+    ledgers stamped branch updates with their source, and those must not spend a cap.
+    """
+    count = 0
+    for key, entry in ledger.items():
+        if not isinstance(entry, dict) or entry.get("source") != source:
+            continue
+        if key.rsplit(":", 1)[-1] in fix_plan.NO_SESSION:
+            continue
+        stamps = entry.get("at")
+        for stamp in stamps if isinstance(stamps, list) else []:
+            try:
+                at = _dt.datetime.fromisoformat(str(stamp))
+            except ValueError:
+                continue
+            count += (at if at.tzinfo else at.replace(tzinfo=_dt.UTC)) >= since
+    return count
+
+
 def sends(entry: object) -> int:
-    """Sessions an entry has had; an entry written before the count was kept had one."""
+    """Sessions an entry has had; an entry written before the count was kept had one,
+    and one whose only session a restart took back (`mark_interrupted`) has none."""
     if not isinstance(entry, dict):
         return 0
     try:
-        return max(1, int(entry.get("sent", 1)))
+        return max(0, int(entry.get("sent", 1)))
     except (TypeError, ValueError):
         return 1
 
@@ -185,6 +254,12 @@ def mark_blocked(path: Path, key: str, reason: str) -> bool:
     return _mark(path, key, "blocked", reason)
 
 
+def mark_waiting(path: Path, key: str, url: str) -> bool:
+    """A dispatched session found its fix waits on the PR at `url`: keep its entry, with
+    that PR. Only an entry the ledger already has. Returns whether one was marked."""
+    return _mark(path, key, "waits", url)
+
+
 def mark_dead(path: Path, key: str, reason: str) -> bool:
     """The session sent under `key` ended without an outcome, or never started.
 
@@ -192,6 +267,29 @@ def mark_dead(path: Path, key: str, reason: str) -> bool:
     re-send still counts against the problem's `ATTEMPTS`. Returns whether one was marked.
     """
     return _mark(path, key, "dead", reason)
+
+
+def mark_interrupted(path: Path, key: str, reason: str) -> bool:
+    """The session sent under `key` died of something outside it: the machine restarting,
+    a login that had lapsed, or a checkout nobody had trusted.
+
+    Frees the key as `mark_dead` does, and takes the send back: nothing a fixer did is
+    measured by a power-off, and counted, it spent a blind problem's one attempt and
+    escalated two conflicts (#480, #482) nobody had tried. The send's stamp in `at` goes
+    too, or the daily cap (`sent_since`) still counts it: social-scraper #90 and #91's
+    fixers, both refused at login, held every Dependabot send for a day. Returns whether
+    one was marked.
+    """
+    if not _mark(path, key, "dead", reason):
+        return False
+    ledger = read_ledger(path)
+    entry = ledger[key]
+    entry["sent"] = max(0, sends(entry) - 1)
+    stamps = entry.get("at")
+    if isinstance(stamps, list) and stamps and stamps[-1] == entry.get("when"):
+        stamps.pop()  # `record` appends the send's `when` last
+    _write(path, ledger)
+    return True
 
 
 def _mark(path: Path, key: str, field: str, reason: str) -> bool:
@@ -239,6 +337,22 @@ def blocked_reason(decision: fix_plan.Decision, ledger: dict[str, dict], since: 
         ):
             return str(other["blocked"])
     return ""
+
+
+def waiting_on(decision: fix_plan.Decision, ledger: dict[str, dict], since: str = "") -> str:
+    """The PR the newest session sent at this decision's problem, after `since`, said its
+    fix waits on; "" when none said so. Newest, because a later session's word is what
+    the problem looks like now."""
+    problem = problem_key(decision)
+    waits = sorted(
+        (str(entry.get("when", "")), str(entry["waits"]))
+        for key, entry in ledger.items()
+        if isinstance(entry, dict)
+        and entry.get("waits")
+        and problem_of(key, entry) == problem
+        and _since(entry, since)
+    )
+    return waits[-1][1] if waits else ""
 
 
 def attempts(decision: fix_plan.Decision, ledger: dict[str, dict], since: str = "") -> int:
@@ -304,13 +418,44 @@ def already_sent(
         return when
     if entry.get("dead"):
         return ""
+    return when if _recent(when, now) else ""
+
+
+def _recent(when: str, now: _dt.datetime) -> bool:
+    """Whether `when` is inside `RESEND_AFTER` of `now`; a time it cannot read is."""
     try:
         sent_at = _dt.datetime.fromisoformat(when)
     except ValueError:
-        return when
+        return True
     if sent_at.tzinfo is None:
         sent_at = sent_at.replace(tzinfo=_dt.UTC)
-    return "" if now - sent_at >= RESEND_AFTER else when
+    return now - sent_at < RESEND_AFTER
+
+
+def open_medium_session(
+    decision: fix_plan.Decision, ledger: dict[str, dict], now: _dt.datetime, since: str = ""
+) -> str:
+    """When a medium tier session that may still be working went to this project, or "".
+
+    The key digests the signature, so a red that gained one flaky test is a new problem,
+    which is right for `ATTEMPTS` and wrong while a fixer is still at the first: a tier
+    that runs every 15 minutes can widen a signature within the hour. The ledger records
+    no session's end, so "may still be working" is what `RESEND_AFTER` already takes it
+    to be: sent inside the window, and not reported dead or blocked.
+    """
+    prefixes = tuple(
+        f"{fix_plan.LOCAL}:{failure.project}:{MEDIUM_TARGET}:"
+        for failure in decision.failures
+        if failure.workflow == fix_plan.MEDIUM_TIER
+    )
+    for key, entry in ledger.items() if prefixes else ():
+        if not key.startswith(prefixes) or not isinstance(entry, dict):
+            continue
+        if _since(entry, since) and not (entry.get("dead") or entry.get("blocked")):
+            when = str(entry.get("when", "?"))
+            if _recent(when, now):
+                return when
+    return ""
 
 
 def render(decisions: Iterable[fix_plan.Decision], ledger: dict[str, dict]) -> str:

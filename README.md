@@ -290,11 +290,20 @@ path for one already published, and any other tag shape is ignored. `RELEASING.m
 the release this was written for.
 
 The global `post-checkout` hook (`scripts/worktree_env.py`) fires once, in the new tree,
-whenever one is created — `git worktree add`, whoever ran it, which is the one seam that
-reaches `claude --worktree`, `codex --worktree` and a person at a prompt alike, with no
-agent hook involved. `claude --worktree` cuts with `--no-checkout`, which git exempts from
-`post-checkout`, so the same set-up also runs from the global `post-index-change` hook on
-the `git reset --hard` that fills the tree, for as long as the tree has no `.venv`. It
+whenever one is created by `git worktree add` from a shell or a script, and the global
+`post-index-change` hook runs the same set-up for a tree cut `--no-checkout` and filled by
+`git reset --hard`. **Neither reaches `claude --worktree`**: Claude Code runs its own git
+with `-c core.hooksPath=/dev/null`, so no git hook fires for the trees it cuts, and the
+only seam it offers instead is an agent hook, which this harness does not wire. Its
+trees borrow the checkout's `node_modules` through `worktree.symlinkDirectories` in
+`.claude/settings.json` instead, which `sync-devkit.py --pull` fills in for every project
+(`scripts/project_settings.py`). They borrow `.venv` the same way only where the project
+installs no package of its own, as devkit does (see `tests/test_self_hosting.py`). A
+generated project's trees cannot -- an editable install points the checkout's venv at the
+checkout's `src/`, so a borrowed one tests the wrong code -- so its template
+`run-tests.py` and `lint-all.py` build the tree its own `.venv` on their first run,
+and re-sync it on any run after its lock has moved on (a merge that added a package),
+through `rerun_in_venv` in the vendored `scripts/hooks/toolchain.py`. The hook itself
 does two things a linked worktree otherwise
 lacks, each only when its conditions hold:
 
@@ -453,13 +462,26 @@ python scripts/harness-switch.py --off --job devkit-tray  # one scheduled job, f
 | --- | --- | --- |
 | `hooks` | every switchable hook script — none is wired today, so this changes nothing until one is | `DEVKIT_HOOKS_OFF=1` in the user settings and the user environment |
 | `instructions` | every `CLAUDE.md` and `.claude/rules/*.md`, at every tier | moved to `logs/harness-switch/`, tracked ones marked `skip-worktree` |
-| `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release`, `devkit-fix-pass` | `schtasks /Change /DISABLE` |
+| `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release`, `devkit-fix-pass`, `devkit-ship` | `schtasks /Change /DISABLE` |
 
 Nothing is deleted: files are held and restored byte for byte, jobs are disabled rather
 than unregistered, and `--on` is the inverse of `--off`. A job stood down by name or by
 group is recorded in the ledger, and its installer registers it *disabled* from then on,
 so the nightly `devkit-installers` pass keeps it registered without ever starting it.
 Skills are never touched — they cost nothing until a session invokes one by name.
+
+### One defect ledger across machines
+
+Each machine appends to its own `harness-events-<host>.log`, and the fix pass reads every
+shard beside its own. A second machine running the same scheduled jobs is only on the
+backlog once both put their shard in one shared folder (a OneDrive or Dropbox folder, a
+network share). Run this on each machine, with that machine's path to the same folder:
+
+```bash
+python scripts/ledger-pool.py --set "<shared folder>"   # moves this machine's shard there
+python scripts/ledger-pool.py                           # where it lives, which hosts it holds
+python scripts/ledger-pool.py --unset                   # back to the checkout's logs/
+```
 
 With no branch tier wired, `scripts/agent-box.py` is what cuts, runs, ships and destroys a
 box on purpose. It is one verb per workspace task, and the tasks are the intended way in:
@@ -557,7 +579,7 @@ thing it knows that nothing else can recover is *why* the change was made.
 
 `scripts/fix-pass.py` is what does the rest, every half hour once `devkit.fixPass` in the
 workspace file is switched on (`scripts/install-fix-pass-task.py` registers it, wired and
-off), or by hand through the *Agent: Fix What Is Red* task, which passes `dispatch`
+off, and `off` means this PC sends no fixers: the ship task below still ships), or by hand through the *Agent: Fix What Is Red* task, which passes `dispatch`
 explicitly and asks only which agent. One pass, in order:
 
 The rule behind the order: anything a script can do, no session does. A fixer is sent at
@@ -566,19 +588,23 @@ way every session ends — with an intent. Merging the base in, committing, push
 opening the PR, reading the gate, updating a branch, merging an adoption: one command
 each, run here.
 
-1. **Ship every intent.** Run the tree's commit-stage fixers, commit with the message,
-   push with the push gate skipped, open the PR -- labelled `automerge` when the pass cut
-   the tree for a fixer, so a fixer's PR merges once green while a person's waits for
-   them even after a fixer was sent to repair it (`ship_intent.labels_for`) -- record
+1. **Ship every gated intent.** Run the tree's commit-stage fixers, commit with the message,
+   push with the push gate skipped, open the PR -- labelled `automerge`, so it merges once
+   green whoever shipped it, unless it was shipped `/ship hold` (the intent carries
+   `Hold: yes`), which keeps it for a person through any resolver's ship
+   (`ship_intent.labels_for`) -- record
    the outcome in `logs/ship-state.json` beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
    touched; a refused commit is a failure like any other, with the pre-commit output as
-   its evidence.
+   its evidence. A direct-flow intent (below) is the ship task's: the pass only turns a
+   refusal stored there into that same failure.
 2. **Merge green adoption PRs**, and nothing else. Every other green PR waits for you.
    Before the red is read, so a release whose adoptions just went green stops holding
    the projects on this pass.
-3. **Collect everything red** — refused commits, red PRs, open scheduled-failure issues,
-   and every default branch whose own gate is red — with what each gate actually said
+3. **Collect everything red** — refused commits, red PRs (Dependabot's included), open
+   scheduled-failure issues, every default branch whose own gate is red, and what
+   Dependabot cannot do: update jobs failing, alerts no open PR answers after a day
+   (`scripts/fix_dependabot.py`) — with what each gate actually said
    (`scripts/gate_evidence.py`), and classify each as harness, project or unknown
    (`scripts/fix_cycle.py`). Every registered checkout is read, `devkit.onHold` included:
    a PR that exists is work in flight. A default branch with no verdict at its tip gets
@@ -601,7 +627,19 @@ each, run here.
    exception: an update is a GitHub call and a resolver needs the PR's own head branch,
    so each goes as itself, ahead of the devkit session, rather than into a fresh branch
    that could never land on it.
-6. **Then projects**, conflicts first, each under the dispatch ledger and a daily cap.
+6. **Then projects**, conflicts first, each under the dispatch ledger.
+7. **Upkeep.** A default branch whose only uncommitted change is `uv.lock` is put
+   right (`scripts/fix_drift.py`): already origin's byte for byte, it is restored so the
+   checkout can fast-forward; relocked against a newer sibling path dependency, it is
+   carried to its own branch, CI pin moved with it, for the next pass to ship. Any other
+   drift on a default branch is reported in the record and never touched. A
+   scheduled-failure issue whose workflow is green at the tip is closed as completed
+   (`scripts/fix_issues.py`) when the reporter's own close did not happen. Each database
+   checkout's dev database is upgraded to its head (`scripts/fix_migrate.py`, through an
+   upgrade script each database project ships, whose contract that module states), but only on the default branch, with a clean
+   tree and HEAD already on origin, so nothing unmerged is ever applied. In the direct
+   flow alone, a default branch that stayed red has its commits reverted
+   (`scripts/fix_revert.py`, below).
 
 `--mode plan` writes the whole plan to `logs/fix-pass.log` and does nothing, which is
 what the scheduled job does while the switch says `plan`. What each dispatch looks like
@@ -623,8 +661,16 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
   the affected PRs named. This is the shape a devkit release fans out into, and the one
   the old per-PR dropdown cost eight sessions on.
 - **A failing scheduled workflow** gets a fresh branch off the default branch in that
-  project, the run's logs, and a prompt that ends with the ship skill; the issue closes
-  itself when the workflow next passes.
+  project, the run's logs, and a prompt that ends with the ship skill; its PR carries
+  `Closes #N` for the issue it was sent at, and the issue also closes itself when the
+  workflow next passes.
+- **What Dependabot cannot do** gets one fresh branch per project, with every alert and
+  failing job in the tree's gate evidence (`fix_plan.DEPENDABOT_EVIDENCE`), and a prompt to bump each named package to
+  its patched version. When the cause is a sibling path dependency the Dependabot runner
+  cannot fetch, the prompt says so: the fix is a hand bump or a fetchable source, never
+  a Dependabot retry. A project whose only red is that unfetchable sibling, with every
+  alert answered, is a `dependabot` line in the record and no session; so is a job whose
+  entry has left the default branch's `dependabot.yml`, which never runs again.
 - **A red PR that is behind its base** is updated, not fixed: `gh pr update-branch`,
   no session, and the pass reads the new run next time. Its red may already be fixed
   on the base, and a session sent at it can only merge the base in. A PR the update
@@ -650,8 +696,9 @@ effort. A problem with no evidence gets one session
 — except a conflict whose head has moved since every earlier resolver was sent
 (`fix_ledger.moved_on`): a resolver pushes only a merge that resolved, so a new conflict
 at a new commit is the base moving again, not a fix that did not take.
-There is no daily cap on sessions; `/supervise-fix-pass`'s spend watch is what catches a
-pass spending on something that is not moving. A dispatched session found dead frees its entry at once; an
+The one daily cap is on Dependabot's own sessions (`fix_budget.DEPENDABOT_DAILY` per
+rolling day, its runs, alerts and red PRs together); otherwise `/supervise-fix-pass`'s
+spend watch is what catches a pass spending on something that is not moving. A dispatched session found dead frees its entry at once; an
 entry older than `fix_ledger.RESEND_AFTER` frees it regardless. An open adoption holds
 only its own project's other PRs. Every pass appends a line to
 `logs/fix-pass.history.jsonl`. A scheduled pass always uses `claude-bg`.
@@ -674,6 +721,54 @@ python scripts/fix-prs.py --picks "devkit:88 roguelike:16"    # by hand: these P
 non-interactive but streams into the terminal that started it and leaves nothing to
 reattach to. Every PR is re-read live before anything is spawned, so one that went green,
 was closed or was merged since the scan is reported and skipped.
+
+### The direct flow: nothing between a finished session and `main`
+
+A project opts in with `flow = "direct"` under `[delivery]` in its `.devkit.toml`
+(`scripts/delivery.py` reads it; absent, or anything else, is `gated`, and everything in
+this section is inert). Every check then runs after the merge and repairs what it finds.
+
+`scripts/ship-pass.py` (`devkit-ship`, every two minutes, on every PC) is what ships: it
+commits with no `ship.py --fix` and no pre-commit framework, pushes, and opens the PR
+labelled `merge-now`, which means merge now with no gate consulted, where `automerge`
+means once the gate passes. `/ship hold` puts `Hold: yes` on a line of its own in the
+intent and the PR gets no merge label: it waits for you, and a resolver sent at it leaves
+it waiting. Any doubt reads as held: if `gh` cannot say, no `merge-now` goes on. The task
+holds where the fix pass holds, sends no one, and never runs beside a dispatching pass's
+ship step: both take `ship_step.SHIP_LOCK_NAME`.
+
+**`devkit.fixPass: off` means "this PC sends no fixers", not "nothing runs."** On such a
+PC the ship task ships gated intents too, through the gated path, so a machine that is
+not allowed to send fixers still gets its sessions' work out. `plan` is a dry run and
+ships nothing gated. To stop shipping, use `harness-switch.py --off --group jobs`.
+
+The commit keeps the global branch policy, which `--no-verify` would not: the hook
+reads `DEVKIT_SKIP_PRE_COMMIT_FRAMEWORK` and skips the framework alone, at the commit and
+the push. It is read by the installed policy (`~/.devkit/git-hooks`), so it takes effect
+from the first release that carries it, and a project should not opt in before then.
+
+The fix pass changes in three ways for such a project (`scripts/fix_plan.py`). A red
+default branch does not hold a conflict's resolver, since nothing waits on it being
+green. One red on nothing but formatting or the Codex mirror sends no fixer for
+`fix_plan.TIDY_GRACE`, since the post-merge tidy rewrites both; past that it is a failure
+like any other, because tidy cannot land everything (`.github/workflows` is restored
+before it stages). And one that stays red for two hours from when a pass first saw it
+(`scripts/red_seen.py`, under `logs/red-seen/`) is reverted (`scripts/fix_revert.py`):
+every PR commit after `origin/green` up to the oldest whose failing jobs overlap the
+tip's, newest first, each on `agent/revert-<sha7>` with
+`.devkit-queue/reland-<sha7>.toml` beside it, so the reverted work is queued to land again
+with the failure fixed. Tidy's own commit (its exact subject and author), a release and a
+revert are never named; a tidy commit that touched the same files goes in the same revert,
+since it rewrote those lines. One revert per sha, ever, and a re-land (`Reland-of: <sha>`)
+that goes red is reverted without another re-land and filed. A revert that conflicts is
+aborted and filed, a range longer than `fix_revert.MOST_REVERTS` is filed rather than
+reverted, and a red that implicates no commit -- no runner, a bill, a release's own red, a
+run that did not conclude `failure` -- reverts nothing.
+
+```bash
+python scripts/ship-pass.py                  # one fire, by hand
+python scripts/install-ship-schedule.py --yes  # registered from the static checkout; installers.py keeps it current
+```
 
 ### Running someone else's branch before it merges
 
@@ -817,9 +912,13 @@ fires only where `gh` **answered** that the branch has no PR — an offline or
 unauthenticated `gh` exits with the same code, so absence of an answer keeps waiting
 forever, and a box holding uncommitted work is held at any age like every other.
 
-The run is windowless, so its only record is `logs/reconcile.log`, overwritten per
+The run is windowless, so its record is `logs/reconcile.log`, overwritten per
 pass and written on success too — a log that appears only on failure cannot be told
-apart from a task that has stopped running. That log's timestamp is also what
+apart from a task that has stopped running. Its header says when the pass started, how
+long it took and when it reached each step. Beside it, `logs/reconcile.history.jsonl`
+keeps the same for the last two days of passes, and `logs/reconcile.running.json` names
+the step a pass is in now (`scripts/reconcile_journal.py`). A pass that dies leaves that
+file behind, and the next pass records it in the history as `unfinished`. That log's timestamp is also what
 `workspace-status.py` reads on its own daily pass: a scheduled task that has been disabled
 looks exactly like one that is working, so the status line says when a pass last
 finished rather than leaving you to notice the drift it causes.
@@ -841,6 +940,8 @@ laptop actually runs them, and leaving a file to read when one fails.
 | Job | Installer | Cadence | Its record |
 | --- | --- | --- | --- |
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
+| `devkit-local-e2e` | `scripts/install-e2e-schedule.py` | nightly 01:00, each project once the PC is idle | `logs/scheduled-local-e2e.log`, results under `logs/e2e/` |
+| `devkit-medium-tier` | `scripts/install-tier-schedule.py` | every 15 min, whatever the person is doing, behind `devkit.fixPass` being `dispatch` | `logs/scheduled-medium-tier.log`, results under `logs/medium-tier/` |
 | `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00 | `logs/scheduled-devkit-release.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
@@ -852,6 +953,20 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-installers` | `scripts/install-installers-schedule.py` | daily 08:45, and at logon | `logs/installers.log` |
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
 | `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, behind `devkit.fixPass` | `logs/fix-pass.log` |
+| `devkit-ship` | `scripts/install-ship-schedule.py` | every 2 min, on every PC; a fire with nothing to ship exits within seconds | `logs/ship-pass.log` |
+| `devkit-collectors` | `scripts/install-collectors.py` | every 15 min, and at logon; acts only where `run-here`/`stop-here` assigned | `logs/collectors.log` |
+| `devkit-elevated` | `scripts/install-elevated-worker.py` | every 5 min, elevated; installed once per PC by an administrator, never by a job | `C:\ProgramData\devkit\elevated\worker.log` |
+| `devkit-after-merge` | `scripts/install-after-merge-schedule.py` | every 5 min, on every PC | `logs/scheduled-after-merge.log`, each task under `logs/after-merge/` |
+
+#### What happens after a merge, with nobody remembering
+
+A session that needs something done later commits a task file in `.devkit-queue/`, in the
+PR that needs it: when it is due, which machine takes it, and a command, a session prompt
+or an elevated verb. `devkit-after-merge` reads every project's queue off
+`origin/<default>` on every PC, one PC claims each task with a ref on GitHub
+(`scripts/job_claims.py`), and a failure goes to an agent rather than to a log.
+`scripts/after-merge-pass.py status` says what is due and what this machine would do.
+The format is the ship skill's last section; the decisions are `scripts/after_merge.py`.
 
 #### The one installer you run by hand
 
@@ -863,16 +978,21 @@ asks every `scripts/install-*.py` the one question they all answer — `--check`
 current, 1 needs (re)installing, 2 left alone — and in `maintain` mode runs `--yes` on
 each that answered 1: a job never installed, a checkout that moved, an installer that
 gained a flag, a task disabled by nobody. `devkit-installers` runs it daily and two
-minutes after every logon, so registering *that* job is the only install a machine ever
-needs done by hand:
+minutes after every logon, so registering *that* job is the only install a machine
+needs done by hand, bar the [elevated worker](#the-elevated-worker-one-admin-action-per-pc),
+which this pass holds out because no unelevated job can install it:
 
 ```bash
 python scripts/install-installers-schedule.py --yes   # once per machine
 python scripts/installers.py                          # what is current, stale, or left alone
 ```
 
-Two of them register no scheduled job at all and are driven by this pass alone.
-`install-git-policy.py` is one; `install-wt-profile.py` is the other, and it registers the
+Three of them register no scheduled job at all and are driven by this pass alone.
+`install-agent-env.py` puts `project_settings.AGENT_ENV` in the user-level
+`~/.claude/settings.json`, adding only the keys missing there: a project's own settings
+carry it, but a session started at the workspace root loads no project's settings, and
+its Git Bash then mangles `git show origin/main:<path>`.
+`install-git-policy.py` is another; `install-wt-profile.py` is the third, and it registers the
 `Agent` Windows Terminal profile that every agent tab is opened under — without it a
 session is drawn as an ordinary shell, and the `+` beside one answers with the default
 profile in the default directory rather than another tab in that worktree.
@@ -912,8 +1032,8 @@ on — found by name, answers `--check` and `--yes`, names its group, checks thr
 `devkit_schtasks.run_check`, consults the ledger, and has a row in the table above — so a
 new installer joins the pass by existing, and one that cannot be driven fails the suite.
 
-The last of those is the workspace's own health report, and it is a scheduled job for a
-reason worth knowing before you move it: `workspace-status.py` was written as a
+`devkit-workspace-status` is the workspace's own health report, and it is a scheduled job
+for a reason worth knowing before you move it: `workspace-status.py` was written as a
 SessionStart line, every document here called it one, and **nothing ever ran it** — so a
 missing `uv`, an unset git identity, a stranded checkout and an uninstalled picker
 extension were all reported to nobody until the extension surfaced as `command
@@ -933,6 +1053,202 @@ in (`GROUP`), which is what the switch's list is held to.
 — and names the file above when one exits non-zero, so the reported line is a
 pointer rather than a bare exit code. `tests/test_scheduled_jobs.py` holds the contract:
 a job registered by hand, or one that leaves nothing behind, fails the suite.
+
+#### The elevated worker: one admin action per PC
+
+Every job above runs unelevated, and one recovery cannot: the DACL on `WSLService` grants
+an unelevated token neither start nor stop, and a service stuck in `STOP_PENDING` hangs
+every `wsl` call until an administrator ends it. A dispatcher running tasks as admin would
+run merged, unreviewed code as admin, so there is no dispatcher. Each PC gets
+`devkit-elevated`, a worker with one verb that takes no arguments:
+
+```bash
+python scripts/elevated_request.py restart-wsl-service   # from any unelevated process
+```
+
+Or `elevated_request.request(verb)` from Python. Either way the only thing crossing to the
+elevated side is the name of an empty file in `C:\ProgramData\devkit\requests\`: the worker
+never opens one, and anything else it finds there is deleted and logged.
+
+A request is not an instruction. The worker first asks whether WSL is actually unhealthy,
+with the checks `docker-maint.py recover-wsl` uses, each bounded and needing no elevation,
+and a healthy service is left alone and logged. A stuck one gets what `recover-wsl`'s
+elevated half does: its process ended, a wait for it to settle, and `wsl --update`, so
+Windows Update has no install left to retry and hang on. That ends every distro, Docker's
+included, and `collectors.py` brings Docker Desktop back, unelevated. It runs at most once
+in six hours (`RESTART_EVERY`, kept in the admin-only folder). A run that fails or is
+refused reaches the pass through `elevated_request.results`, and is filed for a fixer.
+
+**Installing takes an administrator, once per PC, and cannot be automated.** That is why
+`installers.py` holds this one out of its pass. From an elevated terminal:
+
+```bash
+python scripts/install-elevated-worker.py                 # the plan, changing nothing
+python -I -S scripts/install-elevated-worker.py --yes     # install or upgrade; elevated only
+python scripts/install-elevated-worker.py --check         # is it current; needs no elevation
+```
+
+The task runs a copy of the worker and a private copy of the interpreter (about 36 MB,
+stdlib only) in `C:\ProgramData\devkit\elevated\`, which only administrators can write, so
+a merged change cannot rewrite what runs as admin. **The install itself cannot have that
+property:** it reads the checkout and the Python it copies from places the user can write,
+so it assumes a clean machine at that moment.
+
+So the harness never prompts for it. A merged change to the worker does not reach a PC
+until someone chooses to re-run `--yes`, a working installed worker keeps working, and only
+`--check` reports that its copy is behind. An unreviewed merge plus a prompted admin paste
+would be the dispatcher this design refused. The one person's step is for a real request
+waiting on a PC with no worker: `request` says so and leaves a dated note, the fix pass
+names the machine and the exact command, and the step goes once a worker appears or a
+day passes with nobody asking again.
+
+The installed task is read-only to the user, so `harness-switch.py --off --job
+devkit-elevated` is refused unelevated, as is `--uninstall --yes`. `installers.py uninstall`
+does not reach it either: take it off a decommissioned PC with `--uninstall --yes` from
+an elevated terminal.
+
+Windows-only. Everywhere else the worker and the installer say so and exit 0, `request`
+says so and writes nothing, and no step is ever filed.
+
+#### Ingestion collectors, and which machine runs them
+
+A **collector** is a compose service that does scheduled work with nobody connected to it
+— ibkr_trader's `serve`, sports_betting's `collector`. Each keeps its own clock inside the
+container, so what needs an owner is the container: up where it should run, down where it
+should not, and visibly healthy. `restart: unless-stopped` gives none of that. It revives a
+container on whichever machine last started one, and does nothing where nobody did.
+
+Which collectors exist is declared once, in `workspace.jsonc`, beside
+`devkit.remoteControl`: the service, and the project's own health command, run inside the
+container and trusted for its exit code.
+
+```jsonc
+"devkit.collectors": {
+  "ibkr_trader": { "service": "app", "health": ["ibkr-trader", "health"],
+                   "handoff": ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"] },
+  "sports_betting": { "service": "collector", "health": ["sports-betting", "health", "--quiet"],
+                      "handoff": ["uv", "run", "--with-editable", "../data-lake[archive]",
+                                  "python", "scripts/handoff.py"] },
+  "social-scraper": { "command": ["uv", "run", "social-scraper", "scrape"], "minutes": 30, "needs": ["db"],
+                      "handoff": ["uv", "run", "python", "scripts/handoff.py"] }
+}
+```
+
+A collector that cannot live in a container — social-scraper drives the installed Chrome
+with the browser profiles in its checkout — declares a `command` instead of a `service`.
+It gets a **Scheduled Task of its own, named after it** (`social-scraper`, never
+`devkit-`, because it is the project's job, not devkit's). That task runs
+`collectors.py fire <name>` every `minutes` while you are logged on. The fire starts the
+compose services the collector `needs`, runs the command from the project's checkout
+without a console window, and kills the whole process tree if the command outruns the
+task. It writes `logs/collector-<name>.log` and exits with the command's own code, so 0
+must also cover "ran and deliberately did nothing". The command is read at fire time, so
+editing it needs no re-registration. Only a changed `minutes` does, and the next pass
+makes it. `collectors.py run-once <name>` (a row of the picker below) runs a scheduled
+collector by hand with its output in the terminal, whatever this machine is set to —
+its first, slow run before `run-here`, say — and refuses while the scheduled run is going,
+since the two would share one browser profile.
+
+**Which machine runs them is not in that file**, because every workstation shares it. It is
+`logs/collectors.machine.json` in the static devkit checkout, written by
+`scripts/collectors.py` and read by nothing but this machine:
+
+```bash
+python scripts/collectors.py                     # declared, assigned, running
+python scripts/collectors.py run-here            # this machine runs them all; starts them now
+python scripts/collectors.py stop-here           # this machine must not; stops them now
+python scripts/collectors.py release ibkr_trader # forget one: neither started nor stopped
+```
+
+The VS Code task **Machine: Ingestion Collectors** does the same from one pick. It lists
+every verb, for all collectors or for one, beside what this PC is set to now
+(`scripts/collectors_picker.py`).
+
+A machine never assigned is **hands off**, so a fresh workstation starts nothing.
+
+**Moving a collector, data and all, is one command** on the machine that runs it — to
+free a PC before a game, say:
+
+```bash
+python scripts/collectors.py move ibkr_trader --to desktop-ml5f3pj
+```
+
+That needs a `handoff` beside the collector: the project's own command that carries its
+data through a store both machines reach (ibkr_trader's dumps its database to its S3-compatible archive store), since
+devkit is stdlib only and reaches neither. `move` stops the collector's service, runs
+`<handoff> export --from <this PC> --to <host>` from the project's checkout, and on success
+sets this PC to `stop` and stops the project's other containers (`docker stop`, never
+`down`; the volumes stay). The other PC's next pass, within 15 minutes if it is on, finds the
+handoff with `<handoff> pending --host <itself>`, runs `<handoff> import`, sets itself to
+`run` and starts it as `run-here` would — whether it was set to `stop` or never assigned.
+A scheduled collector (`command`) moves the same way. In place of stopping a service,
+`move` waits for a scrape already running to finish (up to the task's one-hour limit,
+and it refuses rather than end one still going then), removes the task, and leaves the
+compose services it `needs` up, since the export dumps that db. The receiving pass
+registers the task once its import is done.
+An export that fails starts the service, or registers the task, again and changes nothing; an import that fails
+fails that pass and is tried again on the next one. Until the other PC has taken it over
+nothing runs the collector, so this PC keeps asking, and its pass fails once that is
+overdue. A machine is named as the ledger names it (`$DEVKIT_HOST`, else its hostname, in
+any case). `python scripts/collectors.py` shows a handoff waiting in either direction.
+`collector_handoff.py` holds the contract the project's command answers to.
+
+A collector without a `handoff` moves by hand, and its data stays where it was: `stop-here`
+on the old machine, then `run-here` on the new one. `move` is not a row of the picker:
+devkit keeps no list of the workspace's machines, and the picker cannot ask for a typed name.
+
+While `move` exports, it holds the collectors pass lock (`PASS_LOCK` in
+`scripts/collectors.py`), waiting for it as `run-here` does. A scheduled pass meanwhile stands down rather than restarting the
+service under the dump, a scheduled collector's fire runs nothing, and the tray keeps the row green. The receiving pass runs its import
+under its own lock, whose bound allows for the restore, so two imports never overlap.
+
+`devkit-collectors` is registered everywhere and acts only on the assignment. It starts a
+stopped collector with `docker compose up -d <service>`, stops one on a `stop-here` machine
+with `docker stop`, and redeploys (`up -d --build`) a running one whose code is older than
+its checkout's HEAD -- only when that HEAD is on origin's default branch and no tracked file
+is edited, so a timer deploys merged code and nothing else; otherwise `logs/collectors.log`
+says why it held. A collector whose image copies in a sibling checkout names it in
+`buildsFrom` (ibkr_trader's `["data-lake"]`), and a merge there redeploys it on the same
+terms -- unless the project's own PR gate pins that sibling to a commit: then the image is
+built from a context staged at the pin, and only a move of the pin redeploys it. A container it started or redeployed is not health-checked for its
+`settle` minutes (default 60, settable per collector beside `health`): until every job
+inside has fired on the new code, the verdict is still the old code's. A scheduled collector's task is registered on a `run-here` machine, and
+removed on a `stop-here` or `release`. The tray gets a `collector: <name>` row per
+assigned collector. A container shows its live state on every poll, plus the last health
+verdict, shown amber rather than red because it is the project's verdict, not a failure
+of the job. A scheduled one is judged from its task like any devkit job: red on a failed
+or missing run, amber when overdue. Clicking it opens that fire's log. Neither kind is in
+`schedule_health.report`, so a collector's failure is never filed as a devkit defect.
+
+#### Every PC at once: `fleet.py`
+
+`collectors.py` sees one machine and `move` has to be typed on the one that runs the
+collector. `scripts/fleet.py` asks every workstation on the tailnet instead:
+
+```bash
+python scripts/fleet.py                         # every PC's free memory and collectors
+python scripts/fleet.py move sports_betting --to desktop-ml5f3pj   # from any PC
+python scripts/fleet.py rebalance               # what would relieve the shortest PC
+python scripts/fleet.py rebalance --apply       # make that one move
+```
+
+There is no list of machines. A PC joins by being on the tailnet with this checkout at the
+same place under its home and accepting the SSH key of the PC you run this from. One that
+does not answer costs a row saying why, and changes nothing else: `fleet.py` holds no state
+and a move is still `collectors.py move`, run over SSH on the machine that owns the
+collector and picked up by the destination's next pass. A PC that answers but whose
+checkout predates `fleet.py` says so rather than reading as unreachable: pull devkit there.
+
+An assignment is a file on each PC, so it can outlive what acts on it. A `problem:` line
+names a collector assigned to a PC whose `devkit-collectors` job is disabled or missing,
+as happens when a PC is stood down by hand with its assignment left behind. That
+collector runs nowhere. Move it with `fleet.py move`, or `collectors.py run-here` on the
+PC that should run it and `stop-here` on the one standing down.
+
+`rebalance` picks only a collector declaring `"rebalance": true`, and only when the
+destination keeps at least four gigabytes afterwards. `memoryGb` declares what a collector
+costs where `docker stats` cannot see it. A named `move` needs only a `handoff`, and is
+refused unless the destination has the project's checkout and `.env`.
 
 #### Remote Control servers, and why keeping them up is a job
 
@@ -961,20 +1277,34 @@ file has to be merged back by hand before anything can publish again:
 "devkit.remoteControl": ["devkit", "carameli"]
 ```
 
-or, with the knobs:
+or `"all"` in place of the list, which serves every project in `folders` -- on hold or
+not -- and re-reads them on every fire, so a project plugged in later gets a server with
+no edit here. That is every project *checked out on this machine*, because the live file
+is rendered per machine. Or, with the knobs:
 
 ```jsonc
 "devkit.remoteControl": {
-  "projects": ["devkit"],
+  "projects": ["devkit"],           // or "all"
   "spawn": "same-dir",              // or "worktree" — see below
   "permissionMode": "acceptEdits",  // reaches the server; a phone session ignores it
   "idleMinutes": 20,                // transcript silence before a restart is allowed
   "updateAt": "04:45",              // after devkit-global-tools, deliberately
   "capacity": 8,                    // sessions per server; the CLI's own default is 32
   "powerSaving": false,             // see below — not a free saving
-  "awayMinutes": 15
+  "awayMinutes": 15,
+  "hosts": {"*": "desktop-a", "data-lake": "desktop-b"}  // or just "desktop-a"
 }
 ```
+
+`hosts` is for a workspace checked out on more than one PC. The setting is the same on
+every machine, so without it each PC serves every project and the phone lists each one
+once per machine. With it, a project gets a server only on the machine named for it
+(`"*"` covers every project not named on its own), and every other machine stops the
+server it was running for that project on its next fire. Hosts are spelled as
+`harness_events.host_name` spells a machine: `$DEVKIT_HOST`, else the hostname,
+lowercased. A project `hosts` leaves unassigned is served nowhere, and each machine's
+`logs/rc-servers.log` says which host it is waiting on. There is no failover: while the
+named machine is off, its projects have no server.
 
 `permissionMode` reaches the server as `--permission-mode`, and **it does not raise the
 mode of a session the phone spawns.** A spawned session is handed the server's mode as the
@@ -1045,15 +1375,24 @@ candidates; anything whose activity cannot be read is kept. `status` prints ever
 with its verdict and touches nothing; `maintain` acts, and appends each process it stopped
 to `logs/reap-stale.history.log`, which is never rewritten.
 
+A `docker` or `docker-compose` CLI with no living owner, half an hour old, is reaped the
+same way (`dockerClis`). On 2026-10-08 an orphaned `compose up --wait` spun for hours
+against a wedged engine. A CLI whose owner is alive, Docker Desktop's own included, is
+never in scope.
+
 The same pass reaps a session worktree (`.claude/worktrees/<name>`, and Codex's) whose PR
 merged at the tree's `HEAD`, once it is clean and no transcript has moved in it for
 twelve hours, taking down the compose project it named in its `.env` with it
 (`scripts/session_trees.py`). `worktree.py reconcile` covers only the box tier, and a fixer's
-stack otherwise outlived its PR by days. The settings sit beside
+stack otherwise outlived its PR by days. Any other stack running from the tree keeps it,
+and `logs/reap-stale.log` names that tree until the stack moves to the checkout. A tree holding something only an administrator
+may open -- pytest run elevated leaves such a `.pytest_cache` -- is not counted as a
+failure: its line in `logs/reap-stale.log` gives the command to run from an elevated
+shell. The settings sit beside
 `devkit.remoteControl`:
 
 ```jsonc
-"devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true}
+"devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true, "dockerClis": true}
 ```
 
 ```bash
@@ -1088,6 +1427,16 @@ than no indicator, because it would disagree with the `workspace-status.py` line
 the same machine. A machine with nothing registered shows **amber, not green**: green over a set
 of zero jobs is the most misleading thing it could say.
 
+The fix pass gets rows of its own, read off the newest line of
+`logs/fix-pass.history.jsonl` and judged by the pass, not the tray. A **`your step`** row,
+red, for each step the harness-defect ledger awaits a person for (`claude auth login`, a
+checkout to trust), with the command that retires it. And one **`fixers`** row: how many
+are at work, waiting, owed, and when one was last sent. It turns amber when a red harness
+holds every send, or when a fixer has been owed for `tray_state.STUCK_PASSES` passes with
+none sent, at work or waiting. Clicking either opens `logs/fix-pass.log`. A stale login
+row does not keep the tray red: the pass retires it once a fixer that began after it
+reaches an outcome (`fix_loop.retire_login`).
+
 ```bash
 python scripts/tray.py --once            # what it would show, as text
 python scripts/install-tray.py --yes     # start it at every logon
@@ -1103,11 +1452,14 @@ worktree.
 Windows only, and stdlib only — Shell_NotifyIcon through `ctypes`. `tray.py --once`
 prints the same verdict anywhere, which is also how the read path is tested.
 
-The global-tools pass is the machine-wide counterpart to the project upgrade. Four of
-this workspace's MCP servers — chrome-devtools, postgres, redis, azure-devops — are
-launched from a **globally installed** npm bin rather than through `npx`, so the global
-install is the pin and nothing was moving it; the same is true of every linter reachable
-without a project venv. `scripts/global-tools.py` reads the outdated set from npm itself
+The global-tools pass is the machine-wide counterpart to the project upgrade. Some of
+this workspace's MCP servers are launched from a **globally installed** npm bin rather
+than through `npx`, so the global install is the pin and nothing was moving it; the same
+is true of every linter reachable without a project venv. (chrome-devtools is the
+exception: it is registered at user scope as `npx -y chrome-devtools-mcp@latest
+--isolated`. `--isolated` gives each session its own temporary Chrome profile. Without
+it, every session shares one profile, and a second session's `new_page` is refused with
+"The browser is already running".) `scripts/global-tools.py` reads the outdated set from npm itself
 rather than from a list that would go stale, updates each package to the exact version it
 reported, and skips `npm` and `@anthropic-ai/claude-code` — the two things that would have
 to still work in order to undo a bad update.
@@ -1141,9 +1493,10 @@ every night — so the other half of it runs where the answer is different by co
 agents it is **about to** resume in the gap before the tabs open. Only those agents, only
 while none of them is running, and `--no-update` opts out.
 
-The prune runs `--idle-only`, so it declines whenever containers are up; reclaiming the
-VHDX needs `wsl --shutdown`, and stopping a running stack at 04:00 for disk is not a
-trade to make unattended.
+The prune runs `--idle-only`: it always clears images and build cache inside the VM,
+but declines to compact while containers are up; reclaiming the VHDX needs
+`wsl --shutdown`, and stopping a running stack at 04:00 for disk is not a trade to make
+unattended.
 
 The stop-idle pass is the other half of that trade. `restart: unless-stopped`
 resurrects on every boot whatever was left running, so a stack someone brought up once
@@ -1156,6 +1509,15 @@ stopped stack stays stopped across reboots until something wants it again
 the safety property: a collector-style stack doing scheduled work with no client
 connected looks exactly like an idle one, so it is safe by default rather than by
 being remembered.
+
+One failure none of these jobs can mend is WSL's own service stuck stopping — a Windows
+Update WSL install that cannot stop it leaves it there, every `wsl` call hangs, and
+Docker's engine cannot start. The jobs run unelevated and may not end a service, so they
+detect it and name a person's step, which surfaces in the morning toast:
+**"Docker: Recover Stuck WSL"** (`docker-maint.py recover-wsl`). It ends the service
+through one UAC prompt, installs the pending WSL update so the failed install has
+nothing left to retry, and restarts Docker Desktop as the signed-in user, never
+elevated. On a healthy WSL it changes nothing.
 
 A seventh job stood in that table until 2026-09-02: a nightly `git-merge-default.py`
 against a reference checkout, so its trunk arrived daily instead of as one unreviewable
@@ -1243,8 +1605,37 @@ because a window opened on the project it creates sees no task list at all.
 | `service-redis` | + redis | — |
 | `data` | docker, postgres, archive seam | `ibkr_trader` |
 | `fullstack` | + redis, frontend | `carameli` |
+| `desktop` | desktop, updater — a C#/WPF app, Velopack installer, self-update | `skinamp` |
+| `desktop-static` | desktop — the same app and installer, no updater | — |
+| `desktop-web` | electron — a TypeScript Electron app, electron-builder installer, self-update | — |
 
-Individual `--with-*` flags add to a preset; they never subtract.
+Individual `--with-*` flags add to a preset; they never subtract. The desktop shapes
+refuse every stack feature: an executable on someone else's PC has no compose stack.
+
+**Which shape for an installable app:**
+
+| Choose | When | Why |
+| --- | --- | --- |
+| `desktop-web` | the app's work is its UI | an agent drives the real app with Playwright and reads a screenshot of it |
+| `desktop` | it needs the Win32, COM or registry surface | typed access to those, and a compiler that fails on warnings |
+| `bare` | a tool you run yourself, in Python | no installer to build, so no frozen-build failures |
+
+**The desktop shape** renders a .NET solution (`<Name>.slnx`, the app under
+`src/<Name>/`, xUnit tests under `tests/<Name>.Tests/`), a PR-gate job that builds and
+tests it on Windows, and `.github/workflows/release.yml`, which turns a `v*` tag into a
+GitHub release carrying the installer. `MainWindowTests` is its UI check: it fails on a
+broken `{Binding}`, launches the real executable, and writes `logs/ui/main-window.png`.
+The recipe all three run is
+`scripts/desktop.py` (`lint`, `test`, `release`). It is not templated: it reaches each
+project through the gated tier, keyed on `[desktop] enabled` in `.devkit.toml`, so a fix
+to how releases are built lands everywhere on the next `sync-devkit.py --pull`.
+
+**The `desktop-web` shape** renders an Electron app under `frontend/` (React, electron-vite,
+vitest), Playwright tests in `frontend/e2e/`, a Windows PR-gate job that drives the
+packaged app and uploads its screenshot, and a `release.yml` that publishes the installer
+through electron-builder. There is no driver to vendor: the recipe is `package.json`'s
+scripts, and `.devkit.toml` turns the existing `[frontend]` tier on, which is what points
+`run-tests.py` and `lint-all.py` at it.
 
 Everything local and reversible happens before the two outward-facing steps
 (creating the GitHub repo, pushing). A failure before that leaves a directory you
@@ -1359,6 +1750,67 @@ scripts run here and one reading another project's shape acts on directories tha
 not here. So the tiers devkit does not have are off in it, and the vendored suite skips them
 locally; the `generated-project` job above is what exercises them.
 
+### The local end-to-end tier: what no hosted runner can run
+
+Some tests need *this workstation*: the live workspace file, VS Code itself, a project's
+Docker stack, a browser session, a credential. CI deselects them, a session never runs the
+whole suite, and a box is not the static checkout -- so until this tier they ran only
+when a person happened to run the suite on `main`. Now `devkit-local-e2e`
+(`scripts/install-e2e-schedule.py`) runs them every night once the PC has been idle for
+ten minutes, and a red one reaches the fix pass as that project's red default branch.
+
+| Piece | What it does |
+| --- | --- |
+| `scripts/e2e.py` in a project | **The contract.** Exit 0 green, anything else red; print each failure as pytest's `FAILED <id>` line. Every project owes one: a project whose `origin/<default>` has none is recorded red (`e2e_results.MISSING`), and its fixer is sent to write the tier. |
+| `scripts/e2e-pass.py run` | Waits for idle, fast-forwards each static checkout to `origin/<default>` (skipping, with the reason, one a person is working in), runs its `scripts/e2e.py`, writes `logs/e2e/<project>/result.json` and `output.log` in devkit. Exits 0 on a red result. |
+| `scripts/e2e_results.py` | Turns a red result into a `fix_plan.LOCAL` failure, read by `fix_red.collect_red`. A result older than the tip is held until the next night. |
+| `scripts/e2e-pass.py status` | Each project's last result. |
+| `devkit.localE2e` in `workspace.jsonc` | **Which PC tests which project.** `hosts` takes `devkit.remoteControl`'s shape: one machine name, or `{"*": "pc-a", "carameli": "pc-b"}`. Every PC registers the job and tests only what this assigns it, so moving the job is editing this value. |
+
+devkit's own `scripts/e2e.py` runs every test marked `local`, and `needs_live_workspace` and
+`needs_the_static_checkout` in `tests/support.py` apply that mark themselves. Under the
+scheduler a skip there is a failure. That covers the live-workspace checks,
+`tests/test_workspace_tasks_live.py` (every picker run for real, every task cancelled,
+every path and extension present) and `tests/test_vscode_tasks_e2e.py`, which clicks
+every workspace task in an isolated VS Code. Set `DEVKIT_VSCODE_E2E_ONLY` to a
+comma-separated list of labels to drive just those.
+
+A project without the tier gets one from its fixer, sent the night the pass records it
+missing; to write it yourself, add its `scripts/e2e.py`. A pytest marker of its own,
+run the way devkit's is, is the usual shape. Then `python scripts/e2e-pass.py run --no-wait
+<project>` from devkit shows what the night will see.
+
+### The medium tier: the suite, on Windows, through the day
+
+The PR gate is Linux, so once a merge no longer runs pre-commit on someone's machine,
+nothing else checks a change on Windows. `devkit-medium-tier`
+(`scripts/install-tier-schedule.py`) runs every project's own suite every 15 minutes,
+whoever is at the keyboard. It blocks nothing, so it covers every project, whatever its
+delivery flow. `scripts/CLAUDE.md` has the table of all four tiers.
+
+**It tests only on a PC whose `devkit.fixPass` is `dispatch`.** A result stays on the PC
+that made it, so a red anywhere else would reach no fixer. Every PC registers the job; on
+any other PC a fire says why in one line of its log and exits 0, and no failure is filed.
+
+| Piece | What it does |
+| --- | --- |
+| `scripts/run-tests.py` in a project | **The contract**, run with `--all` where the script has that flag, since bare it picks the tests for what changed, and at origin's tip that is none. Every project owes it: a project whose tip has no script and no override is recorded red (`e2e_results.MEDIUM.missing`), and its fixer is sent to write one. |
+| `[delivery] medium_tier` in `.devkit.toml` | **The override**: a command to run instead, read at the commit under test. `python` in it means the tree's own `.venv`. It runs without a shell. |
+| `scripts/tier_command.py` | **Where the tier does not run.** A tree never gets a project's real `.env`, so a project with `[db] enabled = true`, or whose runner drives the Docker stack, is recorded as not applicable, never as red, unless it sets `medium_tier`. |
+| `scripts/tier-pass.py run` | For each project origin has moved past the last commit this tier judged, longest-waiting first and one at a time: cuts a tree at the tip, provisions it, runs the tests, destroys the tree, and writes `logs/medium-tier/<project>/result.json` and `output.log` in devkit. A red at a tip that has not moved gets one more run an hour later. Exits 0 on a red result. `run <project>` by hand runs that project whatever the schedule would decide. |
+| `scripts/tier_state.py` | What a project with no verdict is waiting for, in `state.json` beside its result. A run that could not start is retried on a backoff doubling from an hour to a day and filed once, only after a day, and never when it is the project's own broken lock. A run that would not fit in free memory is counted in the pass's record, and a day of those is said there and in `status`; no session can fix that, so it is not a finding. |
+| `scripts/disposable_tree.py` | The tree: detached at one commit under the checkout's `.claude/worktrees/`, so a path dependency resolves as it does for a session, and swept if a crash left it, from disk as well as from git's list. The static checkout is never touched. |
+| `scripts/e2e_results.py` | `MEDIUM` reads the same way as the night's tier: a red is a `fix_plan.LOCAL` failure from `fix_red.collect_red`, and its fixer is told to bisect from the last green commit, since a run spans every merge since then. A result older than the tip is held for the next fire, and one fixer goes per project at a time. |
+| `scripts/tier-pass.py status` | Each project's last result, and anything it is waiting for. |
+
+A run is bounded by `--timeout-minutes` and the pass by `--pass-minutes`. A pass in progress
+holds the machine, and a fire that lands during it is dropped, which loses nothing. Where
+several PCs dispatch, each runs the job; once the `job_claims` module is there, a run is claimed as
+`tier-<project>-<sha12>` so one PC takes it, and the result, and so the fixer, is that PC's.
+
+`python scripts/tier-pass.py run <project>` from devkit runs it by hand, against the tip on
+origin, whether or not the tree you are in has that commit.
+
 ### The repo contract
 
 `scripts/hooks/tests/test_repo_contract.py` (vendored) closes the gap the drift check
@@ -1390,8 +1842,11 @@ lockfiles) stay optional and skip explicitly.
 
 The same argument applies to prose. `.claude/rules/engineering.md`,
 `.claude/rules/authoring.md`, and the `/ship` workflow are in the `MANIFEST` and
-vendored byte-identical. `/ship` is the only shared skill: it has a concrete lifecycle
-job and delegates its mechanical checks to the tested `scripts/ship.py` driver.
+vendored byte-identical. `/ship` has a concrete lifecycle job and delegates its
+mechanical checks to the tested `scripts/ship.py` driver. The one other shared skill is
+`/go-nuts <goal>`, for an unattended run: it decides instead of asking, logs each
+judgement call to `logs/overnight.md` so it can be reversed, and finishes through
+`/ship`. Only a user can invoke it; the model never starts one on its own.
 
 Generic audits, compatibility smoke commands, stateful refactor sweeps, and model-to-model
 handoff prompts do not belong in every project. Mechanical constraints such as the

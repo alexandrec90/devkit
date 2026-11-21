@@ -34,7 +34,7 @@ import junit_report
 import sweep
 import task_branch as tb
 from _loader import load_by_path
-from branch_facts import branch_tip, is_behind, is_tagged
+from branch_facts import branch_tip, clean_merge, is_behind, is_tagged
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,7 +57,7 @@ ISSUE_SUFFIX = reporter.issue_title("")
 # The run URL in that issue's facts table.
 RUN_URL = re.compile(r"/actions/runs/(\d+)")
 
-RUN_LIST_FIELDS = "databaseId,headSha,conclusion,status,url,workflowName"
+RUN_LIST_FIELDS = "databaseId,headSha,conclusion,status,url,workflowName,createdAt"
 RUN_VIEW_FIELDS = "jobs,conclusion,headSha,url"
 # The job conclusions whose own log `failed_job_logs` reads.
 FAILED_JOB = frozenset({"failure", "timed_out"})
@@ -112,12 +112,122 @@ def gate_run(gh: Gh, head: str, sha: str) -> dict:
 
 
 def run_jobs(gh: Gh, run_id: str) -> list[dict]:
-    """The run's jobs with their steps, for the coarse signature."""
+    """The run's jobs with their steps, for the coarse signature; empty when `gh` cannot say."""
+    return read_jobs(gh, run_id) or []
+
+
+def read_jobs(gh: Gh, run_id: str) -> list[dict] | None:
+    """`run_jobs`, but None when `gh` could not say -- which is not a run with no jobs."""
     viewed = gh_json(gh("run", "view", str(run_id), "--json", RUN_VIEW_FIELDS))
     if not isinstance(viewed, dict):
-        return []
+        return None
     jobs = viewed.get("jobs", [])
     return [job for job in jobs if isinstance(job, dict)] if isinstance(jobs, list) else []
+
+
+def reread(
+    gh: Gh, run_ids: list[str], conflicted: bool, texts: list[str]
+) -> tuple[tuple[str, ...], bool]:
+    """`(signature, unread)` for runs whose evidence named nothing: their jobs asked once
+    more, and `unread` when `gh` still answers nothing for one of them.
+
+    `run_evidence` takes a `gh` that failed for a run that said nothing, so a pass whose
+    reads all failed sent the failure out blind. carameli's PR Gate run 39800864308 was
+    red on `Lint / Lint` with its lint artifact up, and the 15:30 pass on 2026-10-22 read
+    it as naming nothing: the empty signature counted a 10-05 session at another blind
+    failure as its one attempt, and was escalated as `blind-evidence` with no session
+    sent (6a7d386f). Unread, the plan skips it and the next pass reads it again.
+    """
+    jobs: list[dict] = []
+    for run_id in run_ids:
+        found = read_jobs(gh, run_id)
+        if found is None:
+            return fix_plan.signature(conflicted, texts, jobs), not conflicted
+        jobs += found
+    return fix_plan.signature(conflicted, texts, jobs), False
+
+
+def run_attempt(gh: Gh, run_id: str, sig: tuple[str, ...]) -> int:
+    """The run's attempt when `sig` is jobs none of whose workflow steps ran, which is
+    when the plan re-runs it once (`fix_plan.reruns_in_place`); 0 otherwise, or when `gh`
+    cannot say.
+    """
+    if not run_id or not fix_plan.is_runner_side(sig):
+        return 0
+    viewed = gh_json(gh("run", "view", str(run_id), "--json", "attempt"))
+    try:
+        return int(viewed.get("attempt", 0) or 0) if isinstance(viewed, dict) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+# Tries at `gh run download` before a failure counts: GitHub answers it HTTP 502 often
+# enough that one try sent a fixer out blind (bb6fdcee).
+DOWNLOAD_ATTEMPTS = 2
+# Written under a run's evidence directory when it uploaded artifacts `gh` would not hand
+# over; neither a `.log` nor an `.xml`, so `junit_report` never reads it as evidence.
+UNFETCHED = "unfetched.txt"
+
+
+def download(gh: Gh, run_id: str, dest: Path) -> bool:
+    """Whether the run's artifacts are under `dest`. False when the download failed.
+
+    A failed download is a run with nothing uploaded, or one `gh` could not fetch, and
+    only the second leaves evidence unread: PR #760's run 43092636831 uploaded
+    `test-failures`, `gh` answered HTTP 502 for it and for `--log-failed`, and the
+    fixer was told "No artifact came down from the run" with only a job's name to go on
+    (bb6fdcee). So a failure is tried again, then the run's listing decides: anything
+    uploaded and not expired writes `UNFETCHED`. A listing `gh` cannot give proves
+    nothing was missed no more than that something was, and holding on it would also
+    hold the runs that upload nothing because no step ever ran, so it holds nothing.
+    """
+    said = ""
+    for _ in range(DOWNLOAD_ATTEMPTS):
+        done = gh("run", "download", str(run_id), "-D", str(dest))
+        if getattr(done, "returncode", 1) == 0:
+            return True
+        said = str(getattr(done, "stderr", "") or getattr(done, "stdout", "") or "").strip()
+    listed = gh_json(gh("api", f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/artifacts"))
+    uploaded = listed.get("artifacts") if isinstance(listed, dict) else None
+    if not isinstance(uploaded, list) or not any(
+        isinstance(item, dict) and not item.get("expired") for item in uploaded
+    ):
+        return False  # nothing to fetch, or nothing known to be missed
+    (dest / UNFETCHED).write_text(
+        f"gh run download {run_id} failed {DOWNLOAD_ATTEMPTS} times: {said or 'no message'}\n",
+        encoding="utf-8",
+    )
+    return False
+
+
+def unfetched(where: Path) -> bool:
+    """Whether a run read under `where` uploaded artifacts `download` could not fetch."""
+    return where.is_dir() and any(where.rglob(UNFETCHED))
+
+
+def held_unfetched(where: Path, texts: list[str]) -> bool:
+    """Whether a failure read under `where` waits for the next pass: evidence was
+    uploaded and not fetched, and nothing that did come down names a failing test or
+    file. A failure named only by its job would send its fixer out blind."""
+    return unfetched(where) and not fix_plan.signature_from_logs(texts)
+
+
+def settle_unread(
+    gh: Gh,
+    run_ids: list[str],
+    conflicted: bool,
+    texts: list[str],
+    sig: tuple[str, ...],
+    where: Path,
+) -> tuple[tuple[str, ...], bool]:
+    """`(signature, unread)` once both ways a read comes back short are asked: evidence
+    uploaded and not fetched (`held_unfetched`), and runs whose evidence named nothing,
+    their jobs asked once more (`reread`). A conflict is read from git, not a run."""
+    unread = not conflicted and held_unfetched(where, texts)
+    if fix_plan.names_nothing(sig):
+        sig, again = reread(gh, run_ids, conflicted, texts)
+        unread = unread or again
+    return sig, unread
 
 
 def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]]:
@@ -132,24 +242,109 @@ def run_evidence(gh: Gh, run_id: str, dest: Path) -> tuple[list[str], list[dict]
     """
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
-    done = gh("run", "download", str(run_id), "-D", str(dest))
-    texts = junit_report.read_artifacts(dest) if getattr(done, "returncode", 1) == 0 else []
+    fetched = download(gh, run_id, dest)
+    drop_empty(dest)
+    texts = junit_report.read_artifacts(dest) if fetched else []
     junit_report.write_readable(dest)  # what the prompt tells the fixer to read first
     jobs: list[dict] | None = None
-    if not fix_plan.signature_from_logs(texts):
-        # A job that uploads nothing (carameli's frontend unit tests) left the fixer with
-        # `job / step` and no test id, digging through `--log-failed` itself; read it once
-        # here, and keep it beside the artifacts for the fixer.
-        text = _stdout(gh("run", "view", str(run_id), "--log-failed"))
-        if not text.strip():
-            jobs = run_jobs(gh, run_id)
-            text = failed_job_logs(gh, jobs)
-        if text.strip():
-            (dest / FAILED_LOG).write_text(text, encoding="utf-8")
-            texts.append(text)
+    named = set(fix_plan.signature_from_logs(texts))
+    # A job that uploads nothing (carameli's frontend unit tests) left the fixer with
+    # `job / step` and no test id, digging through `--log-failed` itself; read it once
+    # here, and keep it beside the artifacts for the fixer. Read even when the artifacts
+    # named something: sports_betting #48's lint artifact named two files, its failed
+    # Tests job uploaded an empty one, and the prompt never mentioned that job.
+    text = _stdout(gh("run", "view", str(run_id), "--log-failed"))
+    if not text.strip() and not named:
+        jobs = run_jobs(gh, run_id)
+        text = failed_job_logs(gh, jobs)
+    if text.strip() and (not named or set(fix_plan.signature_from_logs([text])) - named):
+        (dest / FAILED_LOG).write_text(text, encoding="utf-8")
+        texts.append(text)
     if fix_plan.signature_from_logs(texts):
         return texts, []
     return texts, run_jobs(gh, run_id) if jobs is None else jobs
+
+
+# What GitHub annotates a job's check run with when no runner ever took the job: the job
+# is `cancelled` with zero steps, no log and no artifact. roguelike's gate run 37364441127
+# and social-scraper's 37364457089 failed on nothing else, and a fixer went at each.
+RUNNER_LOST = re.compile(r"\bwas not acquired by runner\b", re.I)
+# What GitHub annotates a job it would not start over the account's billing with: "The
+# job was not started because recent account payments have failed or your spending
+# limit needs to be increased" -- productivity-tracker's PR Gate run 40962955157 and
+# social-scraper's 40962940638, every job `failure` with zero steps.
+BILLING_REFUSED = re.compile(
+    r"\bnot started because recent account payments have failed\b|\bspending limit needs to be increased\b",
+    re.I,
+)
+# The job conclusions that are not red; anything else -- `cancelled` included -- is.
+JOB_PASSED = frozenset({"success", "skipped", "neutral"})
+
+
+def job_annotations(gh: Gh, job_id: object) -> list[str]:
+    """The messages on a job's check run (a job's id is its check run's); empty when
+    `gh` cannot say."""
+    listed = gh_json(gh("api", f"repos/{{owner}}/{{repo}}/check-runs/{job_id}/annotations"))
+    if not isinstance(listed, list):
+        return []
+    return [str(note.get("message", "")) for note in listed if isinstance(note, dict)]
+
+
+def runner_lost(gh: Gh, jobs: list[dict]) -> tuple[str, ...]:
+    """The red jobs' names when every one of them is a job GitHub never gave a runner:
+    no step ran, and its check run says so. () when any red job ran a step, or says
+    nothing about its runner -- that red is the code's, and a fixer's to read."""
+    return unstarted_for(gh, jobs, RUNNER_LOST)
+
+
+def billing_refused(gh: Gh, jobs: list[dict]) -> tuple[str, ...]:
+    """The red jobs' names when GitHub refused to start every one of them over the
+    account's billing (`BILLING_REFUSED`); () otherwise, as `runner_lost` says it."""
+    return unstarted_for(gh, jobs, BILLING_REFUSED)
+
+
+def unstarted_for(gh: Gh, jobs: list[dict], why: re.Pattern[str]) -> tuple[str, ...]:
+    """The red jobs' names when every one ran no step and its check run says `why`."""
+    red = [job for job in jobs if str(job.get("conclusion", "")).lower() not in JOB_PASSED]
+    for job in red:
+        if job.get("steps") or not job.get("databaseId"):
+            return ()
+        if not any(why.search(said) for said in job_annotations(gh, job["databaseId"])):
+            return ()
+    return tuple(sorted({str(job.get("name", "?")) for job in red}))
+
+
+def lost_signature(names: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(f"{name} / {fix_plan.NO_RUNNER}" for name in names)
+
+
+def billing_signature(gh: Gh, sig: tuple[str, ...], jobs: list[dict]) -> tuple[str, ...]:
+    """`sig`, or the jobs signed `fix_plan.NO_BILLING` when it is jobs that never started
+    a step (`fix_plan.is_unstarted`) and GitHub's billing refused every one of them.
+    Asked of no other signature, so a run that names a failure costs no annotation read."""
+    names = billing_refused(gh, jobs) if fix_plan.is_unstarted(sig) else ()
+    return tuple(f"{name} / {fix_plan.NO_BILLING}" for name in names) or sig
+
+
+def drop_empty(dest: Path) -> list[str]:
+    """Delete every zero-byte file under `dest`, then every directory that leaves empty;
+    the deleted files' paths, relative to `dest` and in POSIX form.
+
+    An artifact a passing step uploaded is empty, and a fixer reads it as one that ought
+    to name the failure: roguelike #52's gate uploaded the application suite's empty
+    `test-failures.log` for a red vendored suite, and its fixer reported that the
+    evidence named nothing, though `failed-jobs.log` beside it did (1b01678b).
+    """
+    if not dest.is_dir():
+        return []
+    dropped = []
+    for path in sorted(dest.rglob("*"), reverse=True):
+        if path.is_file() and path.stat().st_size == 0:
+            path.unlink()
+            dropped.append(path.relative_to(dest).as_posix())
+        elif path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    return sorted(dropped)
 
 
 def _stdout(result: object) -> str:
@@ -191,10 +386,19 @@ def run_id_from_body(body: str) -> str:
 
 
 def nightly_issues(gh: Gh) -> list[dict]:
-    """The open tracker issues in one checkout: the reporter's title shape only."""
-    listed = gh_json(
-        gh("issue", "list", "--state", "open", "--limit", str(ISSUE_LIMIT), "--json", ISSUE_FIELDS)
-    )
+    """The open tracker issues in one checkout: the reporter's title shape only.
+
+    Empty when `gh` cannot be spawned there, on `broken_pr_menu.broken_prs`'s terms: a
+    registered checkout missing from disk raised `NotADirectoryError` here and took
+    every other project's evidence down with the collect step (79505f2b).
+    """
+    try:
+        done = gh(
+            "issue", "list", "--state", "open", "--limit", str(ISSUE_LIMIT), "--json", ISSUE_FIELDS
+        )
+    except OSError:
+        return []
+    listed = gh_json(done)
     if not isinstance(listed, list):
         return []
     return [
@@ -215,8 +419,11 @@ def newest_release(devkit: Path) -> str:
     return next((line.strip() for line in tags.stdout.splitlines() if line.strip()), "")
 
 
-def default_branch_runs(gh: Gh, base: str, workflow: str = GATE_WORKFLOW) -> list[dict]:
-    """The newest runs of `workflow` on `base`, newest first; empty when `gh` cannot say."""
+def default_branch_runs(
+    gh: Gh, base: str, workflow: str = GATE_WORKFLOW, limit: int = RUN_LIMIT
+) -> list[dict]:
+    """The newest `limit` runs of `workflow` on `base`, newest first; empty when `gh`
+    cannot say."""
     listed = gh_json(
         gh(
             "run",
@@ -226,7 +433,7 @@ def default_branch_runs(gh: Gh, base: str, workflow: str = GATE_WORKFLOW) -> lis
             "--workflow",
             workflow,
             "--limit",
-            str(RUN_LIMIT),
+            str(limit),
             "--json",
             RUN_LIST_FIELDS,
         )
@@ -260,6 +467,18 @@ def _tip_verdict(runs: list[dict], tip: str) -> tuple[bool | str | None, dict]:
     if conclusion == "success":
         return True, {}
     return (None, {}) if conclusion in NO_VERDICT else (False, run)
+
+
+def last_green(runs: list[dict]) -> str:
+    """When the newest run among `runs` that passed was started, ISO; "" when none did.
+
+    A failure on a default branch that has passed since a session was sent at the same
+    signature is a new failure, not that session's leftover (`fix_plan.Failure.green_at`).
+    """
+    for run in runs:
+        if str(run.get("conclusion", "")).lower() == "success":
+            return str(run.get("createdAt", "") or "")
+    return ""
 
 
 def run_ids_from_rollup(rollup: object) -> tuple[str, ...]:
@@ -297,7 +516,9 @@ def evidence_slot(failure: fix_plan.Failure) -> str:
     project under a directory named for the project would overwrite each other.
     """
     where = failure.number or tb.slugify(failure.head or failure.base or "?")
-    return f"{failure.project}-{failure.kind}-{where}"
+    # The two local tiers share a kind and a base, and a project can be red in both.
+    kind = "medium-tier" if failure.workflow == fix_plan.MEDIUM_TIER else failure.kind
+    return f"{failure.project}-{kind}-{where}"
 
 
 def pr_failure(project: str, pr: dict) -> fix_plan.Failure:
@@ -322,31 +543,63 @@ def read_pr(project_dir: Path, failure: fix_plan.Failure, root: Path) -> fix_pla
     behind the failing checks. Three of nine ledger entries once read "no artifact and
     no failed step named" because the failing check belonged to another workflow, and
     each got a session sent blind at a run the rollup had the id of.
+
+    A conflict GitHub reports and git does not is no conflict: the PR is behind, and the
+    pass pushes the merge itself (`merges_clean`), so no resolver goes. Checked only when
+    GitHub says conflicting, against the same `origin/<base>` `is_behind` reads.
+
+    Where every run read lost its red jobs to a runner GitHub never gave them, the
+    failure carries those runs as `lost_runs`, and the plan re-runs them.
     """
     gh = sweep.gh_for(project_dir)
-    conflicted = fix_plan.CONFLICT in failure.reason
-    behind = not conflicted and is_behind(sweep.git_for(project_dir), failure.base, failure.sha)
+    git = sweep.git_for(project_dir)
+    said = fix_plan.CONFLICT in failure.reason
+    clean = said and bool(clean_merge(git, failure.base, failure.sha))
+    conflicted = said and not clean
+    behind = clean or (not conflicted and is_behind(git, failure.base, failure.sha))
+    failure = replace(failure, merges_clean=clean)
     run = gate_run(gh, failure.head, failure.sha)
     gate_id = str(run.get("databaseId", "") or "")
     run_ids = [gate_id] if gate_id else list(failure.check_runs)
     if not run_ids:
         return replace(failure, signature=fix_plan.signature(conflicted, [], []), behind=behind)
     where = root / evidence_slot(failure)
+    texts, jobs, lost = read_runs(gh, run_ids, where)
+    lost = () if conflicted else lost
+    sig = lost_signature(lost) if lost else fix_plan.signature(conflicted, texts, jobs)
+    sig = billing_signature(gh, sig, jobs)
+    sig, unread = settle_unread(gh, run_ids, conflicted, texts, sig, where)
+    return replace(
+        failure,
+        signature=sig,
+        unread=unread,
+        run_id=run_ids[0],
+        evidence=str(where) if texts else "",
+        behind=behind,
+        lost_runs=tuple(run_ids) if lost else (),
+        attempt=run_attempt(gh, run_ids[0], sig),
+    )
+
+
+def read_runs(
+    gh: Gh, run_ids: list[str], where: Path
+) -> tuple[list[str], list[dict], tuple[str, ...]]:
+    """`(texts, jobs, lost)` across `run_ids`, each run's evidence downloaded under `where`
+    (in a directory of its own when there are several). `lost` names the red jobs no
+    runner took when that is the whole of every run's red, and is () otherwise."""
     texts: list[str] = []
     jobs: list[dict] = []
+    lost: list[str] = []
+    every_run_lost = True
     for run_id in run_ids:
         dest = where / run_id if len(run_ids) > 1 else where
         found, failed_jobs = run_evidence(gh, run_id, dest)
         texts += found
         jobs += failed_jobs
-    sig = fix_plan.signature(conflicted, texts, jobs)
-    return replace(
-        failure,
-        signature=sig,
-        run_id=run_ids[0],
-        evidence=str(where) if texts else "",
-        behind=behind,
-    )
+        names = () if fix_plan.signature_from_logs(found) else runner_lost(gh, failed_jobs)
+        every_run_lost = every_run_lost and bool(names)
+        lost += names
+    return texts, jobs, tuple(sorted(set(lost))) if every_run_lost else ()
 
 
 def read_default_branch(
@@ -387,13 +640,26 @@ def read_default_branch(
         sha=str(run.get("headSha", "")),
         run_id=run_id,
         workflow=str(run.get("workflowName") or GATE_WORKFLOW),
+        green_at=last_green(runs),
     )
     where = root / evidence_slot(failure)
     texts, jobs = run_evidence(gh, run_id, where) if run_id else ([], [])
-    sig = fix_plan.signature(False, texts, jobs)
+    sig = billing_signature(gh, fix_plan.signature(False, texts, jobs), jobs)
     if fix_plan.is_release_red(sig) and is_tagged(git, failure.sha):
         return True, None
-    return False, replace(failure, signature=sig, evidence=str(where) if texts else "")
+    if lost := runner_lost(gh, jobs):
+        return False, replace(failure, signature=lost_signature(lost), lost_runs=(run_id,))
+    unread = False
+    if run_id:
+        sig, unread = settle_unread(gh, [run_id], False, texts, sig, where)
+    return False, replace(
+        failure,
+        signature=sig,
+        unread=unread,
+        evidence=str(where) if texts else "",
+        attempt=run_attempt(gh, run_id, sig),
+        hooks=fix_plan.failed_hooks(texts),
+    )
 
 
 def collect_default_branches(
@@ -429,6 +695,24 @@ def run_head(gh: Gh, run_id: str) -> str:
     return str(viewed.get("headSha", "") or "") if isinstance(viewed, dict) else ""
 
 
+def scheduled_at_tip(project_dir: Path, workflow: str) -> tuple[str, str, list[dict], str]:
+    """`(base, file, runs, tip)` for the scheduled workflow titled `workflow`: the default
+    branch, the workflow's file when it takes `workflow_dispatch`, its newest runs there,
+    and the branch's tip ("" when there are no runs to judge it by)."""
+    git = sweep.git_for(project_dir)
+    base = tb.detect_default_branch(git, fallback="main")
+    file = dispatchable_file(project_dir, workflow)
+    runs = default_branch_runs(sweep.gh_for(project_dir), base, file or workflow)
+    return base, file, runs, branch_tip(git, base) if runs else ""
+
+
+def green_at_tip(runs: list[dict], tip: str) -> dict:
+    """The run that judged `tip` green, or {} when nothing did: `_tip_verdict`'s True."""
+    if not tip or _tip_verdict(runs, tip)[0] is not True:
+        return {}
+    return next((r for r in runs if str(r.get("status", "")) == "completed"), {})
+
+
 def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_plan.Failure | None:
     """One tracker issue, read at its base's tip; None when the workflow is green there.
 
@@ -442,20 +726,17 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
     prompt names: a fixer could not tell the log was older than its tree (41924a97).
     """
     gh = sweep.gh_for(project_dir)
-    git = sweep.git_for(project_dir)
     title = str(issue.get("title", ""))
+    base, file, runs, tip = scheduled_at_tip(project_dir, workflow_from_title(title))
     failure = fix_plan.Failure(
         kind=fix_plan.NIGHTLY,
         project=project,
         number=int(issue.get("number", 0) or 0),
         title=title,
         url=str(issue.get("url", "")),
-        base=tb.detect_default_branch(git, fallback="main"),
+        base=base,
         workflow=workflow_from_title(title),
     )
-    file = dispatchable_file(project_dir, failure.workflow)
-    runs = default_branch_runs(gh, failure.base, file or failure.workflow)
-    tip = branch_tip(git, failure.base) if runs else ""
     verdict, red = _tip_verdict(runs, tip) if tip else (None, {})
     if verdict is True:
         return None
@@ -467,11 +748,15 @@ def read_issue(project: str, project_dir: Path, issue: dict, root: Path) -> fix_
         return failure  # held until the run at the tip is done, so nothing to download
     where = root / evidence_slot(failure)
     texts, jobs = run_evidence(gh, run_id, where)
+    sig = fix_plan.signature(False, texts, jobs)
+    sig, unread = settle_unread(gh, [run_id], False, texts, sig, where)
     return replace(
         failure,
-        signature=fix_plan.signature(False, texts, jobs),
+        signature=sig,
+        unread=unread,
         sha=str(red.get("headSha", "") or "") or run_head(gh, run_id),
         evidence=str(where) if texts else "",
+        attempt=run_attempt(gh, run_id, sig),
     )
 
 

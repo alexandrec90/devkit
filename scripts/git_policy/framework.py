@@ -14,8 +14,22 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ._core import Runner, _git, _stdout, console_python, emit
+from ._core import (
+    FRAMEWORK_SKIP_ENV_VAR,
+    _OFF_VALUES,
+    Runner,
+    _git,
+    _stdout,
+    console_python,
+    emit,
+)
 from .branch import parse_push_updates
+
+
+def framework_skipped(env: Mapping[str, str]) -> bool:
+    """True when `FRAMEWORK_SKIP_ENV_VAR` is set to anything that does not read as "off",
+    as `branch.policy_skipped` reads its own variable."""
+    return env.get(FRAMEWORK_SKIP_ENV_VAR, "").strip().lower() not in _OFF_VALUES
 
 
 def _venv_roots(root: Path, runner: Runner) -> tuple[Path, ...]:
@@ -58,7 +72,12 @@ def _pre_commit_command(root: Path, runner: Runner) -> list[str] | None:
     )
     for candidate in candidates:
         if candidate.is_file():
-            return [str(candidate)]
+            # The venv's interpreter rather than the console script, which names an
+            # absolute interpreter path and dies with `uv trampoline failed to
+            # canonicalize script path` once the tree that wrote it is deleted -- as a
+            # `claude --worktree` tree syncing through the checkout's linked `.venv` does.
+            python = candidate.with_name("python.exe" if candidate.suffix == ".exe" else "python")
+            return [str(python), "-m", "pre_commit"] if python.is_file() else [str(candidate)]
     executable = shutil.which("pre-commit")
     if executable:
         return [executable]

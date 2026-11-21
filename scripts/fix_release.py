@@ -14,7 +14,9 @@ under `log-wrap.py` with its own label, so its record is `logs/<slug>.log` in th
 checkout and a click or the nightly run cannot overwrite it. A start is refused while:
 
 - devkit's own default branch is not green -- the pipeline stops on any red but the
-  release test, so starting would only open a PR it will abandon;
+  release test, so starting would only open a PR it will abandon. A main red on that
+  test alone is a merged bump waiting on its tag, which the start is what delivers
+  (`release_verdict`);
 - a `release/` PR is already open -- one is in flight;
 - this pass started one less than `STARTED_COOLDOWN` ago -- the gap between that PR
   merging and the tag landing has neither a PR nor a tag to see.
@@ -99,6 +101,29 @@ def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
                 f"{name} #{row.get('number')} -- {message if ok else 'FAILED: ' + message}"
             )
     return merged
+
+
+def release_verdict(
+    devkit_green: bool | str | None, failures: list[fix_plan.Failure]
+) -> bool | str | None:
+    """devkit's default-branch verdict as the release step reads it. Pure.
+
+    A main red on the newest-tag test alone is a release whose bump merged and whose tag
+    never landed, and only the tag clears that red: holding the release for a green main
+    then holds it for good. On 2026-11-11 v0.11.87's tag run failed, main stayed red on that
+    test alone, `green` stopped advancing, and the scheduled jobs ran a fix merged hours
+    before from a checkout that could not reach it (c6c538d9, devkit #763). So that red reads
+    as green here: the pipeline resumes at the tag (`release-pipeline.run_pipeline`), and
+    `release.yml` runs the full suite on the commit before it pushes one.
+    """
+    if devkit_green is not False:
+        return devkit_green
+    return any(
+        f.kind == fix_plan.BRANCH
+        and f.project == fix_cycle.DEVKIT
+        and fix_plan.is_release_red(f.signature)
+        for f in failures
+    )
 
 
 def release_refusal(

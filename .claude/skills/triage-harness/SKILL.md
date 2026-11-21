@@ -44,7 +44,8 @@ This is the one rule the rest of the skill is arranged around, and it is worth s
 before the steps rather than inside them.
 
 Every group is either **retired with a fix** or **retired as not-a-defect with the
-evidence** (§2). There is no third outcome. A backlog entry that survives a sweep has been
+evidence** (§2). There is no third outcome but a group `AWAITS A PERSON` (§3), which
+the count line keeps apart from the open ones. A backlog entry that survives a sweep has been
 read by an agent, judged real, and handed to the next agent — who pays the same
 verification cost to reach the same conclusion, and hands it on again. That is the exact
 loop the ledger replaced, restored one deferral at a time, and it is worse than the
@@ -81,7 +82,7 @@ failure-artifact rule. Both are grouped by `(event, project, detail)`, most recu
 first, because a backlog read flat stops being read: 24 of this machine's first 39 open
 items were **one** spawn race recorded 24 times.
 
-Three event names reach it, and they want different treatment:
+These event names reach it, and they want different treatment:
 
 | Event | What it is | Where the diagnosis starts |
 | --- | --- | --- |
@@ -89,7 +90,9 @@ Three event names reach it, and they want different treatment:
 | `guard-spawn-failed` | an edit was blocked and no box could be cut for it | the `detail=` field: it carries the exception |
 | `codex-translation-gap` | a hook's answer did not survive Codex's schema — a member refused or stripped | the `detail=` field: it names the members |
 | `fix-pass-finding` | something the fix pass could not turn green: a step that raised, a push that failed, a dead fixer, a wait past a day | the `evidence=` field: a traceback file, a transcript, a tree |
-| `session-friction` | turns a session lost to the harness, read out of its transcript or its `logs/friction.md` | the `evidence=` field: `transcript#L<line>` |
+| `session-friction` | turns a session lost to the harness, read out of its transcript or its `logs/friction.md` | the `evidence=` field: `transcript#L<line>`, read with `python scripts/session_transcripts.py "<evidence>"` |
+| `scheduled-job-failed` | an unattended job exited non-zero (`log-wrap.py --always`) | the `command=` field: it says whose code ran. `collectors.py fire <project>` is that project's scrape, so a cause in its export or the store behind it is fixed in that project, not here |
+| `workspace-failure` | a daily `workspace-status.py` finding that says something is broken: a toolchain gap, drifted branch policy, a retired hook still wired, a refused workspace publish | the `said=` field (the line as printed, when it differs from `message=`); re-run `python scripts/workspace-status.py` to see if it still holds |
 
 A `fix-pass-finding` whose detail starts `fixers-exhausted`, `blind-evidence` or
 `fixer-blocked` is a problem fixers could not move, and it is yours now: fix what in the
@@ -115,13 +118,14 @@ group with the project they were cut from. Do not filter on the raw field.
 
 **A group can span machines**, and the `host` line names the ones it was seen on. The
 backlog is the union of every `harness-events-<host>.log` in the devkit checkout's `logs/`
-(`$DEVKIT_DIR/logs`, not a worktree's own, which holds none), so on
-a machine whose ledger is pooled you are triaging both. Two consequences: a group seen on
+(`$DEVKIT_DIR/logs`, not a worktree's own, which holds none) and in the shared folder
+`python scripts/ledger-pool.py` names, so on a machine whose ledger is pooled you are
+triaging both. Two consequences: a group seen on
 one host only is a lead worth following — a path, a shell, a scheduler that differs — and a
 `--resolve-like` retires **every** machine's copy in one note, which is the point. A
-machine whose `logs/` is not pooled still shows only its own, and a defect filed on the
-other one is invisible here; that is a transport that was never set up, not an empty
-backlog.
+machine that is not pooled still shows only its own, and a defect filed on the other one
+is invisible here; that is `ledger-pool.py --set` never run on both machines, not an
+empty backlog, and it is a person's step: the folder has to be one both machines sync.
 
 ## 2. Verify each group before believing it
 
@@ -161,10 +165,24 @@ cannot produce it again — not when this one tree, box or run is repaired. A mi
 the durable fix was in what provisions every tree (`scripts/worktree_env.py`, the git
 `post-checkout` hook). Ask of each group *what should have prevented this, and why did
 it not* — then fix that, and test it. A group marked `RECURRED` in the triage log was
-retired before by a fix that did not hold: its last note is what not to repeat. One
+retired before by a fix that did not hold: the `tried` lines under it are every such fix,
+with its refs and PR, and none of them is the one to repeat. One
 marked `PENDING on <pr>` is the reverse: its fix is written and not merged yet, so the
 pass sends no session at it, and the pass retires the rows filed while it waited against
-that PR once it merges; only a row filed after the merge reads `RECURRED`. The only
+that PR once it merges; only a row filed after the merge reads `RECURRED`. One marked
+`IN HAND at <tree>` has a session the pass sent at it still at work there: leave it. One
+marked `AWAITS A PERSON` failed on a step its job says no fixer can take
+(`harness_triage.PERSON_STEP`: an elevated command, a reboot), and the pass sends it
+nothing. It is the one group a sweep may leave open, and only while that step is still
+owed: if the job has passed since its newest row, retire it naming that pass; if a fixer
+*could* take the step, the job's marker is the defect -- fix the job. One
+with an `OPEN PR` line names a branch whose PR is still open, and says whether its gate is
+red: read that PR before writing a second fix beside it. A
+`REOPENED <id>` line is a resolution `scripts/fix_verify.py` undid, most often because
+its `--pr` named a branch that never became a PR. A merged PR whose text names the group
+id settles it before that (`fix_verify.named_by`), so a reopened group has no such PR:
+name the id in a fix PR's body, and when a merged PR holds the fix anyway, resolve again
+naming its number. The only
 mechanism ruled out is a coding-agent hook; a test, a git hook, a CI check, a scheduled
 job or a provisioner all are fair game.
 

@@ -7,8 +7,11 @@ so the suite asserts the argv and the state file, never a repository.
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -53,7 +56,115 @@ class Runner:
 
 
 def gh_ok(*_a):
-    return lambda *args: subprocess.CompletedProcess(["gh", *args], 0, "https://x/pull/7", "")
+    """Every call succeeds; a `pr list` finds no open PR yet, as on a first ship."""
+
+    def gh(*args):
+        out = "[]" if args[:2] == ("pr", "list") else "https://x/pull/7"
+        return subprocess.CompletedProcess(["gh", *args], 0, out, "")
+
+    return gh
+
+
+# --- the pass's deadline ------------------------------------------------------------
+
+
+def test_a_bounded_spawn_ends_its_whole_tree_at_the_deadline(tmp_path):
+    """2026-10-08 01:30: a `git commit` whose hooks ran past fifteen minutes. A child
+    that leaves a grandchild holding its pipes is the shape that matters: ending the
+    child alone, the read after it waits for the grandchild."""
+    grandchild = "import time; time.sleep(60)"
+    child = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        "print('started', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    started = time.monotonic()
+    with pytest.raises(ship_intent.OutOfTime) as stopped:
+        with ship_intent.bounded(time.monotonic() + 3):
+            ship_intent.run_quiet([sys.executable, "-c", child], cwd=tmp_path)
+    assert time.monotonic() - started < 30
+    assert stopped.value.ended and "still running at the pass's deadline" in str(stopped.value)
+
+
+# A child whose own child has exited, leaving a grandchild that holds the child's output
+# handles: an orphan, which `taskkill /T` cannot reach because the parent link it walks
+# is gone. The shape of a hook's process left behind by a shell that had already exited.
+ORPHAN_HOLDING_OUTPUT = (
+    "import subprocess, sys\n"
+    "subprocess.Popen([sys.executable, '-c', 'import subprocess, sys; "
+    'subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], '
+    "stdout=sys.stdout, stderr=sys.stderr)'], stdout=sys.stdout, stderr=sys.stderr).wait()\n"
+    "print('started', flush=True)\n"
+)
+
+
+def test_a_bounded_spawn_ended_at_the_deadline_waits_on_no_orphan(tmp_path):
+    """2026-10-08 14:44: the social-scraper ship, ended at the pass's deadline, came back
+    four minutes later, which took the record's whole reserve and the watchdog stopped the
+    pass (`pass-hung`). The read after the end waited on an orphan still holding the
+    pipe."""
+    child = ORPHAN_HOLDING_OUTPUT + "import time; time.sleep(60)\n"
+    started = time.monotonic()
+    with pytest.raises(ship_intent.OutOfTime) as stopped:
+        with ship_intent.bounded(time.monotonic() + 3):
+            ship_intent.run_quiet([sys.executable, "-c", child], cwd=tmp_path)
+    assert time.monotonic() - started < 30
+    assert stopped.value.ended
+
+
+def test_a_bounded_spawn_that_exits_in_time_waits_on_no_orphan(tmp_path):
+    """The same orphan under a child that finished: what it said, when it exits -- not
+    `OutOfTime` at the deadline for a ship that was done."""
+    child = ORPHAN_HOLDING_OUTPUT + "print('done', file=sys.stderr)\nsys.exit(4)\n"
+    started = time.monotonic()
+    with ship_intent.bounded(time.monotonic() + 20):
+        done = ship_intent.run_quiet([sys.executable, "-c", child], cwd=tmp_path)
+    assert time.monotonic() - started < 15
+    assert (done.returncode, done.stdout.strip(), done.stderr.strip()) == (4, "started", "done")
+
+
+def test_a_bounded_spawn_reads_back_as_text_or_bytes_as_asked(tmp_path):
+    script = "import sys; sys.stdout.buffer.write(b'a\\r\\nb\\xe2\\x80\\x9d')"
+    with ship_intent.bounded(time.monotonic() + 60):
+        text = ship_intent.run_quiet([sys.executable, "-c", script], encoding="utf-8")
+        raw = ship_intent.run_quiet([sys.executable, "-c", script], text=False)
+        quiet = ship_intent.run_quiet(
+            [sys.executable, "-c", script], capture_output=False, stdout=subprocess.DEVNULL
+        )
+    assert text.stdout == "a\nb\N{RIGHT DOUBLE QUOTATION MARK}"
+    assert raw.stdout == b"a\r\nb\xe2\x80\x9d"
+    assert (quiet.returncode, quiet.stdout) == (0, None)
+
+
+def test_a_bounded_spawn_past_the_deadline_never_starts(tmp_path):
+    marker = tmp_path / "ran"
+    with pytest.raises(ship_intent.OutOfTime) as stopped:
+        with ship_intent.bounded(time.monotonic() - 1):
+            ship_intent.run_quiet(
+                [sys.executable, "-c", f"open({str(marker)!r}, 'w').close()"], cwd=tmp_path
+            )
+    assert not stopped.value.ended and not marker.exists()
+
+
+def test_a_bounded_spawn_in_time_answers_as_subprocess_run_does(tmp_path):
+    script = "import sys; print(sys.stdin.read().upper()); sys.exit(3)"
+    with ship_intent.bounded(time.monotonic() + 60):
+        done = ship_intent.run_quiet([sys.executable, "-c", script], cwd=tmp_path, input="hi")
+    assert (done.returncode, done.stdout.strip(), done.stderr) == (3, "HI", "")
+    assert ship_intent._deadline is None, "the bound ends with its block"
+    unbounded = ship_intent.run_quiet([sys.executable, "-c", script], input="ok")
+    assert (unbounded.returncode, unbounded.stdout.strip()) == (3, "OK")
+
+
+def test_the_index_lock_an_ended_commit_left_is_removed(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    lock = tmp_path / ".git" / "index.lock"
+    lock.write_text("", encoding="utf-8")
+    assert ship_intent.clear_index_lock(tmp_path)
+    assert not lock.exists()
+    assert not ship_intent.clear_index_lock(tmp_path), "no lock, nothing to say"
+    assert not ship_intent.clear_index_lock(tmp_path / "not-a-repo-child-missing")
 
 
 # --- the intent file ----------------------------------------------------------------
@@ -153,7 +264,7 @@ def test_an_edited_or_unshipped_intent_is_still_found(tmp_path):
         ship_intent.write_state(one.tree, state)
         found = ship_intent.find_intents(tmp_path, ["carameli"], git_for)
         assert [i.subject for i in found] == [one.subject]
-        assert "not a namespaced task branch" in found[0].blocked
+        assert found[0].adopt and not found[0].blocked, "an agent tree's hand name is adopted"
 
 
 def test_spent_needs_a_shipped_stage_and_the_same_words(tmp_path):
@@ -224,12 +335,44 @@ def test_a_hand_named_branch_that_heads_an_open_pr_is_shippable(tmp_path):
 @pytest.mark.parametrize(
     ("code", "out"), [(0, "[]"), (1, ""), (0, "not json")], ids=["no-pr", "gh-failed", "garbage"]
 )
-def test_a_hand_named_branch_with_no_open_pr_stays_blocked(tmp_path, code, out):
+def test_a_hand_named_branch_with_no_open_pr_in_an_agent_tree_is_adopted(tmp_path, code, out):
+    """32f97dae: a session in social-scraper's spent fixer tree cut
+    `reddit-import-memory-cap`, and every pass refused its intent. The tree is disposable
+    by where it sits, so the pass renames the branch rather than stranding the work."""
     git_for = _one_tree_on(tmp_path, "flag-wired-agent-hooks")
     found = ship_intent.find_intents(tmp_path, ["carameli"], git_for, _gh_listing(code, out, []))
-    assert [i.blocked for i in found] == [
-        ship_intent.ship.is_shippable("flag-wired-agent-hooks", "main")[1]
+    assert [(i.blocked, i.adopt) for i in found] == [("", True)]
+
+
+def test_a_hand_named_branch_in_the_static_checkout_stays_blocked(tmp_path):
+    """The checkout itself may sit on a long-lived home branch, which is what the
+    namespace rule is there to keep a PR off."""
+    checkout = tmp_path / "carameli"
+    (checkout / "logs").mkdir(parents=True)
+    (checkout / ship_intent.INTENT_FILE).write_text("Resolve it\n", encoding="utf-8")
+    git_for = listing_git(checkout, "develop")
+    found = ship_intent.find_intents(tmp_path, ["carameli"], git_for, _gh_listing(0, "[]", []))
+    assert [(i.blocked, i.adopt) for i in found] == [
+        (ship_intent.ship.is_shippable("develop", "main")[1], False)
     ]
+
+
+@pytest.mark.parametrize(
+    ("where", "branch", "adopted"),
+    [
+        (Path("p/.claude/worktrees/t"), "memory-cap", True),
+        (Path(".worktrees/p--t"), "memory-cap", True),
+        (Path("p"), "memory-cap", False),
+        (Path("p/.claude/worktrees/t"), "main", False),
+        (Path("p/.claude/worktrees/t"), "", False),
+        (Path("p/.claude/worktrees/t"), "feature/x", False),
+    ],
+    ids=["claude-tree", "box", "static", "default", "detached", "namespaced"],
+)
+def test_hand_named_is_an_unnamespaced_task_branch_in_a_disposable_tree(
+    tmp_path, where, branch, adopted
+):
+    assert ship_intent.hand_named(tmp_path / where, branch, "main") is adopted
 
 
 @pytest.mark.parametrize(
@@ -281,14 +424,20 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
     assert out.stage == ship_intent.SHIPPED and out.url == "https://x/pull/7"
     assert run.verbs() == [
         "git status",
+        "git fetch",  # `refresh_base`, before anything reads `origin/main`
+        "git rev-parse",  # `lands_nothing` asks after `MERGE_HEAD`,
+        "git merge-base",  # then the fork, answered "" here: unknown, so it ships
         "git add",
         r"C:\py\python.exe scripts/ship.py",
         "git add",
         "git commit",
+        "git fetch",
+        "git merge-base",
         "git push",
         "git rev-parse",
     ]
-    fix, add, commit, push = run.calls[2:6]
+    fix, add, commit = run.calls[5:8]
+    push = run.calls[10]
     assert fix[0][1:] == ["scripts/ship.py", "--fix"] and fix[1] == one.tree
     assert add[0] == ["git", "add", "-A"]
     assert commit[0] == ["git", "commit", "-F", str(ship_intent.INTENT_FILE)]
@@ -301,9 +450,8 @@ def test_the_pass_runs_fixers_commits_with_the_message_pushes_past_the_gate_and_
         one.branch,
         "main",
     )
-    # A person's tree carries no fix-pass origin mark, so its PR waits for them: the
-    # vendored auto-merge workflow lands any labelled PR once the gate passes.
-    assert plan.pr_labels == ()
+    # A person's tree, unheld: the vendored auto-merge workflow lands it once green.
+    assert plan.pr_labels == (ship_intent.sweep.AUTOMERGE_LABEL,)
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.SHIPPED
     assert state["intent"] == one.digest and state["sha"] == "abc123"
@@ -334,6 +482,20 @@ def shipped_labels(tmp_path, monkeypatch, marked: bool, stamps: int) -> tuple[st
     return plans[0].pr_labels
 
 
+def test_a_pr_from_a_tree_sent_at_an_issue_closes_that_issue_and_no_other(tmp_path, monkeypatch):
+    """A nightly's fixer: the issue it was sent at closes when its fix merges, even if the
+    workflow is renamed before it runs green again. A tree not sent at one closes none."""
+    one = intent(tmp_path)
+    ship_intent.fix_reports.stamp(one.tree, "nightly:carameli:9:t:d:dispatch", "n", NOW)
+    ship_intent.fix_reports.note_on_stamp(one.tree, ship_intent.fix_reports.CLOSES, "9")
+    plans = capture_plans(monkeypatch)
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
+    assert plans[0].pr_body == "Because.\n\nCloses #9"
+    assert ship_intent.pr_body(replace(one, body="Fixed it. Closes #9")) == "Fixed it. Closes #9"
+    ship_intent.fix_reports.stamp(one.tree, "pr:carameli:412:abc:d:dispatch", "n", NOW)
+    assert ship_intent.pr_body(one) == "Because."
+
+
 def test_a_pr_from_a_branch_the_pass_cut_for_a_fixer_is_labelled_automerge(tmp_path, monkeypatch):
     """The pass decided on that work itself, so its green gate is the whole review."""
     assert shipped_labels(tmp_path, monkeypatch, True, 1) == (ship_intent.sweep.AUTOMERGE_LABEL,)
@@ -345,11 +507,313 @@ def test_a_fixer_sent_back_at_its_own_branch_keeps_the_label(tmp_path, monkeypat
     assert shipped_labels(tmp_path, monkeypatch, True, 2) == (ship_intent.sweep.AUTOMERGE_LABEL,)
 
 
-def test_a_fixer_sent_at_a_feature_sessions_branch_leaves_it_unlabelled(tmp_path, monkeypatch):
-    """Fixing the gate on a feature PR does not make the feature routine: the person
-    who asked for it still merges it, however many dispatches were stamped there."""
-    assert shipped_labels(tmp_path / "once", monkeypatch, False, 1) == ()
-    assert shipped_labels(tmp_path / "twice", monkeypatch, False, 2) == ()
+def test_a_persons_pr_merges_itself_once_green_too(tmp_path, monkeypatch):
+    """2026-11-20: radio #1, sports_betting #94 and skinamp #14 sat green and open for a
+    week, unlabelled because a person rather than the pass had shipped them, waiting on a
+    review nobody meant to give. With or without fixers sent at the branch."""
+    label = (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert shipped_labels(tmp_path / "none", monkeypatch, False, 0) == label
+    assert shipped_labels(tmp_path / "once", monkeypatch, False, 1) == label
+    assert shipped_labels(tmp_path / "twice", monkeypatch, False, 2) == label
+
+
+def test_the_old_auto_trailer_is_inert_text(tmp_path, monkeypatch):
+    """An intent still ending `Automerge: yes` ships as any other, the line kept in the
+    body; only `Hold: yes` changes what the PR is labelled."""
+    one = intent(tmp_path, body="Trivial rename.\n\nAutomerge: yes")
+    plans = capture_plans(monkeypatch)
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
+    assert plans[0].pr_labels == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert plans[0].pr_body.endswith("Automerge: yes")
+    assert ship_intent.labels_for() == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert ship_intent.labels_for(held=True) == ()
+
+
+# --- the direct flow ----------------------------------------------------------------
+
+
+def direct(tmp_path, body="Because.") -> ship_intent.Intent:
+    return replace(intent(tmp_path, body=body), direct=True)
+
+
+def gh_with_open_body(body: str):
+    """A `gh_for` whose one open PR on the branch has `body`; anything else answers ok."""
+
+    def gh_for(_tree):
+        def gh(*args):
+            if args[:2] == ("pr", "list"):
+                row = [{"body": body}]
+                return subprocess.CompletedProcess(args, 0, ship_intent.json.dumps(row), "")
+            return subprocess.CompletedProcess(args, 0, "https://x/pull/7", "")
+
+        return gh
+
+    return gh_for
+
+
+def test_intents_read_the_flow_off_the_projects_checkout(tmp_path):
+    """Off the checkout rather than the tree: every pass and task agrees on one answer,
+    and a tree cut before the switch ships the way the project does now."""
+    checkout = tmp_path / "carameli"
+    ready = intent(tmp_path)
+    (checkout / ".devkit.toml").write_text('[delivery]\nflow = "direct"\n', encoding="utf-8")
+    listing = f"worktree {ready.tree.as_posix()}\nHEAD 2\nbranch refs/heads/agent/labels-0919\n\n"
+
+    def git_for(_project_dir):
+        def git(*args):
+            if args[:2] == ("worktree", "list"):
+                return subprocess.CompletedProcess(args, 0, listing, "")
+            if args[0] == "symbolic-ref":
+                return subprocess.CompletedProcess(args, 0, "refs/remotes/origin/main\n", "")
+            return subprocess.CompletedProcess(args, 1, "", "")
+
+        return git
+
+    [found] = ship_intent.find_intents(tmp_path, ["carameli"], git_for)
+    assert found.direct
+
+
+def gh_no_open_pr(_tree):
+    """A `gh_for` that says plainly this branch heads no open PR yet."""
+
+    def gh(*args):
+        out = "[]" if args[:2] == ("pr", "list") else "https://x/pull/7"
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    return gh
+
+
+def test_a_direct_intents_pr_is_labelled_merge_now(tmp_path, monkeypatch):
+    plans = capture_plans(monkeypatch)
+    out = ship_intent.ship_one(direct(tmp_path), "py", "main", Runner(), gh_no_open_pr, NOW)
+    assert out.stage == ship_intent.SHIPPED
+    assert plans[0].pr_labels == (ship_intent.sweep.MERGE_NOW_LABEL,)
+
+
+def test_merge_now_is_a_label_the_harness_can_create(tmp_path):
+    """`ensure_pr` creates a label before applying it, from this table."""
+    assert ship_intent.sweep.MERGE_NOW_LABEL == "merge-now"
+    args = ship_intent.sweep._label_args(ship_intent.sweep.MERGE_NOW_LABEL)
+    color, description = ship_intent.sweep.LABEL_SPECS["merge-now"]
+    assert args == (
+        "label",
+        "create",
+        "merge-now",
+        "--force",
+        "--color",
+        color,
+        "--description",
+        description,
+    )
+    assert description
+
+
+def test_a_held_direct_intent_gets_no_merge_label_at_all(tmp_path, monkeypatch):
+    plans = capture_plans(monkeypatch)
+    held = direct(tmp_path, body="Wants a look.\n\nHold: yes")
+    assert ship_intent.ship_one(held, "py", "main", Runner(), gh_ok, NOW).stage == "shipped"
+    assert plans[0].pr_labels == ()
+    assert plans[0].pr_body.endswith("Hold: yes"), "what keeps it held through a resolver"
+
+
+def test_a_held_intent_overrides_the_fixers_label_in_a_gated_project_too(tmp_path):
+    (tmp_path / ship_intent.fix_reports.ORIGIN_FILE).parent.mkdir()
+    (tmp_path / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
+    assert ship_intent.labels_for() == (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert ship_intent.labels_for(held=True) == ()
+
+
+def test_a_hold_is_a_whole_line_anywhere_in_the_body(tmp_path):
+    """It is the one promise this flow makes to the person: a `Co-Authored-By` or a
+    `Closes #N` after it must not lose it."""
+    asks = ship_intent.asks_hold
+    assert asks("Because.\n\nHold: yes\n") and asks("Because.\n\n  hold:YES  ")
+    assert asks("Because.\n\nHold: yes\n\nCo-Authored-By: x <x@y>\nCloses #4")
+    assert ship_intent.pr_body(replace(intent(tmp_path), body="B\n\nHold: yes")) == "B\n\nHold: yes"
+
+
+def test_a_prose_mention_of_a_hold_is_not_one():
+    asks = ship_intent.asks_hold
+    assert not asks("Because.\n\nHold: no")
+    assert not asks("Because. Hold: yes")
+    assert not asks("The `Hold: yes` line keeps a PR back.")
+    assert not asks("")
+
+
+def test_a_resolvers_ship_keeps_a_merge_now_prs_label(tmp_path, monkeypatch):
+    """Its intent carries no trailer and the PR is not held, so the label is applied again:
+    `ensure_pr` only ever adds one, so it stays on the PR the drain will pick up."""
+    asked = []
+
+    def gh_for(_tree):
+        def gh(*args):
+            asked.append(args)
+            if args[:2] == ("pr", "list"):
+                return subprocess.CompletedProcess(args, 0, '[{"body": "Because."}]', "")
+            return subprocess.CompletedProcess(args, 0, "https://x/pull/7", "")
+
+        return gh
+
+    one = direct(tmp_path, body="Resolved the conflict.")
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_for, NOW).stage == "shipped"
+    assert ("pr", "edit", one.branch, "--add-label", "merge-now") in asked
+    assert not [a for a in asked if "--remove-label" in a]
+
+
+def test_a_resolvers_ship_leaves_a_held_pr_held(tmp_path, monkeypatch):
+    """A resolver writes its own intent, trailer-less, and may work in a fresh tree: only
+    the PR remembers the person said to wait."""
+    plans = capture_plans(monkeypatch)
+    one = direct(tmp_path, body="Resolved the conflict.")
+    gh_for = gh_with_open_body("Wants a look.\n\nHold: yes")
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_for, NOW).stage == "shipped"
+    assert plans[0].pr_labels == ()
+
+
+def test_an_intents_labels_ask_its_pr_in_either_flow(tmp_path):
+    """Both flows merge what nobody held, so a gated resolver's ship must read the hold
+    off the PR too, or it would label a held PR `automerge`."""
+    asked = []
+
+    def gh(*args):
+        asked.append(args)
+        return subprocess.CompletedProcess(args, 0, '[{"body": "x\\n\\nHold: yes"}]', "")
+
+    assert ship_intent.intent_labels(intent(tmp_path), gh) == ()
+    assert ship_intent.intent_labels(direct(tmp_path), gh) == ()
+    assert len(asked) == 2, "a resolver's own intent says nothing of the hold"
+
+
+@pytest.mark.parametrize(("code", "out"), [(1, ""), (0, "not json"), (0, "{}"), (0, "[3]")])
+def test_a_pr_gh_cannot_describe_reads_as_held(code, out):
+    """A label withheld waits for someone; one applied wrongly merges past the person."""
+
+    def gh(*args):
+        return subprocess.CompletedProcess(args, code, out, "")
+
+    assert ship_intent.held_pr("agent/x", gh) is True
+
+
+def test_a_gh_that_cannot_say_puts_no_merge_label_on(tmp_path, monkeypatch):
+    plans = capture_plans(monkeypatch)
+
+    def gh_for(_tree):
+        def gh(*args):
+            code = 1 if args[:2] == ("pr", "list") else 0
+            return subprocess.CompletedProcess(args, code, "", "HTTP 502" if code else "")
+
+        return gh
+
+    assert ship_intent.ship_one(direct(tmp_path), "py", "main", Runner(), gh_for, NOW).stage == (
+        ship_intent.SHIPPED
+    )
+    assert plans[0].pr_labels == ()
+
+
+def test_a_pr_github_says_is_not_held_is_not_held():
+    def gh(*args):
+        return subprocess.CompletedProcess(args, 0, '[{"body": "Because."}]', "")
+
+    assert ship_intent.held_pr("agent/x", gh) is False
+    assert (
+        ship_intent.held_pr("agent/x", lambda *a: subprocess.CompletedProcess(a, 0, "[]", ""))
+        is False
+    )
+
+
+def test_a_gated_resolvers_ship_leaves_a_held_pr_held(tmp_path, monkeypatch):
+    plans = capture_plans(monkeypatch)
+    one = intent(tmp_path, body="Resolved the conflict.")
+    gh_for = gh_with_open_body("Wants a look.\n\nHold: yes")
+    assert ship_intent.ship_one(one, "py", "main", Runner(), gh_for, NOW).stage == "shipped"
+    assert plans[0].pr_labels == ()
+
+
+def test_a_persons_direct_flow_pr_is_never_pass_owned(tmp_path, monkeypatch):
+    """The regression `pass_owned` was separated from `labels_for` for. A person's PR in
+    the direct flow carries `merge-now`, and pass ownership decides whether the pass may
+    close it; read off the labels, every such PR would read as the pass's own."""
+    one = direct(tmp_path)
+    assert ship_intent.labels_for(direct=True) == (ship_intent.sweep.MERGE_NOW_LABEL,)
+    assert not ship_intent.pass_cut(one.tree)
+    assert ship_intent.pass_owned(one) is False
+    (one.tree / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
+    assert ship_intent.pass_owned(one) is True, "a tree the pass cut is still its own"
+
+
+def test_a_direct_flow_pr_that_lands_nothing_is_left_open(tmp_path):
+    """Through the real decision: `_superseded` hands a person's PR to the commit stage
+    rather than closing it, labelled or not."""
+    one, repo, git = _landed(tmp_path, "agent/mine")
+    one = replace(one, direct=True)
+    asked: list = []
+    gh = _gh_with_pr(git("rev-parse", "HEAD").stdout.strip(), asked)(repo)
+    porcelain = git("status", "--porcelain").stdout
+    settled = ship_intent._settled(one, porcelain, "main", ship_intent.run_quiet, "w", gh)
+    assert settled is None and ("pr", "close") not in [a[:2] for a in asked]
+
+
+def test_a_direct_commit_runs_no_fixers_and_skips_only_the_framework(tmp_path):
+    """No `ship.py --fix`, and no `--no-verify`, which would drop the branch policy too."""
+    run = Runner()
+    assert ship_intent.commit_intent(direct(tmp_path), "py", run) == ("", "")
+    argvs = [argv for argv, _cwd, _env in run.calls]
+    assert ["py", "scripts/ship.py", "--fix"] not in argvs
+    assert run.verbs() == ["git add", "git commit"]
+    assert "--no-verify" not in argvs[-1]
+    env = run.calls[-1][2]
+    assert env[ship_intent.git_policy.FRAMEWORK_SKIP_ENV_VAR] == "1"
+    assert ship_intent.git_policy.SKIP_ENV_VAR not in env, "the policy is what still runs"
+
+
+def test_a_gated_commit_keeps_the_framework(tmp_path):
+    run = Runner()
+    assert ship_intent.commit_intent(intent(tmp_path), "py", run) == ("", "")
+    assert run.calls[-1][0][:2] == ["git", "commit"] and run.calls[-1][2] is None
+
+
+def test_a_direct_commit_names_the_step_that_refused(tmp_path):
+    run = Runner({"git commit": (1, "", "policy said no")})
+    assert ship_intent.commit_intent(direct(tmp_path), "py", run) == ("commit", "policy said no")
+    run = Runner({"git add": (1, "", "index broken")})
+    assert ship_intent.commit_intent(direct(tmp_path), "py", run) == ("add", "index broken")
+
+
+def test_a_direct_push_skips_the_framework_and_a_gated_one_does_not(tmp_path, monkeypatch):
+    capture_plans(monkeypatch)
+    run = Runner()
+    ship_intent.ship_one(direct(tmp_path), "py", "main", run, gh_ok, NOW)
+    [push] = [env for argv, _cwd, env in run.calls if argv[:2] == ["git", "push"]]
+    assert push[ship_intent.git_policy.FRAMEWORK_SKIP_ENV_VAR] == "1"
+    assert push["SKIP"] == ship_intent.SKIP_PUSH_GATE
+    run = Runner()
+    ship_intent.ship_one(intent(tmp_path / "g"), "py", "main", run, gh_ok, NOW)
+    [push] = [env for argv, _cwd, env in run.calls if argv[:2] == ["git", "push"]]
+    assert ship_intent.git_policy.FRAMEWORK_SKIP_ENV_VAR not in push
+
+
+def test_a_direct_commit_is_still_carried_off_a_retired_name(tmp_path):
+    """Why the policy has to keep running in the direct flow."""
+    run = _RetiredBranch(retired={"agent/labels-0919"}, taken={"agent/labels-0919-2"})
+    carried, step, _output = ship_intent._commit_carrying(direct(tmp_path), "py", run)
+    assert step == "" and carried.branch == "agent/labels-0919-3" and carried.direct
+
+
+def test_a_stored_refusal_is_read_off_the_state_without_a_git_step(tmp_path):
+    one = direct(tmp_path)
+    assert ship_intent.stored_refusal(one, Runner()) is None
+    state = {"stage": ship_intent.REFUSED, "step": "commit", "output": "no", "intent": one.digest}
+    ship_intent.write_state(one.tree, {**state, "tree": ship_intent._digest(" M a.py\n")})
+    assert ship_intent.stored_refusal(one, Runner()).stage == ship_intent.REFUSED
+    moved = Runner(porcelain=" M a.py\n M b.py\n")
+    assert ship_intent.stored_refusal(one, moved) is None, "the tree moved: try again"
+
+
+def test_a_tree_git_cannot_read_has_no_stored_refusal(tmp_path):
+    def unreadable(argv, cwd):
+        return subprocess.CompletedProcess(argv, 128, "", "fatal: not a git repository")
+
+    assert ship_intent.stored_refusal(direct(tmp_path), unreadable) is None
 
 
 def test_the_commit_half_names_the_step_that_refused(tmp_path):
@@ -522,8 +986,8 @@ class _RetiredBranch(Runner):
             return subprocess.CompletedProcess(
                 argv, 0, "".join(f"sha\trefs/heads/{n}\n" for n in names), ""
             )
-        if argv[:3] == ["git", "switch", "-c"]:
-            self.branch = argv[3]
+        if argv[:3] == ["git", "symbolic-ref", "HEAD"]:
+            self.branch = argv[3].removeprefix("refs/heads/")
         if argv[:2] == ["git", "commit"] and self.branch in self.retired:
             self.calls.append((argv, Path(cwd), env))
             why = f"[devkit branch policy] commit blocked: branch '{self.branch}' is permanently retired because its PR merged (https://x/pull/426)."
@@ -535,21 +999,341 @@ def test_an_intent_on_a_retired_branch_is_carried_to_the_next_free_name(tmp_path
     """A ledger sweep's second intent landed after the pass had shipped its first and the
     PR merged: the policy refused every commit on the retired name, and the fix -- plus
     the ledger group it was resolved against -- sat stranded in the tree (c45826ad). The
-    policy's own remedy is one `git switch -c`, which the ship step now takes itself."""
+    policy's own remedy is a fresh name, which the ship step now makes itself."""
     one = intent(tmp_path)
     run = _RetiredBranch(retired={"agent/labels-0919"}, taken={"agent/labels-0919-2"})
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.SHIPPED
-    assert ["git", "switch", "-c", "agent/labels-0919-3"] in [argv for argv, _c, _e in run.calls]
-    assert ["git", "push", "-u", "origin", "agent/labels-0919-3"] in [
-        argv for argv, _c, _e in run.calls
+    argv = [argv for argv, _c, _e in run.calls]
+    assert ["git", "branch", "agent/labels-0919-3"] in argv
+    assert ["git", "symbolic-ref", "HEAD", "refs/heads/agent/labels-0919-3"] in argv
+    assert ["git", "push", "-u", "origin", "agent/labels-0919-3"] in argv
+
+
+def _resolving(tmp_path, resolution: str):
+    """carameli's tree in f95dffbc, as a real repository: `feat` bumped `f`, the trunk
+    bumped it another way (`m1`), and a resolver is mid-merge of `m1` with `f` set to
+    `resolution`. Since then the trunk landed `f` = "d" and an unrelated `g`, and
+    `origin/main` says so. Returns the repository and its `git`."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+
+    def commit(message, **files):
+        for name, text in files.items():
+            (repo / name).write_text(f"{text}\n", encoding="utf-8")
+        git("add", *files)
+        git("commit", "-qm", message)
+
+    git("init", "-q", "-b", "main")
+    # An author, no signing, and no hooks: the machine's `core.hooksPath` is global.
+    for key, value in (
+        ("user.email", "a@b"),
+        ("user.name", "t"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", str(tmp_path / "no-hooks")),
+    ):
+        git("config", key, value)
+    commit("a", f="a", g="1")
+    git("switch", "-qc", "feat")
+    commit("b", f="b")
+    git("switch", "-q", "main")
+    commit("c", f="c")
+    git("tag", "m1")
+    commit("the bump, landed", f="d")
+    commit("a later merge", g="2")
+    git("update-ref", "refs/remotes/origin/main", "main")
+    git("switch", "-q", "feat")
+    assert git("merge", "m1").returncode != 0, "the conflict a resolver is sent at"
+    (repo / "f").write_text(f"{resolution}\n", encoding="utf-8")
+    git("add", "f")
+    return repo, git
+
+
+def test_the_carry_moves_head_without_switching_so_a_merge_in_progress_survives(tmp_path):
+    """f95dffbc: carameli's resolver was mid-merge on a Dependabot branch when its PR
+    merged. `git switch -c` refuses while merging, so the carry failed and the commit
+    stayed refused on the retired name; `git checkout -b` would drop `MERGE_HEAD`. A
+    real repository, because the property is git's, not the argv's."""
+    repo, git = _resolving(tmp_path, "c")
+    one = ship_intent.Intent("r", repo, "feat", "S", "")
+    moved = ship_intent._carry_to_free_branch(one, "feat", ship_intent.run_quiet, set())
+    assert isinstance(moved, ship_intent.Intent) and moved.branch == "feat-2"
+    assert git("branch", "--show-current").stdout.strip() == "feat-2"
+    assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0, "still merging"
+    assert git("diff", "--cached", "--name-only").stdout.split() == ["f"], "index untouched"
+
+
+def test_a_carry_whose_head_will_not_move_is_no_carry_and_says_why(tmp_path):
+    one = intent(tmp_path)
+    run = Runner({"git symbolic-ref": (128, "", "fatal: no")})
+    said = ship_intent._carry_to_free_branch(one, "agent/labels-0919", run, set())
+    assert said == "`git symbolic-ref HEAD refs/heads/agent/labels-0919-2`: fatal: no"
+    taken = Runner({"git branch": (128, "", "fatal: already exists")})
+    said = ship_intent._carry_to_free_branch(one, "agent/labels-0919", taken, set())
+    assert said == "`git branch agent/labels-0919-2`: fatal: already exists"
+    assert "git symbolic-ref" not in taken.verbs()
+
+
+def test_a_failed_carry_is_written_into_the_recorded_refusal(tmp_path):
+    """f95dffbc's stored refusal named only the retired branch, so it read as a carry the
+    pass had never tried; the failed `git switch -c` that stopped it was nowhere."""
+    one = intent(tmp_path)
+
+    class Stuck(_RetiredBranch):
+        def __call__(self, argv, cwd, env=None):
+            if [str(a) for a in argv[:2]] == ["git", "branch"]:
+                self.calls.append(([str(a) for a in argv], Path(cwd), env))
+                return subprocess.CompletedProcess(argv, 128, "", "fatal: cannot carry\n")
+            return super().__call__(argv, cwd, env)
+
+    out = ship_intent.ship_one(one, "py", "main", Stuck({"agent/labels-0919"}), gh_ok, NOW)
+    assert out.stage == ship_intent.REFUSED
+    output = ship_intent.read_state(one.tree)["output"]
+    assert "the carry to a fresh name failed: `git branch agent/labels-0919-2`" in output
+    assert ship_intent.RETIRED_MARK in ship_intent.refusal_line(output), "same signature"
+
+
+@pytest.mark.parametrize(
+    ("taken", "name"),
+    [
+        (set(), "agent/memory-cap"),
+        ({"agent/memory-cap", "agent/memory-cap-x"}, "agent/memory-cap-2"),
+    ],
+    ids=["free", "taken"],
+)
+def test_an_adopted_intent_is_renamed_into_the_namespace_before_it_commits(tmp_path, taken, name):
+    """32f97dae: the intent went out on no pass. Renamed, it commits, pushes and opens
+    its PR under the namespaced name, and a name already used counts on from it."""
+    one = replace(intent(tmp_path), branch="memory-cap", adopt=True)
+    run = _RetiredBranch(retired=set(), taken=taken, branch="memory-cap")
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.SHIPPED
+    assert (out.intent.branch, out.intent.adopt) == (name, False)
+    argv = [argv for argv, _c, _e in run.calls]
+    rename = argv.index(["git", "branch", "-m", name])
+    assert rename < argv.index(next(a for a in argv if a[:2] == ["git", "commit"]))
+    assert ["git", "push", "-u", "origin", name] in argv
+
+
+def test_a_rename_git_refuses_is_a_failure_to_retry(tmp_path):
+    one = replace(intent(tmp_path), branch="memory-cap", adopt=True)
+    run = Runner({"git branch": (128, "", "fatal: cannot rename\n")})
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED
+    assert out.detail == "rename: `git branch -m agent/memory-cap`: fatal: cannot rename"
+    assert "git commit" not in run.verbs() and "git push" not in run.verbs()
+    assert ship_intent.read_state(one.tree)["stage"] == ship_intent.FAILED
+
+
+def test_the_rename_keeps_a_merge_in_progress(tmp_path):
+    """A real repository, because the property is git's: a tree mid-merge keeps its
+    `MERGE_HEAD` and its index through `git branch -m`."""
+    repo, git = _resolving(tmp_path, "c")
+    one = ship_intent.Intent("r", repo, "feat", "S", "", adopt=True)
+    moved = ship_intent.adopt_name(one, ship_intent.run_quiet)
+    assert isinstance(moved, ship_intent.Intent) and moved.branch == "agent/feat"
+    assert git("branch", "--show-current").stdout.strip() == "agent/feat"
+    assert git("rev-parse", "-q", "--verify", "refs/heads/feat").returncode != 0, "no stray ref"
+    assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0, "still merging"
+    assert git("diff", "--cached", "--name-only").stdout.split() == ["f"], "index untouched"
+
+
+def test_ever_precedes_every_resolution_stamp():
+    """`harness_triage.carried` compares it with aware stamps, so it must be aware too."""
+    ever = _dt.datetime.fromisoformat(ship_intent.EVER)
+    assert ever.tzinfo is not None and ever < NOW
+
+
+def test_a_tree_whose_every_change_already_landed_is_nothing_to_ship(tmp_path, monkeypatch):
+    """f95dffbc: the resolver's staged merge matched master, because the bump it was
+    resolving had landed meanwhile. Two fixers wrote "nothing to ship" and the pass
+    committed each anyway; only the retired-name refusal stopped an empty PR, and the
+    group went to the ledger as fixers-exhausted. A later trunk change the tree lacks
+    (`g`) is not the tree's to ship."""
+    plans = capture_plans(monkeypatch)
+    repo, git = _resolving(tmp_path, "d")
+    (repo / "logs").mkdir()
+    (repo / ".git" / "info" / "exclude").write_text("logs/\n", encoding="utf-8")
+    (repo / ship_intent.INTENT_FILE).write_text("Nothing to ship\n\nIt landed.\n", "utf-8")
+    one = ship_intent.Intent("r", repo, "feat", "Nothing to ship", "It landed.")
+    assert ship_intent.lands_nothing(repo, "main", ship_intent.run_quiet)
+    out = ship_intent.ship_one(one, "py", "main", ship_intent.run_quiet, gh_ok, NOW)
+    assert out.stage == ship_intent.EMPTY and plans == []
+    assert "already on origin/main" in out.detail
+    assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0, "nothing committed"
+    assert not (repo / ship_intent.INTENT_FILE).exists()
+    assert ship_intent.read_state(repo)["stage"] == ship_intent.EMPTY
+
+
+def _landed(tmp_path, branch: str) -> tuple[ship_intent.Intent, Path, Callable]:
+    """`_resolving`'s tree with a resolution the trunk already has, its intent written."""
+    repo, git = _resolving(tmp_path, "c")
+    (repo / "logs").mkdir()
+    (repo / ".git" / "info" / "exclude").write_text("logs/\n", encoding="utf-8")
+    (repo / ship_intent.INTENT_FILE).write_text("Took master\n\nIt landed.\n", "utf-8")
+    return ship_intent.Intent("r", repo, branch, "Took master", "It landed."), repo, git
+
+
+def _gh_with_pr(head: str, asked: list, close_code: int = 0):
+    """A `gh_for` whose open PR #476 has its head at `head`, recording every call."""
+
+    def gh_for(_tree):
+        def gh(*args):
+            asked.append(args)
+            if args[:2] == ("pr", "list"):
+                return subprocess.CompletedProcess(
+                    args, 0, f'[{{"number": 476, "headRefOid": "{head}"}}]', ""
+                )
+            return subprocess.CompletedProcess(
+                args, close_code, "", "" if not close_code else "HTTP 502"
+            )
+
+        return gh
+
+    return gh_for
+
+
+def test_a_dependabot_pr_whose_every_change_landed_is_closed_as_superseded(tmp_path):
+    """199602e6: carameli #476's resolver took `master`'s side everywhere, the pass set
+    the merge aside as empty, and the PR stayed open and conflicting until the next pass
+    escalated it as `blind-evidence`. Its head is the tree's, so it is closed."""
+    one, repo, git = _landed(tmp_path, "dependabot/npm_and_yarn/frontend/minor-and-patch")
+    asked: list = []
+    head = git("rev-parse", "HEAD").stdout.strip()
+    out = ship_intent.ship_one(
+        one, "py", "main", ship_intent.run_quiet, _gh_with_pr(head, asked), NOW
+    )
+    assert out.stage == ship_intent.EMPTY and out.detail.startswith("closed #476 as superseded")
+    close = [a for a in asked if a[:2] == ("pr", "close")]
+    assert close and close[0][2] == "476" and "already on `main`" in close[0][4]
+    assert git("rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0, "nothing committed"
+    assert ship_intent.read_state(repo)["stage"] == ship_intent.EMPTY
+
+
+def test_a_pr_from_a_tree_the_pass_cut_is_closed_too(tmp_path):
+    one, repo, git = _landed(tmp_path, "agent/took-master")
+    (repo / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
+    asked: list = []
+    head = git("rev-parse", "HEAD").stdout.strip()
+    out = ship_intent.ship_one(
+        one, "py", "main", ship_intent.run_quiet, _gh_with_pr(head, asked), NOW
+    )
+    assert out.detail.startswith("closed #476") and ("pr", "close") in [a[:2] for a in asked]
+
+
+def test_a_pr_github_holds_a_newer_head_for_is_left_open(tmp_path):
+    """Pushed to from elsewhere since the tree saw it: what it holds now was never read."""
+    one, _repo, _git = _landed(tmp_path, "dependabot/npm_and_yarn/x")
+    asked: list = []
+    out = ship_intent.ship_one(
+        one, "py", "main", ship_intent.run_quiet, _gh_with_pr("f" * 40, asked), NOW
+    )
+    assert out.stage == ship_intent.EMPTY and not out.detail.startswith("closed")
+    assert ("pr", "close") not in [a[:2] for a in asked]
+
+
+def test_a_persons_pr_is_not_closed_and_its_resolution_ships(tmp_path):
+    """Theirs to close: `_settled` hands it to the commit stage, which clears the conflict."""
+    one, repo, git = _landed(tmp_path, "feat")
+    asked: list = []
+    gh = _gh_with_pr(git("rev-parse", "HEAD").stdout.strip(), asked)(repo)
+    porcelain = git("status", "--porcelain").stdout
+    settled = ship_intent._settled(one, porcelain, "main", ship_intent.run_quiet, "w", gh)
+    assert settled is None and ("pr", "close") not in [a[:2] for a in asked]
+
+
+def test_a_close_github_refused_is_a_failure_the_next_pass_retries(tmp_path):
+    one, repo, git = _landed(tmp_path, "dependabot/npm_and_yarn/x")
+    head = git("rev-parse", "HEAD").stdout.strip()
+    gh_for = _gh_with_pr(head, [], close_code=1)
+    out = ship_intent.ship_one(one, "py", "main", ship_intent.run_quiet, gh_for, NOW)
+    assert out.stage in (ship_intent.FAILED, ship_intent.DEFERRED) and "close" in out.detail
+    assert (repo / ship_intent.INTENT_FILE).exists(), "kept for the retry"
+
+
+@pytest.mark.parametrize(
+    ("branch", "marked", "owned"),
+    [("dependabot/pip/x", False, True), ("agent/x", True, True), ("agent/x", False, False)],
+)
+def test_pass_owned_is_dependabots_branch_or_a_tree_the_pass_cut(tmp_path, branch, marked, owned):
+    one = replace(intent(tmp_path), branch=branch)
+    if marked:
+        (one.tree / ship_intent.fix_reports.ORIGIN_FILE).write_text("x\n", encoding="utf-8")
+    assert ship_intent.pass_owned(one) is owned
+
+
+@pytest.mark.parametrize(
+    ("code", "out"), [(1, ""), (0, "not json"), (0, "{}"), (0, '[{"number": 3}]')]
+)
+def test_open_pr_at_head_is_empty_whenever_gh_cannot_name_one_at_this_head(code, out, tmp_path):
+    gh = lambda *args: subprocess.CompletedProcess(args, code, out, "")
+    assert ship_intent.open_pr_at_head(tmp_path, "b", Runner(), gh) == ""
+
+
+def test_a_resolution_the_trunk_does_not_have_is_still_shipped(tmp_path):
+    repo, _git = _resolving(tmp_path, "e")
+    assert not ship_intent.lands_nothing(repo, "main", ship_intent.run_quiet)
+
+
+def test_a_resolution_that_took_the_trunks_side_is_measured_from_the_merged_commit(tmp_path):
+    """The resolver kept `m1`'s `f`, and the trunk has moved `f` on since. Measured from
+    HEAD's fork alone, that reads as the tree's own edit and conflicts with the trunk;
+    the commit will have `MERGE_HEAD` as a parent, so the fork counts it."""
+    repo, _git = _resolving(tmp_path, "c")
+    assert ship_intent.lands_nothing(repo, "main", ship_intent.run_quiet)
+
+
+def test_a_change_off_the_trunk_with_no_merge_in_progress_is_measured_from_the_fork(tmp_path):
+    repo, git = _resolving(tmp_path, "c")
+    git("merge", "--abort")
+    assert not ship_intent.lands_nothing(repo, "main", ship_intent.run_quiet), "f = b"
+    (repo / "f").write_text("d\n", encoding="utf-8")
+    assert ship_intent.lands_nothing(repo, "main", ship_intent.run_quiet)
+
+
+def test_an_edit_in_the_indexs_own_clock_tick_is_still_read(tmp_path):
+    """The probe index is a copy of the real one, and a copy stamped *now* tells git its
+    stat cache postdates every file -- so an edit of the same size, in the tick the index
+    was written in, read as unchanged (flaky here whenever a second ticked over mid-test).
+    Pinned: the index and `f` share one mtime a minute back, as a later pass finds them,
+    and `f` was rewritten at the size and mtime the index records for it."""
+    repo, git = _resolving(tmp_path, "c")
+    git("merge", "--abort")
+    f, index = repo / "f", repo / ".git" / "index"
+    stamp = f.stat().st_mtime_ns - 60 * 10**9
+    os.utime(f, ns=(stamp, stamp))
+    git("update-index", "--really-refresh")  # the index now records `f` at `stamp`
+    f.write_text("d\n", encoding="utf-8")  # the size of the "b" HEAD has
+    for path in (f, index):
+        os.utime(path, ns=(stamp, stamp))
+    assert git("diff-files", "--name-only").stdout.split() == ["f"], "git itself sees it"
+    assert ship_intent.lands_nothing(repo, "main", ship_intent.run_quiet)
+
+
+def test_the_fork_counts_merge_head_only_while_a_merge_is_in_progress(tmp_path):
+    merging = Runner({"git merge-base": (0, "abc\n", "")})
+    ship_intent.lands_nothing(tmp_path, "main", merging)
+    assert ["git", "merge-base", "origin/main", "HEAD", "MERGE_HEAD"] in [
+        c[0] for c in merging.calls
     ]
+    plain = Runner({"git merge-base": (0, "abc\n", "")})
+
+    def not_merging(argv, cwd, env=None):
+        if argv[:2] == ["git", "rev-parse"]:  # `Runner` answers every rev-parse with a sha
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return plain(argv, cwd, env)
+
+    ship_intent.lands_nothing(tmp_path, "main", not_merging)
+    assert ["git", "merge-base", "origin/main", "HEAD"] in [c[0] for c in plain.calls]
 
 
 def test_a_stored_retired_branch_refusal_is_tried_again(tmp_path):
     """The stranded sweep's refusal was recorded before the carry existed; held as "nothing
     has changed", it would never have been retried, and a fixer would have been sent to
-    type the one `git switch -c` the ship step now makes."""
+    type the one fresh name the ship step now makes."""
     one = intent(tmp_path)
     why = "[devkit branch policy] commit blocked: branch 'x' " + ship_intent.RETIRED_MARK
     state = {"stage": ship_intent.REFUSED, "intent": one.digest, "output": why, "step": "commit"}
@@ -568,8 +1352,8 @@ def test_the_retirement_mark_is_the_branch_policys_own_words():
 def test_a_topic_past_its_ninth_branch_is_still_carried(tmp_path):
     """The carry once tried only `-2`..`-9`. The pass cut sixteen
     `agent/fix-harness-ledger-0927` branches in a day, so a fix on the retired base name
-    found every candidate taken and was refused, and a fixer was sent to type the
-    `git switch -c` the carry exists to make."""
+    found every candidate taken and was refused, and a fixer was sent to make the fresh
+    name the carry exists to make."""
     one = intent(tmp_path)
     taken = {"agent/labels-0919"} | {f"agent/labels-0919-{n}" for n in range(2, 17)}
     run = _RetiredBranch(retired={"agent/labels-0919"}, taken=taken)
@@ -588,7 +1372,7 @@ def test_a_retired_suffixed_branch_counts_on_from_its_family(tmp_path):
     run = _RetiredBranch(retired={"agent/labels-0919-14"}, taken=taken, branch=one.branch)
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.SHIPPED
-    assert ["git", "switch", "-c", "agent/labels-0919-15"] in [argv for argv, _c, _e in run.calls]
+    assert ["git", "branch", "agent/labels-0919-15"] in [argv for argv, _c, _e in run.calls]
 
 
 def test_a_retired_branch_whose_every_carry_is_retired_too_is_still_a_refusal(tmp_path):
@@ -599,7 +1383,7 @@ def test_a_retired_branch_whose_every_carry_is_retired_too_is_still_a_refusal(tm
     run = _RetiredBranch(retired=names)
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.REFUSED and "git push" not in run.verbs()
-    assert run.verbs().count("git switch") == ship_intent.CARRIES
+    assert run.verbs().count("git symbolic-ref") == ship_intent.CARRIES
 
 
 def test_the_next_free_name_is_above_every_used_one_not_in_a_gap():
@@ -621,10 +1405,118 @@ def test_the_branch_stem_drops_only_the_collision_suffix():
 
 def test_a_failed_push_is_a_failure_not_a_refusal_and_leaves_no_refused_state(tmp_path):
     one = intent(tmp_path)
-    run = Runner({"git push": (1, "", "could not resolve host")})
+    run = Runner({"git push": (1, "", "Permission denied (publickey)")})
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.FAILED and "push" in out.detail
-    assert ship_intent.read_state(one.tree) == {}
+    state = ship_intent.read_state(one.tree)
+    assert state["stage"] == ship_intent.FAILED, "recorded, and not as a refusal to cache"
+    assert state["step"] == "push" and "Permission denied" in state["output"]
+    assert state["intent"] == one.digest and state["when"] == NOW.isoformat(timespec="seconds")
+    assert ship_intent.still_refused(one, state, "") is None
+    assert run.verbs().count("git push") == 1, "a refusal is not asked again"
+
+
+class Flaky(Runner):
+    """A `Runner` whose `git push` fails `errors` times, in order, then goes through."""
+
+    def __init__(self, *errors: str):
+        super().__init__()
+        self.errors = list(errors)
+
+    def __call__(self, argv, cwd, env=None):
+        if argv[:2] == ["git", "push"] and self.errors:
+            self.calls.append(([str(a) for a in argv], Path(cwd), env))
+            return subprocess.CompletedProcess(argv, 1, "", self.errors.pop(0))
+        return super().__call__(argv, cwd, env)
+
+
+GITHUB_500 = "remote: Internal Server Error\nremote: Request ID CF97:30974F\n! [remote rejected]"
+
+
+def test_a_push_github_failed_on_its_side_is_asked_again_in_the_pass(tmp_path, monkeypatch):
+    """4d942641: one `remote: Internal Server Error` filed a ship as a harness defect."""
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    run = Flaky(GITHUB_500)
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert waited == [ship_intent.GITHUB_RETRY_SECONDS[0]]
+    assert run.verbs().count("git push") == 2
+
+
+def test_a_pr_github_failed_on_its_side_is_deferred_not_failed(tmp_path, monkeypatch):
+    """a0287c8b: an `HTTP 500` from the labels endpoint, past every retry, reads
+    `deferred` -- which the pass does not file -- and the next pass tries again."""
+    waited: list[float] = []
+    monkeypatch.setattr(ship_intent, "_wait", waited.append)
+    answer = "HTTP 500 (https://api.github.com/repos/o/devkit/labels/automerge)"
+    asked: list[str] = []
+    monkeypatch.setattr(
+        ship_intent.sweep, "ensure_pr", lambda gh, plan: asked.append("pr") or ("", False, answer)
+    )
+    one = intent(tmp_path)
+    out = ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    assert (out.stage, out.detail) == (ship_intent.DEFERRED, f"pr: {answer}")
+    assert len(asked) == 1 + len(ship_intent.GITHUB_RETRY_SECONDS)
+    assert waited == list(ship_intent.GITHUB_RETRY_SECONDS)
+    state = ship_intent.read_state(one.tree)
+    assert state["stage"] == ship_intent.FAILED, "the state still reads as a ship to retry"
+    assert state["since"] == NOW.isoformat(timespec="seconds")
+    assert (one.tree / ship_intent.INTENT_FILE).exists()
+
+
+def test_a_transient_failure_that_lasts_past_the_grace_is_failed_after_all(tmp_path, monkeypatch):
+    """GitHub is not down for six hours; a "server error" that lasts that long is
+    something about the request, and is filed like any other failure."""
+    monkeypatch.setattr(ship_intent, "_wait", lambda seconds: None)
+    one = intent(tmp_path)
+    run = Runner({"git push": (1, "", GITHUB_500)})
+    first = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert first.stage == ship_intent.DEFERRED
+    later = NOW + ship_intent.TRANSIENT_GRACE - _dt.timedelta(minutes=1)
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, later).stage == ship_intent.DEFERRED
+    assert ship_intent.read_state(one.tree)["since"] == NOW.isoformat(timespec="seconds")
+    past = NOW + ship_intent.TRANSIENT_GRACE
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, past).stage == ship_intent.FAILED
+
+
+def test_a_new_intent_starts_its_own_grace(tmp_path, monkeypatch):
+    """`since` belongs to one intent: a fresh one after a long-failing one is not filed on
+    its first transient failure."""
+    monkeypatch.setattr(ship_intent, "_wait", lambda seconds: None)
+    one = intent(tmp_path)
+    old = {"stage": ship_intent.FAILED, "intent": "older", "since": "2026-09-01T00:00:00+00:00"}
+    ship_intent.write_state(one.tree, old)
+    run = Runner({"git push": (1, "", GITHUB_500)})
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.DEFERRED
+
+
+def test_a_push_that_failed_saying_nothing_is_named_by_its_exit_code(tmp_path):
+    one = intent(tmp_path)
+    out = ship_intent.ship_one(one, "py", "main", Runner({"git push": (1, "", "")}), gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED and out.detail == "push: exit 1"
+
+
+def test_a_push_refused_over_an_earlier_ship_is_pushed_again_next_pass(tmp_path, monkeypatch):
+    """436fc0c8: the tree's last ship read `shipped`, this one's push was refused, and the
+    next pass read a clean tree over that old `shipped` as already shipped -- the intent
+    set aside, its commit never pushed."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": "older"})
+    refused = Runner({"git push": (1, "", "! [rejected] (non-fast-forward)")})
+    assert ship_intent.ship_one(one, "py", "main", refused, gh_ok, NOW).stage == ship_intent.FAILED
+    again = Runner(porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git push" in again.verbs()
+
+
+def test_a_branch_origin_does_not_have_yet_needs_no_catching_up(tmp_path):
+    """A first push: the fetch finds no such ref, and nothing is compared or merged."""
+    run = Runner({"git fetch": (128, "", "fatal: couldn't find remote ref agent/x")})
+    assert ship_intent.catch_up(tmp_path, "agent/x", run) == ""
+    assert run.verbs() == ["git fetch"]
 
 
 def test_a_pr_that_could_not_be_opened_is_a_failure_to_retry(tmp_path, monkeypatch):
@@ -632,6 +1524,34 @@ def test_a_pr_that_could_not_be_opened_is_a_failure_to_retry(tmp_path, monkeypat
     monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("", False, "no auth"))
     out = ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
     assert out.stage == ship_intent.FAILED and "no auth" in out.detail
+
+
+def test_a_pr_the_pass_s_deadline_left_unopened_is_held_not_failed(tmp_path, monkeypatch):
+    """19834a2e: #710 reached its PR past the deadline, `sweep` answered "not started",
+    and the branch was filed as a failed ship the next pass cleared unaided."""
+    one = intent(tmp_path)
+    said = "not started: past the caller's deadline"
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("", False, said))
+    with ship_intent.sweep.until(time.monotonic() - 1):
+        with pytest.raises(ship_intent.OutOfTime) as stopped:
+            ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    assert not stopped.value.ended and said in str(stopped.value)
+
+
+def test_past_until_reads_the_deadline_in_force():
+    assert not ship_intent.sweep.past_until(), "no deadline, nothing past it"
+    with ship_intent.sweep.until(time.monotonic() - 1):
+        assert ship_intent.sweep.past_until()
+    with ship_intent.sweep.until(time.monotonic() + 600):
+        assert not ship_intent.sweep.past_until()
+
+
+def test_a_pr_that_failed_in_time_is_not_taken_for_the_deadline(tmp_path, monkeypatch):
+    one = intent(tmp_path)
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("", False, "no auth"))
+    with ship_intent.sweep.until(time.monotonic() + 600):
+        out = ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED
 
 
 def test_an_intent_already_shipped_with_a_clean_tree_is_not_shipped_twice(tmp_path, monkeypatch):
@@ -642,7 +1562,9 @@ def test_an_intent_already_shipped_with_a_clean_tree_is_not_shipped_twice(tmp_pa
     )
     again = Runner(porcelain="")
     assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SKIPPED
-    assert again.verbs() == ["git status"]
+    assert again.verbs() == ["git status", "git rev-parse", "git rev-parse"], (
+        "no merge in progress, and HEAD is still the shipped sha"
+    )
 
 
 def test_an_intent_left_over_from_a_ship_is_set_aside_and_said_once(tmp_path, monkeypatch):
@@ -670,7 +1592,55 @@ def test_a_rewritten_intent_on_a_clean_shipped_tree_is_nothing_to_ship(tmp_path,
     two = intent(tmp_path, body="Rewritten.")
     run = Runner(porcelain="")
     assert ship_intent.ship_one(two, "py", "main", run, gh_ok, NOW).stage == ship_intent.SKIPPED
-    assert run.verbs() == ["git status"]
+    assert run.verbs() == ["git status", "git rev-parse", "git rev-parse"]
+
+
+class Merging(Runner):
+    """A `Runner` whose tree is mid-merge: `--git-path MERGE_HEAD` names a file that exists."""
+
+    def __init__(self, merge_head: Path, **kwargs):
+        super().__init__(**kwargs)
+        self.merge_head = merge_head
+
+    def __call__(self, argv, cwd, env=None):
+        if argv[:4] == ["git", "rev-parse", "--git-path", "MERGE_HEAD"]:
+            self.calls.append(([str(a) for a in argv], Path(cwd), env))
+            return subprocess.CompletedProcess(argv, 0, f"{self.merge_head}\n", "")
+        return super().__call__(argv, cwd, env)
+
+
+def test_a_merge_that_changes_no_file_is_committed_not_read_as_shipped(tmp_path, monkeypatch):
+    """#538: its resolver merged origin/main in, the merge changed no file (main's side was
+    already in through a criss-cross), and the pass read the clean tree at the shipped sha
+    as "already shipped" -- the merge parent that would have cleared GitHub's conflict
+    was set aside with the intent."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    shipped = {"stage": ship_intent.SHIPPED, "intent": one.digest, "sha": "abc123"}
+    ship_intent.write_state(one.tree, shipped)
+    merge_head = tmp_path / "MERGE_HEAD"
+    merge_head.write_text("78f8e03\n", encoding="utf-8")
+    assert not ship_intent.is_spent(one, Merging(merge_head, porcelain=""))
+    run = Merging(merge_head, porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    verbs = run.verbs()
+    assert "git commit" in verbs and verbs.index("git commit") < verbs.index("git push")
+    merge_head.unlink()
+    assert ship_intent.is_spent(one, Merging(merge_head, porcelain=""))
+
+
+def test_merging_is_whether_merge_head_exists_and_unknown_is_no(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    assert not ship_intent.merging(repo, ship_intent.run_quiet)
+    (repo / ".git" / "MERGE_HEAD").write_text("abc\n", encoding="utf-8")
+    assert ship_intent.merging(repo, ship_intent.run_quiet)
+
+    def refused(argv, cwd, env=None):
+        return subprocess.CompletedProcess(argv, 128, "", "fatal: not a git repository")
+
+    assert not ship_intent.merging(tmp_path, refused)
 
 
 def test_a_clean_tree_whose_last_ship_failed_still_pushes(tmp_path, monkeypatch):
@@ -684,6 +1654,102 @@ def test_a_clean_tree_whose_last_ship_failed_still_pushes(tmp_path, monkeypatch)
     assert "git commit" not in run.verbs() and "git push" in run.verbs()
 
 
+def test_a_failed_push_is_recorded_so_an_older_ship_cannot_hide_its_commit(tmp_path, monkeypatch):
+    """3ae36740 (#463): the commit landed, the push was refused, and nothing was written,
+    so `ship-state.json` still said `shipped` for an older sha. The next pass read the
+    clean tree as that ship and set the intent aside; the fix never reached origin."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": one.digest})
+    refused = Runner({"git push": (1, "", "! [rejected] (non-fast-forward)")})
+    out = ship_intent.ship_one(one, "py", "main", refused, gh_ok, NOW)
+    assert out.stage == ship_intent.FAILED and "non-fast-forward" in out.detail
+    state = ship_intent.read_state(one.tree)
+    assert (state["stage"], state["step"], state["intent"]) == ("failed", "push", one.digest)
+    again = Runner(porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", again, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git push" in again.verbs()
+
+
+def test_a_pr_that_failed_after_the_push_is_recorded_too(tmp_path, monkeypatch):
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": one.digest})
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("", False, "no auth"))
+    ship_intent.ship_one(one, "py", "main", Runner(), gh_ok, NOW)
+    assert ship_intent.read_state(one.tree)["step"] == "pr"
+
+
+def test_a_clean_tree_whose_head_moved_past_its_ship_still_pushes(tmp_path, monkeypatch):
+    """The tree #463's reporter left: `shipped` at 035c6b7, HEAD two commits on and
+    neither on origin. A record of a ship is a record of *that* sha."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    stale = {"stage": ship_intent.SHIPPED, "intent": one.digest, "sha": "035c6b7"}
+    ship_intent.write_state(one.tree, stale)
+    assert not ship_intent.is_spent(one, Runner(porcelain=""))
+    run = Runner(porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git push" in run.verbs()
+    assert not ship_intent.already_shipped(one, stale, "", head="abc123")
+    assert ship_intent.already_shipped(one, {**stale, "sha": "abc123"}, "", head="abc123")
+
+
+def test_origin_moved_ahead_of_the_tree_is_merged_before_the_push(tmp_path, monkeypatch):
+    """#463 again: GitHub merged main into the PR 24 times while the tree held a commit
+    of its own, so every push was refused non-fast-forward. Merged first, it goes."""
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    run = Runner({"git merge-base": (1, "", "")}, porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    argv = [call[0] for call in run.calls]
+    remote = "refs/remotes/origin/agent/labels-0919"
+    fetch = ["git", "fetch", "--quiet", "origin", f"+refs/heads/agent/labels-0919:{remote}"]
+    assert fetch in argv
+    assert ["git", "merge-base", "--is-ancestor", remote, "HEAD"] in argv
+    merge = ["git", "merge", "--no-edit", remote]
+    assert argv.index(merge) < argv.index(["git", "push", "-u", "origin", "agent/labels-0919"])
+
+
+def test_a_head_that_does_not_merge_is_a_refusal_a_fixer_is_sent_at(tmp_path, monkeypatch):
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    run = Runner(
+        {"git merge-base": (1, "", ""), "git merge": (1, "CONFLICT (content): a.py", "")},
+        porcelain="",
+    )
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.REFUSED and "CONFLICT" in out.detail
+    assert ["git", "merge", "--abort"] in [call[0] for call in run.calls]
+    assert "git push" not in run.verbs()
+    assert ship_intent.read_state(one.tree)["step"] == "merge"
+
+
+def test_catch_up_merges_only_what_origin_has_that_head_lacks(tmp_path):
+    behind = Runner({"git merge-base": (1, "", "")})
+    assert ship_intent.catch_up(tmp_path, "b", behind) == ""
+    assert ["git", "merge", "--no-edit", "refs/remotes/origin/b"] in [c[0] for c in behind.calls]
+    unknown = Runner({"git merge-base": (128, "", "not a commit")})
+    assert ship_intent.catch_up(tmp_path, "b", unknown) == ""
+    assert "git merge" not in unknown.verbs(), "git could not say: push as before"
+    conflict = Runner({"git merge-base": (1, "", ""), "git merge": (1, "CONFLICT (content)", "")})
+    said = ship_intent.catch_up(tmp_path, "b", conflict)
+    assert said.startswith("origin/b moved") and "CONFLICT" in said
+    assert conflict.calls[-1][0] == ["git", "merge", "--abort"]
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [{"git fetch": (128, "", "couldn't find remote ref")}, {"git merge-base": (0, "", "")}],
+    ids=["first push", "origin already in HEAD"],
+)
+def test_nothing_is_merged_when_origin_has_nothing_the_tree_lacks(tmp_path, monkeypatch, answers):
+    monkeypatch.setattr(ship_intent.sweep, "ensure_pr", lambda gh, plan: ("u", True, ""))
+    one = intent(tmp_path)
+    run = Runner(answers, porcelain="")
+    assert ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW).stage == ship_intent.SHIPPED
+    assert "git merge" not in run.verbs()
+
+
 def test_a_clean_tree_with_nothing_committed_opens_no_pr_and_sets_the_intent_aside(
     tmp_path, monkeypatch
 ):
@@ -695,12 +1761,54 @@ def test_a_clean_tree_with_nothing_committed_opens_no_pr_and_sets_the_intent_asi
     run = Runner({"git rev-list": (0, "0\n", "")}, porcelain="")
     out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
     assert out.stage == ship_intent.EMPTY and plans == []
-    assert run.verbs() == ["git status", "git rev-list"]
-    assert run.calls[1][0] == ["git", "rev-list", "--count", "origin/main..HEAD"]
+    assert run.verbs() == ["git status", "git rev-parse", "git fetch", "git rev-list"]
+    assert run.calls[1][0] == ["git", "rev-parse", "--git-path", "MERGE_HEAD"], "no merge"
+    assert run.calls[3][0] == ["git", "rev-list", "--count", "origin/main..HEAD"]
     assert not (one.tree / ship_intent.INTENT_FILE).exists()
     assert (one.tree / ship_intent.SHIPPED_FILE).is_file(), "the session's outcome, kept"
     state = ship_intent.read_state(one.tree)
     assert state["stage"] == ship_intent.EMPTY and state["intent"] == one.digest
+
+
+class StaleBase(Runner):
+    """A tree whose `origin/main` predates the merge of its own commits: two ahead until
+    the base is fetched, level with it after."""
+
+    def __init__(self):
+        super().__init__(porcelain="")
+        self.fetched = False
+
+    def __call__(self, argv, cwd, env=None):
+        if argv[:2] == ["git", "fetch"] and argv[-1] == "+refs/heads/main:refs/remotes/origin/main":
+            self.fetched = True
+        if argv[:2] == ["git", "rev-list"]:
+            self.calls.append(([str(a) for a in argv], Path(cwd), env))
+            return subprocess.CompletedProcess(argv, 0, "0\n" if self.fetched else "2\n", "")
+        return super().__call__(argv, cwd, env)
+
+
+def test_a_branch_merged_since_the_last_fetch_is_nothing_to_ship(tmp_path, monkeypatch):
+    """07c1172a: data-lake's tree pushed its commit by hand and #55 merged it; the next
+    pass read a stale `origin/main`, counted two commits ahead, and `gh pr create`
+    refused the branch ("No commits between main and ...") as a `ship-failed`."""
+    plans = capture_plans(monkeypatch)
+    one = intent(tmp_path)
+    run = StaleBase()
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.EMPTY and plans == []
+    assert "git push" not in run.verbs()
+
+
+def test_refresh_base_fetches_only_the_base_into_its_remote_ref(tmp_path):
+    run = Runner({"git fetch": (128, "", "could not resolve host")})
+    ship_intent.refresh_base(tmp_path, "master", run)
+    assert run.calls == [
+        (
+            ["git", "fetch", "--quiet", "origin", "+refs/heads/master:refs/remotes/origin/master"],
+            tmp_path,
+            None,
+        )
+    ], "a failed fetch is not a raise: the stale ref answers as before"
 
 
 @pytest.mark.parametrize(
@@ -715,6 +1823,177 @@ def test_a_clean_tree_with_nothing_committed_opens_no_pr_and_sets_the_intent_asi
 def test_commits_ahead_is_none_whenever_git_cannot_say(tmp_path, answer, ahead):
     """Unknown is not zero: a tree with no `origin/<base>` still ships as before."""
     assert ship_intent.commits_ahead(tmp_path, "main", Runner({"git rev-list": answer})) == ahead
+
+
+def _git(cwd: Path, *args: str) -> str:
+    done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+def _commit(repo: Path, files: dict[str, str], message: str) -> str:
+    for name, text in files.items():
+        (repo / name).write_text(text, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def merged_elsewhere(tmp_path):
+    """carameli's minor-and-patch tree (e21febb8): a Dependabot branch one commit ahead of
+    the base it was cut from, merging its base in with the result staged, while the PR
+    landed on origin as a squash and origin moved on past it (#419's locks)."""
+    repo = tmp_path / "tree"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    hooks = tmp_path / "no-hooks"
+    hooks.mkdir()
+    for key, value in (
+        ("user.email", "t@t"),
+        ("user.name", "t"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", str(hooks)),
+        ("core.autocrlf", "false"),
+        ("merge.conflictstyle", "merge"),
+    ):
+        _git(repo, "config", key, value)
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+    (repo / ".gitignore").write_text("logs/\n", encoding="utf-8")
+    _commit(repo, {"package.json": "1\n", "reqs.txt": "a\n"}, "cut")
+    _git(repo, "switch", "-q", "-c", "theirs")
+    _commit(repo, {"package.json": "2-rebased\n"}, "rebased upstream")
+    landed = _commit(repo, {"reqs.txt": "b\n"}, "the locks")
+    _git(repo, "switch", "-q", "main")
+    _git(repo, "switch", "-q", "-c", "dependabot/x")
+    _commit(repo, {"package.json": "2\n"}, "bump")
+    done = subprocess.run(["git", "merge", "theirs~1"], cwd=repo, capture_output=True, text=True)
+    assert done.returncode == 1, "the conflict the fixer was resolving"
+    (repo / "package.json").write_text("2-rebased\n", encoding="utf-8")
+    _git(repo, "add", "package.json")
+    _git(repo, "update-ref", "refs/remotes/origin/main", landed)
+    return repo
+
+
+def test_a_tree_whose_every_change_is_already_on_its_base_lands_nothing(merged_elsewhere):
+    """It was dirty and one commit ahead, so it read as work: the commit stage ran, was
+    refused on the retired name, and a fixer was sent at a refusal its own intent had
+    already called nothing to ship (e21febb8)."""
+    repo = merged_elsewhere
+    staged = _git(repo, "diff", "--cached", "--name-status")
+    assert ship_intent.lands_nothing(repo, "main", ship_intent.run_quiet)
+    assert _git(repo, "diff", "--cached", "--name-status") == staged, "the real index is untouched"
+    assert (repo / ".git" / "MERGE_HEAD").is_file()
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [{"package.json": "3\n"}, {"new.py": "x = 1\n"}],
+    ids=["an edit origin lacks", "an untracked file"],
+)
+def test_anything_origin_lacks_is_something_to_land(merged_elsewhere, edit):
+    for name, text in edit.items():
+        (merged_elsewhere / name).write_text(text, encoding="utf-8")
+    assert not ship_intent.lands_nothing(merged_elsewhere, "main", ship_intent.run_quiet)
+
+
+def test_a_commit_origin_lacks_is_something_to_land(merged_elsewhere):
+    _git(merged_elsewhere, "commit", "-q", "-m", "the merge")
+    _commit(merged_elsewhere, {"more.txt": "new\n"}, "more")
+    assert not ship_intent.lands_nothing(merged_elsewhere, "main", ship_intent.run_quiet)
+
+
+def test_lands_nothing_is_false_whenever_git_cannot_say(merged_elsewhere, tmp_path):
+    """Unknown is not empty: no `origin/<base>`, or no repository at all, ships as before."""
+    assert not ship_intent.lands_nothing(merged_elsewhere, "trunk", ship_intent.run_quiet)
+    assert not ship_intent.lands_nothing(tmp_path, "main", ship_intent.run_quiet)
+    assert not ship_intent.lands_nothing(merged_elsewhere, "main", Runner())
+
+
+def test_a_dirty_tree_with_nothing_to_land_is_set_aside_before_the_commit_stage(
+    tmp_path, monkeypatch
+):
+    """The intent said "Nothing to ship", and the pass ran the fixers and the commit over
+    it anyway; refused on the retired name, it sent a second fixer to say so again."""
+    plans = capture_plans(monkeypatch)
+    one = intent(tmp_path, subject="Nothing to ship: the bump merged as #418")
+    asked = []
+    monkeypatch.setattr(
+        ship_intent, "lands_nothing", lambda tree, base, runner: asked.append(base) or True
+    )
+    run = Runner({"git rev-list": (0, "1\n", "")}, porcelain="M  package.json\n")
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.EMPTY and plans == [] and asked == ["main"]
+    assert "git add" not in run.verbs() and "git commit" not in run.verbs()
+    assert not (one.tree / ship_intent.INTENT_FILE).exists()
+    assert (one.tree / ship_intent.SHIPPED_FILE).is_file()
+    assert ship_intent.read_state(one.tree)["stage"] == ship_intent.EMPTY
+
+
+def test_a_retired_name_is_carried_off_in_the_middle_of_a_merge(merged_elsewhere):
+    """`git switch -c` refuses while a merge is in progress ("cannot switch branch while
+    merging"), so the carry failed in exactly the tree that needed it, and `git checkout
+    -b` would drop the merge's second parent. Re-pointing HEAD keeps both."""
+    repo = merged_elsewhere
+    (repo / "package.json").write_text("3\n", encoding="utf-8")
+    one = ship_intent.Intent("carameli", repo, "dependabot/x", "S", "")
+    moved = ship_intent._carry_to_free_branch(one, "dependabot/x", ship_intent.run_quiet, set())
+    assert isinstance(moved, ship_intent.Intent) and moved.branch == "dependabot/x-2"
+    assert _git(repo, "branch", "--show-current") == "dependabot/x-2"
+    assert (repo / ".git" / "MERGE_HEAD").is_file()
+    _git(repo, "commit", "-q", "-a", "--no-edit")
+    assert len(_git(repo, "log", "-1", "--format=%P").split()) == 2
+    refused = Runner({"git branch": (128, "", "fatal: not a valid branch name")})
+    said = ship_intent._carry_to_free_branch(one, "dependabot/x", refused, set())
+    assert said == "`git branch dependabot/x-2`: fatal: not a valid branch name"
+    assert "git symbolic-ref" not in refused.verbs(), "HEAD is never pointed at no branch"
+
+
+def test_a_tree_git_will_not_read_is_a_failure_never_a_clean_tree(tmp_path):
+    """The supervisor's second intent, over 19 modified files, was set aside as "already
+    shipped at this intent": git refused the Administrators-owned tree, its empty stdout
+    read as a clean one, and a shipped state from the first intent did the rest. The
+    work sat uncommitted with its intent renamed away."""
+    one = intent(tmp_path)
+    ship_intent.write_state(one.tree, {"stage": ship_intent.SHIPPED, "intent": "old"})
+    refusal = "fatal: detected dubious ownership in repository at 'C:/w/t'\nTo add ...\n"
+
+    def refused(argv, cwd, env=None):
+        return subprocess.CompletedProcess(argv, 128, "", refusal)
+
+    outcome = ship_intent.ship_one(one, "py", "main", refused, gh_ok, NOW)
+    assert outcome.stage == ship_intent.FAILED
+    assert outcome.detail == (
+        "status: git could not read the tree: "
+        "fatal: detected dubious ownership in repository at 'C:/w/t'"
+    )
+    assert (one.tree / ship_intent.INTENT_FILE).is_file(), "kept for the next pass"
+    assert not (one.tree / ship_intent.SHIPPED_FILE).exists()
+    assert ship_intent.is_spent(one, refused) is False, "a plan pass says it would ship"
+
+
+def test_retired_at_is_when_the_names_last_pr_merged(tmp_path):
+    """The line after which a resolution naming a retired branch can only mean the work
+    carried off it -- the same line `fix_verify.relevant` draws. It was the merge-base's
+    commit time, which moves on whenever the branch merges its base in: the supervisor's
+    carry re-pointed nothing, its resolutions being older than main's newest merge."""
+    asked = []
+    merged = '[{"mergedAt": "2026-09-28T13:33:19Z"}, {"mergedAt": "2026-09-29T22:21:55Z"}]'
+
+    def gh_for(tree):
+        def gh(*args):
+            asked.append((tree, args))
+            return subprocess.CompletedProcess(["gh", *args], 0, merged, "")
+
+        return gh
+
+    assert ship_intent.retired_at(tmp_path, "agent/x", gh_for) == "2026-09-29T22:21:55Z"
+    assert asked == [
+        (tmp_path, ("pr", "list", "--head", "agent/x", "--state", "merged", "--json", "mergedAt"))
+    ]
+    refused = lambda tree: lambda *a: subprocess.CompletedProcess(a, 1, "", "no")
+    assert ship_intent.retired_at(tmp_path, "agent/x", refused) == ""
+    empty = lambda tree: lambda *a: subprocess.CompletedProcess(a, 0, "[]", "")
+    assert ship_intent.retired_at(tmp_path, "agent/x", empty) == ""
 
 
 def test_a_clean_tree_git_cannot_count_still_pushes(tmp_path, monkeypatch):
@@ -897,6 +2176,18 @@ def test_a_refusal_is_named_by_the_line_that_says_why():
     assert len(ship_intent.refusal_line("x Failed " + "y" * 500)) == 160
 
 
+def test_a_refusals_reason_is_the_same_line_as_the_hook_wrote_it():
+    """The signature normalises numbers and shas; a reader of the record needs neither
+    lost. Same line `refusal_line` picks, so the two never name different causes."""
+    output = "Detect secrets......Failed\n- hook id: detect-secrets\nline 141 in deadbeef12\n"
+    assert ship_intent.refusal_reason(output) == "Detect secrets......Failed"
+    assert ship_intent.refusal_line(output) == ship_intent.refusal_reason(output)
+    numbered = "test_x_2 failed at deadbeef12\n"
+    assert ship_intent.refusal_reason(numbered) == "test_x_2 failed at deadbeef12"
+    assert ship_intent.refusal_line(numbered) == "test_x_N failed at <sha>"
+    assert ship_intent.refusal_reason("") == ""
+
+
 def test_a_branch_policy_refusal_is_named_by_its_reason_not_its_details_pointer():
     """b4b33191: the policy says "commit blocked", which matched nothing, so the line
     kept was the last -- `details: <path>`, a file the next hook run rewrites -- and the
@@ -929,7 +2220,11 @@ def test_a_refusal_nothing_has_changed_since_is_not_run_again(tmp_path):
         outcome.stage == ship_intent.REFUSED
         and outcome.detail == "fixers: Detect secrets....Failed"
     )
-    assert run.verbs() == ["git status"], "no fixers, no commit: the stored refusal stands"
+    # Asked first whether the work has landed on the base since -- a refusal of work
+    # that merged elsewhere is nothing to hold (e21febb8) -- and then held, unrun.
+    assert run.verbs() == ["git status", "git fetch", "git rev-parse", "git merge-base"], (
+        "no fixers, no commit: the stored refusal stands"
+    )
     moved = Runner(porcelain=" M a.py\n M b.py\n")
     assert ship_intent.still_refused(one, ship_intent.read_state(one.tree), " M b.py\n") is None
     ship_intent.ship_one(one, "py", "main", moved, gh_ok, NOW)
@@ -942,10 +2237,9 @@ def test_a_refusal_nothing_has_changed_since_is_not_run_again(tmp_path):
     )
 
 
-def test_a_pr_from_a_tree_the_pass_cut_merges_itself_and_a_persons_waits(tmp_path, monkeypatch):
-    """Fixer PRs merge once green; only a person's PR waits for a person. The mark is the
-    tree's origin, not the dispatch stamp: a fixer sent to repair a person's PR stamps
-    that person's tree, and `ensure_pr` labels a reused PR too."""
+def test_a_pr_from_a_tree_the_pass_cut_merges_itself_and_so_does_a_persons(tmp_path, monkeypatch):
+    """Every unheld PR merges once green, whoever's tree it came from: the mark of the
+    tree's origin now decides only who may close it (`pass_owned`), not how it merges."""
     plans = capture_plans(monkeypatch)
     fixer = intent(tmp_path / "fixer")
 
@@ -954,5 +2248,6 @@ def test_a_pr_from_a_tree_the_pass_cut_merges_itself_and_a_persons_waits(tmp_pat
     person = intent(tmp_path / "person")
     ship_intent.fix_reports.stamp(person.tree, "pr:devkit:404:a:d:dispatch", "n", NOW)
     ship_intent.ship_one(person, "py", "main", Runner(), gh_ok, NOW)
-    assert [p.pr_labels for p in plans] == [(ship_intent.sweep.AUTOMERGE_LABEL,), ()]
-    assert ship_intent.labels_for(person.tree) == ()
+    label = (ship_intent.sweep.AUTOMERGE_LABEL,)
+    assert [p.pr_labels for p in plans] == [label, label]
+    assert ship_intent.pass_cut(fixer.tree) and not ship_intent.pass_cut(person.tree)

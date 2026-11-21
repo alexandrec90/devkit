@@ -3,8 +3,10 @@
 The tree half of `scripts/fix-prs.py`, split out along the section header that module
 already drew. `existing_tree` finds a tree already holding the PR's head branch,
 `cut_tree` cuts one under `.claude/worktrees/` when nothing does, `cut_fresh_tree`
-cuts a new branch for a failure that has none, and `provision_tree`
-installs the toolchain into whichever came back without one. Where a worktree for a
+cuts a new branch for a failure that has none, `provision_tree`
+installs the toolchain into whichever came back without one, `locked_caches` names
+what an elevated session left in it that the fixer cannot open, and `provenance` says
+who made a reused one. Where a worktree for a
 branch goes and what git is asked to do are `scripts/agent_worktrees.py`'s; a matching
 live box is `worktree.py`'s, reused and never leased from here.
 
@@ -14,13 +16,17 @@ Every function here is tested in `tests/test_fix_prs.py` (see `COVERED_BY` in
 
 from __future__ import annotations
 
-import subprocess
+import json
+import os
 import sys
 from pathlib import Path
 
 import agent_worktrees as aw
+import fix_reports
+import ship_intent
 import stray_worktree as stray
 import sweep
+import tree_provision
 import worktree
 
 # `project_python.VENV_DIR`, spelled out rather than imported: the fix pass is a
@@ -28,6 +34,10 @@ import worktree
 # cannot take `NO_WINDOW` -- in the set `tests/test_scheduled_jobs.py` checks, for a
 # string. `worktree.plan_provision` writes the same literal.
 VENV_DIR = ".venv"
+
+# A tool cache an elevated run leaves owner-only (`locked_caches`), and the environment
+# variable that sends that tool's next run somewhere else.
+LOCKABLE = {".pytest_cache": "PYTEST_ADDOPTS=-p no:cacheprovider"}
 
 
 def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
@@ -57,7 +67,7 @@ def existing_tree(project_dir: Path, branch: str) -> tuple[Path | None, str]:
     return Path(held), ""
 
 
-def cut_tree(project_dir: Path, branch: str, runner=subprocess.run) -> Path | None:
+def cut_tree(project_dir: Path, branch: str, runner=sweep.run_windowless) -> Path | None:
     """Cut a default-tier worktree on the PR's own head branch. None when git refused.
 
     The fetch first is `agent-worktree.create`'s and for its reason: a checkout that has
@@ -94,11 +104,14 @@ def provision_tree(
     `claude --worktree` -- which cut most of the trees `existing_tree` reuses -- installs
     anything. So every fixer opened in a checkout that could not run its own tests or
     linter, and spent its first turns on `uv sync` before it could verify the fix it
-    was sent for. A tree that already has a `.venv` is left alone: a reused one may hold
-    a session still working, and a warm `uv sync` there buys nothing. A failed install
-    is a note, not a refusal -- the fixer is told to close that gap itself.
+    was sent for. A tree that already has a `.venv` is left alone, since a reused one may
+    hold a session still working and a warm `uv sync` there buys nothing. The exception
+    is a frontend tier whose `node_modules` holds no finished install
+    (`tree_provision.frontend_missing`): installing into an empty directory takes nothing
+    away from anyone. A failed install is a note, not a refusal -- the fixer is told to
+    close that gap itself.
     """
-    if (tree / VENV_DIR).is_dir():
+    if (tree / VENV_DIR).is_dir() and not tree_provision.frontend_missing(tree):
         return []
     steps = plan(tree)
     if not steps:
@@ -107,20 +120,176 @@ def provision_tree(
     return notes
 
 
+def locked_caches(tree: Path, opener=os.scandir) -> dict[str, str]:
+    """The entries of `LOCKABLE` at `tree`'s root this process may not even open, each
+    with the setting that routes around it.
+
+    Python's `mkdtemp` makes a directory owner-only, and pytest makes its cache with it,
+    so a reused tree an *elevated* session ran pytest in holds a `.pytest_cache` whose
+    owner is Administrators -- deny-only in the pass's token and in the fixer's. Nothing
+    unelevated can open, rename or delete it (probed: `os.rename` in place is refused
+    too), so it cannot be cleared from here; the fixer is told instead, or it spends
+    turns finding `WinError 5` (sports_betting #48's, 2026-09-29). ruff and mypy make
+    theirs with a plain `mkdir`, which inherits the tree's ACL, so they are not listed.
+    """
+    locked: dict[str, str] = {}
+    for name, setting in LOCKABLE.items():
+        try:
+            with opener(tree / name):
+                pass
+        except PermissionError:
+            locked[name] = setting
+        except OSError:
+            continue
+    return locked
+
+
+# The well-known SID of `BUILTIN\Administrators`, which owns what an elevated process
+# creates on Windows (see `git_trust.py`).
+ADMINISTRATORS_SID = "S-1-5-32-544"
+
+
+def owner_sid(path: Path) -> str:
+    """The string SID of `path`'s owner; "" off Windows or when it cannot be read.
+
+    `sys.platform` for the reason `wt_profile.is_elevated` gives: it is the spelling of
+    "not Windows" mypy narrows on the Linux CI, where `ctypes.windll` does not exist.
+    """
+    if sys.platform != "win32":
+        return ""
+    import ctypes
+
+    advapi32, kernel32 = ctypes.windll.advapi32, ctypes.windll.kernel32
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    owner, descriptor, text = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    # SE_FILE_OBJECT (1), OWNER_SECURITY_INFORMATION (1); the owner points into the
+    # descriptor, which is the one allocation to free.
+    failed = advapi32.GetNamedSecurityInfoW(
+        str(path), 1, 1, ctypes.byref(owner), None, None, None, ctypes.byref(descriptor)
+    )
+    if failed:
+        return ""
+    try:
+        if not advapi32.ConvertSidToStringSidW(owner, ctypes.byref(text)) or not text.value:
+            return ""
+        try:
+            return ctypes.wstring_at(text.value)
+        finally:
+            kernel32.LocalFree(text)
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def provenance(tree: Path, owner=owner_sid) -> str:
+    """Who made a tree the pass is reusing, as its fixer is told; always a sentence.
+
+    `existing_tree` hands a fixer whichever tree holds the PR's head, and that is often
+    an operator's own `claude --worktree` checkout, elevated on this machine. Nothing
+    said so, and two devkit sessions each spent about eight calls proving that the
+    Administrators-owned tree they were in was the operator's and not the dispatcher's
+    (df43b14e). The pass's own mark is `fix_reports.ORIGIN_FILE` or a dispatch stamp,
+    read before this dispatch stamps it.
+    """
+    if (tree / fix_reports.ORIGIN_FILE).is_file() or fix_reports.read_stamp(tree):
+        maker = "the fix pass cut it for an earlier fixer"
+    else:
+        maker = (
+            "a session a person started made it -- a claude --worktree or a git worktree "
+            "add, not the fix pass"
+        )
+    elevated = owner(tree) == ADMINISTRATORS_SID
+    how = (
+        ", elevated: the Administrators group owns it, so what that session wrote may "
+        "refuse you and nothing unelevated can take it back"
+        if elevated
+        else ""
+    )
+    return f" This tree was not cut for you: {maker}{how}. That is settled; spend no turns on who made it."
+
+
+# How many of the base's newest merged PRs `squashed_base` compares against the branch.
+SQUASH_LOOKBACK = 30
+
+
+def squashed_base(tree: Path, base: str, git_for=sweep.git_for, gh_for=sweep.gh_for) -> str:
+    """`#N (head <sha>, squashed as <sha>)` for a PR `origin/<base>` squash-merged from
+    commits this branch still carries; "" for none, or when git or `gh` cannot say.
+
+    ibkr_trader #98 carried #96's two commits, which main held only as their squash, so
+    the merge base predated both and `git merge origin/main` called eight files add/add;
+    its resolver found the true base by hand (6c10216b). A PR whose head this branch
+    holds but `origin/<base>` does not was squashed or rebased in, not merged.
+    """
+    git = git_for(tree)
+    git("fetch", "--quiet", "origin", base)
+    fields = "number,headRefOid,mergeCommit"
+    listed = gh_for(tree)(
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--base",
+        base,
+        "--limit",
+        str(SQUASH_LOOKBACK),
+        "--json",
+        fields,
+    )
+    try:
+        rows = json.loads(getattr(listed, "stdout", "") or "[]")
+    except ValueError:
+        return ""
+    for row in rows if getattr(listed, "returncode", 1) == 0 and isinstance(rows, list) else []:
+        head = str(row.get("headRefOid") or "")
+        squash = str((row.get("mergeCommit") or {}).get("oid") or "")
+        if not head or not squash:
+            continue
+        carried = git("merge-base", "--is-ancestor", head, "HEAD").returncode == 0
+        if carried and git("merge-base", "--is-ancestor", head, f"origin/{base}").returncode == 1:
+            return f"#{row.get('number')} (head {head[:7]}, squashed as {squash[:7]})"
+    return ""
+
+
+def base_lag(tree: Path, base: str, git_for=sweep.git_for) -> str:
+    """How far the tree's HEAD is behind a freshly fetched `origin/<base>`; "" only when
+    git says it carries the base's tip.
+
+    The plan reads `behind` once, at the start of the pass, and a base can move before
+    the tree opens: carameli #474's fixer was told its head was "already up to date with
+    its base" while master held the brotli bump that was the whole fix.
+    """
+    git = git_for(tree)
+    git("fetch", "--quiet", "origin", base)
+    counted = git("rev-list", "--count", f"HEAD..origin/{base}")
+    said = str(getattr(counted, "stdout", "") or "").strip()
+    if getattr(counted, "returncode", 1) != 0 or not said.isdigit():
+        return f"git could not say whether it carries origin/{base}"
+    n = int(said)
+    return f"origin/{base} has {n} commit{'s' * (n != 1)} it does not" if n else ""
+
+
 def cut_fresh_tree(
-    project_dir: Path, branch: str, base: str, runner=subprocess.run
+    project_dir: Path, branch: str, base: str, runner=sweep.run_windowless
 ) -> tuple[Path | None, str]:
     """Cut a default-tier worktree on a new `branch` off `origin/<base>`.
 
-    The branch is renamed with a counter when the checkout already has one of that
-    name: two clicks on two different nightlies of one project on one day want two
-    branches, and git would otherwise refuse the second with the first's name.
+    The branch is renamed with a counter when the checkout or origin already has one in
+    its family: two clicks on two different nightlies of one project on one day want two
+    branches, and git would otherwise refuse the second with the first's name. Origin
+    counts because the reaper deletes a merged tree's local branch and leaves origin's,
+    so a local-only probe cut #589's merged head a second time (fix-harness-ledger-1009).
     """
     git = sweep.git_for(project_dir)
     runner(["git", "-C", str(project_dir), "fetch", "--quiet", "origin"], check=False)
-    name, counter = branch, 2
-    while git("rev-parse", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0:
-        name, counter = f"{branch}-{counter}", counter + 1
+    listed = git(
+        "for-each-ref",
+        "--format=%(refname:short)",
+        f"refs/heads/{branch}*",
+        f"refs/remotes/origin/{branch}*",
+    )
+    branches = {ref.removeprefix("origin/") for ref in (listed.stdout or "").split()}
+    family = ship_intent.next_free_name(branch, branches)
+    name = branch if family == f"{branch}-2" and branch not in branches else family
     root = aw.default_root(project_dir)
     taken = [entry.name for entry in root.iterdir()] if root.is_dir() else []
     path = root / aw.tree_name(name, taken)

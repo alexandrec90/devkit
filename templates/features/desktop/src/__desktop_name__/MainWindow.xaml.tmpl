@@ -1,0 +1,33 @@
+<Window x:Class="{{ desktop_name }}.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="{{ desktop_name }}"
+        Width="480"
+        Height="280"
+        Opacity="0"
+        WindowStartupLocation="CenterScreen">
+  <!-- WPF's animation system: a storyboard on a dependency property. The fade-in is the
+       placeholder; theming transitions belong in storyboards like it, not in timers. -->
+  <Window.Triggers>
+    <EventTrigger RoutedEvent="Window.Loaded">
+      <BeginStoryboard>
+        <Storyboard>
+          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.25" />
+        </Storyboard>
+      </BeginStoryboard>
+    </EventTrigger>
+  </Window.Triggers>
+  <StackPanel Margin="24" VerticalAlignment="Center">
+    <TextBlock x:Name="TitleText" FontSize="22" FontWeight="SemiBold" />
+    <TextBlock x:Name="StatusText" Margin="0,8,0,0" Opacity="0.75" TextWrapping="Wrap" />
+{{#updater}}
+    <Button x:Name="RestartButton"
+            Margin="0,16,0,0"
+            HorizontalAlignment="Left"
+            Padding="12,4"
+            Content="Restart to update"
+            Visibility="Collapsed"
+            Click="OnRestartClicked" />
+{{/updater}}
+  </StackPanel>
+</Window>

@@ -47,7 +47,6 @@ Every function that decides something is pure and tested in `tests/test_fix_prs.
 """
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
@@ -55,13 +54,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import adoption_prs
 import agent_models
 import agent_tabs
+import delivery
 import devkit_project
 import fix_ledger
 import fix_plan
 import fix_prompts
 import fix_reports
-from fix_trees import cut_fresh_tree, cut_tree, existing_tree, provision_tree
+from fix_trees import (
+    base_lag,
+    cut_fresh_tree,
+    cut_tree,
+    existing_tree,
+    locked_caches,
+    provenance,
+    provision_tree,
+    squashed_base,
+)
 import gate_evidence
+import session_friction
 import sweep
 import task_branch as tb
 import task_input
@@ -136,9 +146,11 @@ def open_session(
     branch: str,
     prompt: str,
     title: str,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
 ) -> int:
-    """The one place a mode becomes a tab or a background session."""
+    """The one place a mode becomes a tab or a background session, and so the one place
+    a prompt learns whether `tree`'s own runner runs the whole suite bare."""
+    prompt = fix_prompts.for_runner(prompt, session_friction.runs_suite_bare(tree))
     if AGENT_MODES[launch.agent][1] == BACKGROUND:
         off = agent_tabs.harness_switch.hooks_are_off()
         return agent_tabs.launch_background(launch, tree, prompt, off, runner)
@@ -146,7 +158,7 @@ def open_session(
 
 
 def run_one(
-    pick: menu.Pick, workspace: Path, launch: agent_models.Launch, runner=subprocess.run
+    pick: menu.Pick, workspace: Path, launch: agent_models.Launch, runner=sweep.run_windowless
 ) -> int:
     """One hand-picked PR: read it live, gather its evidence, send it the planned way.
 
@@ -189,7 +201,10 @@ def run_one(
 
 
 def run(
-    picks: list[menu.Pick], workspace: Path, launch: agent_models.Launch, runner=subprocess.run
+    picks: list[menu.Pick],
+    workspace: Path,
+    launch: agent_models.Launch,
+    runner=sweep.run_windowless,
 ) -> int:
     """Every picked PR in turn. The worst exit code, so one failure is still reported.
 
@@ -213,22 +228,37 @@ def refresh_head(tree: Path, branch: str, git_for=sweep.git_for) -> str:
     The pass updates a behind PR through GitHub, so origin's head carries the base and
     the prompt says so; a local branch checked out before that does not, and a push
     from it is refused. A tree with edits is a session still working, and stays as is.
+
+    Git's own refusal is said as that: sports_betting #48's prompt called a branch five
+    commits behind "diverged", because an unreadable status read as clean and a refused
+    fast-forward read as divergence -- git had refused the tree outright.
     """
     git = git_for(tree)
     git("fetch", "--quiet", "origin", branch)
     status = git("status", "--porcelain")
+    if status.returncode != 0:
+        return f"left as is: git could not read the tree: {_said(status)}"
     if (status.stdout or "").strip():
         return "left as is: the tree has uncommitted changes"
-    if git("merge", "--ff-only", f"origin/{branch}").returncode != 0:
+    merged = git("merge", "--ff-only", f"origin/{branch}")
+    if merged.returncode == 0:
+        return ""
+    if "not possible to fast-forward" in _said(merged, whole=True).lower():
         return f"left as is: {branch} has diverged from origin/{branch}"
-    return ""
+    return f"left as is: git refused the fast-forward: {_said(merged)}"
+
+
+def _said(done, whole: bool = False) -> str:
+    """Git's first line of complaint, or all of it."""
+    text = (done.stderr or done.stdout or "").strip()
+    return text if whole else (text.splitlines()[0] if text else f"exit {done.returncode}")
 
 
 def dispatch_pr(
     failure: fix_plan.Failure,
     root: Path,
     launch: agent_models.Launch,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
     key: str = "",
     problem: str = "",
 ) -> int:
@@ -244,6 +274,8 @@ def dispatch_pr(
     if refused:
         print(f"  {refused}", file=sys.stderr)
         return EXIT_FAILED
+    # Read before this dispatch stamps the tree, which would make every tree the pass's.
+    made = provenance(tree) if tree else ""
     tree = tree or cut_tree(project_dir, failure.head, runner)
     if tree is None:
         print(f"  no worktree for {failure.head}; nothing opened", file=sys.stderr)
@@ -259,7 +291,16 @@ def dispatch_pr(
         fix_reports.stamp(tree, key, what, problem=problem, agent=launch.agent)
     print(f"  worktree {tree}")
     refusal = fix_prompts.standing_refusal(tree)
-    prompt = tab_safe(fix_prompts.pr_prompt(failure, refusal, stale.removeprefix("left as is: ")))
+    # Only this path reuses a tree, so only here can an elevated session's leftovers be.
+    left = stale.removeprefix("left as is: ")
+    conflicted = fix_plan.CONFLICT in failure.signature
+    squashed = squashed_base(tree, failure.base) if conflicted else ""
+    # The plan's `behind` is as old as the pass; a base can move before the tree opens.
+    red = failure.kind == fix_plan.PR and not conflicted
+    lag = base_lag(tree, failure.base) if red else ""
+    locked = locked_caches(tree)
+    notes = fix_prompts.TreeNotes(refusal, left, locked, made, squashed, lag)
+    prompt = tab_safe(fix_prompts.pr_prompt(failure, notes))
     return open_session(launch, tree, failure.head, prompt, f"{failure.project} {name}", runner)
 
 
@@ -267,11 +308,12 @@ def dispatch_fresh(
     decision: fix_plan.Decision,
     root: Path,
     launch: agent_models.Launch,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
     key: str = "",
     problem: str = "",
 ) -> int:
-    """A nightly, or a vendored failure shared across consumers: a fresh branch."""
+    """A nightly, a red default branch (its gate's or its local end-to-end run's), what
+    Dependabot cannot do, or a vendored failure shared across consumers: a fresh branch."""
     first = decision.failures[0]
     upstream = decision.action == fix_plan.UPSTREAM
     project = DEVKIT if upstream else first.project
@@ -293,15 +335,28 @@ def dispatch_fresh(
         fix_reports.stamp(tree, key, decision.note, problem=problem, agent=launch.agent)
         # A tree the pass cut is fixer work from the start: its PR merges itself.
         (tree / fix_reports.ORIGIN_FILE).write_text("fix-pass\n", encoding="utf-8")
+        if not upstream and first.kind == fix_plan.NIGHTLY and first.number:
+            # The tracker issue the prompt names, in this same repo: the PR closes it.
+            fix_reports.note_on_stamp(tree, fix_reports.CLOSES, str(first.number))
     print(f"  worktree {tree} on {branch}")
-    if upstream:
-        failures = fix_prompts.with_trees(decision.failures, root, sweep.git_for)
-        prompt, title = fix_prompts.upstream_prompt(failures, branch), f"devkit {branch}"
-    elif first.kind == fix_plan.BRANCH:
-        prompt, title = fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
-    else:
-        prompt, title = fix_prompts.nightly_prompt(first, branch), f"{project} {first.workflow}"
+    prompt, title = fresh_prompt(decision, root, branch)
     return open_session(launch, tree, branch, tab_safe(prompt), title, runner)
+
+
+def fresh_prompt(decision: fix_plan.Decision, root: Path, branch: str) -> tuple[str, str]:
+    """`(prompt, tab title)` for a fresh-branch session, by the shape of its first failure."""
+    first = decision.failures[0]
+    if decision.action == fix_plan.UPSTREAM:
+        failures = fix_prompts.with_trees(decision.failures, root, sweep.git_for)
+        return fix_prompts.upstream_prompt(failures, branch), f"devkit {branch}"
+    project = first.project
+    if first.kind == fix_plan.BRANCH:
+        return fix_prompts.branch_prompt(first, branch), f"{project} {first.base}"
+    if first.kind == fix_plan.LOCAL:
+        return fix_prompts.local_prompt(first, branch), f"{project} {fix_plan.local_name(first)}"
+    if first.kind == fix_plan.DEPENDABOT:
+        return fix_prompts.dependabot_prompt(first, branch), f"{project} dependabot"
+    return fix_prompts.nightly_prompt(first, branch), f"{project} {first.workflow}"
 
 
 def rerun_workflow(failure: fix_plan.Failure, root: Path) -> int:
@@ -310,15 +365,45 @@ def rerun_workflow(failure: fix_plan.Failure, root: Path) -> int:
     That run decides next pass: green, and the reporter closes the tracker issue; red,
     and it is a failure at the tip with its fixer. The plan makes this only for a
     workflow that takes `workflow_dispatch`, so a refusal here is worth reporting.
+
+    A run whose jobs never started a workflow step is re-run in place instead
+    (`fix_plan.reruns_in_place`): its failed and cancelled jobs, on the same commit,
+    which is what the PR's checks or the branch's verdict read next pass. So is a gate
+    whose red jobs GitHub said it never gave a runner (`lost_runs`), every run of it.
     """
     gh = sweep.gh_for(root / failure.project)
-    done = gh("workflow", "run", failure.rerun_file, "--ref", failure.base)
-    name = f"{failure.project} #{failure.number}"
+    if failure.lost_runs:
+        return rerun_lost_jobs(gh, failure)
+    in_place = fix_plan.reruns_in_place(failure)
+    if in_place:
+        done = gh("run", "rerun", failure.run_id, "--failed")
+    else:
+        done = gh("workflow", "run", failure.rerun_file, "--ref", failure.base)
+    name = f"{failure.project} {fix_plan.name_of(failure)}"
     if done.returncode != 0:
         why = (done.stderr or done.stdout or "").strip().splitlines()
-        print(f"  {name}: workflow run failed: {why[-1] if why else '?'}", file=sys.stderr)
+        what = "run rerun" if in_place else "workflow run"
+        print(f"  {name}: {what} failed: {why[-1] if why else '?'}", file=sys.stderr)
         return EXIT_FAILED
-    print(f"  {name}: {failure.workflow} re-run on origin/{failure.base} at {failure.tip[:9]}")
+    if in_place:
+        print(f"  {name}: run {failure.run_id}'s jobs never started a workflow step; re-ran them")
+    else:
+        print(f"  {name}: {failure.workflow} re-run on origin/{failure.base} at {failure.tip[:9]}")
+    return EXIT_OK
+
+
+def rerun_lost_jobs(gh, failure: fix_plan.Failure) -> int:
+    """`gh run rerun --failed` on each of `lost_runs`: the jobs no runner took, again."""
+    name = f"{failure.project} {fix_plan.name_of(failure)}"
+    for run_id in failure.lost_runs:
+        done = gh("run", "rerun", run_id, "--failed")
+        if done.returncode != 0:
+            why = (done.stderr or done.stdout or "").strip().splitlines()
+            print(
+                f"  {name}: run rerun {run_id} failed: {why[-1] if why else '?'}", file=sys.stderr
+            )
+            return EXIT_FAILED
+    print(f"  {name}: no runner took its red jobs; re-ran them in {', '.join(failure.lost_runs)}")
     return EXIT_OK
 
 
@@ -327,7 +412,7 @@ def run_plan(
     launch: agent_models.Launch,
     dry_run: bool,
     redo: bool,
-    runner=subprocess.run,
+    runner=sweep.run_windowless,
 ) -> int:
     """Scan, read the evidence, plan, print the plan, then send what is new.
 
@@ -338,7 +423,8 @@ def run_plan(
     found = menu.scan(workspace)
     failures = gate_evidence.collect(workspace, found)
     newest = gate_evidence.newest_release(root / DEVKIT)
-    decisions = fix_plan.plan(failures, newest, adoption_prs.adoption_prefixes())
+    direct = delivery.direct_projects(root, found)
+    decisions = fix_plan.plan(failures, newest, adoption_prs.adoption_prefixes(), direct)
     ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
     ledger = fix_ledger.read_ledger(ledger_path)
     print(fix_ledger.render(decisions, ledger))
