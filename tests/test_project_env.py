@@ -62,6 +62,18 @@ def test_provisioning_syncs_every_extra_and_group_in_the_new_root(tmp_path, caps
     assert "write   .venv" in capsys.readouterr().out
 
 
+def test_provisioning_builds_the_venv_on_the_pinned_python(tmp_path, monkeypatch):
+    """fdfe3a1d: `new-project.py radio --preset bare` built `.venv` on 3.14.7 while
+    `.devkit.toml` pinned 3.12, because a bare `uv sync` takes any interpreter
+    `requires-python` allows."""
+    monkeypatch.setattr(project_env.shutil, "which", _which("uv"))
+    calls = _recording_run(monkeypatch)
+
+    project_env.provision_environment(tmp_path, dry_run=False, python="3.12")
+
+    assert calls == [(["uv", "sync", "--all-extras", "--all-groups", "--python", "3.12"], tmp_path)]
+
+
 def test_a_failed_sync_warns_and_leaves_the_verdict_to_the_commit(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(project_env.shutil, "which", _which("uv"))
     _recording_run(monkeypatch, returncode=2, stderr="error: no network")

@@ -28,9 +28,9 @@ git, so nothing anywhere was red.
 
 **Never writes, and silent when Codex is not set up.** A machine with no `CODEX_HOME`
 directory is a machine that does not run Codex, and a prerequisite reported to somebody
-who does not have the tool is the line that teaches them to skip the rest. Restoring
-either file is the operator's edit to their own home directory, so the report names the
-file and what belongs in it.
+who does not have the tool is the line that teaches them to skip the rest. The writer is
+`install-codex-context.py`, which `installers.py` runs every maintenance pass: this
+report alone named both files missing here daily for seven weeks (bdd4dfd3, 4dd922ff).
 
 Tested in `tests/test_codex_context.py`.
 """

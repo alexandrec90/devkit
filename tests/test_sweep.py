@@ -1876,6 +1876,12 @@ def test_a_failed_pr_creation_is_reported_not_swallowed():
         ),
         ("remote: fatal error in commit_refs\n ! [remote rejected] x -> x (failure)", True),
         ("GraphQL: Resource not accessible by integration (createPullRequest)", False),
+        # 78016688: data-lake's reconcile fetch, GitHub's request timeout.
+        (
+            "error: RPC failed; HTTP 408 curl 22 The requested URL returned error: 408\n"
+            "fatal: expected flush after ref listing",
+            True,
+        ),
     ],
 )
 def test_transient_tells_githubs_failure_from_a_refusal(said, transient):

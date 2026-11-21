@@ -1900,6 +1900,8 @@ policy and no bridge at all, with this paragraph still claiming otherwise and no
 anywhere red. `scripts/codex_context.py` is the check that would have said so:
 `workspace-status.py` reports a missing fallback setting or a lost bridge beside the
 other workstation prerequisites, and stays silent on a machine with no `CODEX_HOME`.
+`scripts/install-codex-context.py` writes whichever is missing, never an operator's own
+value, and `installers.py` runs it on every maintenance pass.
 
 `sync-codex-context.py` mirrors only `.claude/skills/` to `.agents/skills/` and invokes
 `sync-codex-hooks.py` to regenerate `.codex/hooks.json` from the `settings.json` hooks

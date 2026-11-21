@@ -2325,6 +2325,66 @@ def test_the_marker_goes_even_when_the_pass_raises(tmp_path):
     assert not path.exists()
 
 
+BAKE_FAILURE = """#0 building with "desktop-linux" instance using docker driver
+#1 [internal] load local bake definitions
+#1 reading from stdin 512B done
+#5 [collector 3/6] RUN pip install -r requirements.txt
+#5 ERROR: process "/bin/sh -c pip install -r requirements.txt" did not complete successfully
+failed to solve: process "/bin/sh -c pip install -r requirements.txt" did not complete
+"""
+
+
+def test_a_failed_build_is_named_by_its_error_not_its_first_progress_line():
+    """777a28c5: sports_betting's start failure was filed as `#1 [internal] load local
+    bake definitions`, BuildKit's first progress line, which says nothing about why."""
+    said = collectors.start_failure(BAKE_FAILURE)
+    assert said.startswith("failed to solve:")
+    assert collectors.start_failure("Error response from daemon: no such image\n") == (
+        "Error response from daemon: no such image"
+    )
+    assert collectors.start_failure("just one line\n") == "just one line"
+    assert collectors.start_failure("") == ""
+
+
+def _held_for(monkeypatch, path, refusals):
+    """`path.unlink` refused `refusals` times, as Windows refuses a file a reader holds."""
+    real = Path.unlink
+    left = [refusals]
+
+    def unlink(self, missing_ok=False):
+        if self == path and left[0]:
+            left[0] -= 1
+            raise PermissionError(32, "being used by another process", str(self))
+        return real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    monkeypatch.setattr(collectors._time, "sleep", lambda _s: None)
+
+
+def test_a_marker_a_reader_holds_for_a_moment_still_goes(tmp_path, monkeypatch):
+    """7d71791d: a pass that had done its work went red on WinError 32 removing the marker
+    another process was reading."""
+    path = tmp_path / "logs" / "pass.json"
+    _held_for(monkeypatch, path, collectors.MARKER_TRIES - 1)
+    with collectors.acting(path, [target(tmp_path)]):
+        pass
+    assert not path.exists()
+
+
+def test_a_marker_held_past_every_try_is_left_to_expire_not_raised(tmp_path, monkeypatch):
+    """Left behind, the marker still names its own `until`, so `in_pass` stops honouring
+    it then; raising would only turn a finished pass red."""
+    path = tmp_path / "logs" / "pass.json"
+    _held_for(monkeypatch, path, collectors.MARKER_TRIES + 5)
+    with collectors.acting(path, [target(tmp_path)]):
+        pass
+    assert path.exists()
+
+
+def test_remove_marker_is_quiet_about_a_marker_already_gone(tmp_path):
+    collectors.remove_marker(tmp_path / "never-written.json")
+
+
 @pytest.mark.parametrize(
     ("text", "clock", "age", "expected"),
     [

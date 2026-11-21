@@ -60,7 +60,6 @@ scripts/merge-dependabot-prs.py::labels_of
 scripts/merge-dependabot-prs.py::merge_pr
 scripts/merge-dependabot-prs.py::open_prs
 scripts/merge-dependabot-prs.py::prs_for_branch
-scripts/merge-dependabot-prs.py::verdict
 scripts/new-project.py::build_context
 scripts/new-project.py::register_slot_hint
 scripts/new-project.py::scripted_setup_env

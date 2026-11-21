@@ -100,6 +100,11 @@ NEVER_RUN_DATE = _dt.date(1999, 11, 30)
 # was reported as "last run failed (exit 267011)".
 SCHED_S_TASK_HAS_NOT_RUN = 267011  # 0x00041303
 SCHED_S_TASK_RUNNING = 267009  # 0x00041301
+# How a run ended from outside reads: `/End`, a sign-out, the time limit. For a resident
+# job -- every trigger an event, running until something stops it, as `devkit-tray`
+# does -- that is how every run ends, so it is no failure there (23f4ee82). A clocked
+# job is ended that way by its own time limit, which is a hung run and stays one.
+SCHED_S_TASK_TERMINATED = 267014  # 0x00041306
 
 # `0x800710E0` -- documented as "the operator or administrator has refused the request",
 # and what Task Scheduler reports when `MultipleInstancesPolicy` is `IgnoreNew` and a
@@ -570,7 +575,8 @@ def job_problem(
             f"its runs are overlapping"
             f"{artifact_hint(job.name, artifacts, root=root, since=job.last_run)}"
         )
-    if job.last_result not in NOT_A_FAILURE:
+    resident_stop = job.event_only and job.last_result == SCHED_S_TASK_TERMINATED
+    if job.last_result not in NOT_A_FAILURE and not resident_stop:
         return (
             f"{job.name}: last run failed (exit {job.last_result}) at "
             f"{job.last_run:%Y-%m-%d %H:%M}"

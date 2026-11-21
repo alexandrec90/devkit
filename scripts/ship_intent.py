@@ -969,7 +969,7 @@ def lands_nothing(tree: Path, base: str, runner: Runner) -> bool:
     # With three commits `merge-base` answers for the first against a merge of the rest.
     forked = runner(["git", "merge-base", upstream, *heads], cwd=tree)
     fork = (forked.stdout or "").strip() if forked.returncode == 0 else ""
-    held = _held_tree(tree, runner) if fork else ""
+    held = _held_commit(tree, fork, runner) if fork else ""
     if not held:
         return False
     target = runner(["git", "rev-parse", f"{upstream}^{{tree}}"], cwd=tree)
@@ -980,6 +980,33 @@ def lands_nothing(tree: Path, base: str, runner: Runner) -> bool:
         return False  # 1 is a conflict: the tree has something origin does not
     lines = (merged.stdout or "").split()
     return bool(lines) and lines[0] == (target.stdout or "").strip()
+
+
+# Who the throwaway commit `_held_commit` writes is by: a box may have no identity set.
+_PROBE_IDENTITY = {
+    "GIT_AUTHOR_NAME": "devkit probe",
+    "GIT_AUTHOR_EMAIL": "probe@example.invalid",
+    "GIT_COMMITTER_NAME": "devkit probe",
+    "GIT_COMMITTER_EMAIL": "probe@example.invalid",
+}
+
+
+def _held_commit(tree: Path, fork: str, runner: Runner) -> str:
+    """`_held_tree` wrapped in a commit on `fork`, unreferenced, or "" when git cannot say.
+
+    `merge-tree --write-tree` takes a bare tree only from git 2.45; git 2.40 refuses one
+    with "expected commit type", which read as "not merged" and failed nine
+    `tests/test_ship_intent.py` tests on this workstation alone (0cd24454). A commit
+    every git accepts; gc collects it."""
+    held = _held_tree(tree, runner)
+    if not held:
+        return ""
+    made = runner(
+        ["git", "commit-tree", held, "-p", fork, "-m", "probe"],
+        cwd=tree,
+        env={**os.environ, **_PROBE_IDENTITY},
+    )
+    return (made.stdout or "").strip() if made.returncode == 0 else ""
 
 
 def _held_tree(tree: Path, runner: Runner) -> str:

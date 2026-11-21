@@ -515,6 +515,25 @@ def test_a_running_task_is_not_a_failure():
     assert health.problems([running], NOW) == []
 
 
+def test_a_resident_job_stopped_from_outside_is_not_a_failure():
+    """23f4ee82: `devkit-tray` runs from logon until something ends it, so a stop, a
+    sign-out or a reinstall's `/End` leaves `SCHED_S_TASK_TERMINATED` (267014), and it
+    was filed as "last run failed (exit 267014)"."""
+    tray = job(
+        name="devkit-tray",
+        last_result=health.SCHED_S_TASK_TERMINATED,
+        next_run=None,
+        event_only=True,
+    )
+    assert health.problems([tray], NOW) == []
+
+
+def test_a_clocked_job_ended_from_outside_is_still_reported():
+    """A clocked job is ended that way by its own time limit: a hung run, so a failure."""
+    ended = job(last_result=health.SCHED_S_TASK_TERMINATED)
+    assert "failed (exit 267014)" in health.problems([ended], NOW)[0]
+
+
 def test_a_real_failure_is_still_reported():
     """Reversion check: widen `NOT_A_FAILURE` too far and nothing is ever reported."""
     assert "failed (exit 1)" in health.problems([job(last_result=1)], NOW)[0]

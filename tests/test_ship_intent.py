@@ -1330,6 +1330,18 @@ def test_the_fork_counts_merge_head_only_while_a_merge_is_in_progress(tmp_path):
     assert ["git", "merge-base", "origin/main", "HEAD"] in [c[0] for c in plain.calls]
 
 
+def test_merge_tree_is_handed_a_commit_never_a_bare_tree(tmp_path, monkeypatch):
+    """0cd24454: git 2.40 refuses a tree there ("expected commit type"), so nine tests
+    failed on one workstation while CI's newer git passed them."""
+    monkeypatch.setattr(ship_intent, "_held_tree", lambda tree, runner: "tree-sha")
+    run = Runner({"git commit-tree": (0, "commit-sha\n", ""), "git merge-base": (0, "fork\n", "")})
+    ship_intent.lands_nothing(tmp_path, "main", run)
+    argv = [c[0] for c in run.calls]
+    assert ["git", "commit-tree", "tree-sha", "-p", "fork", "-m", "probe"] in argv
+    [merge] = [a for a in argv if a[:2] == ["git", "merge-tree"]]
+    assert merge[-1] == "commit-sha"
+
+
 def test_a_stored_retired_branch_refusal_is_tried_again(tmp_path):
     """The stranded sweep's refusal was recorded before the carry existed; held as "nothing
     has changed", it would never have been retried, and a fixer would have been sent to
