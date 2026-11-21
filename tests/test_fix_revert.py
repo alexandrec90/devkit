@@ -389,7 +389,7 @@ def test_it_ships_as_a_merge_now_pr_the_pass_owns(world):
     world.tend()
     tree = world.tree_of(f"agent/revert-{bad[:7]}")
     one = ship_intent.Intent("roguelike", tree, f"agent/revert-{bad[:7]}", "S", "B", direct=True)
-    assert ship_intent.labels_for(tree, direct=True) == ("merge-now",)
+    assert ship_intent.labels_for(direct=True) == ("merge-now",)
     assert ship_intent.pass_owned(one)
 
 

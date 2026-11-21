@@ -450,7 +450,7 @@ def test_the_registry_change_names_every_flip_and_merges_once_green():
     assert slug == "plug-skinamp-unplug-carameli"
     assert intent.startswith("Plug skinamp and unplug carameli in the workspace registry\n\n")
     assert "plugged skinamp and unplugged carameli" in intent
-    assert intent.rstrip().endswith("\n\nAutomerge: yes"), "the pick was the decision"
+    assert "Hold: yes" not in intent, "the pick was the decision: it merges once green"
 
 
 def test_an_unplug_leaves_the_static_checkout_on_main_and_clean(tmp_path):

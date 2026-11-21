@@ -807,10 +807,9 @@ static checkout and say to commit it on a task branch, and a session did, in tha
 checkout: the fix pass runs from it, so the pass ran the task branch's code and filed
 `pass-stale` (a5ec492b).
 
-It merges once green: the pick was the decision, and until it lands the nightly render of
-the canonical copy (`scripts/e2e.py`) would undo it in the live file.
-
-Automerge: yes
+It merges once green, as every unheld PR does: the pick was the decision, and until it
+lands the nightly render of the canonical copy (`scripts/e2e.py`) would undo it in the
+live file.
 """
 
 
