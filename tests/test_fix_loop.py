@@ -1004,10 +1004,13 @@ def test_a_failing_scheduled_job_is_filed_whatever_wraps_it(ctx):
 
 
 def test_a_fire_skipped_in_the_catch_up_after_a_boot_is_not_filed(ctx, monkeypatch):
-    """061e40de and two more: one boot's catch-up, filed as three overlapping jobs."""
+    """061e40de and two more: one boot's catch-up, filed as three overlapping jobs.
+
+    Not `devkit-fix-pass`: a skip of the pass's own task inside its half hour is
+    `_covered_by_this_pass`, which on a UTC runner hid the long-uptime line too."""
     overlap = fix_loop.schedule_health.SCHED_REFUSED_ALREADY_RUNNING
     ran = NOW - _dt.timedelta(minutes=5)
-    skipped = _job("devkit-fix-pass", overlap, ran)
+    skipped = _job("devkit-worktree-reconcile", overlap, ran)
     up = ran.replace(tzinfo=None) - _dt.timedelta(minutes=12)
     monkeypatch.setattr(fix_loop.schedule_health, "awake_local", lambda now=None: up)
     assert fix_loop.job_findings(ctx, [skipped]) == []
