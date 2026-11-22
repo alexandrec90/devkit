@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 from support import LIVE_WORKSPACE, needs_live_workspace, sweep
 
+import devkit_manifest
+
 # Pinned so branch names are assertable: tb.branch_name() stamps -<mmdd>.
 DATE = dt.date(2026, 7, 29)
 
@@ -939,9 +941,21 @@ def test_follows_names_green_only_for_devkit_s_own_checkout(tmp_path):
 
     assert sweep.follows(tmp_path, answering(0)) == "", "a project's checkout is only read"
     (tmp_path / "scripts").mkdir()
+    # Every consumer carries the vendored manifest module; that must not make it devkit.
     (tmp_path / "scripts" / "devkit_manifest.py").write_text("", encoding="utf-8")
+    assert sweep.follows(tmp_path, answering(0)) == "", "a consumer holding vendored files"
+    (tmp_path / sweep.DEVKIT_ONLY).write_text("", encoding="utf-8")
     assert sweep.follows(tmp_path, answering(0)) == "origin/green"
     assert sweep.follows(tmp_path, answering(1)) == "", "before its gate has ever passed"
+
+
+def test_the_devkit_only_marker_reaches_no_consumer():
+    """`follows` holds a checkout on `green` by this file, so a consumer that received it
+    would be held on its own `green`, which nothing there advances on the PC's behalf."""
+    marker = sweep.DEVKIT_ONLY.as_posix()
+    assert (sweep.REPO_ROOT / marker).is_file()
+    assert marker not in devkit_manifest.MANIFEST
+    assert not (sweep.REPO_ROOT / "templates" / "core" / marker).exists()
 
 
 def test_sync_reaps_merged_task_branches_it_is_not_standing_on():

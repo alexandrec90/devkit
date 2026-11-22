@@ -649,6 +649,33 @@ def clear_dead_link(target: Path) -> str:
     return f"devkit: removed {target}, a link to {aimed}, which is gone"
 
 
+def clear_checkout_link(target: Path, source: Path) -> str:
+    """Remove `target` when it is a link to the sibling's own checkout; the line, else "".
+
+    f9dbfb12: ibkr's `.claude/worktrees/data-lake` was a junction, left by an older
+    harness, to `../data-lake` itself. It shares that checkout's git dir, and the branch
+    checked out there read to `advance_sibling` as a task's own, so the link stayed and
+    every tree built against the static checkout's working state -- what cutting a
+    detached sibling exists to prevent. Only the link goes, as in `clear_dead_link`.
+    """
+    is_link = os.path.islink(target) or getattr(os.path, "isjunction", lambda _: False)(target)
+    if not is_link:
+        return ""
+    try:
+        if not os.path.samefile(target, source):
+            return ""
+    except OSError:
+        return ""
+    try:
+        os.unlink(target)
+    except OSError:
+        try:
+            os.rmdir(target)
+        except OSError as exc:
+            return f"devkit: {target} links to the {source.name} checkout itself, and stays ({exc})"
+    return f"devkit: removed {target}, a link to the {source.name} checkout itself"
+
+
 def link_path_sources(
     here: Path,
     checkout: Path,
@@ -689,6 +716,7 @@ def link_path_sources(
             _git(source, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", env=env) or "HEAD"
         )
         lines.append(clear_dead_link(target))
+        lines.append(clear_checkout_link(target, source))
         if target.exists():
             lines.append(advance_sibling(target, source, ref, env, tree=here, wait=wait))
             continue

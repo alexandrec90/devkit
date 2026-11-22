@@ -1123,6 +1123,31 @@ def test_a_link_to_a_reaped_box_at_the_sibling_path_is_replaced_by_a_cut(tmp_pat
     assert reaped.exists() is False and tmp_path.exists(), "only the link went"
 
 
+def test_a_link_to_the_sibling_checkout_itself_is_replaced_by_a_detached_cut(tmp_path):
+    """f9dbfb12: ibkr's `.claude/worktrees/data-lake` was a junction to `../data-lake`,
+    whose `main` read as a task's branch, so every tree built against the static checkout."""
+    lake, checkout, tree = _with_sibling_source(tmp_path)
+    target = checkout / ".claude" / "worktrees" / "data-lake"
+    _dir_link(target, lake)
+    lines = wt_env.link_path_sources(tree, checkout, runner=_hookless)
+    assert any(line.startswith(f"devkit: removed {target}") for line in lines), lines
+    assert not wt_env.os.path.islink(target), lines
+    assert _git(target, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "HEAD", "detached"
+    assert (lake / ".git").is_dir(), "only the link went"
+
+
+def test_only_a_link_to_the_sibling_checkout_is_cleared_as_one(tmp_path):
+    lake = tmp_path / "lake"
+    lake.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    assert wt_env.clear_checkout_link(lake, lake) == "", "the checkout itself is no link"
+    link = tmp_path / "link"
+    _dir_link(link, other)
+    assert wt_env.clear_checkout_link(link, lake) == "", "a link to some other directory"
+    assert wt_env.clear_checkout_link(tmp_path / "absent", lake) == ""
+
+
 def test_only_a_link_to_nothing_is_cleared(tmp_path):
     live = tmp_path / "live"
     live.mkdir()
