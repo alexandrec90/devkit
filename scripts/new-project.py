@@ -839,8 +839,18 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
             continue
         registered.add(path)
         print(f"  update  {shown} (folders + project picker)")
-    if dry_run:
-        return
+    if not dry_run:
+        _hand_off_or_carry_slot(plan, canonical, registered, clean_before=clean_before)
+
+
+def _hand_off_or_carry_slot(
+    plan: Plan, canonical: Path, registered: set[Path], *, clean_before: bool
+) -> None:
+    """Put the canonical registration on a task branch, or leave the slot beside it.
+
+    `clean_before` says devkit's checkout was clean before this run wrote to it, so the
+    edit on it is this project's alone and may be carried onto a branch.
+    """
     slot = plan.context.get("slot")
     handed = hand_off_registration(plan.name, canonical, slot=slot) if clean_before else Handoff()
     plan.slot_on_branch = handed.slot
