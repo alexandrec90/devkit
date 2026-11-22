@@ -121,6 +121,34 @@ def test_a_blocked_report_is_its_first_lines_trimmed_and_absent_is_empty(tmp_pat
     assert len(reason) <= fix_reports.REASON_LIMIT
 
 
+STEP_COMMAND = "'A','B','C'|%{$a=(Get-ScheduledTask $_).Actions[0];Enable-ScheduledTask $_}"
+
+
+def test_a_blocked_reports_person_step_survives_the_cut_whole(tmp_path):
+    """2026-11-22: a host-scripts fixer's admin command was cut mid-word at 400."""
+    import harness_triage as triage
+
+    assert fix_reports.PERSON_STEP == triage.PERSON_STEP, "spelled twice, held equal here"
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.BLOCKED_FILE).write_text(
+        "# Blocked\n\nAccess is denied on every task. " + "why " * 120 + "\n\n"
+        f"{fix_reports.PERSON_STEP} in admin PowerShell run {STEP_COMMAND}\n",
+        encoding="utf-8",
+    )
+    reason = fix_reports.blocked_reason(tmp_path)
+    assert len(reason) <= fix_reports.REASON_LIMIT
+    assert reason.startswith("Blocked Access is denied")
+    step = triage.person_step(triage.Item("", "", {"cause": reason}))
+    assert step == f"in admin PowerShell run {STEP_COMMAND}"
+
+
+def test_a_short_blocked_report_with_a_person_step_is_left_as_it_is(tmp_path):
+    (tmp_path / "logs").mkdir()
+    text = f"Blocked. {fix_reports.PERSON_STEP} run {STEP_COMMAND}"
+    (tmp_path / fix_reports.BLOCKED_FILE).write_text(text, encoding="utf-8")
+    assert fix_reports.blocked_reason(tmp_path) == text
+
+
 def test_waits_on_reads_the_pr_a_blocked_report_names_on_its_own_line(tmp_path):
     assert fix_reports.waits_on(tmp_path) == ""
     (tmp_path / "logs").mkdir()

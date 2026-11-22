@@ -608,3 +608,35 @@ def test_the_brake_stops_the_run_past_its_token_total(tmp_path, monkeypatch):
     ]
     assert supervise.main(argv) == supervise.EXIT_VIOLATED
     assert runs == [1, 2], "the second iteration crossed 1000 and nothing after it started"
+
+
+def _passes(*records: str):
+    """A `run` and a `read` that answer `records` in turn, and the count of runs."""
+    queue, ran = list(records), []
+
+    def run():
+        ran.append(1)
+        return 0, ""
+
+    return run, lambda: queue[len(ran) - 1], ran
+
+
+def test_a_pass_that_yielded_the_lock_is_run_again():
+    """2026-11-22: iteration 1 yielded to the scheduled pass and was spent as a violation."""
+    run, read, ran = _passes(f"{supervise.YIELDED} -- another pass", "fix-pass: mode=dispatch\n")
+    assert supervise.pass_that_ran(run, read) == (0, "fix-pass: mode=dispatch\n")
+    assert len(ran) == 2
+
+
+def test_a_pass_that_ran_is_not_run_again():
+    run, read, ran = _passes("fix-pass: mode=dispatch\n")
+    supervise.pass_that_ran(run, read)
+    assert len(ran) == 1
+
+
+def test_a_lock_that_never_frees_is_left_to_check_ran():
+    held = f"{supervise.YIELDED} -- another pass"
+    run, read, ran = _passes(*[held] * supervise.YIELD_TRIES)
+    _code, record = supervise.pass_that_ran(run, read)
+    assert len(ran) == supervise.YIELD_TRIES and record == held
+    assert supervise.check_ran(record, "dispatch")

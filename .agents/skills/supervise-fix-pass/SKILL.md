@@ -170,6 +170,16 @@ recommend is the decision, so carry it out and say why in the intent. Ending a r
 supervisor once relayed a fixer's three-option question and recommended one, and the
 answer was to have done it.
 
+**A person's step is yours while a person is at the keyboard.** The record's `you` lines
+are what an *unattended* job cannot take -- an elevated command, an upgrade, a re-enabled
+task. This session is not unattended: take each one yourself, elevated through one
+`Start-Process pwsh -Verb RunAs -Wait` the person consents to at the UAC prompt, read
+back what it did, then resolve its group. Hand back only what needs their own hands or
+judgement (a trust prompt, a password, whether a job is retired). Relaying "upgrade Git"
+as a question is the lost turn this section exists to prevent. Check a step against the
+machine before taking it, too: a `you` line can be stale, and a group whose job has
+passed since its last row is retired by `fix_loop.retire_passed_jobs`, not taken.
+
 ## Reporting
 
 Ship with the ship skill. In the reply, give per iteration: what the pass shipped,

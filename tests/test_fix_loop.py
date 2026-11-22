@@ -636,6 +636,90 @@ def test_retire_trusted_retires_only_a_checkout_now_trusted(ctx, monkeypatch):
     assert [item.id for item in left] == [triage.item_id(other)]
 
 
+DOCKER_CAUSE = f"error: Docker Desktop is not running -- {triage.PERSON_STEP} start Docker Desktop"
+
+
+def collectors_failed(when: _dt.datetime, host: str = "", cause: str = DOCKER_CAUSE) -> str:
+    """A `log-wrap.py --always` row for a failed Collectors run, awaiting a person."""
+    row = (
+        ("host", host or triage.harness_events.host_name()),
+        ("project", "devkit"),
+        ("message", "unattended task 'Scheduled: Collectors' failed"),
+        ("cause", cause),
+    )
+    return triage.harness_events.event_line(when.isoformat(), fix_loop.FAILED_RUN_EVENT, row)
+
+
+def _collectors_ran(ctx, when: _dt.datetime, code: int) -> None:
+    """The per-run artifact `log-wrap.py --always` writes, `when` in local wall time."""
+    local = when.astimezone().replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
+    logs = ctx.devkit_dir / "logs"
+    logs.mkdir(exist_ok=True)
+    (logs / "scheduled-collectors.log").write_text(
+        "# source: devkit scripts/log-wrap.py\n# task: Scheduled: Collectors\n"
+        f"# when: {local}\n# exit: {code}\n# result: passed\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_person_step_job_that_passed_since_is_retired(ctx):
+    """f26e1145: "start Docker Desktop" sat in the toast for a month after its last
+    failure, while the job passed every fifteen minutes."""
+    older, newer = (collectors_failed(NOW - _dt.timedelta(hours=h)) for h in (3, 2))
+    seed(ctx, older, newer)
+    _collectors_ran(ctx, NOW - _dt.timedelta(hours=1), 0)
+    [line] = fix_loop.retire_passed_jobs(ctx)
+    assert line.startswith("retired [") and "Scheduled: Collectors passed at " in line
+    assert triage.open_items(triage.load(ctx.devkit_dir)) == []
+
+
+@pytest.mark.parametrize(
+    ("ran", "code"),
+    [(-3, 0), (-1, 1)],
+    ids=["passed-before-the-failure", "failed-again"],
+)
+def test_a_person_step_job_not_passed_since_stays_open(ctx, ran, code):
+    seed(ctx, collectors_failed(NOW - _dt.timedelta(hours=2)))
+    _collectors_ran(ctx, NOW + _dt.timedelta(hours=ran), code)
+    assert fix_loop.retire_passed_jobs(ctx) == []
+    assert len(triage.open_items(triage.load(ctx.devkit_dir))) == 1
+
+
+def test_a_person_step_job_with_no_artifact_stays_open(ctx):
+    seed(ctx, collectors_failed(NOW - _dt.timedelta(hours=2)))
+    assert fix_loop.retire_passed_jobs(ctx) == []
+
+
+def test_a_person_step_job_another_machine_failed_stays_open(ctx):
+    """This machine's artifact cannot speak for another's runs."""
+    seed(
+        ctx,
+        collectors_failed(NOW - _dt.timedelta(hours=3)),
+        collectors_failed(NOW - _dt.timedelta(hours=2), host="other-pc"),
+    )
+    _collectors_ran(ctx, NOW, 0)
+    assert fix_loop.retire_passed_jobs(ctx) == []
+
+
+def test_a_failed_job_a_fixer_owns_is_not_retired_by_its_pass(ctx):
+    """Only a person's step is retired here; a fixer's group goes through `_verify`."""
+    seed(ctx, collectors_failed(NOW - _dt.timedelta(hours=2), cause="error: a bug"))
+    _collectors_ran(ctx, NOW, 0)
+    assert fix_loop.retire_passed_jobs(ctx) == []
+
+
+def test_last_pass_reads_only_a_passing_header(tmp_path):
+    assert fix_loop.last_pass(tmp_path, "Scheduled: Collectors") is None
+    (tmp_path / "logs").mkdir()
+    artifact = tmp_path / "logs" / "scheduled-collectors.log"
+    artifact.write_text("# task: x\n# when: 2026-11-21 21:48:30\n# exit: 0\n", encoding="utf-8")
+    assert fix_loop.last_pass(tmp_path, "Scheduled: Collectors") == _dt.datetime(
+        2026, 11, 21, 21, 48, 30
+    ).astimezone(_dt.UTC)
+    artifact.write_text("# task: x\n# when: 2026-11-21 21:48:30\n# exit: 2\n", encoding="utf-8")
+    assert fix_loop.last_pass(tmp_path, "Scheduled: Collectors") is None
+
+
 def test_retire_trusted_with_nothing_open_reads_nothing(ctx, monkeypatch):
     def asked(_checkout):
         raise AssertionError("no row, no read of the login's own file")
