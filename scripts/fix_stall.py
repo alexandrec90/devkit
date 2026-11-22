@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Nothing the fix pass holds, caps or skips may sit there: past a day, it is a finding.
 
-Every wait the pass makes is reasonable on the pass that makes it -- a PR held behind a
-red harness, a release PR red by construction until its tag exists, an adoption the
-upgrade sweep is about to close. Each is also a way for something to sit for a week
+Every wait the pass makes is reasonable on the pass that makes it -- a red local run held
+for the next scheduled one, a release PR red by construction until its tag exists, an
+adoption the upgrade sweep is about to close. Each is also a way for something to sit for a week
 with a sensible sentence beside it, because the record is rewritten every half hour and
 nobody reads the one before. `fix-pass.history.jsonl` keeps the waits by name
 (`fix_cycle.history_line`), so how long each has lasted is a question with an answer.
 
-A wait that has lasted `STALL_AFTER` is filed: a harness fix that is not landing, a
+A wait that has lasted `STALL_AFTER` is filed: a local tier that is not re-running, a
 release pipeline that is not releasing, a sweep that is not closing. What the pass is
 already tracking elsewhere -- an escalation the devkit session has, a back-off, a
-session in flight -- is not filed twice.
+session in flight, a hold behind the red harness or an open adoption -- is not filed
+twice.
 
 Tested in `tests/test_fix_stall.py`.
 """
@@ -25,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fix_budget
+import fix_cycle
 import fix_findings
 
 STALL_AFTER = _dt.timedelta(hours=24)
@@ -38,6 +40,13 @@ TRACKED = (
     "backing off",
     "already dispatched",
     "held until the devkit session",
+    # A PR held behind the red harness or behind its project's open adoption waits on
+    # something already a finding: the ledger groups or the devkit gate that make the
+    # harness red, the adoption PR with its own decision. Filed as a stall, the hold went
+    # onto the harness ledger and kept the harness red, so it held itself, and its
+    # adoption with it: carameli #526 and #530, 2026-11-21 (39517cbb, 4e79a5bd).
+    fix_cycle.HELD_FOR_HARNESS,
+    fix_cycle.HELD_FOR_ADOPTION,
     # Another PC's claim, which frees itself at its TTL (`fix_claims.CLAIMED_BY`). The one
     # hold a claim makes: one that could not be made sends anyway.
     "claimed by",

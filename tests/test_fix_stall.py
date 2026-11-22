@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import fix_cycle
+import fix_plan
 import fix_stall
 
 NOW = _dt.datetime(2026, 9, 26, 12, 0, tzinfo=_dt.UTC)
@@ -18,7 +20,8 @@ def line(hours_ago: float, waiting: dict | None = None, skipped: dict | None = N
     return {"when": when, "waiting": waiting or {}, "skipped": skipped or {}}
 
 
-HELD = {"carameli #8": "held until the harness is clean: devkit's gate is red"}
+# A hold nothing else tracks: a red local run the scheduled one is to re-test.
+HELD = {"carameli #8": "Medium Tier failing on main: the next scheduled local run re-tests the tip"}
 
 
 def test_a_wait_is_dated_from_the_start_of_its_unbroken_run():
@@ -32,7 +35,9 @@ def test_a_wait_past_a_day_is_filed_with_its_reason():
     history = [line(30, HELD), line(0, HELD)]
     [found] = fix_stall.stalled(history, NOW)
     assert (found.kind, found.project) == ("stalled", "carameli")
-    assert found.detail.startswith(f"waiting since {history[0]['when'][:16]}: carameli #8 -- held")
+    assert found.detail.startswith(
+        f"waiting since {history[0]['when'][:16]}: carameli #8 -- Medium"
+    )
 
 
 def test_a_wait_under_a_day_is_not():
@@ -56,6 +61,22 @@ def test_what_another_part_of_the_loop_already_tracks_is_not_filed_twice():
     assert fix_stall.stalled([line(72, tracked), line(0, tracked)], NOW) == []
     assert all(fix_stall.tracked(why) for why in tracked.values())
     assert not fix_stall.tracked(HELD["carameli #8"]) and not fix_stall.tracked(None)
+
+
+def test_a_hold_behind_the_harness_or_an_adoption_is_not_a_stall():
+    """39517cbb, 4e79a5bd: carameli #526, held a day behind the red harness and then behind
+    its adoption #530, was filed as a stall on the harness ledger -- which kept the harness
+    red, so #526 stayed held and #530 with it. Each waits on a finding already worked."""
+    harness = fix_cycle.Harness(clean=False, reasons=("1 harness failure(s) open",))
+    adopting = fix_cycle.Harness(clean=True, reasons=(), adopting=("carameli",))
+    pr = fix_plan.Failure(fix_plan.PR, "carameli", 526, "chore(deps): bump", "u", head="b")
+    held = {}
+    for state in (harness, adopting):
+        decision = fix_plan.Decision(fix_plan.DISPATCH, "red", (pr,))
+        [(_, why)] = fix_cycle.phase([decision], {}, state)[1]
+        held[f"carameli #{len(held)}"] = why
+    assert fix_stall.stalled([line(48, held), line(0, held)], NOW) == []
+    assert all(fix_stall.tracked(why) for why in held.values())
 
 
 def test_a_skip_naming_a_persons_step_is_the_persons_not_a_stall():
