@@ -138,6 +138,27 @@ def test_a_dead_session_offers_the_task_again_on_the_next_cycle(world, state):
     assert len(world.launches) == 2
 
 
+@pytest.mark.parametrize(
+    "state", [fix_reports.UNTRUSTED, fix_reports.NEVER_STARTED, fix_reports.NO_OUTCOME]
+)
+def test_a_dead_sessions_tree_is_marked_dead_so_the_reaper_can_take_it(world, state):
+    """25 host-scripts trees were left unmarked while the checkout was untrusted, and
+    `session_trees.stillborn` reaps only a tree whose stamp says it died."""
+    world.queue('agent = "x"\nwhen = "merged"\n')
+    world.run()
+    world.session = state
+    world.run()
+    assert fix_reports.read_stamp(world.trees[0]).get("dead") == state
+
+
+def test_a_working_sessions_tree_is_not_marked_dead(world):
+    world.queue('agent = "x"\nwhen = "merged"\n')
+    world.run()
+    world.session = fix_reports.WORKING
+    world.run()
+    assert fix_reports.read_stamp(world.trees[0]).get("dead") is None
+
+
 def test_attempts_are_counted_on_the_remote_and_then_it_fails_visibly(world):
     task = world.queue('agent = "x"\nwhen = "merged"\n')
     world.run()

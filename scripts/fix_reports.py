@@ -295,14 +295,30 @@ def read_stamp(tree: Path) -> dict:
     return loaded if isinstance(loaded, dict) else {}
 
 
+# `harness_triage.PERSON_STEP`, spelled here because that module's readers import this
+# one; a test holds the two equal, as `collectors.PERSON_STEP` is held.
+PERSON_STEP = "a person's step:"
+
+
 def blocked_reason(tree: Path) -> str:
-    """The report's text as one line, cut to `REASON_LIMIT`; "" when there is none."""
+    """The report's text as one line, cut to `REASON_LIMIT`; "" when there is none.
+
+    A person's step is kept whole and the text before it is what gets cut: the step is
+    a command someone pastes, and a cut one is worse than none. The host-scripts
+    repoint fixer of 2026-11-22 found its admin command cut mid-word at 400 and spent
+    four calls rewording the report to fit."""
     try:
         text = (tree / BLOCKED_FILE).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     words = " ".join(line.strip().lstrip("#").strip() for line in text.splitlines()).split()
-    return " ".join(words)[:REASON_LIMIT]
+    joined = " ".join(words)
+    head, marker, step = joined.partition(PERSON_STEP)
+    if not marker or len(joined) <= REASON_LIMIT:
+        return joined[:REASON_LIMIT]
+    tail = f"{marker}{step}"
+    room = max(REASON_LIMIT - len(tail) - 1, 0)
+    return f"{head[:room].rstrip()} {tail}".lstrip()
 
 
 # The line a blocked report carries when its fix is another PR's merge, in any repository.

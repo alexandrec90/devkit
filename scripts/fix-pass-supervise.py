@@ -390,6 +390,32 @@ def run_pass(workspace: Path, mode: str) -> tuple[int | None, str]:
     return done.returncode, (done.stdout or "") + (done.stderr or "")
 
 
+# How many times one iteration runs a pass that yielded the machine's run lock to another
+# (`fix-pass.run_locked`). Each try already waits out `fix-pass.RUN_LOCK_WAIT` for it, and
+# a pass outlasting that is the scheduled one at its slowest, which a second wait covers.
+YIELD_TRIES = 3
+YIELDED = "fix-pass: yielded"
+
+
+def pass_that_ran(
+    run: Callable[[], tuple[int | None, str]], read: Callable[[], str], tries: int = YIELD_TRIES
+) -> tuple[int | None, str]:
+    """`(exit code, record)` of the first of `tries` passes that did not yield.
+
+    The supervisor's pass and the scheduled one contend for one lock, and a yield is the
+    lock working, not a broken pass: on 2026-11-22 iteration 1 of 3 yielded to the
+    scheduled pass and the run spent it as a `did not run in dispatch mode` violation.
+    The last try's record is returned whatever it says, so a lock that never frees is
+    still `check_ran`'s to report."""
+    code, record = None, ""
+    for _ in range(max(tries, 1)):
+        code, _output = run()
+        record = read()
+        if not record.startswith(YIELDED):
+            break
+    return code, record
+
+
 def open_kinds(devkit_dir: Path) -> set[tuple[str, str]]:
     """`(kind, project)` of every open fix-pass finding."""
     kinds = set()
@@ -412,8 +438,10 @@ def iterate(
     devkit_dir = root / "devkit"
     before = {i.id for i in triage.open_items(triage.load(devkit_dir))}
     started = clock()
-    code, _output = run_pass(workspace, mode)
-    record = RECORD.read_text(encoding="utf-8") if RECORD.is_file() else ""
+    code, record = pass_that_ran(
+        lambda: run_pass(workspace, mode),
+        lambda: RECORD.read_text(encoding="utf-8") if RECORD.is_file() else "",
+    )
     items = triage.open_items(triage.load(devkit_dir))
     iteration = Iteration(number, started.isoformat(timespec="seconds"), code, record)
     iteration.filed = [f"{i.event} {i.project}: {i.detail}" for i in items if i.id not in before]

@@ -567,6 +567,19 @@ def _read_back(task: Task, board: Board, cycle: Cycle) -> None:
         if outcome.endswith(fix_reports.UNTRUSTED):
             _untrusted(task, board, cycle)
         _spent_attempt(task, held, board, outcome, cycle)
+        _bury(result, outcome)
+
+
+def _bury(result: dict, outcome: str) -> None:
+    """Write the dead session's state on its tree's stamp, as `fix_loop.judge_dead` does for
+    a fixer's: the next attempt cuts a fresh tree, and `session_trees.stillborn` reaps only
+    a tree whose stamp says it died without starting. Unmarked, every refused launch left
+    its tree behind for good -- 25 host-scripts trees in 18 hours while the checkout was
+    untrusted, each re-reported by the fix pass on every iteration."""
+    state = outcome.removeprefix("its session ")
+    tree = Path(str(result.get("tree", "")))
+    if state in fix_reports.DEAD and result.get("tree") and tree.is_dir():
+        fix_reports.note_on_stamp(tree, "dead", state)
 
 
 def _claimed(task: Task, board: Board, cycle: Cycle) -> str:

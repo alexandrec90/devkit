@@ -160,6 +160,7 @@ def close(ctx: Context, journal: fix_findings.Journal) -> Closed:
             "signed-in", retire_login, ctx, closed.signed_in, default=[]
         )
         closed.verified += journal.step("trusted", retire_trusted, ctx, default=[])
+        closed.verified += journal.step("job-passed", retire_passed_jobs, ctx, default=[])
         runner = ship_intent.run_quiet
         closed.stopped = journal.step(
             "stop", bg_sessions.stop_finished, closed.finished, runner, default=[]
@@ -1067,6 +1068,68 @@ def retire_trusted(ctx: Context) -> list[str]:
         note = f"{item.project} is trusted now: Claude Code holds the prompt's answer"
         triage.resolve([item.id], note, root=ctx.devkit_dir)
         lines.append(f"retired [{item.id}] -- {note}")
+    return lines
+
+
+# What `log-wrap.failure_message` names an unattended job's row after, and the header
+# `log-wrap.artifact_body` writes on every `--always` run, a passing one included, into
+# `logs/<log-wrap.slug(title)>.log` -- a hyphenated script, so spelled here.
+UNATTENDED_FAILED = re.compile(r"""^unattended task (['"])(?P<title>.+)\1 failed$""")
+RUN_HEADER = re.compile(
+    r"^# when: (?P<when>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\n# exit: (?P<code>-?\d+)$", re.M
+)
+
+
+def _job_slug(title: str) -> str:
+    """`log-wrap.slug`: the stem of a task's per-run artifact."""
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "task"
+
+
+def last_pass(checkout: Path, title: str) -> _dt.datetime | None:
+    """When the job `title` last passed in `checkout`, as its per-run artifact says (aware,
+    UTC); None when its newest run failed or the file cannot say."""
+    try:
+        text = (checkout / "logs" / f"{_job_slug(title)}.log").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    found = RUN_HEADER.search(text)
+    if found is None or found["code"] != "0":
+        return None
+    # `log-wrap._now`: the scheduler's local wall clock, naive.
+    return _dt.datetime.fromisoformat(found["when"]).astimezone(_dt.UTC)
+
+
+def retire_passed_jobs(ctx: Context) -> list[str]:
+    """Retire each group of failed runs awaiting a person whose job has passed since its
+    newest row on this machine; lines for the record.
+
+    The step is a person's and so is its resolution, which nobody comes back to write:
+    f26e1145 ("start Docker Desktop", 246 rows) sat in the morning toast for a month
+    after its last failure on 2026-10-25, while `devkit-collectors` passed every fifteen
+    minutes. `retire_trusted`'s reason -- the job's own artifact is the proof the step
+    asked for, so the group goes as of that run, and a later failure files afresh.
+    """
+    items = triage.open_items(triage.load(ctx.devkit_dir))
+    awaiting = triage.awaiting_person(items)
+    host = triage.harness_events.host_name()
+    lines = []
+    for signature, bucket in triage.groups(items):
+        named = UNATTENDED_FAILED.match(bucket[0].fields.get("message", ""))
+        if signature not in awaiting or named is None:
+            continue
+        mine = [item for item in bucket if item.event == FAILED_RUN_EVENT and item.host == host]
+        if len(mine) != len(bucket):
+            continue  # another machine's runs, which this one's artifact cannot speak for
+        passed = last_pass(ctx.root / bucket[0].project, named["title"])
+        try:
+            newest = max(_dt.datetime.fromisoformat(item.stamp) for item in bucket)
+        except ValueError:  # a stamp no ledger writer produces
+            continue
+        if passed is None or passed <= newest:
+            continue
+        note = f"{named['title']} passed at {passed.isoformat()}, after its last failure"
+        triage.resolve([item.id for item in bucket], note, root=ctx.devkit_dir)
+        lines.append(f"retired [{bucket[0].id}] -- {note}")
     return lines
 
 
