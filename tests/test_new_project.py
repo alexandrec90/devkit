@@ -1340,6 +1340,60 @@ def test_a_canonical_copy_on_a_task_branch_is_left_on_it(tmp_path):
     assert _git_out(canonical.parent, "status", "--porcelain") == "M workspace.jsonc"
 
 
+@pytest.mark.parametrize("where", ["task-branch", "hand-edit-on-main"])
+def test_a_registration_left_in_place_carries_its_slot_beside_it(
+    tmp_path, capsys, monkeypatch, where
+):
+    """radio's registration (PR #779) and tvshell's (#778) were not handed off -- one
+    checkout was already on a task branch, the other dirty -- so the slot was only the
+    printed hint, the session that committed `workspace.jsonc` skipped it, and each PR
+    went red on `test_every_checkout_either_holds_a_slot_or_says_why_not`. Until it
+    merged, the live file's extra folder made *Publish devkit's Copy* refuse to render."""
+    canonical = _devkit_checkout(tmp_path / "devkit", ports=True)
+    checkout = canonical.parent
+    if where == "task-branch":
+        subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", "-b", "agent/x-1120"])
+    else:
+        canonical.write_text(canonical.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+    new_project.next_steps(the_plan)
+
+    assert not (checkout / ".claude").exists(), "nothing was handed off"
+    slot = the_plan.context["slot"]
+    assert devkit_ports.load(checkout).slot_of(the_plan.name) == slot
+    changed = _git_out(checkout, "diff", "--name-only").splitlines()
+    assert sorted(changed) == ["ports.toml", "workspace.jsonc"]
+    out = capsys.readouterr().out
+    assert "commit devkit's workspace.jsonc and ports.toml on a branch" in out
+    assert "Next: register the slot" not in out, "the checkout already carries it"
+
+
+def test_a_canonical_copy_that_could_not_be_registered_gets_no_slot_either(
+    tmp_path, capsys, monkeypatch
+):
+    """The slot rides with the folder entry, never alone: a slot for a checkout no
+    picker names is a number spent on nothing, with only the hint to say so."""
+    canonical = _devkit_checkout(tmp_path / "devkit", ports=True)
+    canonical.write_text('{"tasks": {}}', encoding="utf-8")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    live = tmp_path / "live.code-workspace"
+    live.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+    new_project.next_steps(the_plan)
+
+    assert the_plan.name not in devkit_ports.load(canonical.parent).slots
+    assert "Next: register the slot" in capsys.readouterr().out
+
+
 def test_an_unwritable_canonical_copy_still_registers_the_live_file(tmp_path, capsys, monkeypatch):
     """Each copy is best-effort on its own: one failing must not skip the other."""
     args = make_args(parent=str(tmp_path))
