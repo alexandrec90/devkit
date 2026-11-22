@@ -112,6 +112,10 @@ HARNESS_REFUSALS = (
 # A `RERUN` is a `gh workflow run` or `gh run rerun` call, and goes as itself for the
 # same reason.
 BRANCH_SHAPED = (fix_plan.UPDATE, fix_plan.RERUN, fix_plan.RESOLVE)
+# How `phase` words a project decision it holds behind something else the pass works:
+# the red harness, or that project's open adoption. `fix_stall.TRACKED` names both.
+HELD_FOR_HARNESS = "held until the harness is clean"
+HELD_FOR_ADOPTION = "held until the newest release is adopted in"
 
 
 @dataclass(frozen=True)
@@ -330,7 +334,7 @@ def phase(
     go = _harness_first(harness_ones)
     held: list[tuple[fix_plan.Decision, str]] = []
     sent: list[fix_plan.Decision] = []
-    red = "held until the harness is clean: " + "; ".join(harness.reasons)
+    red = f"{HELD_FOR_HARNESS}: " + "; ".join(harness.reasons)
     for d in project_ones:
         adopting = sorted({f.project for f in d.failures} & set(harness.adopting))
         if is_devkit_pr(d):
@@ -338,7 +342,7 @@ def phase(
         elif not harness.clean:
             held.append((d, red))
         elif adopting and not fix_plan.is_adoption(d, prefixes):
-            held.append((d, f"held until the newest release is adopted in {', '.join(adopting)}"))
+            held.append((d, f"{HELD_FOR_ADOPTION} {', '.join(adopting)}"))
         else:
             sent.append(d)
     return go + sorted(sent, key=lambda d: RANK.get(d.action, 2)), held + planned_holds

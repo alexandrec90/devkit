@@ -390,6 +390,9 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(loop.fix_reports, "read_trees", lambda root, projects: list(table["trees"]))
     monkeypatch.setattr(loop.session_friction, "harvest", lambda *a, **k: list(table["friction"]))
     monkeypatch.setattr(loop.schedule_health, "query", lambda *a, **k: list(table["jobs"]))
+    # The hand-made tasks no project claims are read off this PC's scheduler, so on a
+    # Windows PC with any (D2R Net Logger, 2026-11-21) each became an open finding here.
+    monkeypatch.setattr(loop.project_tasks, "unowned_on_machine", lambda claimed: [])
     monkeypatch.setattr(loop.collectors, "scheduled_tasks", lambda *a, **k: {})
     monkeypatch.setattr(loop.collectors, "tray_rows", lambda *a, **k: [])
     monkeypatch.setattr(
