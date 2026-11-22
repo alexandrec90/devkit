@@ -606,6 +606,29 @@ def test_the_ship_task_outliving_a_fire_is_the_schedule_working():
     assert not [line for line in health.problems([ship], NOW) if "overlapping" in line]
 
 
+def test_a_resident_jobs_second_start_refused_is_the_running_one_working():
+    """68357ee3: data-lake's pool restarts its supervisor on a called-off shutdown, which
+    mostly finds it still running; a clocked job refused the same way still overlaps."""
+    pool = job(
+        name="SeaweedFS data-lake pool",
+        event_only=True,
+        last_result=health.SCHED_REFUSED_ALREADY_RUNNING_UNSIGNED,
+        next_run=None,
+    )
+    assert health.problems([pool], NOW) == []
+    assert not health.overlaps(pool)
+    clocked = job(name=pool.name, last_result=pool.last_result)
+    assert health.overlaps(clocked)
+    assert "overlapping" in "".join(health.problems([clocked], NOW))
+
+
+def test_a_resident_job_ended_from_outside_is_still_a_failure():
+    """0x40010004 is a supervisor a shutdown ended; on a machine still up nothing starts
+    it again, so unlike `SCHED_S_TASK_TERMINATED` it stays a line."""
+    pool = job(name="SeaweedFS data-lake pool", event_only=True, last_result=1073807364)
+    assert "last run failed" in "".join(health.problems([pool], NOW))
+
+
 def test_the_medium_tier_outliving_a_fire_is_the_schedule_working():
     """Its pass may run far past its own interval by design, so the skip is expected; the
     reason is read off the two scripts, so it stops holding the day either changes."""
