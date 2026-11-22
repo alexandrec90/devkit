@@ -543,6 +543,22 @@ def test_a_resident_job_stopped_from_outside_is_not_a_failure():
     assert health.problems([tray], NOW) == []
 
 
+def test_a_resident_job_whose_console_closed_is_not_a_failure():
+    """e530fb0a, 4ef3389a: host-scripts' `D2R Net Logger` and `D2R Disconnect Guard` run
+    from logon until the session ends, and a sign-out or shutdown closes their console,
+    which a process reports as `STATUS_CONTROL_C_EXIT` (0xC000013A, signed -1073741510)
+    -- filed as "last run failed (exit -1073741510)". Both spellings reach here."""
+    for code in (health.STATUS_CONTROL_C_EXIT, health.STATUS_CONTROL_C_EXIT_UNSIGNED):
+        logger = job(name="D2R Net Logger", last_result=code, next_run=None, event_only=True)
+        assert health.problems([logger], NOW) == []
+
+
+def test_a_clocked_job_whose_console_closed_is_still_reported():
+    """A clocked job's run is meant to finish, so a closed console mid-run is a failure."""
+    closed = job(last_result=health.STATUS_CONTROL_C_EXIT)
+    assert "failed (exit -1073741510)" in health.problems([closed], NOW)[0]
+
+
 def test_a_clocked_job_ended_from_outside_is_still_reported():
     """A clocked job is ended that way by its own time limit: a hung run, so a failure."""
     ended = job(last_result=health.SCHED_S_TASK_TERMINATED)

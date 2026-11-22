@@ -637,6 +637,9 @@ def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
     assert "or it backgrounded it" in flat
     # 977b93dc: Claude Code refuses a leading `sleep`, which cost that subagent three turns.
     assert "never `sleep`" in flat
+    # 26022937: a loop whose pattern missed pytest's last line outlived its session and
+    # held Git Bash open against a Git upgrade, so the loop carries a deadline.
+    assert "`|| [ $SECONDS -gt 900 ]`" in flat
 
 
 def test_a_module_the_tree_itself_holds_is_a_code_defect_not_the_environment(tmp_path):

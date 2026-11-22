@@ -579,11 +579,15 @@ class ProvisionStep:
     `shell_command` exists only for `[python] install_command`, which is a shell string in
     `.devkit.toml` because that is the shape `session-start.sh` reads it in. Everything
     detected here is argv, so the ladder can be asserted without a shell.
+
+    `skip_if` is a path, relative to the box, whose presence when the step comes up
+    means an earlier step already did its work (`provision_steps` says when).
     """
 
     label: str
     argv: tuple[str, ...] = ()
     shell_command: str = ""
+    skip_if: str = ""
 
 
 @dataclass(frozen=True)
@@ -1314,29 +1318,35 @@ def provision_steps(
             )
         )
     if frontend_dir:
-        # `ci` when a lockfile is there, and the difference is not about speed.
-        # **`npm install` writes `package-lock.json`**, so provisioning a box left a
-        # tracked file modified before anyone had edited anything -- and a box that
-        # holds a tracked change is one `reapable` refuses to destroy, on any verdict,
-        # forever. Two carameli preview boxes sat on a port slot each for that reason
-        # alone, and the registry filling is what made the next box preview fail.
-        # `ci` installs the lock exactly and never rewrites it, which is also what the
-        # lock is for.
-        verb = "ci" if frontend_locked else "install"
-        steps.append(
-            ProvisionStep(
-                f"npm {verb} ({frontend_dir})",
-                (
-                    npm_executable(windows),
-                    verb,
-                    "--prefix",
-                    frontend_dir,
-                    "--no-audit",
-                    "--no-fund",
-                ),
-            )
-        )
+        steps.append(frontend_step(frontend_dir, frontend_locked, windows, bool(install_command)))
     return tuple(steps)
+
+
+def frontend_step(
+    frontend_dir: str, locked: bool, windows: bool, after_install_command: bool
+) -> ProvisionStep:
+    """`provision_steps`' npm install of `frontend_dir`.
+
+    `ci` when a lockfile is there, and the difference is not about speed. **`npm install`
+    writes `package-lock.json`**, so provisioning a box left a tracked file modified
+    before anyone had edited anything -- and a box that holds a tracked change is one
+    `reapable` refuses to destroy, on any verdict, forever. Two carameli preview boxes sat
+    on a port slot each for that reason alone. `ci` installs the lock exactly and never
+    rewrites it, which is also what the lock is for.
+
+    After an install command it is skipped when the frontend is already installed: that
+    command may install it itself, under the Node the project pins, where this step would
+    run PATH's. carameli's did, and the second `npm ci` died on PATH's Node 18 under
+    `engine-strict` (e5e65461). npm writes `.package-lock.json` only once an install
+    completes.
+    """
+    verb = "ci" if locked else "install"
+    done = f"{frontend_dir}/node_modules/.package-lock.json" if after_install_command else ""
+    return ProvisionStep(
+        f"npm {verb} ({frontend_dir})",
+        (npm_executable(windows), verb, "--prefix", frontend_dir, "--no-audit", "--no-fund"),
+        skip_if=done,
+    )
 
 
 PROVISION_MARKERS = ("uv.lock", "requirements.txt", "requirements-dev.txt", "pyproject.toml")
@@ -2987,6 +2997,9 @@ def run_provision(
     worktree_env.mark_provisioned(path, False)
     env = install_env(path)
     for step in steps:
+        if step.skip_if and (path / step.skip_if).is_file():
+            notes.append(f"already provisioned: {step.label}")
+            continue
         try:
             if step.shell_command:
                 # `[python] install_command` is a shell string by contract, authored in

@@ -2211,6 +2211,40 @@ def test_an_unreadable_manifest_still_yields_the_python_toolchain(tmp_path):
     assert [s.label for s in worktree.plan_provision(tmp_path)] == ["uv sync (uv.lock)"]
 
 
+def test_the_frontend_step_after_an_install_command_waits_on_what_it_left():
+    """e5e65461: carameli's `install_command` (`scripts/bootstrap.py`) provisions the Node
+    `.nvmrc` pins and runs `npm ci` under it; the ladder's own `npm ci` ran next on PATH's
+    Node 18, which `engine-strict` refuses, and the whole tree read as FAILED. So after an
+    install command the step names npm's completion marker as its skip."""
+    steps = worktree.provision_steps(
+        frozenset(), install_command="python scripts/bootstrap.py", frontend_dir="frontend"
+    )
+    assert steps[1].skip_if == "frontend/node_modules/.package-lock.json"
+    alone = worktree.provision_steps(frozenset({"uv.lock"}), frontend_dir="frontend")
+    assert alone[1].skip_if == ""
+    step = worktree.frontend_step("web", locked=False, windows=False, after_install_command=True)
+    assert step.label == "npm install (web)" and step.skip_if.startswith("web/node_modules/")
+
+
+def test_a_step_whose_work_is_already_on_disk_is_not_run(tmp_path, monkeypatch):
+    calls: list[object] = []
+    monkeypatch.setattr(
+        worktree.subprocess, "run", lambda argv, **k: calls.append(argv) or _completed()
+    )
+    marker = tmp_path / "frontend" / "node_modules" / ".package-lock.json"
+    step = worktree.ProvisionStep(
+        "npm ci (frontend)", ("npm", "ci"), skip_if="frontend/node_modules/.package-lock.json"
+    )
+    ok, notes = worktree.run_provision(tmp_path, (step,))
+    assert ok is True and calls == [["npm", "ci"]]
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}", encoding="utf-8")
+    calls.clear()
+    ok, notes = worktree.run_provision(tmp_path, (step,))
+    assert ok is True and calls == []
+    assert notes == ["already provisioned: npm ci (frontend)"]
+
+
 def test_provisioning_stops_at_the_first_failure(tmp_path, monkeypatch):
     """The second step of a ladder assumes the first one placed an interpreter."""
     calls: list[tuple[str, ...]] = []

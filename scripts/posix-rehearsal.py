@@ -22,7 +22,8 @@ outside the pytest process:
    `logs/posix-rehearsal.log` reads the shape it already knows.
 
 Usage:
-    python scripts/posix-rehearsal.py
+    python scripts/posix-rehearsal.py                       # the suite, as the push gate runs it
+    python scripts/posix-rehearsal.py tests/test_x.py ...   # just these tests
 
 Tested in `tests/test_posix_rehearsal.py`.
 """
@@ -125,6 +126,23 @@ def verdict(failed: set[str], ledger: dict[str, str]) -> tuple[list[str], list[s
     return sorted(failed - set(ledger)), sorted(set(ledger) - failed)
 
 
+def in_scope(ledger: dict[str, str], targets: list[str]) -> dict[str, str]:
+    """The ledger lines a run of `targets` collects; the whole ledger when none is named.
+
+    A line for a test the run never collected has not stopped being true, so a named run
+    holds only its own lines to failing. A target is a file, a directory or a node id."""
+    if not targets:
+        return ledger
+    roots = [target.replace("\\", "/").rstrip("/") for target in targets]
+
+    def collected(test_id: str) -> bool:
+        return any(
+            test_id == root or test_id.startswith((root + "::", root + "/")) for root in roots
+        )
+
+    return {test_id: why for test_id, why in ledger.items() if collected(test_id)}
+
+
 def _display(path: Path) -> str:
     """The artifact path as a reader wants it: repo-relative, or absolute when it is not
     under the repo -- which is only ever a test pointing it at a tmp dir."""
@@ -192,9 +210,13 @@ def _reexec(module: str) -> int | None:
 
 def main(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.parse_args(argv)
+    # A session rehearses the tests for what it changed; the push gate, naming none,
+    # rehearses the suite. The whole suite beside running fixers was stopped for low
+    # memory (9bc7cbbd).
+    parser.add_argument("tests", nargs="*", help="test files or node ids; none is the suite")
+    targets = parser.parse_args(argv).tests
 
-    cmd = command()
+    cmd = command() + targets
     print(f"posix-rehearsal: {' '.join(cmd[2:])}", flush=True)
     # What a run killed mid-suite leaves (4c396283): a tool call cut off at its timeout
     # exited 1 with no artifact, which read as a failure nobody could find.
@@ -225,7 +247,7 @@ def main(argv: list[str] | None = None, runner: Runner = subprocess.run) -> int:
     # `LEDGER` passed rather than defaulted: a default argument binds at definition time,
     # so a test pointing this at a fixture ledger would silently be read against the real
     # one -- and would pass by agreeing with it.
-    ledger = read_ledger(LEDGER)
+    ledger = in_scope(read_ledger(LEDGER), targets)
     unexpected, fixed = verdict(failed_tests(raw), ledger)
     # A run that could not start at all -- a collection error, a missing plugin -- exits
     # non-zero with no summary line to parse, and reading that as "nothing failed" would

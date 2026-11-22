@@ -227,6 +227,17 @@ def test_changed_asks_pytest_for_the_last_failed_subset(artifact, monkeypatch):
     assert ["--last-failed-no-failures", "all"] == seen[0][-2:]
 
 
+def test_changed_says_it_is_not_the_changed_files(artifact, monkeypatch, capsys):
+    """e6929429: a fixer carried `lint-all.py --changed` (the working-tree diff) over to
+    this runner, where `--changed` is the last-failed rerun, and read "passed" as its
+    changed files tested. So the run says what it was, and the template's says the same."""
+    stub_pytest(monkeypatch, 0)
+    run_tests.main(["--changed"])
+    assert run_tests.LAST_FAILED_NOTE in capsys.readouterr().out
+    assert "bare" in run_tests.LAST_FAILED_NOTE
+    assert template_runner(monkeypatch).LAST_FAILED_NOTE == run_tests.LAST_FAILED_NOTE
+
+
 def test_unknown_arguments_are_passed_through_as_pytest_targets(artifact, monkeypatch):
     """The Stop hook passes the changed test files positionally."""
     seen = stub_pytest(monkeypatch, 0)
