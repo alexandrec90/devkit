@@ -615,6 +615,66 @@ def test_run_pytest_is_empty_on_a_pass_and_the_artifact_text_on_a_failure(artifa
     assert "FAILED tests/test_b.py::test_b_thing" in text
 
 
+# What a parallel run printed when it died before its summary (79bdb858), and the
+# serial rerun's report of the same tests.
+DIED_OUTPUT = "bringing up nodes...\n\n.[gw0] node down: Not properly terminated\nF"
+
+
+def stub_runs(monkeypatch, *results: tuple[int, str]):
+    """Replace pytest with one `(returncode, stdout)` per call, recording each argv."""
+    seen: list[list[str]] = []
+    queue = list(results)
+
+    def fake_run(cmd, **_kwargs):
+        seen.append(list(cmd))
+        code, out = queue.pop(0)
+        return subprocess.CompletedProcess(cmd, code, out, "")
+
+    monkeypatch.setattr(run_tests.subprocess, "run", fake_run)
+    return seen
+
+
+def test_a_parallel_run_that_died_unsummarised_is_rerun_serially(artifact, monkeypatch):
+    seen = stub_runs(monkeypatch, (1, DIED_OUTPUT), (1, FAILING_OUTPUT))
+    text = run_tests.run_pytest(["py", "-m", "pytest", "-n", "3", "tests/test_b.py"])
+    assert len(seen) == 2
+    assert "-n" not in seen[1] and seen[1][-1] == "tests/test_b.py"
+    assert text.startswith(run_tests.SERIAL_NOTE)
+    assert "FAILED tests/test_b.py::test_b_thing" in text
+
+
+def test_a_serial_rerun_that_passes_says_only_the_parallel_run_failed(artifact, monkeypatch):
+    stub_runs(monkeypatch, (1, DIED_OUTPUT), (0, "3 passed\n"))
+    text = run_tests.run_pytest(["py", "-m", "pytest", "-n", "auto", "tests/test_b.py"])
+    assert "serially it passed" in text, "a pass after a crash is still not a green run"
+
+
+@pytest.mark.parametrize(
+    ("cmd", "first"),
+    [
+        (["py", "-m", "pytest", "-n", "3", "tests/test_b.py"], FAILING_OUTPUT),
+        (["py", "-m", "pytest", "tests/test_b.py"], DIED_OUTPUT),
+    ],
+    ids=["summarised", "already-serial"],
+)
+def test_no_rerun_when_the_run_summarised_or_was_serial(artifact, monkeypatch, cmd, first):
+    seen = stub_runs(monkeypatch, (1, first))
+    text = run_tests.run_pytest(cmd)
+    assert len(seen) == 1
+    assert not text.startswith(run_tests.SERIAL_NOTE)
+
+
+def test_serial_drops_only_the_worker_count():
+    assert run_tests.serial(["py", "-m", "pytest", "-n", "auto", "-k", "x"]) == [
+        "py",
+        "-m",
+        "pytest",
+        "-k",
+        "x",
+    ]
+    assert run_tests.serial(["py", "-m", "pytest", "-k", "x"]) is None
+
+
 @pytest.mark.parametrize("runner", ["devkit", "template"])
 def test_run_pytest_reads_utf8_output_whatever_the_locale(artifact, monkeypatch, runner):
     """0f982488: decoded in cp1252, one `0x9d` byte raised in subprocess's reader thread,

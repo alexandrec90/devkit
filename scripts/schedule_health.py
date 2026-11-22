@@ -586,6 +586,19 @@ def problems(
     return [line for line in found if line is not None]
 
 
+def overlaps(job: Job) -> bool:
+    """Whether `job`'s last fire was skipped for a run still going, and that is news.
+
+    Not for `OVERLAP_EXPECTED`, nor for a resident job -- every trigger an event -- which
+    runs until something ends it, so a second start refused is the one running working,
+    as `devkit-tray`'s is: data-lake's pool restarts on a called-off shutdown, which
+    mostly finds it still up (68357ee3).
+    """
+    return (
+        job.last_result in OVERLAPPING and job.name not in OVERLAP_EXPECTED and not job.event_only
+    )
+
+
 def job_problem(
     job: Job,
     moment: _dt.datetime,
@@ -611,7 +624,7 @@ def job_problem(
         if job.next_run is None or job.next_run < moment:
             return f"{job.name}: registered but has never run"
         return None
-    if job.last_result in OVERLAPPING and job.name not in OVERLAP_EXPECTED:
+    if overlaps(job):
         # Not a failure, but not silence either: a job whose pass outlives its own
         # interval is running essentially continuously, and that background cost is
         # invisible everywhere else.

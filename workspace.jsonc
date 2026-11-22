@@ -3186,9 +3186,13 @@
 		// time each tests only what `hosts` assigns it, so two PCs never test, record and
 		// send fixers at the same red. Same shape as `devkit.remoteControl`'s: one name for
 		// every project, or {"*": "pc-a", "carameli": "pc-b"} to spread them. Moving the
-		// job to another PC is editing this value -- nothing is re-registered.
+		// job to another PC is editing this value -- nothing is re-registered -- in devkit's
+		// `workspace.jsonc` on a task branch, never in the live `.code-workspace`: a live
+		// edit is refused at the next render until someone merges it by hand (98bd198a).
 		"devkit.localE2e": {
-			"hosts": "desktop-b9fc8vp"
+			// tvshell's tier checks the TV's own logs and crash events, so it runs on the
+			// PC the TV is plugged into.
+			"hosts": {"*": "desktop-b9fc8vp", "tvshell": "desktop-ml5f3pj"}
 		},
 		// Ingestion that runs with nobody connected, kept going by `devkit-collectors` --
 		// see README, "Ingestion collectors". Declared here for every machine; RUN on none

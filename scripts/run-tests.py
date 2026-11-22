@@ -517,8 +517,58 @@ def _plan_changed(root: Path) -> list[str] | None:
     return targets
 
 
+def serial(cmd: list[str]) -> list[str] | None:
+    """`cmd` without its xdist `-n <workers>`, or None when it carries none."""
+    if "-n" not in cmd[:-1]:
+        return None
+    at = cmd.index("-n")
+    return [*cmd[:at], *cmd[at + 2 :]]
+
+
+def _summarised(raw: str) -> bool:
+    """Whether pytest got as far as reporting its failures."""
+    return SUMMARY_BANNER in raw or "= FAILURES =" in raw
+
+
+# Prefixed to the serial rerun's text, so the reader knows why the run was made twice.
+SERIAL_NOTE = (
+    "# the parallel run ended with no failure summary (a worker or the run itself died);"
+    " this is the same tests run serially\n"
+)
+
+
 def run_pytest(cmd: list[str]) -> str:
-    """Run pytest; the artifact's text for a failure, empty for a pass."""
+    """Run pytest; the artifact's text for a failure, empty for a pass.
+
+    A parallel run that dies before pytest summarises -- `[gw0] node down: Not properly
+    terminated` and then nothing -- names no test, and the artifact was that one line
+    (79bdb858). The same tests run serially then, so the artifact names what failed.
+    """
+    raw, code = _pytest(cmd)
+    if code in (0, PYTEST_NO_TESTS_COLLECTED):
+        return ""
+    alone = None if _summarised(raw) else serial(cmd)
+    if alone is not None:
+        print("run-tests: the parallel run ended with no summary; running it serially")
+        raw, code = _pytest(alone)
+        if code in (0, PYTEST_NO_TESTS_COLLECTED):
+            return SERIAL_NOTE + "# and serially it passed: the parallel run alone failed\n"
+        return SERIAL_NOTE + _artifact(raw)
+    return _artifact(raw)
+
+
+def _artifact(raw: str) -> str:
+    """The artifact's text for a failed run's output."""
+    body = cap_failure_blocks(filter_output(raw))
+    # Never leave the agent with nothing: if filtering stripped everything (an
+    # unexpected pytest output shape, a collection error), fall back to raw.
+    if not body.strip():
+        body = raw.strip()
+    return "# source: scripts/run-tests.py\n# fix: pytest <the failing test id> --tb=long\n" + body
+
+
+def _pytest(cmd: list[str]) -> tuple[str, int]:
+    """Run `cmd` in a temp root of its own: its whole output and its exit code."""
     print(f"run-tests: {' '.join(cmd[2:])}")
     with tempfile.TemporaryDirectory(prefix="pytest-", ignore_cleanup_errors=True) as basetemp:
         run = with_basetemp(cmd, basetemp)
@@ -527,15 +577,7 @@ def run_pytest(cmd: list[str]) -> str:
         result = subprocess.run(
             run, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace"
         )
-    raw = (result.stdout or "") + (result.stderr or "")
-    if result.returncode in (0, PYTEST_NO_TESTS_COLLECTED):
-        return ""
-    body = cap_failure_blocks(filter_output(raw))
-    # Never leave the agent with nothing: if filtering stripped everything (an
-    # unexpected pytest output shape, a collection error), fall back to raw.
-    if not body.strip():
-        body = raw.strip()
-    return "# source: scripts/run-tests.py\n# fix: pytest <the failing test id> --tb=long\n" + body
+    return (result.stdout or "") + (result.stderr or ""), result.returncode
 
 
 def _finish(failures: list[str]) -> int:
