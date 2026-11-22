@@ -579,6 +579,27 @@ def test_overlapping_runs_are_reported_as_an_overrun_not_a_failure():
     assert "devkit-upgrade-projects" in line
 
 
+def test_a_fire_skipped_in_the_hour_after_the_machine_came_up_is_its_catch_up():
+    """061e40de, 889ae996, f6ce3419: a boot at 17:48 ran every missed fire at once, and
+    the 18:00 fire found three of them still going -- filed as three overlapping jobs."""
+    skipped = job(last_result=health.SCHED_REFUSED_ALREADY_RUNNING, last_run=NOW)
+    assert health.problems([skipped], NOW, awake=NOW - dt.timedelta(minutes=12)) == []
+    assert health.problems([skipped], NOW, awake=NOW - dt.timedelta(hours=2)), "long up"
+    assert health.problems([skipped], NOW, awake=NOW + dt.timedelta(minutes=1)), "before it"
+    assert health.problems([skipped], NOW, awake=None), "the machine cannot say"
+    failed = job(last_result=1, last_run=NOW)
+    assert health.problems([failed], NOW, awake=NOW), "a failure is no catch-up"
+    assert health.catching_up(skipped, NOW - health.CATCH_UP)
+    assert not health.catching_up(job(last_run=None), NOW)
+
+
+def test_awake_local_is_the_machines_own_answer_in_local_time(monkeypatch):
+    monkeypatch.setattr(health.machine_clock, "awake_since", lambda now=None: 1_000_000.0)
+    assert health.awake_local() == dt.datetime.fromtimestamp(1_000_000.0)
+    monkeypatch.setattr(health.machine_clock, "awake_since", lambda now=None: None)
+    assert health.awake_local() is None
+
+
 def test_the_ship_task_outliving_a_fire_is_the_schedule_working():
     """Two minutes is shorter than a slow ship, and the fire it skips loses nothing."""
     ship = job(name="devkit-ship", last_result=health.SCHED_REFUSED_ALREADY_RUNNING)

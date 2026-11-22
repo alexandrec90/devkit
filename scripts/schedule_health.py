@@ -65,6 +65,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
 import harness_state
+import machine_clock
 
 # `ARTIFACTS` holds repo-relative paths, and the caller is `workspace-status.py`, whose
 # cwd is the workspace rather than this checkout. Resolving against this file keeps the
@@ -133,6 +134,30 @@ NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) |
 # (`install-tray.py`, 4e6fe3ae), so the logon trigger can fire beside one already
 # running, and the second start it is refused is the one tray working.
 OVERLAP_EXPECTED = frozenset({"devkit-ship", "devkit-medium-tier", "devkit-tray"})
+
+# A fire skipped this soon after the machine came up is its catch-up working: every fire
+# slept or shut through starts at once (`StartWhenAvailable`, `machine_clock`), and the
+# next clock fire finds that run still going. 061e40de, 889ae996 and f6ce3419 were one
+# boot, at 17:48 on 2026-11-21 after an unexpected shutdown, filed as three overlapping
+# jobs at 18:00 -- and the same three had been retired once already as "one skip at
+# boot". An hour is every job's `ExecutionTimeLimit`, so no catch-up run outlives it.
+CATCH_UP = _dt.timedelta(hours=1)
+
+
+def catching_up(job: Job, awake: _dt.datetime | None) -> bool:
+    """Whether `job`'s skipped fire came within `CATCH_UP` of the machine booting or
+    waking at `awake`, in the scheduler's naive local time; None, or a fire before it,
+    is not."""
+    if awake is None or job.last_run is None:
+        return False
+    return _dt.timedelta(0) <= job.last_run - awake <= CATCH_UP
+
+
+def awake_local(now: float | None = None) -> _dt.datetime | None:
+    """`machine_clock.awake_since` as the scheduler's naive local time, or None."""
+    since = machine_clock.awake_since(now)
+    return None if since is None else _dt.datetime.fromtimestamp(since)
+
 
 # How many intervals a job may miss before it is worth a line. One is noise: a laptop
 # asleep at 04:00 misses a daily run and catches it the next night, which is the system
@@ -520,6 +545,7 @@ def problems(
     deliberate: frozenset[str] = frozenset(),
     root: Path | None = None,
     artifacts: dict[str, str] | None = None,
+    awake: _dt.datetime | None = None,
 ) -> list[str]:
     """One line per job that needs attention; [] when they are all healthy.
 
@@ -538,10 +564,15 @@ def problems(
 
     `artifacts` replaces `ARTIFACTS` for the pointers, for a caller judging jobs that
     table does not list -- the tray's scheduled collectors.
+
+    `awake`, when the machine last booted or woke in the scheduler's local time
+    (`awake_local`), excuses an overlap that is its catch-up (`catching_up`).
     """
     moment = now or _dt.datetime.now()
     found = (
-        job_problem(job, moment, deliberate, root, artifacts)
+        None
+        if job.last_result in OVERLAPPING and catching_up(job, awake)
+        else job_problem(job, moment, deliberate, root, artifacts)
         for job in sorted(jobs, key=lambda item: item.name)
     )
     return [line for line in found if line is not None]

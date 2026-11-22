@@ -27,8 +27,10 @@ pass's ship of an elevated `claude --worktree` tree failed on its first `git sta
 exiting the scheduled pass 1. On such a git the command scope carries `*` instead: that
 reaches only the pass's own process tree, which acts on nothing outside the workspace.
 The global entry stays the narrow one -- `*` there would trust every repository on the
-machine for every process, which is the operator's to choose -- so on an old git a push
-gate or a fixer in such a tree is still refused until git is upgraded.
+machine for every process, which is the operator's to choose -- so on such a git a
+dispatching pass also gives each tree under the workspace that git refuses its own
+exact-path global entry (`persist_exact`), which every git reads: without it a push gate
+or a fixer in an elevated session's tree was refused until git was upgraded.
 
 The same two halves carry `http.https://github.com/.proactiveAuth`, for a second refusal
 that was read as one tree's problem. GitHub answers *anonymous* requests from a blocked
@@ -44,8 +46,12 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Callable, Mapping, MutableMapping
+import sys
+from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))  # the vendored tier
+import worktree_tiers
 
 KEY = "safe.directory"
 AUTH_SETTING = "http.https://github.com/.proactiveAuth"
@@ -151,22 +157,117 @@ def persist(root: Path, git: Runner = _git) -> str:
     return "\n".join(lines)
 
 
+# How git names the directory it refused, the exact value `safe.directory` must hold.
+DUBIOUS = re.compile(r"dubious ownership in repository at '([^']+)'")
+# The command-scope variables `trusted_env` writes, which a probe must not carry or it
+# would be trusted by the very entry it is asking whether git needs.
+_SCOPED = re.compile(r"GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$")
+
+
+def _bare_git(*args: str) -> subprocess.CompletedProcess[str]:
+    """`_git` without the command scope: what a fixer's session or a push gate sees."""
+    env = {key: value for key, value in os.environ.items() if not _SCOPED.match(key)}
+    return subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        creationflags=NO_WINDOW,
+        env=env,
+    )
+
+
+def trees(root: Path) -> list[Path]:
+    """Every checkout under `root`, each one's agent worktrees, and the workspace's boxes:
+    the trees an elevated session can have made that the pass or a fixer acts in."""
+    found: list[Path] = []
+    try:
+        children = sorted(path for path in root.iterdir() if path.is_dir())
+    except OSError:
+        return []
+    for child in children:
+        if child.name == worktree_tiers.BOXES_DIR_NAME:
+            nest = child
+        elif (child / ".git").exists():
+            found.append(child)
+            nest = child.joinpath(*worktree_tiers.DEFAULT_TIER.segments)
+        else:
+            continue
+        try:
+            found += sorted(path for path in nest.iterdir() if (path / ".git").exists())
+        except OSError:
+            continue
+    return found
+
+
+def refused(tree: Path, probe: Runner = _bare_git, tries: int = 3) -> list[str]:
+    """The directories git refuses `tree` over, as it spells them, in the order it names
+    them: a linked worktree's own directory, and its checkout's when that is foreign too.
+    Each is found by asking again with the last one trusted, `tries` times at most."""
+    named: list[str] = []
+    for _ in range(tries):
+        scope = [arg for value in named for arg in ("-c", f"{KEY}={value}")]
+        done = probe(*scope, "-C", str(tree), "rev-parse", "--git-dir")
+        found = DUBIOUS.search(done.stderr or "")
+        if not found or found[1] in named:
+            return named
+        named.append(found[1])
+    return named
+
+
+def persist_exact(
+    root: Path, git: Runner = _git, probe: Runner = _bare_git, under: Iterable[Path] | None = None
+) -> str:
+    """For a git older than `LEADING_PATH`: give each tree under `root` that git refuses
+    its own global `safe.directory` entry, which every git reads, and drop the entries
+    this added for trees that are gone. The lines to record, or "".
+
+    The `/*` entry trusts nothing on such a git, and the pass's own `*` reaches no fixer
+    session and no push gate: on 2026-11-21 a fixer in an elevated session's tree failed
+    every bare git call and six of its tests (d2f2c4b0, 7a8de777) and a ship in another
+    failed its first `git status` (46d64a5a). An exact path trusts that one directory and
+    nothing else, which is the narrow grant `persist` makes, spelled so this git reads it.
+    """
+    listed = (git("config", "--global", "--get-all", KEY).stdout or "").splitlines()
+    prefix = root.as_posix().rstrip("/").lower() + "/"
+    lines = []
+    for value in listed:
+        if value.lower().startswith(prefix) and value != pattern(root) and not Path(value).exists():
+            git("config", "--global", "--fixed-value", "--unset-all", KEY, value)
+            lines.append(f"git-trust: dropped {value} from git's global {KEY}: it is gone")
+    for tree in trees(root) if under is None else under:
+        for value in refused(tree, probe):
+            if value in listed:
+                continue
+            added = git("config", "--global", "--add", KEY, value)
+            listed.append(value)
+            lines.append(
+                f"git-trust: added {value} to git's global {KEY}: another account owns it"
+                if added.returncode == 0
+                else f"git-trust: could not add {value} to git's global {KEY}: {_said(added)}"
+            )
+    return "\n".join(lines)
+
+
 def adopt(
     root: Path,
     write: bool,
     environ: MutableMapping[str, str] = os.environ,
     git: Runner = _git,
+    probe: Runner = _bare_git,
 ) -> str:
     """Trust `root`'s tree in this process, and globally too when `write`: `persist`'s lines,
-    and one saying so when this git cannot read the global entry `persist` writes."""
+    and on a git that cannot read the global entry `persist` writes, `persist_exact`'s and
+    one saying so."""
     leading = reads_leading_path(git)
     environ.update(trusted_env(environ, root, None if leading else EVERYTHING))
     lines = persist(root, git) if write else ""
     if leading:
         return lines
+    exact = persist_exact(root, git, probe) if write else ""
     old = (
         f"git-trust: this git predates {KEY}'s `/*` form ({'.'.join(map(str, LEADING_PATH))}),"
-        f" so this pass trusts {EVERYTHING} in its own scope and the global {pattern(root)}"
-        " trusts nothing until git is upgraded"
+        f" so this pass trusts {EVERYTHING} in its own scope, and globally each tree under"
+        f" {root.as_posix()} that another account owns by its own path"
     )
-    return "\n".join(line for line in (lines, old) if line)
+    return "\n".join(line for line in (lines, exact, old) if line)

@@ -203,7 +203,11 @@ def refresh(now=None) -> list[JobState]:
     jobs = schedule_health.query(also=frozenset(tasks))
     deliberate = schedule_health.stood_down()
     lines = schedule_health.problems(
-        jobs, now, deliberate, artifacts={**schedule_health.ARTIFACTS, **tasks}
+        jobs,
+        now,
+        deliberate,
+        artifacts={**schedule_health.ARTIFACTS, **tasks},
+        awake=schedule_health.awake_local(),
     )
     found = collector_task_states(states(jobs, lines, deliberate), tasks)
     found += collector_states() + fix_pass_states(read_history(REPO_ROOT / FIX_HISTORY))

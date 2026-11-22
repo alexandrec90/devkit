@@ -229,7 +229,7 @@ def test_refresh_asks_the_scheduler_and_returns_what_the_tray_draws(monkeypatch)
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(), artifacts=None: [
+        lambda found, now=None, deliberate=frozenset(), artifacts=None, awake=None: [
             "devkit-b: disabled -- nothing runs it"
         ],
     )
@@ -245,7 +245,7 @@ def test_refresh_on_a_machine_with_no_scheduler_reports_nothing_registered(monke
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
+        lambda found, now=None, deliberate=frozenset(), artifacts=None, awake=None: [],
     )
     assert tray_state.refresh() == []
     assert tray_state.overall(tray_state.refresh()) == tray_state.WARN
@@ -286,7 +286,7 @@ def test_refresh_tells_problems_what_was_stood_down_on_purpose(monkeypatch):
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(), artifacts=None: (
+        lambda found, now=None, deliberate=frozenset(), artifacts=None, awake=None: (
             seen.update(passed=deliberate) or []
         ),
     )
@@ -302,7 +302,7 @@ def test_a_collector_row_joins_the_jobs_and_sorts_by_how_loud_it_is(monkeypatch)
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
+        lambda found, now=None, deliberate=frozenset(), artifacts=None, awake=None: [],
     )
     monkeypatch.setattr(
         tray_state.collectors,
@@ -356,7 +356,7 @@ def test_a_scheduled_collector_is_asked_about_in_the_same_query_and_judged_the_s
         asked["also"] = also
         return jobs("devkit-a", "social-scraper")
 
-    def problems(found, now=None, deliberate=frozenset(), artifacts=None):
+    def problems(found, now=None, deliberate=frozenset(), artifacts=None, awake=None):
         asked["artifacts"] = artifacts
         return ["social-scraper: last run failed (exit 1) at 2026-10-02 14:30"]
 
@@ -406,7 +406,7 @@ def test_a_scheduled_collector_with_no_task_is_red_rather_than_absent(monkeypatc
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
+        lambda found, now=None, deliberate=frozenset(), artifacts=None, awake=None: [],
     )
     first, _devkit = tray_state.refresh()
     assert (first.name, first.state) == ("collector: social-scraper", tray_state.FAIL)
@@ -549,7 +549,7 @@ def test_refresh_adds_the_fix_pass_rows_from_this_checkouts_history(monkeypatch,
     monkeypatch.setattr(
         schedule_health,
         "problems",
-        lambda found, now=None, deliberate=frozenset(), artifacts=None: [],
+        lambda found, now=None, deliberate=frozenset(), artifacts=None, awake=None: [],
     )
     history = tmp_path / tray_state.FIX_HISTORY
     history.parent.mkdir(parents=True)

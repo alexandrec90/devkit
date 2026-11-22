@@ -34,6 +34,8 @@ def ctx(tmp_path, monkeypatch):
     monkeypatch.setattr(fix_loop.session_friction, "harvest", lambda *a, **k: [])
     # The machine's own Task Scheduler, which `close` would otherwise read and file.
     monkeypatch.setattr(fix_loop.schedule_health, "query", lambda *a, **k: [])
+    # Nor the machine's own boot clock, which excuses a catch-up's overlap.
+    monkeypatch.setattr(fix_loop.schedule_health, "awake_local", lambda now=None: None)
     # Nor any hand-made task of the machine's that no project claims.
     monkeypatch.setattr(fix_loop.project_tasks, "unowned_on_machine", lambda *a, **k: [])
     # Nor has it any task asked about by name.
@@ -726,6 +728,33 @@ def test_retire_trusted_with_nothing_open_reads_nothing(ctx, monkeypatch):
     assert fix_loop.retire_trusted(ctx) == []
 
 
+def stall_row(project: str, name: str) -> str:
+    detail = f"waiting since 2026-11-13T22:27: {name} -- held until the harness is clean"
+    found = fix_findings.Finding("stalled", project, detail)
+    return fix_findings.harness_events.event_line(NOW.isoformat(), found.event, found.fields())
+
+
+def test_retire_unstalled_retires_a_stall_whose_wait_the_last_pass_dropped(ctx):
+    """68e4b506 and five more: local-e2e stalls a pass on the code before #787 filed
+    stayed open after the next pass stopped making the waits."""
+    gone = stall_row("roguelike", "roguelike origin/main (local e2e)")
+    held = stall_row("carameli", "carameli #526")
+    seed(ctx, gone, held)
+    row = {"when": NOW.isoformat(), "waiting": {"carameli #526": "held"}, "skipped": {}}
+    ctx.history_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    [line] = fix_loop.retire_unstalled(ctx)
+    assert line.startswith(f"retired [{triage.item_id(gone)}] -- the wait it names is gone")
+    left = triage.open_items(triage.load(ctx.devkit_dir))
+    assert [item.id for item in left] == [triage.item_id(held)]
+
+
+def test_retire_unstalled_with_no_history_retires_nothing(ctx):
+    seed(ctx, stall_row("roguelike", "roguelike origin/main (local e2e)"))
+    ctx.history_path.unlink(missing_ok=True)
+    assert fix_loop.retire_unstalled(ctx) == []
+    assert len(triage.open_items(triage.load(ctx.devkit_dir))) == 1
+
+
 def test_a_plan_retires_no_login_refusal(ctx, monkeypatch):
     row = login_row(NOW - _dt.timedelta(hours=3))
     seed(ctx, row)
@@ -1056,6 +1085,23 @@ def test_a_failing_scheduled_job_is_filed_whatever_wraps_it(ctx):
     assert found.evidence == "", "no reconcile.log was written, so none is cited"
     healthy = _job("devkit-worktree-reconcile", 0, ran)
     assert fix_loop.job_findings(ctx, [healthy]) == []
+
+
+def test_a_fire_skipped_in_the_catch_up_after_a_boot_is_not_filed(ctx, monkeypatch):
+    """061e40de and two more: one boot's catch-up, filed as three overlapping jobs.
+
+    Not `devkit-fix-pass`: a skip of the pass's own task inside its half hour is
+    `_covered_by_this_pass`, which on a UTC runner hid the long-uptime line too."""
+    overlap = fix_loop.schedule_health.SCHED_REFUSED_ALREADY_RUNNING
+    ran = NOW - _dt.timedelta(minutes=5)
+    skipped = _job("devkit-worktree-reconcile", overlap, ran)
+    up = ran.replace(tzinfo=None) - _dt.timedelta(minutes=12)
+    monkeypatch.setattr(fix_loop.schedule_health, "awake_local", lambda now=None: up)
+    assert fix_loop.job_findings(ctx, [skipped]) == []
+    long_up = up - _dt.timedelta(hours=3)
+    monkeypatch.setattr(fix_loop.schedule_health, "awake_local", lambda now=None: long_up)
+    [found] = fix_loop.job_findings(ctx, [skipped])
+    assert "overlapping" in found.command
 
 
 def test_a_task_a_project_claims_is_filed_against_that_project(ctx):

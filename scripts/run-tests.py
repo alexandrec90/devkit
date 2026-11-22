@@ -115,10 +115,16 @@ PYTEST_NO_TESTS_COLLECTED = 5
 # whole of `scripts/hooks/tests` to reach the two ratchets -- 1,693 tests, twice in one
 # session, the second catching the untested-symbol failure the named run had not
 # (9caa3f5d). `--only` is the run of just the named files.
+#
+# The installers picker is held to every `scripts/install-*.py` on disk, so a new
+# installer names only its own test and a `workspace.jsonc` edit names that file's
+# readers: a session that added `install-codex-context.py` ran green and met the picker
+# test first on the gate (83db1c30).
 CONTRACT_TESTS = (
     "tests/test_test_contract.py",
     "tests/test_scheduled_jobs.py",
     "tests/test_install_tray.py",
+    "tests/test_installers.py::test_the_scheduled_jobs_picker_offers_every_installer_on_disk",
     "tests/test_self_hosting.py",
     "tests/test_doc_claims.py",
     "tests/test_installer_contract.py",

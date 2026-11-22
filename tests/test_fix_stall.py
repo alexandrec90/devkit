@@ -82,6 +82,29 @@ def test_a_tracked_wait_breaks_the_run_an_untracked_one_is_dated_from():
     assert fix_stall.stalled(history, NOW) == []
 
 
+class Row:
+    def __init__(self, detail: str):
+        self.fields = {"detail": detail}
+
+
+def test_waited_name_reads_the_name_back_out_of_a_filed_stall():
+    [found] = fix_stall.stalled([line(30, HELD), line(0, HELD)], NOW)
+    assert fix_stall.waited_name(f"{found.kind}: {found.detail}") == "carameli #8"
+    assert fix_stall.waited_name("stalled: waiting since x: no reason") == ""
+    assert fix_stall.waited_name("push-failed: waiting since x: a -- b") == ""
+    assert fix_stall.waited_name("stalled: held since x: a -- b") == ""
+    assert fix_stall.waited_name("") == ""
+
+
+def test_a_stall_ends_when_the_newest_pass_stops_making_its_wait():
+    kept = Row("stalled: waiting since 2026-09-24T12:00: carameli #8 -- held")
+    gone = Row("stalled: skipped since 2026-09-24T12:00: devkit #410 -- red by construction")
+    other = Row("push-failed: carameli: rejected")
+    history = [line(30, HELD, {"devkit #410": "red"}), line(0, HELD)]
+    assert fix_stall.ended(history, [kept, gone, other]) == [gone]
+    assert fix_stall.ended([], [kept, gone]) == [], "no history proves nothing"
+
+
 def test_history_reads_skip_junk_and_a_missing_file_is_empty(tmp_path):
     path = tmp_path / "h.jsonl"
     assert fix_stall.read_history(path) == []
