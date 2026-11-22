@@ -510,6 +510,39 @@ def test_a_ledger_entry_that_stopped_being_true_refuses_the_push(tmp_path, monke
     assert "FAILED" in capsys.readouterr().out
 
 
+def test_named_tests_are_rehearsed_alone(tmp_path, monkeypatch):
+    """9bc7cbbd: a supervisor ran the whole suite under POSIX while the fixers it had
+    sent were running, and Claude Code stopped it "because the system is running low on
+    memory". The files a change touches are the ones a POSIX run can newly fail, so they
+    can be named and nothing else runs."""
+    monkeypatch.setattr(rehearsal, "ARTIFACT", tmp_path / "a.log")
+    seen: list[list[str]] = []
+
+    def run(cmd, **_kwargs):
+        seen.append(list(cmd))
+        return _completed(0)
+
+    assert rehearsal.main(["tests/test_a.py", "tests/test_b.py::t"], runner=run) == 0
+    assert seen[0][-2:] == ["tests/test_a.py", "tests/test_b.py::t"]
+
+
+def test_a_named_run_holds_only_its_own_ledger_lines_to_failing(tmp_path, monkeypatch):
+    """A ledger line for a test the run never collected has not stopped being true."""
+    monkeypatch.setattr(rehearsal, "ARTIFACT", tmp_path / "a.log")
+    ledger = tmp_path / "ledger.txt"
+    ledger.write_text(
+        "tests/test_other.py::t  # elsewhere\ntests/test_a.py::t  # here\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(rehearsal, "LEDGER", ledger)
+    lines = rehearsal.read_ledger(ledger)
+    assert list(rehearsal.in_scope(lines, ["tests\\test_a.py"])) == ["tests/test_a.py::t"]
+    assert list(rehearsal.in_scope(lines, ["tests/"])) == list(lines)
+    assert rehearsal.in_scope(lines, []) == lines
+    raw = "FAILED tests/test_a.py::t - AssertionError\n"
+    assert rehearsal.main(["tests/test_a.py"], runner=lambda *_a, **_k: _completed(1, raw)) == 0
+    assert rehearsal.main(["tests/test_a.py"], runner=lambda *_a, **_k: _completed(0)) == 1
+
+
 def test_a_run_that_never_started_is_not_read_as_nothing_failed(tmp_path, monkeypatch):
     """The failure mode that would make the whole gate silently inert: a collection error
     exits non-zero with no summary to parse, and "no FAILED lines" must not read as clean.

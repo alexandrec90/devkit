@@ -106,6 +106,14 @@ SCHED_S_TASK_RUNNING = 267009  # 0x00041301
 # does -- that is how every run ends, so it is no failure there (23f4ee82). A clocked
 # job is ended that way by its own time limit, which is a hung run and stays one.
 SCHED_S_TASK_TERMINATED = 267014  # 0x00041306
+# The same end seen from the process: a sign-out or shutdown closes a resident job's
+# console, and it exits `STATUS_CONTROL_C_EXIT` (host-scripts' D2R loggers, e530fb0a).
+# Signed by `schtasks`, unsigned by `Get-ScheduledTaskInfo`, as below.
+STATUS_CONTROL_C_EXIT = -1073741510  # 0xC000013A
+STATUS_CONTROL_C_EXIT_UNSIGNED = 3221225786
+RESIDENT_ENDS = frozenset(
+    {SCHED_S_TASK_TERMINATED, STATUS_CONTROL_C_EXIT, STATUS_CONTROL_C_EXIT_UNSIGNED}
+)
 
 # `0x800710E0` -- documented as "the operator or administrator has refused the request",
 # and what Task Scheduler reports when `MultipleInstancesPolicy` is `IgnoreNew` and a
@@ -613,7 +621,7 @@ def job_problem(
             f"its runs are overlapping"
             f"{artifact_hint(job.name, artifacts, root=root, since=job.last_run)}"
         )
-    resident_stop = job.event_only and job.last_result == SCHED_S_TASK_TERMINATED
+    resident_stop = job.event_only and job.last_result in RESIDENT_ENDS
     if job.last_result not in NOT_A_FAILURE and not resident_stop:
         return (
             f"{job.name}: last run failed (exit {job.last_result}) at "

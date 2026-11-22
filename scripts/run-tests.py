@@ -43,6 +43,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ARTIFACT = REPO_ROOT / "logs" / "test-failures.log"
 USAGE = "%(prog)s [-h] [--all | --changed] [--only] [test file or pytest argument ...]"
+# `--changed` is not `lint-all.py --changed`: a fixer took it for the changed files and
+# read "passed" as theirs tested (e6929429), so the run says what it is.
+LAST_FAILED_NOTE = (
+    "run-tests: --changed reruns the tests that failed last time (every test when none "
+    "did), not the files you changed -- run it bare for those"
+)
 
 # Where the whole suite is the point: CI, and the push gate that mirrors it (pre-commit
 # exports `PRE_COMMIT` into every hook's environment).
@@ -478,6 +484,7 @@ def main(argv: list[str] | None = None) -> int:
     cmd += _parallel_args()
     if args.changed:
         cmd += ["--last-failed", "--last-failed-no-failures", "all"]
+        print(LAST_FAILED_NOTE)
     whole = args.all or args.changed or targets or any(os.environ.get(k) for k in FULL_SUITE_ENV)
     ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     groups = [targets] if args.only else explicit_runs(targets, REPO_ROOT)
