@@ -78,6 +78,9 @@ import task_branch as tb
 import worktree_tiers
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# A file only devkit's own checkout has -- never vendored, never templated -- that marks
+# the one checkout `follows` holds on `green`. It is the watchdog that holds it there.
+DEVKIT_ONLY = Path("scripts") / "fix-pass-watchdog.py"
 
 WORKSPACE_FILE_NAME = "alex-projects.code-workspace"
 # Where the ephemeral tier keeps its boxes, relative to the workspace root, re-exported
@@ -1587,8 +1590,14 @@ def follows(path: Path, git: Git) -> str:
     on the newest commit whose gate passed, so a bad merge cannot break the pass that
     repairs it. This job syncs every checkout, so taking this one to the tip would undo
     that every fifteen minutes. A project's checkout is only what a person reads.
+
+    Recognised by `DEVKIT_ONLY`, the watchdog that does the holding, which no consumer
+    carries. The marker was once `scripts/devkit_manifest.py`, which is vendored, so every
+    project's checkout was held on its own `green` too -- and host-scripts', never moved
+    past its first commit, hid the `[schedule]` claims merged on `main` from
+    `project_tasks.declared`, which filed its tasks as unowned again every pass.
     """
-    if not (path / "scripts" / "devkit_manifest.py").is_file():
+    if not (path / DEVKIT_ONLY).is_file():
         return ""
     known = git("rev-parse", "--verify", "--quiet", "refs/remotes/origin/green")
     return "origin/green" if known.returncode == 0 else ""

@@ -498,6 +498,24 @@ JOB_FAILED_RUN = ": last run failed ("
 OWN_TASK = "devkit-fix-pass"
 # The run's time and count, kept out of the detail: a group must survive its recurrences.
 _JOB_WHEN = re.compile(r" (?:at|since) \d{4}-\d\d-\d\d \d\d:\d\d| \(\d+ intervals ago\)")
+# `schedule_health.job_problem`'s head for a disabled job.
+JOB_DISABLED = ": disabled"
+
+
+def claimed_disabled(task: str) -> str:
+    """The detail for a disabled task a project claims: a person's step, not a fixer's.
+
+    devkit can stand its own jobs down and remembers doing it (`stood_down`), so one of
+    its jobs found disabled is a fault. A project's task has no such ledger, so devkit
+    cannot tell an accident from a person's choice, and re-enabling it is that choice
+    made by a fixer. Nor can a fixer always make it: data-lake's pool task, registered
+    from an elevated prompt, answers an unelevated `schtasks /Change` with "Access is
+    denied" (68385718), so the fixer sent at it could only re-check it."""
+    return (
+        f"{task}{JOB_DISABLED} -- {triage.PERSON_STEP} re-enable it if it should run"
+        f' (schtasks /Change /TN "{task}" /ENABLE, from an elevated prompt if refused), or'
+        " drop it from its project's [schedule] tasks if it is retired"
+    )
 
 
 def job_findings(
@@ -530,6 +548,7 @@ def job_findings(
         tasks = collectors.scheduled_tasks(ctx.devkit_dir) if live else {}
     if owners is None:
         owners = project_tasks.declared(ctx.root, ctx.projects) if live else {}
+    claimed = frozenset(owners)
     # A collector's task is named after its project, so it owns itself.
     owners = {**owners, **{name: name for name in tasks}}
     if jobs is None:
@@ -546,10 +565,13 @@ def job_findings(
     for line in lines:
         name, head = line.split(":", 1)[0], line.split(" -- ", 1)[0]
         job = by_name.get(name)
+        detail = _JOB_WHEN.sub("", head)
+        if name in claimed and detail == name + JOB_DISABLED:
+            detail = claimed_disabled(name)
         finding = Finding(
             JOB_KIND,
             owners.get(name, fix_cycle.DEVKIT),
-            _JOB_WHEN.sub("", head),
+            detail,
             command=line[:300],
         )
         if not _filed_elsewhere(ctx, line, job, finding, items, git):
