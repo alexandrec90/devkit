@@ -28,6 +28,7 @@ import fix_budget
 import fix_findings
 
 STALL_AFTER = _dt.timedelta(hours=24)
+KIND = "stalled"
 FIELDS = ("waiting", "skipped")
 # Waits some other part of the loop already owns, by how the reason starts. A full
 # Dependabot cap frees itself within the day, and filing it as a stall would send the
@@ -95,8 +96,43 @@ def stalled(
                 continue
             project = name.split(" ", 1)[0]
             detail = f"{field} since {since[:16]}: {name} -- {why}"
-            found.append(fix_findings.Finding("stalled", project, detail))
+            found.append(fix_findings.Finding(KIND, project, detail))
     return found
+
+
+def waited_name(detail: str) -> str:
+    """The wait a `stalled` finding's ledger detail names (`stalled: <field> since
+    <when>: <name> -- <why>`), or "" for a detail of another shape."""
+    kind, sep, rest = detail.partition(": ")
+    if kind != KIND or not sep:
+        return ""
+    head, sep, rest = rest.partition(": ")
+    if not sep or not head.startswith(tuple(f"{field} since " for field in FIELDS)):
+        return ""
+    name, sep, _ = rest.partition(" -- ")
+    return name if sep else ""
+
+
+def ended(history: list[dict], items: list) -> list:
+    """Each open `stalled` item in `items` whose wait the newest pass no longer made.
+
+    Nothing else retires one, and the wait it names is gone once its cause is fixed: six
+    local-e2e stalls a pass running the code before #787 filed sat open after the next
+    pass stopped making them, each one more group sent to a devkit session. An empty
+    history proves nothing, so it retires nothing."""
+    if not history:
+        return []
+    carried: set[str] = set()
+    for field in FIELDS:
+        names = history[-1].get(field)
+        if isinstance(names, dict):
+            carried.update(names)
+    gone = []
+    for item in items:
+        name = waited_name(item.fields.get("detail", ""))
+        if name and name not in carried:
+            gone.append(item)
+    return gone
 
 
 def tracked(why: object) -> bool:

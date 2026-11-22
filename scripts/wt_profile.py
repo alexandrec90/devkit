@@ -316,7 +316,14 @@ ELEVATED_DEFAULT_LINE = (
 )
 
 
-def status_lines(local_app_data: str | os.PathLike[str] | None = None) -> list[str]:
-    """`[ELEVATED_DEFAULT_LINE]` when this machine's default profile elevates, else []."""
-    settings = read_settings(settings_path(local_app_data))
+def lines_for(settings: dict) -> list[str]:
+    """`[ELEVATED_DEFAULT_LINE]` when `settings`, Windows Terminal's parsed settings,
+    make the default profile elevate, else []."""
     return [ELEVATED_DEFAULT_LINE] if default_elevates(settings) else []
+
+
+def status_lines(*, local_app_data: str | os.PathLike[str] | None = None) -> list[str]:
+    """`lines_for` this machine's own settings file, read under `local_app_data`
+    (`%LOCALAPPDATA%` when None). Keyword-only: handed a settings dict positionally, it
+    used to die inside `pathlib` with "not 'dict'" (ac2b6b93) -- `lines_for` takes one."""
+    return lines_for(read_settings(settings_path(local_app_data)))

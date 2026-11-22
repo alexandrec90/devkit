@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -226,12 +227,14 @@ def desktop_targets(paths: list[str], tier: Any | None) -> list[str]:
     ]
 
 
-def dotnet_sdk_missing() -> str:
+def dotnet_sdk_missing(root: Path = REPO_ROOT) -> str:
     """Why this host cannot build the desktop app, or "" when it can.
 
     A `dotnet` on PATH is only the host: with no SDK installed it answers every build with
     "No .NET SDKs were found", which read as a lint finding on a PC that simply lacks one
     (8448cfc1). So the SDK list is asked too, and an empty one is the same missing host.
+    So is a list without the SDK `global.json` pins: every build then says "A compatible
+    .NET SDK was not found" (176a4fa4).
     """
     if not shutil.which("dotnet"):
         return "no dotnet on PATH"
@@ -243,7 +246,39 @@ def dotnet_sdk_missing() -> str:
         return f"dotnet --list-sdks did not answer ({exc})"
     if not (listed.stdout or "").strip():
         return "dotnet on PATH lists no SDK"
+    pinned = pinned_sdk(root)
+    if pinned and not sdk_listed(listed.stdout, pinned):
+        return f"dotnet on PATH lists no SDK that global.json's {pinned} rolls forward to"
     return ""
+
+
+def pinned_sdk(root: Path) -> str:
+    """The SDK version `root`'s `global.json` pins, or "" with none to read."""
+    try:
+        return str(json.loads((root / "global.json").read_text(encoding="utf-8"))["sdk"]["version"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
+def _sdk_version(text: str) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(part) for part in text.split("-", 1)[0].split("."))
+    except ValueError:
+        return None
+
+
+def sdk_listed(listed: str, pinned: str) -> bool:
+    """Whether `dotnet --list-sdks`' `listed` holds an SDK the `latestFeature` roll-forward
+    `global.json` names accepts for `pinned`: its major.minor, at that version or later.
+    A pin this cannot read is not second-guessed."""
+    want = _sdk_version(pinned)
+    if want is None or len(want) < 3:
+        return True
+    for line in listed.splitlines():
+        have = _sdk_version(line.strip().split(" ", 1)[0]) if line.strip() else None
+        if have and have[:2] == want[:2] and have >= want:
+            return True
+    return False
 
 
 def desktop_section(tier: Any | None, changed: list[str], scoped: bool) -> str:

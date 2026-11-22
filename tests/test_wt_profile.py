@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import uuid
 
+import pytest
+
 from support import wt_profile as wt
 
 
@@ -300,14 +302,23 @@ def test_the_status_line_names_an_elevating_default_whoever_is_asking(tmp_path, 
     path.write_text(json.dumps(elevating()), encoding="utf-8")
     for elevated in (True, False):
         monkeypatch.setattr(wt, "is_elevated", lambda elevated=elevated: elevated)
-        assert wt.status_lines(tmp_path) == [wt.ELEVATED_DEFAULT_LINE]
+        assert wt.status_lines(local_app_data=tmp_path) == [wt.ELEVATED_DEFAULT_LINE]
     assert '"elevate"' in wt.ELEVATED_DEFAULT_LINE and "fix:" in wt.ELEVATED_DEFAULT_LINE
     path.write_text(json.dumps(settings(other())), encoding="utf-8")
-    assert wt.status_lines(tmp_path) == []
+    assert wt.status_lines(local_app_data=tmp_path) == []
 
 
 def test_the_status_line_on_a_machine_with_no_windows_terminal_is_empty(tmp_path):
-    assert wt.status_lines(tmp_path) == []
+    assert wt.status_lines(local_app_data=tmp_path) == []
+
+
+def test_settings_already_read_go_to_lines_for_and_status_lines_refuses_them():
+    """ac2b6b93: a session handed `status_lines` the settings dict and got a `TypeError`
+    from inside `pathlib` that named neither the parameter nor what it wanted."""
+    assert wt.lines_for(elevating()) == [wt.ELEVATED_DEFAULT_LINE]
+    assert wt.lines_for(settings(other())) == []
+    with pytest.raises(TypeError, match="positional"):
+        wt.status_lines(elevating())
 
 
 # --- without: the inverse of merged --------------------------------------------
