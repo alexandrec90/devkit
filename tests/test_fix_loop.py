@@ -985,6 +985,22 @@ def test_a_task_a_project_claims_is_filed_against_that_project(ctx):
     assert found.detail.startswith("SeaweedFS data-lake pool: ")
 
 
+def test_a_disabled_claimed_task_awaits_a_person_and_a_devkit_job_does_not(ctx):
+    """68385718: the pool's task sat disabled and each pass sent a fixer, whose
+    `schtasks /Change /ENABLE` was "Access is denied" -- and whether it should run at all
+    is its project's choice, which devkit has no ledger of."""
+    ran = NOW - _dt.timedelta(minutes=5)
+    pool = dataclasses.replace(_job("SeaweedFS data-lake pool", 267014, ran), enabled=False)
+    own = dataclasses.replace(_job("devkit-worktree-reconcile", 0, ran), enabled=False)
+    owners = {"SeaweedFS data-lake pool": "data-lake"}
+    found = {f.project: f for f in fix_loop.job_findings(ctx, [pool, own], owners=owners)}
+    claimed = fix_loop.triage.Item("", fix_loop.JOB_KIND, {"detail": found["data-lake"].detail})
+    assert fix_loop.triage.person_step(claimed).startswith("re-enable it if it should run")
+    assert found["devkit"].detail == "devkit-worktree-reconcile: disabled", "a fixer's to fix"
+    step = fix_loop.claimed_disabled("Pool")
+    assert step.startswith("Pool: disabled -- ") and '/TN "Pool" /ENABLE' in step
+
+
 def test_a_live_pass_asks_the_scheduler_about_every_claimed_task(ctx, monkeypatch):
     asked: list[frozenset[str]] = []
     monkeypatch.setattr(
