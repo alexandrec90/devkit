@@ -530,9 +530,13 @@ def name_of(failure: Failure) -> str:
     return f"#{failure.number}"
 
 
+# The nightly tier's name in a record. `fix_stall.stall_after` reads it back off a wait.
+LOCAL_E2E_NAME = "local e2e"
+
+
 def local_name(failure: Failure) -> str:
     """Which scheduled local tier a `LOCAL` came from, as a record and a tab title name it."""
-    return "medium tier" if failure.workflow == MEDIUM_TIER else "local e2e"
+    return "medium tier" if failure.workflow == MEDIUM_TIER else LOCAL_E2E_NAME
 
 
 def is_dependabot(failure: Failure) -> bool:
