@@ -1394,6 +1394,9 @@ def imported_by_tree(name: str, roots: Iterable[Path], runner=sweep.run_windowle
 
 # A `.venv`'s interpreter named in a call, and the checkout before it ("" when relative).
 VENV_INTERPRETER = re.compile(r"(?P<home>[^\s\"';&|]*?)\.venv[\\/](?:Scripts|bin)[\\/]python", re.I)
+# `uv run` in command position: the `.venv` of the directory it runs in, by no path at all
+# (69c7d774, a devkit fixer probing a scratch checkout of tvshell for pytest).
+UV_RUN = re.compile(r"(?:^|[;&|]\s*)uv(?:\.exe)?\s+run\b", re.M)
 # Git Bash's spelling of a drive: `/c/Users/...` is `C:/Users/...`.
 BASH_DRIVE = re.compile(r"^/([a-z])(?=/|$)")
 
@@ -1406,11 +1409,16 @@ def _comparable(path: str | Path) -> str:
 
 def interpreter_home(command: str) -> str:
     """The checkout whose `.venv` interpreter `command` runs, as an absolute path; "" when
-    it runs none, or one relative to the session's own directory."""
+    it runs none, or one relative to the session's own directory. A `uv run` is the
+    `.venv` of the directory it runs in (`UV_RUN`), looked for outside quoted arguments,
+    which are blanked in place so the match still says where in `command` it stands."""
     found = VENV_INTERPRETER.search(command)
+    by_path = found is not None
+    if not found:
+        found = UV_RUN.search(QUOTED_ARGUMENT.sub(lambda m: " " * len(m[0]), command))
     if not found:
         return ""
-    home = found["home"].strip("\"'").rstrip("\\/")
+    home = found["home"].strip("\"'").rstrip("\\/") if by_path else ""
     if home and ABSOLUTE_PATH.match(home):
         return home
     beside = [m["dir"].strip().strip("\"'") for m in CD_INTO.finditer(command[: found.start()])]

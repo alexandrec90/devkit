@@ -130,16 +130,58 @@ def fresh(findings: Iterable[Finding], items: list[triage.Item]) -> list[Finding
 
 
 def record_all(
-    findings: Iterable[Finding], items: list[triage.Item], devkit_dir: Path
+    findings: Iterable[Finding],
+    items: list[triage.Item],
+    devkit_dir: Path,
+    code: tuple[tuple[str, str], ...] | None = None,
 ) -> list[Finding]:
     """Append every fresh finding to the ledger under `devkit_dir`; what was written.
     Bar one that says a name could not be looked up while this machine still cannot
-    (`networked`)."""
+    (`networked`). A `FINDING` also says which code judged it (`running_code`, or `code`
+    in its place); a `FRICTION` row is a session's turn, dated by that session."""
     written = networked(fresh(findings, items))
+    if code is None and any(finding.event == FINDING for finding in written):
+        code = running_code()
     for finding in written:
-        harness_events.record(finding.event, finding.fields(), root=devkit_dir)
+        ran = (code or ()) if finding.event == FINDING else ()
+        harness_events.record(finding.event, (*finding.fields(), *ran), root=devkit_dir)
     settle(written, devkit_dir)
     return written
+
+
+# The checkout whose code is running: what a finding is a judgement *of*, whatever
+# project it is about and whichever `devkit_dir` holds the ledger.
+CHECKOUT = Path(__file__).resolve().parents[1]
+# Seconds `running_code` waits on git: it stands between a finding and the ledger.
+GIT_TIMEOUT = 10
+
+
+def running_code(root: Path = CHECKOUT, runner=sweep.run_windowless) -> tuple[tuple[str, str], ...]:
+    """`filer=` and `head_at=` for a finding: the repo whose code judged it, and when the
+    checkout that code ran from was last committed to; `()` when git cannot say.
+
+    The pass runs `origin/green`, which trails the default branch by a gate, so a fix
+    merged there is not the code filing until green reaches it. f97bc2fd: #801 stopped a
+    stall being filed and merged at 14:37Z; the 15:04Z pass, two commits behind it, filed
+    the stall again against tvshell, and `fix_verify.ran_from` had only the row's own
+    stamp and project to read, so the group came back `RECURRED ... did not hold`. Spelled
+    as `log-wrap.head_stamp` spells a scheduled job's, and read the same way."""
+    try:
+        done = runner(
+            ["git", "log", "-1", "--format=%cI", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+        when = _dt.datetime.fromisoformat(done.stdout.strip()) if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ()
+    if when is None:
+        return ()
+    stamp = when.astimezone(_dt.UTC).isoformat(timespec="seconds")
+    return (("filer", harness_events.project_name(root)), ("head_at", stamp))
 
 
 def networked(findings: list[Finding], lookup=None) -> list[Finding]:

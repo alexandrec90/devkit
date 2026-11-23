@@ -2531,10 +2531,38 @@ def test_a_scratch_program_under_another_checkouts_venv_is_not_friction(tmp_path
         (".venv/Scripts/python.exe -c 'x'", ""),
         ("cd scripts && ../.venv/Scripts/python.exe -c 'x'", ""),
         ("python -c 'x'", ""),
+        (r"Set-Location C:\tmp\tvshell-tip; uv run --frozen python -c 'x'", r"C:\tmp\tvshell-tip"),
+        ("cd /c/tmp/tip && uv run python -c 'x'", "/c/tmp/tip"),
+        ("uv run python -c 'x'", ""),
+        ("cd scripts && uv run python -c 'x'", ""),
+        ("cd /c/tmp/tip && grep -c 'uv run' scripts/e2e.py", ""),
     ],
 )
 def test_interpreter_home_is_the_checkout_whose_venv_runs(command, home):
     assert sf.interpreter_home(command) == home
+
+
+def test_a_probe_through_uv_run_in_another_checkout_is_not_this_trees_environment(tmp_path):
+    """69c7d774: a devkit fixer reproducing tvshell's e2e failure probed a scratch checkout
+    of tvshell with `uv run ... python -c "import pytest"`. `uv run` is the `.venv` of the
+    directory it runs in, as surely as a `.venv` path is, and that one was not devkit's."""
+    said = "Traceback\nModuleNotFoundError: No module named 'pytest'\nTrue\n M scripts/e2e.py"
+    tree = _git_tree(tmp_path / "devkit", {"tests/test_x.py": "import pytest\n"})
+    other = tmp_path / "jobs" / "tvshell-tip"
+    probe = (
+        "uv run --frozen --all-extras --all-groups python -c "
+        '"import pytest,sys;print(pytest.__version__,sys.version)"'
+    )
+
+    def judged(command: str) -> list[str]:
+        rows = [call(command, "1"), result(said, "1")]
+        events = [e for n, row in enumerate(rows, 1) for e in st.claude_events(row, n)]
+        return [row[0] for row in sf.judged(events, str(tree), tmp_path)]
+
+    assert judged(f"Set-Location {other}; {probe} 2>&1 | Select-Object -Last 8") == []
+    assert judged(f"cd {_bash_spelling(other)} && {probe}") == []
+    assert judged(probe) == ["environment"], "its own tree's"
+    assert judged(f"Set-Location {tree}; {probe}") == ["environment"], "its own, by its path"
 
 
 def test_a_checkout_is_compared_however_it_is_spelled():

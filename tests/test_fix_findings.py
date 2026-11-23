@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -29,6 +30,47 @@ def test_the_kind_leads_the_detail_so_one_kind_recurring_is_one_ledger_group(tmp
     assert item.detail == "push-failed: agent/x: rejected"
     assert item.project == "carameli"
     assert item.signature == fix_findings.signature(finding()), "computed the ledger's own way"
+
+
+def _git_says(stdout: str, returncode: int = 0):
+    def run(argv, **_):
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    return run
+
+
+def test_a_finding_says_which_checkout_judged_it_and_how_old_that_code_was(tmp_path):
+    """f97bc2fd: the pass ran `origin/green`, two commits behind a merged fix, and filed
+    against tvshell the stall that fix had stopped. Nothing on the row said devkit's code
+    had judged it, or how old that code was, so `fix_verify` read a fix that did not hold."""
+    code = tmp_path / "devkit"
+    code.mkdir()
+    ran = fix_findings.running_code(code, _git_says("2026-11-22T10:44:39-05:00\n"))
+    assert ran == (("filer", "devkit"), ("head_at", "2026-11-22T15:44:39+00:00"))
+    assert fix_findings.running_code(code, _git_says("", 128)) == (), "no checkout: unsaid"
+    assert fix_findings.running_code(code, _git_says("not a time")) == ()
+
+    def hangs(argv, **_):
+        raise subprocess.TimeoutExpired(argv, 10)
+
+    assert fix_findings.running_code(code, hangs) == ()
+
+    friction = finding(event=fix_findings.FRICTION, detail="a session's turn, not the pass's")
+    fix_findings.record_all([finding(project="tvshell"), friction], [], tmp_path, code=ran)
+    by_event = {item.event: item for item in triage.open_items(triage.load(tmp_path))}
+    filed = by_event[fix_findings.FINDING]
+    assert (filed.fields["filer"], filed.fields["head_at"]) == ("devkit", ran[1][1])
+    assert filed.signature == fix_findings.signature(finding(project="tvshell")), "same group"
+    merged = _dt.datetime(2026, 11, 23, 14, 37, tzinfo=_dt.UTC)
+    assert fix_verify.ran_from(filed, "devkit") < merged, "the code predates the merge"
+    assert "head_at" not in by_event[fix_findings.FRICTION].fields, "dated by its session"
+
+
+def test_a_finding_filed_from_this_checkout_is_stamped_without_being_asked(tmp_path):
+    fix_findings.record_all([finding()], [], tmp_path)
+    [item] = triage.open_items(triage.load(tmp_path))
+    assert item.fields["filer"] == "devkit"
+    assert _dt.datetime.fromisoformat(item.fields["head_at"]).tzinfo is not None
 
 
 def test_a_finding_already_open_is_not_filed_again(tmp_path):
