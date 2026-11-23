@@ -19,8 +19,11 @@ reported as a pass.
 **A fixture error is printed as `FAILED` too.** pytest's own line for one says `ERROR`,
 and the failing id is what the fix pass groups by.
 
-**It goes through `uv run --frozen`**, because the pass requires this checkout free of
-tracked edits and `uv run` would otherwise be free to rewrite `uv.lock`.
+**It goes through `uv run --frozen --all-extras --all-groups`.** `--frozen` because the
+pass requires this checkout free of tracked edits and `uv run` would otherwise be free to
+rewrite `uv.lock`. The other two because pytest lives in the `dev` extra: in a tree with
+no `.venv` yet, a bare `uv run` builds one without it and the run ends
+`No module named pytest`. `run_env` says why that tree's run drops `UV_NO_SYNC`.
 
 Stdlib only, for `.claude/rules/task-scripts.md`'s reason: the caller may be the machine's
 Python, not this project's. The junit report stays in `logs/e2e-junit.xml`.
@@ -46,6 +49,8 @@ REPORT = REPO_ROOT / "logs" / "e2e-junit.xml"
 # Spelled as devkit's `e2e-pass.ENV_FLAG` spells it.
 ENV_FLAG = "DEVKIT_E2E"
 MARKER = "local"
+# uv's switch for "run in the environment as it stands".
+NO_SYNC = "UV_NO_SYNC"
 
 PASSED = "passed"
 FAILED = "failed"
@@ -123,6 +128,8 @@ def pytest_argv(report: Path, named: Sequence[str] = ()) -> list[str]:
         "uv",
         "run",
         "--frozen",
+        "--all-extras",
+        "--all-groups",
         "python",
         "-m",
         "pytest",
@@ -137,6 +144,20 @@ def pytest_argv(report: Path, named: Sequence[str] = ()) -> list[str]:
         "no:cacheprovider",
         f"--junitxml={report}",
     ]
+
+
+def run_env(env: Mapping[str, str], root: Path) -> dict[str, str]:
+    """The environment pytest runs in. Pure but for one `exists`.
+
+    `UV_NO_SYNC` is dropped where `root` has no `.venv`. A session whose tree borrows its
+    checkout's `.venv` carries it so `uv run` leaves that venv alone, and it reaches a run
+    such a session starts in any other tree: there `uv run` made an empty `.venv` and
+    installed nothing into it. A tree that has a `.venv`, borrowed or its own, keeps it.
+    """
+    out = {**env, "PYTHONUTF8": "1"}
+    if not (root / ".venv").exists():
+        out.pop(NO_SYNC, None)
+    return out
 
 
 def _printable(text: str) -> str:
@@ -157,7 +178,7 @@ def main(
     done = runner(
         pytest_argv(REPORT, named),
         cwd=REPO_ROOT,
-        env={**env, "PYTHONUTF8": "1"},
+        env=run_env(env, REPO_ROOT),
         capture_output=True,
         encoding="utf-8",
         errors="replace",
