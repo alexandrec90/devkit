@@ -268,7 +268,30 @@ def test_the_generated_e2e_script_keeps_the_local_e2e_contract(tmp_path, monkeyp
     assert e2e.verdict(0, [passed, skipped], strict=False)[0] == 0
     assert e2e.pytest_id("tests.test_a.TestB", "test_c") == "tests/test_a.py::TestB::test_c"
     argv = e2e.pytest_argv(tmp_path / "r.xml")
-    assert argv[:3] == ["uv", "run", "--frozen"] and argv[argv.index("-m", 6) + 1] == "local"
+    assert argv[:3] == ["uv", "run", "--frozen"]
+    to_pytest = argv[argv.index("pytest") + 1 :]
+    assert to_pytest[to_pytest.index("-m") + 1] == "local"
+    # 51e8b20b, the other half: a devkit session's `UV_NO_SYNC` reached a run in a tree
+    # with no `.venv`, where `uv run` then made an empty one and installed nothing.
+    session = {e2e.NO_SYNC: "1", "KEPT": "x"}
+    assert e2e.run_env(session, tmp_path) == {"KEPT": "x", "PYTHONUTF8": "1"}
+    (tmp_path / ".venv").mkdir()
+    assert e2e.run_env(session, tmp_path)[e2e.NO_SYNC] == "1", "a borrowed .venv is left alone"
+
+
+def test_the_generated_e2e_script_installs_what_holds_pytest(tmp_path):
+    """51e8b20b: in a tree with no `.venv`, `uv run --frozen` built one from the default
+    dependencies alone, and the run ended `No module named pytest`. The run has to ask
+    for the extra the generated `pyproject.toml` keeps pytest in."""
+    root = generate(tmp_path / "a", {})
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert any(dep.startswith("pytest") for dep in project["optional-dependencies"]["dev"]), (
+        "pytest moved: point `pytest_argv` at where it lives now"
+    )
+    text = (root / "scripts" / "e2e.py").read_text(encoding="utf-8")
+    argv = text[text.index("def pytest_argv") :]
+    before_python = argv[: argv.index('"python"')]
+    assert '"--all-extras"' in before_python and '"--all-groups"' in before_python
 
 
 def test_alembic_implies_postgres_via_the_cli(tmp_path):
