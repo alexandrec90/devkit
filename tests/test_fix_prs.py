@@ -454,6 +454,44 @@ def test_a_tree_that_has_a_venv_is_left_alone(tmp_path):
     assert real_provision_tree(tmp_path, plan=lambda t: pytest.fail("must not plan")) == []
 
 
+def test_a_venv_without_the_pytest_its_project_names_is_provisioned(tmp_path):
+    """2ca551a4: a bare `uv run pytest` builds a `.venv` without the dev extra, and the
+    fixer that reused the tree spent its first turns on `uv sync`."""
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / "pyproject.toml").write_text(
+        '[project.optional-dependencies]\ndev = ["pytest"]\n', encoding="utf-8"
+    )
+    assert fix_trees.venv_lacks_pytest(tmp_path)
+    ran = []
+    real_provision_tree(
+        tmp_path, plan=lambda t: ("uv sync",), run=lambda t, s: ran.append(s) or (True, [])
+    )
+    assert ran == [("uv sync",)]
+
+
+@pytest.mark.parametrize("script", fix_trees.PYTEST_SCRIPTS)
+def test_a_venv_holding_pytest_is_left_alone(tmp_path, script):
+    (tmp_path / ".venv" / script).parent.mkdir(parents=True)
+    (tmp_path / ".venv" / script).write_bytes(b"")
+    (tmp_path / "requirements-dev.txt").write_text("pytest\n", encoding="utf-8")
+    assert not fix_trees.venv_lacks_pytest(tmp_path)
+    assert real_provision_tree(tmp_path, plan=lambda t: pytest.fail("must not plan")) == []
+
+
+def test_a_project_that_names_no_pytest_is_not_judged_by_it(tmp_path):
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+    assert not fix_trees.venv_lacks_pytest(tmp_path)
+
+
+def test_a_borrowed_venv_is_the_checkouts_to_sync(tmp_path, monkeypatch):
+    """A `.venv` linked to the checkout's would be installed into through the link."""
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / "pyproject.toml").write_text('dev = ["pytest"]\n', encoding="utf-8")
+    monkeypatch.setattr(fix_trees.worktree_env, "borrowed", lambda path: tmp_path / "home")
+    assert not fix_trees.venv_lacks_pytest(tmp_path)
+
+
 def test_a_tree_with_a_venv_and_an_empty_node_modules_is_provisioned(tmp_path):
     """fcf111b9: the `.venv` says nothing about the frontend tier, and a roguelike tree
     with an empty `node_modules` could not start `vite`."""
