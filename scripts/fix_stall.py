@@ -8,7 +8,7 @@ with a sensible sentence beside it, because the record is rewritten every half h
 nobody reads the one before. `fix-pass.history.jsonl` keeps the waits by name
 (`fix_cycle.history_line`), so how long each has lasted is a question with an answer.
 
-A wait that has lasted `STALL_AFTER` is filed: a local tier that is not re-running, a
+A wait that has lasted `STALL_AFTER` (`stall_after`: two nights for the nightly tier) is filed: a local tier that is not re-running, a
 release pipeline that is not releasing, a sweep that is not closing. What the pass is
 already tracking elsewhere -- an escalation the devkit session has, a back-off, a
 session in flight, a hold behind the red harness or an open adoption -- is not filed
@@ -28,8 +28,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fix_budget
 import fix_cycle
 import fix_findings
+import fix_plan
 
 STALL_AFTER = _dt.timedelta(hours=24)
+# A hold for the nightly local run waits on a job that fires once a day and then waits for
+# the PC to go idle (`e2e-pass.py`), so at a day it has had one chance, and that one may
+# still be waiting. tvshell's was held at 09:00, and filed at 09:00 the next day with
+# that day's run started and not yet idle (09f80e67). Two nights with no re-test is a tier
+# that is not re-running.
+NIGHTLY_STALL_AFTER = _dt.timedelta(hours=48)
 KIND = "stalled"
 FIELDS = ("waiting", "skipped")
 # Waits some other part of the loop already owns, by how the reason starts. A full
@@ -94,14 +101,22 @@ def streaks(history: list[dict], field: str) -> dict[str, tuple[str, str]]:
     return found
 
 
+def stall_after(name: str) -> _dt.timedelta:
+    """How long the wait `name` may last before it is a stall: `NIGHTLY_STALL_AFTER` for
+    one on the nightly local tier, `STALL_AFTER` for every other."""
+    nightly = name.endswith(f"({fix_plan.LOCAL_E2E_NAME})")
+    return NIGHTLY_STALL_AFTER if nightly else STALL_AFTER
+
+
 def stalled(
-    history: list[dict], now: _dt.datetime, after: _dt.timedelta = STALL_AFTER
+    history: list[dict], now: _dt.datetime, after: _dt.timedelta | None = None
 ) -> list[fix_findings.Finding]:
-    """A finding for each wait older than `after` that nothing else is tracking."""
+    """A finding for each wait nothing else is tracking that is older than `after`, or
+    than its own `stall_after` when none is given."""
     found = []
     for field in FIELDS:
         for name, (since, why) in sorted(streaks(history, field).items()):
-            if tracked(why) or not _older(since, now, after):
+            if tracked(why) or not _older(since, now, after or stall_after(name)):
                 continue
             project = name.split(" ", 1)[0]
             detail = f"{field} since {since[:16]}: {name} -- {why}"

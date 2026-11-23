@@ -44,6 +44,34 @@ def test_a_wait_under_a_day_is_not():
     assert fix_stall.stalled([line(20, HELD), line(0, HELD)], NOW) == []
 
 
+def test_a_hold_for_the_nightly_run_is_given_a_second_night():
+    # 09f80e67: tvshell's red local e2e was held at 09:00 for a job that fires once a day,
+    # and filed at 09:00 the next day while that day's run was still waiting for the PC to
+    # go idle. One cadence is not a stall; two nights with no re-test is.
+    failure = fix_plan.Failure(
+        kind=fix_plan.LOCAL, project="tvshell", number=0, title="", url="", base="main"
+    )
+    name = f"tvshell {fix_plan.name_of(failure)}"
+    assert name.endswith(f"({fix_plan.LOCAL_E2E_NAME})")
+    held = {name: "Local E2E failing: the next scheduled local run re-tests the tip"}
+    assert fix_stall.stalled([line(30, held), line(0, held)], NOW) == []
+    [found] = fix_stall.stalled([line(49, held), line(0, held)], NOW)
+    assert found.project == "tvshell" and name in found.detail
+    # The medium tier re-tests within minutes, so a day of its hold is still a stall.
+    tier = fix_plan.Failure(
+        kind=fix_plan.LOCAL,
+        project="tvshell",
+        number=0,
+        title="",
+        url="",
+        base="main",
+        workflow=fix_plan.MEDIUM_TIER,
+    )
+    medium = f"tvshell {fix_plan.name_of(tier)}"
+    assert fix_stall.stall_after(medium) == fix_stall.STALL_AFTER
+    assert len(fix_stall.stalled([line(30, {medium: "x"}), line(0, {medium: "x"})], NOW)) == 1
+
+
 def test_a_long_skip_is_a_release_or_a_sweep_that_is_not_happening():
     skip = {"devkit #410": "red by construction: a release PR fails the newest-tag test"}
     [found] = fix_stall.stalled([line(48, skipped=skip), line(0, skipped=skip)], NOW)
