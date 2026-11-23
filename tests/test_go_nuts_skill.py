@@ -60,10 +60,11 @@ def test_every_decision_lands_in_an_ignored_append_only_log():
         assert "logs/" in gitignore.read_text(encoding="utf-8").splitlines(), gitignore
 
 
-def test_it_ends_through_ship_so_the_pass_does_not_read_it_as_dead():
+def test_it_ends_with_an_intent_so_the_pass_does_not_read_it_as_dead():
+    """Nobody types `/ship` for an unattended run, and the built-in is the person's alone."""
     text = " ".join(_text().split())
-    assert "Finish with the `/ship` skill, even when only part of the goal is done" in text
-    assert ".claude/rules/session-scope.md" in text
+    assert "Finish with the intent file `.claude/ship-intent.md` describes" in text
+    assert "even when only part of the goal is done" in text
 
 
 def test_a_harness_refusal_is_reported_not_routed_around():

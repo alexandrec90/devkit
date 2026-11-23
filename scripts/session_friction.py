@@ -476,7 +476,7 @@ HANDED_BACK = re.compile(
 )
 # A session's last words giving the person a job, which they will forget: "you need to run
 # X", "once this merges, rebuild Y", "run Z on each PC". What such a session owed instead
-# is a task in `QUEUE_DIR` (the ship skill's last section). Narrow on purpose, matched a
+# is a task in `QUEUE_DIR` (`.claude/ship-intent.md`'s last section). Narrow on purpose, matched a
 # sentence at a time and held to an instruction, not a mention: a first cut matched 54 of
 # 393 endings, many of them only saying a PR waits for a merge or that something was once
 # done by hand. So no bare "manually", and "merge" and "review" are not among the verbs,

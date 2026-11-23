@@ -602,8 +602,71 @@ def test_a_draft_is_still_unfinished_with_merge_now(tmp_path):
     assert merged_numbers(run) == []
 
 
-def test_a_held_pr_carries_neither_label_and_stays(tmp_path):
-    run = FakeRun(world(prs=[pr(labels=[])], gate=""))
+HERE = {"full_name": REPO}
+
+
+def shipped(number: int = 15, **overrides) -> dict:
+    """What Claude Code's built-in `/ship` opens: a person's branch here, no label."""
+    fields = {
+        "number": number,
+        "labels": [],
+        "user": {"login": "someone", "type": "User"},
+        "head": {"sha": SHA, "ref": "agent/thing-1123", "repo": HERE},
+        "base": {"ref": "main", "repo": {**HERE, "default_branch": "main"}},
+        "body": "Why it changed.",
+    }
+    fields.update(overrides)
+    return pr(**fields)
+
+
+def test_an_unlabelled_pr_merges_with_no_gate_in_a_direct_project(tmp_path):
+    """**The built-in `/ship`'s PR.** It applies no label, and nothing in this flow
+    stands between it and `main`: the session opens it and leaves."""
+    run = FakeRun(world(prs=[shipped()], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+    assert not any("actions/runs" in arg for call in run.calls for arg in call), run.calls
+
+
+def test_an_unlabelled_pr_waits_in_a_gated_project(tmp_path):
+    """The gated flow's whole meaning: nothing merges without a label and a green gate."""
+    run = FakeRun(world(prs=[shipped()], gate=""))
+    assert merger.main(env(MERGE_QUEUE="yes"), run, root=tmp_path) == 0
+    assert merged_numbers(run) == []
+
+
+def test_an_unlabelled_pr_waits_outside_the_queue_job(tmp_path):
+    run = FakeRun(world(prs=[shipped()], gate=""))
+    assert merger.main(env(), run, root=direct_project(tmp_path)) == 0
+    assert merged_numbers(run) == []
+
+
+@pytest.mark.parametrize(
+    ("why", "overrides"),
+    [
+        ("a draft", {"draft": True}),
+        ("the hold label", {"labels": [{"name": "hold"}]}),
+        ("a Hold line", {"body": "Why.\n\nHold: yes\nCloses #3"}),
+        ("a bot's PR", {"user": {"login": "dependabot[bot]", "type": "Bot"}}),
+        ("a fork", {"head": {"sha": SHA, "ref": "x", "repo": {"full_name": "fork/repo"}}}),
+        ("an undescribed head", {"head": {"sha": SHA, "ref": "x"}}),
+        ("a release", {"head": {"sha": SHA, "ref": "release/v1.2.3", "repo": HERE}}),
+    ],
+)
+def test_an_unlabelled_pr_that_says_wait_stays_open(tmp_path, why, overrides):
+    run = FakeRun(world(prs=[shipped(**overrides)], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [], why
+
+
+def test_a_sentence_mentioning_hold_is_not_a_hold():
+    assert merger.ships_unlabelled(shipped(body="We said hold: yes was the old way."))
+
+
+def test_automerge_still_waits_for_its_gate_in_a_direct_project(tmp_path):
+    """An adoption or a Dependabot bump asked for the gate; the direct flow keeps that."""
+    labelled = shipped(labels=[{"name": "automerge"}])
+    run = FakeRun(world(prs=[labelled], gate=""))
     assert in_the_queue(run, tmp_path) == 0
     assert merged_numbers(run) == []
 
@@ -882,7 +945,14 @@ def test_the_drain_runs_one_at_a_time_and_runs_the_default_branchs_script():
     assert "group: merge-queue" in job
     assert "cancel-in-progress: false" in job
     assert "ref: ${{ github.event.repository.default_branch }}" in job
-    assert "merge-now" in job
+
+
+def test_any_pr_from_this_repository_starts_the_drain():
+    """Gating the job on `merge-now` would leave every built-in `/ship` PR, which carries
+    no label, for the hourly pass: an hour the session would spend watching it."""
+    condition = _job("sweep").split("runs-on:", 1)[0]
+    assert "pull_request" in condition
+    assert "labels" not in condition
 
 
 def test_tidying_never_shares_the_drains_group():

@@ -1,5 +1,5 @@
 ---
-description: What a coding session leaves to the fix pass — no commit, push or PR, no full test suite — the fixer sessions that are exempt, and why a checkout that cannot run its checks is fixed rather than reported
+description: What a coding session leaves to the fix pass — no full test suite, no waiting on a gate — the fixer sessions that are exempt, and why a checkout that cannot run its checks is fixed rather than reported
 ---
 
 # Rule: Stop at the change
@@ -7,18 +7,17 @@ description: What a coding session leaves to the fix pass — no commit, push or
 Deliberately **unscoped**, and vendored from devkit like `engineering.md`: change it
 there.
 
-A coding session makes the change and describes it. It does **not**:
+Shipping is Claude Code's own business: commit, push and open a PR however it does,
+`/ship` included. An unattended session, or a task for later, goes as
+[`.claude/ship-intent.md`](../ship-intent.md) says.
 
-- `git commit`, `git push`, or open a PR (`gh pr create`) — only the top-level session
-  ships; a subagent never invokes `/ship` or writes `logs/ship-intent.md`;
-- run the whole test suite — `pytest tests`, or any run naming no test file, however
-  few tests it holds — or wait on a CI gate.
+A session does **not** run the whole test suite — `pytest tests`, or any run naming no
+test file, however few tests it holds — or wait on a CI gate.
 
 Running the tests for what you touched is optional. Where `scripts/run-tests.py --help`
 says it picks them, run it bare: it builds the `.venv` a `claude --worktree` tree
-arrives without, which `uv run pytest` builds lacking the dev extra.
-The scheduled jobs commit, push, open the PR and run the full gate in CI; a red
-gate comes back to a fresh session with the failures named.
+arrives without, which `uv run pytest` builds lacking the dev extra. Every gate runs
+after you stop, and a red one comes back to a fresh session.
 
 **Fixer sessions are exempt:** one the fix pass dispatched, as its prompt's first
 sentence says, follows that prompt and [`.claude/fixer.md`](../fixer.md), tests included.

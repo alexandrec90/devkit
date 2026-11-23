@@ -39,6 +39,14 @@ landed, so every wait in front of `main` is one the person loses track of. Its P
 conflicted one is passed over rather than waited on: its resolver's push fires the next
 drain, and the rest of the line has no reason to stop for it.
 
+**In the direct flow a PR needs no label at all** (`ships_unlabelled`). Claude Code's
+built-in `/ship` opens a PR and applies nothing, and the person decided the harness
+defers to it, so the queue merges any open PR a collaborator pushed to this repository
+unless something says wait: a draft, a `hold` label, a `Hold: yes` line in the body, a
+bot author (a Dependabot major left unlabelled for review), or a `release/` branch,
+whose PR is red by construction until its tag exists. A label still decides when one is
+there: `automerge` waits for its gate here as everywhere.
+
 **Everything it merges it also gets checked.** A merge made with `GITHUB_TOKEN` raises no
 `push`, so without `dispatch_gate` the only run a bot merge ever got was the fix pass's
 half-hourly re-gate of whatever the tip was by then, which cannot say which merge broke it.
@@ -51,6 +59,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -69,6 +78,14 @@ AUTOMERGE_LABEL = "automerge"
 # in this file. Spelled again in `dependabot-automerge.yml`'s `sweep` condition.
 MERGE_NOW_LABEL = "merge-now"
 MERGE_LABELS = (AUTOMERGE_LABEL, MERGE_NOW_LABEL)
+
+# What keeps an unlabelled PR in a direct project open (`held`): a label a person applies,
+# or the line a held ship intent leaves in the PR body (`ship_intent.HOLD_TRAILER`).
+HOLD_LABEL = "hold"
+HOLD_LINE = re.compile(r"hold:\s*yes", re.IGNORECASE)
+# `release.py`'s branch. Its PR fails the newest-tag test until the tag exists, and the
+# release pipeline is what merges it, after reading that the failure is that test alone.
+RELEASE_BRANCH_PREFIX = "release/"
 
 # `green-ref.py`'s branch, which a PR's head must never be deleted as.
 GREEN_BRANCH = "green"
@@ -293,6 +310,34 @@ def write_outputs(env: dict[str, str], outputs: dict[str, str]) -> None:
         handle.writelines(f"{key}={value}\n" for key, value in outputs.items())
 
 
+def held(pr: dict) -> bool:
+    """Whether someone said this PR waits: the `hold` label, or a `Hold: yes` line."""
+    if HOLD_LABEL in labels_of(pr):
+        return True
+    body = str(pr.get("body") or "")
+    return any(HOLD_LINE.fullmatch(line.strip()) for line in body.splitlines())
+
+
+def ships_unlabelled(pr: dict) -> bool:
+    """Whether the direct flow's queue merges `pr` though it carries no merge label.
+
+    Only a PR whose head is a branch of this very repository, so pushing it took write
+    access, which is the authorization a label stands for elsewhere. Every unknown reads
+    as no: a head or base the listing did not describe is not known to be this repo's.
+    """
+    labels = labels_of(pr)
+    if any(label in labels for label in MERGE_LABELS) or held(pr) or pr.get("draft"):
+        return False
+    head, base = pr.get("head") or {}, pr.get("base") or {}
+    head_repo = str((head.get("repo") or {}).get("full_name") or "")
+    if not head_repo or head_repo != str((base.get("repo") or {}).get("full_name") or ""):
+        return False
+    user = pr.get("user") or {}
+    if user.get("type") == "Bot" or str(user.get("login") or "").endswith("[bot]"):
+        return False
+    return not str(head.get("ref") or "").startswith(RELEASE_BRANCH_PREFIX)
+
+
 def verdict(repo: str, pr: dict, run, env_sha: str = "", queue: bool = False) -> tuple[bool, str]:
     """`(should_merge, why)` for one open PR. Every guard re-derived from scratch.
 
@@ -308,7 +353,8 @@ def verdict(repo: str, pr: dict, run, env_sha: str = "", queue: bool = False) ->
     # is the whole authorization -- see the module docstring. The head-SHA check below is
     # what defuses a stray human commit on the branch, not the author field.
     labels = labels_of(pr)
-    if not any(label in labels for label in MERGE_LABELS):
+    unlabelled = queue and ships_unlabelled(pr)
+    if not unlabelled and not any(label in labels for label in MERGE_LABELS):
         return False, f"not labelled {AUTOMERGE_LABEL!r} (unclassified, or held for review)"
     if pr.get("draft"):
         return False, "still a draft"
@@ -322,6 +368,8 @@ def verdict(repo: str, pr: dict, run, env_sha: str = "", queue: bool = False) ->
         return False, f"not known-mergeable ({state})"
     if queue and MERGE_NOW_LABEL in labels:
         return True, f"labelled {MERGE_NOW_LABEL}: its checks run after it lands"
+    if unlabelled:
+        return True, "a direct project's PR, unheld: its checks run after it lands"
     return gate_verdict(repo, pr, run, env_sha)
 
 
@@ -404,7 +452,11 @@ def in_line(found: list[dict], queue: bool = False) -> list[dict]:
     is the other way round. On the label only, so the per-PR read that follows is spent on
     candidates alone; `verdict` re-checks it against the fresh detail regardless."""
     labels = MERGE_LABELS if queue else (AUTOMERGE_LABEL,)
-    labelled = (pr for pr in found if any(label in labels_of(pr) for label in labels))
+    labelled = (
+        pr
+        for pr in found
+        if any(label in labels_of(pr) for label in labels) or (queue and ships_unlabelled(pr))
+    )
     return sorted(labelled, key=lambda pr: pr.get("number") or 0)
 
 

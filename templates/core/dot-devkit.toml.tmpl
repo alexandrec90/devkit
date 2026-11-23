@@ -26,13 +26,13 @@ unit_tests = "{{ unit_tests }}"
 [python]
 version = "{{ python_version }}"
 
-# How a finished session's work reaches the default branch. `gated`, the default, is a
-# PR the gate decides. `direct` merges first: the ship task opens a PR labelled
-# `merge-now`, nothing waits on a gate, and every check runs after the merge and repairs
-# what it finds.
-#
-# [delivery]
-# flow = "direct"
+# How a finished session's work reaches the default branch. `direct` merges first: a PR
+# from Claude Code's built-in `/ship` merges as soon as it opens, no hook gates its commit
+# or push, and every check runs after the merge and repairs what it finds. `gated`, what
+# an absent or unreadable value means, is a PR the gate decides: keep it for a project
+# whose code moves real money.
+[delivery]
+flow = "direct"
 
 # The Bash output cap `invoke-capped.py` applies. `enforce-capped-bash.py` (vendored,
 # not wired as a hook) quotes the same `max_bytes`, so one field feeds both.

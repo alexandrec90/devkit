@@ -536,6 +536,57 @@ def test_the_framework_skip_covers_the_push_stage_too(tmp_path, monkeypatch):
     assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner, env=env) == 0
 
 
+def _direct(root):
+    (root / ".devkit.toml").write_text('[delivery]\nflow = "direct"\n', encoding="utf-8")
+
+
+def test_a_direct_project_commits_with_no_framework_and_no_variable(tmp_path, monkeypatch):
+    """**Claude Code's built-in `/ship`.** It runs a plain `git commit`, with nothing set,
+    and in a direct project nothing may stand between that commit and its PR."""
+    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
+    monkeypatch.setattr(
+        git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
+    )
+    responses = _commit_responses(tmp_path)
+    assert git_policy.run_hook("pre-commit", [], runner=FakeRunner(responses), env={}) == 1, (
+        "gated, the missing framework still refuses"
+    )
+    _direct(tmp_path)
+    runner = FakeRunner(responses)
+    assert git_policy.run_hook("pre-commit", [], runner=runner, env={}) == 0
+    assert ("project-hook-test",) in runner.calls
+
+
+def test_a_direct_project_pushes_with_no_push_gate(tmp_path, monkeypatch):
+    """The push stage is the PR gate's own lint and tests: minutes a session would sit
+    through on every `/ship`, in a flow where CI runs them after the merge anyway."""
+    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
+    responses = _push_responses(tmp_path)
+    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    _direct(tmp_path)
+    raw = "refs/heads/claude/fresh aaa refs/heads/claude/fresh 0000\n"
+    runner = FakeRunner(responses)
+    assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner, env={}) == 0
+
+
+def test_a_direct_project_keeps_the_branch_policy(tmp_path, capsys):
+    responses = _commit_responses(tmp_path)
+    responses.update(merged_response("claude/fresh", [{"url": "https://github.com/acme/w/pull/1"}]))
+    _direct(tmp_path)
+    assert git_policy.run_hook("pre-commit", [], runner=FakeRunner(responses), env={}) == 1
+    assert "is permanently retired because its PR merged" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "[delivery]\n", '[delivery]\nflow = "gated"\n', 'delivery = "direct"\n', "[delivery\n"],
+)
+def test_only_a_clear_direct_flow_skips_the_framework(tmp_path, text):
+    (tmp_path / ".devkit.toml").write_text(text, encoding="utf-8")
+    assert not git_policy.framework.flows_directly(tmp_path)
+    assert not git_policy.framework.flows_directly(tmp_path / "absent")
+
+
 def test_the_framework_skip_reads_off_values_as_off(tmp_path):
     for value in ("", "0", "false", "no", "off", " Off "):
         assert not git_policy.framework_skipped({git_policy.FRAMEWORK_SKIP_ENV_VAR: value}), value

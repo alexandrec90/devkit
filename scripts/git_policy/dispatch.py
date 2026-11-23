@@ -32,7 +32,7 @@ from ._core import (
 )
 
 from .branch import evaluate_pre_commit, evaluate_pre_push, policy_skipped
-from .framework import _run_pre_commit_framework, framework_skipped
+from .framework import _run_pre_commit_framework, flows_directly, framework_skipped
 
 
 def _project_hook_command(path: Path, args: Sequence[str]) -> list[str] | None:
@@ -147,7 +147,10 @@ def run_hook(
     if root is None:
         emit("[devkit branch policy] cannot locate repository root", stream=sys.stderr)
         return 1
-    if not framework_skipped(os.environ if env is None else env):
+    # A direct project runs every check after the merge, so neither stage gates its
+    # commit or its push; the branch policy above still does.
+    skip = framework_skipped(os.environ if env is None else env) or flows_directly(root)
+    if not skip:
         framework_result = _run_pre_commit_framework(root, runner, hook_name, input_text)
         if framework_result:
             return framework_result

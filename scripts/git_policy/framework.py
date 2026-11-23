@@ -11,6 +11,7 @@ import importlib.util
 import os
 import shutil
 import sys
+import tomllib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -30,6 +31,28 @@ def framework_skipped(env: Mapping[str, str]) -> bool:
     """True when `FRAMEWORK_SKIP_ENV_VAR` is set to anything that does not read as "off",
     as `branch.policy_skipped` reads its own variable."""
     return env.get(FRAMEWORK_SKIP_ENV_VAR, "").strip().lower() not in _OFF_VALUES
+
+
+# `[delivery] flow` in `.devkit.toml`, the value `scripts/delivery.py` reads in devkit.
+DIRECT_FLOW = "direct"
+
+
+def flows_directly(root: Path) -> bool:
+    """Whether the repository at `root` is in the direct flow, where nothing stands
+    between a commit and its PR: every check runs after the merge.
+
+    Read here, and not left to whoever commits to set `FRAMEWORK_SKIP_ENV_VAR`, because
+    Claude Code's built-in `/ship` runs a plain `git commit` and `git push`, and the push
+    stage alone is minutes of lint and tests a session would sit through, or fight. Anything
+    unreadable is the gated flow, which runs the framework: the skip needs a clear yes.
+    """
+    try:
+        with (root / ".devkit.toml").open("rb") as manifest:
+            data = tomllib.load(manifest)
+    except (OSError, ValueError):  # `TOMLDecodeError` and a bad encoding are ValueErrors
+        return False
+    delivery = data.get("delivery")
+    return isinstance(delivery, dict) and delivery.get("flow") == DIRECT_FLOW
 
 
 def _venv_roots(root: Path, runner: Runner) -> tuple[Path, ...]:

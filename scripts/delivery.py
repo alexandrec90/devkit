@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Which delivery flow a project is in: `[delivery] flow` in its `.devkit.toml`.
 
-`gated` is the flow every project has always had: the fix pass runs the commit-stage
-fixers, opens a PR, and the gate decides. `direct` is the opt-in: `scripts/ship-pass.py`
-commits with no framework, labels the PR `merge-now`, and every check runs after the
-merge and repairs what it finds.
+`direct` is every project's flow by the owner's decision, and what the template writes:
+a PR merges as it opens -- Claude Code's built-in `/ship`'s unlabelled, `ship-pass.py`'s
+labelled `merge-now` -- and every check runs after the merge and repairs what it finds.
+`gated` is the fix pass running the commit-stage fixers and a PR the gate decides, kept
+for code that moves real money.
 
 **Anything that cannot be read is `gated`.** A missing file, a broken one, a misspelt
 value: the direct flow takes a gate away, so it is only ever entered on a clear yes.
