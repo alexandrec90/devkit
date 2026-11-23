@@ -43,7 +43,7 @@ from fix_plan import (
     is_unstarted,
     name_of,
 )
-from fix_reports import BLOCKED_FILE, FRICTION_FILE, REFUSED_FILE
+from fix_reports import BLOCKED_FILE, FRICTION_FILE, PROMPT_PERSON_STEP, REFUSED_FILE
 from harness_triage import ARTIFACT as _TRIAGE_ARTIFACT
 from junit_report import READABLE
 from ship_intent import INTENT_FILE, REFUSAL_LINE, REFUSED, STATE_FILE, read_state
@@ -158,7 +158,9 @@ STOP = (
     "is not one of them: adding a worktree on another branch, fetching or merging a ref, "
     "reproducing the failure, reading code outside the diff, reshaping code to fit a "
     f"limit. If you write {BLOCKED_FILE.as_posix()}, name which of the three it is and "
-    "what you tried first. A fix that waits on another open PR, in any repository, is "
+    "what you tried first. For an admin right, end it with "
+    f"a line {PROMPT_PERSON_STEP} and the exact command to run elevated: the pass then "
+    "hands it to a person and sends no further fixer at the same wall. A fix that waits on another open PR, in any repository, is "
     "none of the three and not yours to merge: put a line Waits on: and the full "
     "github.com URL of that PR in the same file, and the pass holds this until it closes."
 )

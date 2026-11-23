@@ -298,6 +298,10 @@ def read_stamp(tree: Path) -> dict:
 # `harness_triage.PERSON_STEP`, spelled here because that module's readers import this
 # one; a test holds the two equal, as `collectors.PERSON_STEP` is held.
 PERSON_STEP = "a person's step:"
+# The same marker as `fix_prompts.STOP` can spell it: no quote crosses a `wt` line, so
+# the prompt names this one and `blocked_reason` reads it as `PERSON_STEP`. Unmarked,
+# three data-lake fixers each stopped on one admin step and a fourth was due (31f7fe5f).
+PROMPT_PERSON_STEP = "Person step:"
 
 
 def blocked_reason(tree: Path) -> str:
@@ -313,6 +317,8 @@ def blocked_reason(tree: Path) -> str:
         return ""
     words = " ".join(line.strip().lstrip("#").strip() for line in text.splitlines()).split()
     joined = " ".join(words)
+    if PERSON_STEP not in joined:
+        joined = joined.replace(PROMPT_PERSON_STEP, PERSON_STEP, 1)
     head, marker, step = joined.partition(PERSON_STEP)
     if not marker or len(joined) <= REASON_LIMIT:
         return joined[:REASON_LIMIT]

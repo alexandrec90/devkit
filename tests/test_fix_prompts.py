@@ -325,6 +325,8 @@ def test_the_exit_names_its_blockers_what_is_not_one_and_asks_for_evidence():
         "what you tried first",
         # the line `fix_reports.waits_on` reads, so a wait on another PR is held, not filed
         "a line Waits on: and the full github.com URL",
+        # the marker `fix_reports.blocked_reason` reads, so an admin step awaits a person
+        f"a line {fix_reports.PROMPT_PERSON_STEP} and the exact command",
     ):
         assert expected in fix_prompts.STOP
     # It crosses a wt command line with every other sentence here.
