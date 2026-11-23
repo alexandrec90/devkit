@@ -149,6 +149,38 @@ def test_a_short_blocked_report_with_a_person_step_is_left_as_it_is(tmp_path):
     assert fix_reports.blocked_reason(tmp_path) == text
 
 
+def test_a_blocked_reports_prompt_spelled_person_step_awaits_the_person(tmp_path):
+    """2026-11-22: three data-lake fixers each stopped on the same admin step, unmarked.
+
+    The prompt's exit cannot spell `PERSON_STEP` (no quotes cross a `wt` line), so it
+    names `PROMPT_PERSON_STEP`, and the report's reader turns that into the marker."""
+    import harness_triage as triage
+
+    assert not set("\"'`") & set(fix_reports.PROMPT_PERSON_STEP)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.BLOCKED_FILE).write_text(
+        "# Blocked: an admin right\n\nThe task is Administrators-owned. "
+        + "why " * 120
+        + f"\n\n{fix_reports.PROMPT_PERSON_STEP} in admin PowerShell run {STEP_COMMAND}\n",
+        encoding="utf-8",
+    )
+    reason = fix_reports.blocked_reason(tmp_path)
+    assert len(reason) <= fix_reports.REASON_LIMIT
+    step = triage.person_step(triage.Item("", "", {"detail": f"fixer-blocked: x: {reason}"}))
+    assert step == f"in admin PowerShell run {STEP_COMMAND}"
+
+
+def test_a_blocked_report_naming_no_person_step_is_a_fixers_again(tmp_path):
+    import harness_triage as triage
+
+    (tmp_path / "logs").mkdir()
+    (tmp_path / fix_reports.BLOCKED_FILE).write_text(
+        "Blocked: admin right only a person has.", encoding="utf-8"
+    )
+    reason = fix_reports.blocked_reason(tmp_path)
+    assert triage.person_step(triage.Item("", "", {"detail": reason})) == ""
+
+
 def test_waits_on_reads_the_pr_a_blocked_report_names_on_its_own_line(tmp_path):
     assert fix_reports.waits_on(tmp_path) == ""
     (tmp_path / "logs").mkdir()
