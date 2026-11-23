@@ -207,9 +207,15 @@ def ran_from(item: triage.Item, repo: str = "") -> _dt.datetime | None:
     checkout's, which has the merge only once it pulls: d7b9c8c4, a reconcile begun five
     minutes after devkit #659 merged, from a checkout still two commits behind it.
     `head_at` dates only the row's own checkout, so a merge in another repo (a project
-    fix for a `collectors.py fire` row filed from devkit) is never judged by it."""
+    fix for a `collectors.py fire` row filed from devkit) is never judged by it.
+
+    That checkout is the row's `filer=` when it names one (`fix_findings.running_code`):
+    the pass's own finding is devkit's judgement, whatever project it is about. f97bc2fd,
+    a stall filed against tvshell half an hour after devkit #801 merged the end of it, by
+    a pass still on `origin/green` two commits behind."""
     began = _moment(item.fields.get("started", "")) or _moment(item.stamp)
-    head = _moment(item.fields.get("head_at", "")) if repo and repo == item.project else None
+    ran = item.fields.get("filer", "") or item.project
+    head = _moment(item.fields.get("head_at", "")) if repo and repo == ran else None
     return min(began, head) if began and head else began
 
 

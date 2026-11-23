@@ -181,6 +181,35 @@ def test_a_run_from_a_checkout_without_the_merge_is_covered_though_begun_after_i
     assert fix_verify.ran_from(unreadable, "devkit") == _dt.datetime.fromisoformat(at(2.5))
 
 
+def test_a_finding_about_a_project_is_dated_by_the_checkout_that_filed_it(tmp_path):
+    """f97bc2fd: devkit #801 merged at 14:37Z and stopped a stall being filed; the pass at
+    15:04Z still ran `origin/green`, two commits behind, and filed it again against
+    tvshell. The row's project is tvshell's, but the code that judged it is devkit's
+    (`filer=`), so devkit's merge is measured against that checkout's `head_at=`."""
+    stall = "stalled: waiting since 2026-11-22T14:00: tvshell origin/main (local e2e)"
+    row = lambda hours: finding(hours, stall).replace("project=devkit", "project=tvshell")
+    first = row(10)
+    behind = f"{row(1)}\tfiler=devkit\thead_at={at(20)}"
+    current = f"{row(1 / 2)}\tfiler=devkit\thead_at={at(3)}"
+    unsaid = f"{row(1 / 4)}\thead_at={at(20)}"
+    lines = items(
+        first,
+        resolution("agent/x", days_ago=8 / 24, ref=triage.item_id(first)),
+        behind,
+        current,
+        unsaid,
+    )
+    merge = fix_verify.Pr(fix_verify.LANDED, at(3), "https://github.com/o/devkit/pull/801")
+    [(row_id, _, _)] = fix_verify.verify(lines, lambda *_: [merge], tmp_path / "a", NOW).covered
+    assert row_id == triage.item_id(behind), "only the row a checkout behind the merge filed"
+    assert fix_verify.ran_from(lines[2], "devkit") == _dt.datetime.fromisoformat(at(20))
+    assert fix_verify.ran_from(lines[2], "tvshell") == _dt.datetime.fromisoformat(at(1)), (
+        "tvshell's own merge is not what that checkout was behind"
+    )
+    elsewhere = fix_verify.Pr(fix_verify.LANDED, at(3), "https://github.com/o/carameli/pull/9")
+    assert fix_verify.verify(lines, lambda *_: [elsewhere], tmp_path / "b", NOW).covered == []
+
+
 def test_an_unreadable_start_falls_back_to_when_the_row_was_filed(tmp_path):
     first = finding(10)
     garbled = f"{finding(1)}\tstarted=not a time"
