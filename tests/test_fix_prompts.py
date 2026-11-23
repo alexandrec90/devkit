@@ -433,6 +433,18 @@ def test_a_pr_prompt_sends_its_fixer_to_the_prs_own_description():
     assert "gh pr view" not in fix_prompts.pr_prompt(commit), "a refused commit has no PR yet"
 
 
+def test_a_red_pr_fixer_may_close_an_obsolete_pr_rather_than_leave_it_red():
+    """carameli #527 sat red for days with nothing sent at it; a PR the base has already
+    overtaken is fixed by closing it, never by leaving it open."""
+    red = failure()
+    text = fix_prompts.pr_prompt(red)
+    assert f"gh pr close {red.number} --delete-branch" in text
+    assert f"origin/{red.base} already holds its change" in text
+    assert text.endswith(fix_prompts.STOP)
+    conflicted = fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,)))
+    assert "gh pr close" not in conflicted, "a resolver's job is the merge alone"
+
+
 def test_a_resolver_is_told_the_true_base_when_the_base_squashed_part_of_its_branch():
     """6c10216b: #96 squashed #98's first two commits into main, so `git merge` called
     eight files add/add against a merge base older than both."""

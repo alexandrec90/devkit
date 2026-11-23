@@ -186,6 +186,7 @@ def run_one(
     # this view says "nothing wrong with it now" -- a session that opens nothing,
     # reports success, and leaves the PR exactly as red as it was.
     menu.settle_mergeability(project_dir, [pr])
+    menu.add_dispatched_gates(project_dir, [pr])
     if not menu.broken_reason(pr):
         print(f"{pick.project} #{pick.number}: nothing wrong with it now -- nothing to do")
         return EXIT_OK

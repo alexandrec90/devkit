@@ -47,8 +47,11 @@ reporter = load_by_path(
 )
 
 # The workflow file every consumer's gate lives at; `sync-devkit.PR_GATE_FILE` is the
-# path, this is the name `gh run list --workflow` filters by.
-GATE_WORKFLOW = "pr-gate.yml"
+# path, this is the name `gh run list --workflow` filters by. The scan owns it.
+GATE_WORKFLOW = menu.GATE_WORKFLOW
+
+# A run GitHub held for approval and never started: no jobs, no logs, no verdict.
+UNSTARTED = "action_required"
 
 # How the tracker issue is titled, less the workflow name: `issue_title` is a pure
 # function of that name, so asking it about an empty one yields the suffix.
@@ -87,7 +90,12 @@ def gh_json(result: object) -> object:
 
 
 def gate_run(gh: Gh, head: str, sha: str) -> dict:
-    """The gate run at `sha` on `head`, or the newest on `head` when `sha` is unknown."""
+    """The gate run at `sha` on `head`, or the newest on `head` when `sha` is unknown.
+
+    A run that never started is passed over for one at the same sha that did: carameli
+    #527's head held a dispatched gate that failed and, newer, a `pull_request` gate held
+    for approval, and the newer one has no job to read evidence from.
+    """
     listed = gh_json(
         gh(
             "run",
@@ -105,10 +113,11 @@ def gate_run(gh: Gh, head: str, sha: str) -> dict:
     if not isinstance(listed, list):
         return {}
     runs = [run for run in listed if isinstance(run, dict)]
-    for run in runs:
-        if sha and str(run.get("headSha", "")) == sha:
-            return run
-    return {} if sha else (runs[0] if runs else {})
+    if not sha:
+        return runs[0] if runs else {}
+    at_sha = [run for run in runs if str(run.get("headSha", "")) == sha]
+    started = [run for run in at_sha if str(run.get("conclusion") or "") != UNSTARTED]
+    return (started or at_sha or [{}])[0]
 
 
 def run_jobs(gh: Gh, run_id: str) -> list[dict]:
