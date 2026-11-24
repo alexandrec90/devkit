@@ -451,7 +451,18 @@ def pr_prompt(failure: Failure, tree: TreeNotes | None = None) -> str:
         + _head_state(tree, failure)
         + _described(failure.number)
         + " Fix what the gate is failing on, and nothing else about "
-        f"the PR.{tree_notes} {FINISH}"
+        f"the PR.{_obsolete(failure.number, failure.base)}{tree_notes} {FINISH}"
+    )
+
+
+def _obsolete(number: int, base: str) -> str:
+    """The one way a red PR ends without a fix. A PR whose change has no reason left to
+    land was otherwise either fixed for nothing or left open and red forever."""
+    return (
+        f" If the PR is obsolete -- origin/{base} already holds its change, or a newer PR "
+        f"supersedes it -- close it instead (gh pr close {number} --delete-branch --comment "
+        "with why, naming what superseded it) and say so in the intent; never leave it open "
+        "and red."
     )
 
 
