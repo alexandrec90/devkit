@@ -10,7 +10,9 @@ default branch, so "the checkout is synced" is read off the files on disk.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -315,3 +317,153 @@ def test_slug_of_reads_every_remote_spelling(url):
 def test_a_remote_that_is_not_github_is_refused():
     with pytest.raises(land.LandError, match="not a GitHub repository"):
         land.slug_of("/srv/git/proj.git")
+
+
+# --- each step on its own ----------------------------------------------------------
+
+
+def repo_of(world) -> object:
+    return land.read_repo(world.tree, subprocess.run)
+
+
+def test_read_repo_finds_the_root_and_the_default_branch(world):
+    repo = repo_of(world)
+    assert (repo.root.resolve(), repo.slug, repo.default) == (world.tree.resolve(), SLUG, "main")
+
+
+def test_branch_name_is_a_slug_of_the_title_and_the_moment():
+    name = land.branch_name("Fix the Broker's  retry!", 0.0)
+    assert re.fullmatch(r"land/fix-the-broker-s-retry-\d{4}-\d{6}", name), name
+    assert land.branch_name("!!!", 0.0).startswith("land/change-")
+
+
+def test_commit_stays_on_a_session_branch_and_leaves_the_default_one(world):
+    (world.tree / "x.txt").write_text("x\n", encoding="utf-8")
+    assert land.commit(repo_of(world), "Add x", "", subprocess.run, 0.0) == "worktree-s1"
+    (world.checkout / "y.txt").write_text("y\n", encoding="utf-8")
+    on_main = land.read_repo(world.checkout, subprocess.run)
+    assert land.commit(on_main, "Add y", "", subprocess.run, 0.0).startswith("land/")
+
+
+def test_changed_files_lists_what_differs_from_origin(world):
+    (world.tree / "z.txt").write_text("z\n", encoding="utf-8")
+    repo = repo_of(world)
+    land.commit(repo, "Add z", "", subprocess.run, 0.0)
+    assert land.changed_files(repo, subprocess.run) == ["z.txt"]
+
+
+def test_open_pr_creates_once_then_reuses(world):
+    github, repo = FakeGitHub(world), repo_of(world)
+    first = land.open_pr(repo, "worktree-s1", "T", "B", merger, github)
+    assert land.open_pr(repo, "worktree-s1", "T", "B", merger, github) == first == 100
+    assert list(github.prs) == [100]
+
+
+def test_label_applies_one_label(world):
+    github = FakeGitHub(world)
+    land.label(repo_of(world), 5, "merge-now", merger, github)
+    assert github.labels == {5: ["merge-now"]}
+
+
+@pytest.mark.parametrize(
+    ("queue", "outcome"),
+    [("merges", land.LANDED), ("never", land.LANDED), ("conflict", land.CONFLICT)],
+)
+def test_merge_it_lands_or_leaves_a_conflict(world, queue, outcome):
+    (world.tree / "m.txt").write_text("m\n", encoding="utf-8")
+    github, repo = FakeGitHub(world, queue=queue), repo_of(world)
+    land.commit(repo, "Add m", "", github, 0.0)
+    number = land.open_pr(repo, "worktree-s1", "Add m", "", merger, github)
+    land.label(repo, number, "merge-now", merger, github)
+    assert land.merge_it(repo, number, merger, github, lambda _s: None, ticking()) == outcome
+
+
+def test_main_checkout_is_the_one_the_worktrees_hang_off(world):
+    assert land.main_checkout(repo_of(world), subprocess.run).resolve() == world.checkout.resolve()
+
+
+def test_sync_checkout_fast_forwards_and_says_so(world):
+    (world.tree / "s.txt").write_text("s\n", encoding="utf-8")
+    sh(["git", "add", "-A"], world.tree)
+    sh(["git", "commit", "--quiet", "-m", "s"], world.tree)
+    sh(["git", "push", "--quiet", "origin", "HEAD:main"], world.tree)
+    said = land.sync_checkout(repo_of(world), subprocess.run)
+    assert said.endswith("is at origin/main") and (world.checkout / "s.txt").exists()
+
+
+def test_sync_checkout_leaves_a_checkout_on_another_branch(world):
+    sh(["git", "switch", "--quiet", "-c", "mine"], world.checkout)
+    assert "left as it is" in land.sync_checkout(repo_of(world), subprocess.run)
+
+
+def test_settings_at_reads_a_ref_and_tolerates_none(world):
+    repo = repo_of(world)
+    assert land.settings_at(repo, "origin/main", merger, subprocess.run)["delivery"]["guarded"]
+    assert land.settings_at(repo, "origin/no-such", merger, subprocess.run) == {}
+
+
+def test_needs_gate_names_the_money_or_says_nothing(world):
+    repo = repo_of(world)
+    assert land.needs_gate(repo, ["src/execution/a.py"], merger, subprocess.run) == (
+        "touches src/execution/a.py"
+    )
+    assert land.needs_gate(repo, ["README.md"], merger, subprocess.run) == ""
+
+
+def test_load_merger_shares_the_queues_reading_of_guarded():
+    loaded = land.load_merger()
+    assert loaded.guarded_paths(["a/b.py"], ("a/",)) == ["a/b.py"]
+
+
+def test_guarded_paths_matches_globs_and_directories():
+    globs = ("src/execution/", "ext/*.js")
+    paths = ["src/execution/x/y.py", "src/execution.py", "ext/a/b.js", "ext/a.css"]
+    assert merger.guarded_paths(paths, globs) == ["ext/a/b.js", "src/execution/x/y.py"]
+    assert merger.guarded_paths(paths, ()) == []
+
+
+def test_parse_args_reads_the_body_from_a_file(tmp_path):
+    body = tmp_path / "body.md"
+    body.write_text("Why.\n", encoding="utf-8")
+    args = land.parse_args(["--title", "T", "--body-file", str(body)])
+    assert (args.title, args.body, args.cwd) == ("T", "Why.\n", ".")
+    with pytest.raises(SystemExit):
+        land.parse_args(["--body", "x"])
+
+
+def test_main_reports_a_failure_and_exits_one(tmp_path, capsys):
+    assert land.main(["--title", "T", "--cwd", str(tmp_path)]) == 1
+    assert capsys.readouterr().err.startswith("land: ")
+
+
+@pytest.mark.parametrize("name", ["broker.py", "caf\N{LATIN SMALL LETTER E WITH ACUTE}.py"])
+def test_a_rename_out_of_the_money_hides_nothing(world, name):
+    """Rename detection lists only the new path, and git quotes a non-ASCII one: either
+    would let guarded code merge with no gate."""
+    old = world.tree / "src" / "execution" / name
+    old.parent.mkdir(parents=True)
+    old.write_text("x = 1\n" * 30, encoding="utf-8")
+    sh(["git", "add", "-A"], world.tree)
+    sh(["git", "commit", "--quiet", "-m", "seed"], world.tree)
+    sh(["git", "push", "--quiet", "origin", "HEAD:main"], world.tree)
+    old.rename(world.tree / "moved.py")
+    repo = repo_of(world)
+    land.commit(repo, "Move it", "", land.utf8_run, 0.0)
+    assert f"src/execution/{name}" in land.changed_files(repo, land.utf8_run)
+
+
+def test_utf8_run_decodes_what_the_console_code_page_cannot():
+    script = r"import sys; sys.stdout.buffer.write(b'\xe2\x80\x9d')"
+    done = land.utf8_run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert done.stdout == "\N{RIGHT DOUBLE QUOTATION MARK}"
+
+
+@pytest.mark.parametrize(
+    "hold", [{"labels": [{"name": "hold"}]}, {"body": "Why.\n\nHold: yes"}, {"draft": True}]
+)
+def test_a_reused_pr_that_was_held_stays_held(world, hold):
+    (world.tree / "r.txt").write_text("r\n", encoding="utf-8")
+    github = FakeGitHub(world, existing=7)
+    github.prs[7].update(hold)
+    assert run_land(world, github) == land.HELD
+    assert github.labels == {} and not github.merged_by_put()

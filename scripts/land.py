@@ -79,6 +79,13 @@ class Repo:
     default: str
 
 
+def utf8_run(argv, **kwargs):
+    """`subprocess.run` decoding UTF-8: on Windows `text=True` means cp1252, and a PR body
+    it cannot decode comes back as no output at all."""
+    kwargs = {key: value for key, value in kwargs.items() if key not in ("text", "check")}
+    return subprocess.run(argv, encoding="utf-8", errors="replace", check=False, **kwargs)
+
+
 def git(args: list[str], run, cwd: Path, check: bool = True) -> str:
     result = run(
         ["git", *args],
@@ -129,8 +136,11 @@ def commit(repo: Repo, title: str, body: str, run, now: float) -> str:
 
 def changed_files(repo: Repo, run) -> list[str]:
     git(["fetch", "--quiet", "origin", repo.default], run, repo.root)
-    listed = git(["diff", "--name-only", f"origin/{repo.default}...HEAD"], run, repo.root)
-    return [line for line in listed.splitlines() if line.strip()]
+    # No rename detection, which lists only the new path; `-z`, or git quotes non-ASCII.
+    # Either would hide a guarded path from `needs_gate`.
+    span = f"origin/{repo.default}...HEAD"
+    listed = git(["diff", "--name-only", "--no-renames", "-z", span], run, repo.root)
+    return [path for path in listed.split("\0") if path]
 
 
 def open_pr(repo: Repo, branch: str, title: str, body: str, merger, run) -> int:
@@ -241,7 +251,7 @@ def needs_gate(repo: Repo, files: list[str], merger, run) -> str:
     return f"touches {', '.join(money)}" if money else ""
 
 
-def land(args, run=subprocess.run, sleep=time.sleep, clock=time.monotonic, merger=None) -> str:
+def land(args, run=utf8_run, sleep=time.sleep, clock=time.monotonic, merger=None) -> str:
     """Every step; the outcome: `LANDED`, `GATED`, `CONFLICT`, `QUEUED` or `HELD`."""
     merger = merger or load_merger()
     repo = read_repo(Path(args.cwd), run)
@@ -251,8 +261,10 @@ def land(args, run=subprocess.run, sleep=time.sleep, clock=time.monotonic, merge
         raise LandError(f"nothing differs from origin/{repo.default}: there is nothing to land")
     git(["push", "--quiet", "-u", "origin", f"HEAD:refs/heads/{branch}"], run, repo.root)
     number = open_pr(repo, branch, args.title, args.body, merger, run)
-    if merger.held({"body": args.body, "labels": []}):
-        print(f"#{number} is held: it waits for the person, as `Hold: yes` asked.")
+    # A reused PR may already be held, whatever this run was told.
+    pr = merger.gh_json(f"repos/{repo.slug}/pulls/{number}", run) or {}
+    if merger.held({"body": args.body, "labels": []}) or merger.held(pr) or pr.get("draft"):
+        print(f"#{number} is held or a draft: it waits for the person.")
         return HELD
     gate_for = needs_gate(repo, files, merger, run)
     if gate_for:
