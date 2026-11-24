@@ -209,6 +209,125 @@ def test_settled_conflicts_and_drafts_need_no_refresh(monkeypatch, tmp_path):
     assert menu.broken_prs(tmp_path) == entries[:1]
 
 
+# --- a gate the rollup cannot show ---------------------------------------------------
+
+
+def unstable(**fields) -> dict:
+    """carameli #527's shape: UNSTABLE, an empty rollup, a head a lock repair pushed."""
+    shape = {
+        "mergeStateStatus": "UNSTABLE",
+        "statusCheckRollup": [],
+        "headRefName": "dependabot/pip/x",
+        "headRefOid": "9f379b2",
+    }
+    return pr(**{**shape, **fields})
+
+
+class RunsGh:
+    """A `gh` answering every call with `runs`, recording each argv in `calls`."""
+
+    def __init__(self, runs: object, code: int = 0):
+        self.runs, self.code = runs, code
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str) -> subprocess.CompletedProcess[str]:
+        self.calls.append(args)
+        return subprocess.CompletedProcess([], self.code, json.dumps(self.runs), "")
+
+
+def runs_gh(runs: object, code: int = 0) -> RunsGh:
+    return RunsGh(runs, code)
+
+
+URL = "https://github.com/x/y/actions/runs/44749839977"
+
+
+def test_a_failed_dispatched_gate_at_the_head_is_a_failing_check():
+    gh = runs_gh(
+        [
+            {"headSha": "9f379b2", "conclusion": "failure", "url": URL},
+            {"headSha": "4ebfa09", "conclusion": "success", "url": "u"},
+        ]
+    )
+    node = menu.dispatched_gate(gh, unstable())
+    assert node == {"name": "pr-gate.yml (dispatched)", "conclusion": "FAILURE", "detailsUrl": URL}
+    asked = gh.calls[0]
+    assert asked[:4] == ("run", "list", "--branch", "dependabot/pip/x")
+    assert ("--event", "workflow_dispatch") == asked[6:8]
+    assert ("--workflow", menu.GATE_WORKFLOW) == asked[4:6]
+
+
+@pytest.mark.parametrize(
+    "runs",
+    [
+        [{"headSha": "9f379b2", "conclusion": "success", "url": URL}],
+        [{"headSha": "9f379b2", "conclusion": "", "url": URL}],  # still running
+        [{"headSha": "older", "conclusion": "failure", "url": URL}],  # a superseded push
+        [],
+        "not a list",
+    ],
+)
+def test_a_dispatched_gate_that_did_not_fail_at_the_head_adds_nothing(runs):
+    assert menu.dispatched_gate(runs_gh(runs), unstable()) == {}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pr(mergeStateStatus="CLEAN", statusCheckRollup=[], headRefOid="9f379b2"),
+        unstable(isDraft=True),
+        unstable(headRefOid=""),
+        pr(
+            mergeStateStatus="UNSTABLE",
+            headRefOid="9f379b2",
+            statusCheckRollup=[{"conclusion": "FAILURE"}],
+        ),
+    ],
+)
+def test_only_an_unstable_pr_the_rollup_calls_clean_costs_a_call(entry):
+    """A green PR, a draft, and one already red in its rollup need no second look."""
+    assert menu.dispatched_gate(lambda *_a: pytest.fail("unnecessary call"), entry) == {}
+
+
+def test_a_gh_that_cannot_list_runs_adds_nothing():
+    assert menu.dispatched_gate(runs_gh([], code=1), unstable()) == {}
+
+    def raising(*_args):
+        raise OSError("no gh")
+
+    assert menu.dispatched_gate(raising, unstable()) == {}
+
+
+def test_the_scan_lists_a_pr_whose_only_red_is_a_dispatched_gate(monkeypatch, tmp_path):
+    """The regression: carameli #527 was UNSTABLE with an empty rollup, so it was never
+    broken here and the fix pass never sent anyone at it."""
+    entry = unstable(mergeable="MERGEABLE")
+    runs = [{"headSha": "9f379b2", "conclusion": "failure", "url": URL}]
+
+    def gh(*args):
+        payload = [entry] if args[:2] == ("pr", "list") else runs
+        return subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+
+    monkeypatch.setattr(menu.sweep, "gh_for", lambda _path: gh)
+    found = menu.broken_prs(tmp_path)
+    assert [menu.broken_reason(row) for row in found] == ["1 check failing"]
+    assert found[0]["statusCheckRollup"][-1]["detailsUrl"] == URL
+
+
+def test_add_dispatched_gates_appends_to_the_rollup_it_finds(monkeypatch, tmp_path):
+    """Appended, not replaced: `run_ids_from_rollup` reads the run id off the new node, and
+    a rollup that was not a list is replaced by one holding just the node."""
+    runs = [{"headSha": "9f379b2", "conclusion": "timed_out", "url": URL}]
+    monkeypatch.setattr(menu.sweep, "gh_for", lambda _path: runs_gh(runs))
+    kept = unstable(statusCheckRollup=[{"conclusion": "SUCCESS"}])
+    odd = unstable(statusCheckRollup=None)
+    green = pr()
+    menu.add_dispatched_gates(tmp_path, [kept, odd, green])
+    assert [n.get("conclusion") for n in kept["statusCheckRollup"]] == ["SUCCESS", "TIMED_OUT"]
+    assert [n["detailsUrl"] for n in odd["statusCheckRollup"]] == [URL]
+    assert green["statusCheckRollup"] == pr()["statusCheckRollup"]
+
+
 @pytest.mark.parametrize("fields", [menu.PR_LIST_FIELDS, menu.PR_VIEW_FIELDS])
 def test_both_queries_request_both_conflict_signals(fields):
     assert {"mergeable", "mergeStateStatus"} <= set(fields.split(","))
