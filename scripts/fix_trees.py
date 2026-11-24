@@ -28,12 +28,18 @@ import stray_worktree as stray
 import sweep
 import tree_provision
 import worktree
+import worktree_env
 
 # `project_python.VENV_DIR`, spelled out rather than imported: the fix pass is a
 # scheduled job, and importing that module puts its spawns -- `re_exec` streams, so it
 # cannot take `NO_WINDOW` -- in the set `tests/test_scheduled_jobs.py` checks, for a
 # string. `worktree.plan_provision` writes the same literal.
 VENV_DIR = ".venv"
+
+# The files a project names its test runner in, and where an install puts the runner's
+# console script inside `.venv`: Windows, then POSIX.
+DEPENDENCY_FILES = ("pyproject.toml", "requirements-dev.txt")
+PYTEST_SCRIPTS = ("Scripts/pytest.exe", "bin/pytest")
 
 # A tool cache an elevated run leaves owner-only (`locked_caches`), and the environment
 # variable that sends that tool's next run somewhere else.
@@ -105,19 +111,45 @@ def provision_tree(
     anything. So every fixer opened in a checkout that could not run its own tests or
     linter, and spent its first turns on `uv sync` before it could verify the fix it
     was sent for. A tree that already has a `.venv` is left alone, since a reused one may
-    hold a session still working and a warm `uv sync` there buys nothing. The exception
-    is a frontend tier whose `node_modules` holds no finished install
-    (`tree_provision.frontend_missing`): installing into an empty directory takes nothing
-    away from anyone. A failed install is a note, not a refusal -- the fixer is told to
+    hold a session still working and a warm `uv sync` there buys nothing. The exceptions
+    are a `.venv` missing the pytest its project names (`venv_lacks_pytest`) and a
+    frontend tier whose `node_modules` holds no finished install
+    (`tree_provision.frontend_missing`): installing what is absent takes nothing away
+    from anyone. A failed install is a note, not a refusal -- the fixer is told to
     close that gap itself.
     """
-    if (tree / VENV_DIR).is_dir() and not tree_provision.frontend_missing(tree):
+    complete = (tree / VENV_DIR).is_dir() and not venv_lacks_pytest(tree)
+    if complete and not tree_provision.frontend_missing(tree):
         return []
     steps = plan(tree)
     if not steps:
         return []
     _, notes = run(tree, steps)
     return notes
+
+
+def venv_lacks_pytest(tree: Path) -> bool:
+    """Whether the tree's own `.venv` is missing the pytest its project depends on.
+
+    A bare `uv run pytest` in a `claude --worktree` tree builds a `.venv` without the dev
+    extra (2ca551a4), and `provision_tree` used to trust any `.venv` it found, so the
+    fixer reusing that tree spent its first turns on `uv sync` anyway. The console script
+    is read off the disk rather than imported, so no interpreter is spawned per dispatch.
+    A borrowed `.venv` -- linked to the checkout's -- is the checkout's to sync, so it is
+    not judged, and neither is a project whose dependency files never name pytest.
+    """
+    venv = tree / VENV_DIR
+    if worktree_env.borrowed(venv) is not None:
+        return False
+    named = False
+    for name in DEPENDENCY_FILES:
+        try:
+            named = named or "pytest" in (tree / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    if not named:
+        return False
+    return not any((venv / script).is_file() for script in PYTEST_SCRIPTS)
 
 
 def locked_caches(tree: Path, opener=os.scandir) -> dict[str, str]:

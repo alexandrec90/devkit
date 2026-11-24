@@ -869,7 +869,11 @@ def test_the_rules_every_session_reads_answer_the_two_frictions_they_file():
     and the ban sat in a subordinate clause of the worktree-guard section, below
     bypass mode's own advice to use the shell for small edits. 2ca551a4's session ran
     `uv run pytest` in a fresh `claude --worktree` tree, which no git hook provisions,
-    and got a `.venv` with no pytest. Both answers lead their own sentence now."""
+    and got a `.venv` with no pytest. Both answers lead their own sentence now.
+
+    The second answer was once "run `run-tests.py` bare, it builds the `.venv`", and
+    sessions then spent their turns provisioning trees. A project session now runs no
+    tests and provisions nothing; that work, and the instructions for it, are a fixer's."""
     rules = Path(__file__).resolve().parents[1] / ".claude" / "rules"
     engineering = (rules / "engineering.md").read_text(encoding="utf-8")
     assert (
@@ -877,7 +881,12 @@ def test_the_rules_every_session_reads_answer_the_two_frictions_they_file():
     )
     assert "`python -` patch script" in engineering
     scope = " ".join((rules / "session-scope.md").read_text(encoding="utf-8").split())
-    assert "run it bare: it builds the `.venv` a `claude --worktree` tree arrives without" in scope
+    assert "run any tests at all, or the linter by hand" in scope
+    assert "A `claude --worktree` tree arrives bare and stays bare." in scope
+    for told_to_provision in ("run it bare", 'worktree.py" provision', "is part of the fix"):
+        assert told_to_provision not in scope, f"session-scope.md still says {told_to_provision!r}"
+    fixer = " ".join((rules.parent / "fixer.md").read_text(encoding="utf-8").split())
+    assert "## An environment that cannot run the checks is part of the fix" in fixer
 
 
 def test_the_scope_rule_names_the_whole_run_sessions_type():
