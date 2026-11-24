@@ -339,12 +339,23 @@ def waits_on(tree: Path) -> str:
     no more merge #66 than the fixer could -- and resolving it sent a fresh fixer at the
     same wall. A wait is not a defect: the pass holds the problem until that PR closes.
     """
+    return _waits_in(tree / BLOCKED_FILE)
+
+
+def _waits_in(report: Path) -> str:
+    """The last PR `report` says it waits on: a filed report is appended to."""
     try:
-        text = (tree / BLOCKED_FILE).read_text(encoding="utf-8", errors="replace")
+        text = report.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    found = WAITS_LINE.search(text)
-    return found.group(1) if found else ""
+    found = WAITS_LINE.findall(text)
+    return found[-1] if found else ""
+
+
+def waited_on(tree: Path) -> str:
+    """`waits_on`, whether or not the fix pass has filed the report away: what the
+    after-merge queue, which reads the tree on its own clock, asks of its session's."""
+    return waits_on(tree) or _waits_in(tree / filed(BLOCKED_FILE))
 
 
 def agent_trees(

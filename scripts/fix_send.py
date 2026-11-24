@@ -191,7 +191,7 @@ def update_branch(failure: fix_plan.Failure, root: Path) -> int:
         return push_clean_merge(failure, root)
     gh = sweep.gh_for(root / failure.project)
     done = gh("pr", "update-branch", str(failure.number))
-    if done.returncode != 0 and (state := _state(gh, failure.number)) not in ("", "OPEN"):
+    if done.returncode != 0 and (state := pr_state(gh, failure.number)) not in ("", "OPEN"):
         # Closed or merged since the pass read it: "update-failed #390" was filed 27s
         # after #390 closed, and a sweep spent two calls finding that out.
         print(f"  {failure.project} #{failure.number}: {state.lower()} meanwhile; nothing to do")
@@ -248,7 +248,7 @@ def push_clean_merge(failure: fix_plan.Failure, root: Path) -> int:
     return EXIT_OK
 
 
-def _state(gh, number: int | str) -> str:
+def pr_state(gh, number: int | str) -> str:
     """The PR's state (`OPEN`, `CLOSED`, `MERGED`), or "" when it cannot be read. A URL
     for `number` reads a PR in any repository, from wherever `gh` runs."""
     try:
@@ -269,7 +269,7 @@ def closed_since(failure: fix_plan.Failure, root: Path) -> str:
     """
     if failure.kind != fix_plan.PR or not failure.number:
         return ""
-    state = _state(sweep.gh_for(root / failure.project), failure.number)
+    state = pr_state(sweep.gh_for(root / failure.project), failure.number)
     if state in ("", "OPEN"):
         return ""
     return f"{state.lower()} since the plan read it; nothing to send"
@@ -330,7 +330,7 @@ def send_all(
         problem = fix_ledger.problem_key(decision)
         escalated = fix_loop.fix_findings.escalation(problem, items or [])
         verdict = fix_budget.budget(
-            decision, ledger, ctx.now, escalated, lambda url: _state(sweep.gh_for(ctx.root), url)
+            decision, ledger, ctx.now, escalated, lambda url: pr_state(sweep.gh_for(ctx.root), url)
         )
         if verdict.finding and journal is not None:
             since = fix_budget.since_for(decision, escalated)

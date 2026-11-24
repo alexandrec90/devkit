@@ -197,6 +197,19 @@ def test_waits_on_reads_the_pr_a_blocked_report_names_on_its_own_line(tmp_path):
     assert fix_reports.waits_on(tmp_path) == "", "a URL, so gh can read it from anywhere"
 
 
+def test_waited_on_reads_a_report_the_pass_has_filed_away_and_the_last_one_in_it(tmp_path):
+    (tmp_path / "logs").mkdir()
+    url = "https://github.com/alexandrec90/devkit/pull/"
+    report = tmp_path / fix_reports.BLOCKED_FILE
+    assert fix_reports.waited_on(tmp_path) == ""
+    for number in ("809", "813"):
+        report.write_text(f"Waits on: {url}{number}\n", encoding="utf-8")
+        assert fix_reports.waited_on(tmp_path) == url + number
+        fix_reports.file_away(tmp_path, fix_reports.BLOCKED_FILE)
+    assert fix_reports.waits_on(tmp_path) == ""
+    assert fix_reports.waited_on(tmp_path) == f"{url}813"
+
+
 def listing(*entries: tuple[Path, str]) -> str:
     return "".join(
         f"worktree {path.as_posix()}\nHEAD 1\nbranch refs/heads/{branch}\n\n"
