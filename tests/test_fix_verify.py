@@ -210,6 +210,32 @@ def test_a_finding_about_a_project_is_dated_by_the_checkout_that_filed_it(tmp_pa
     assert fix_verify.verify(lines, lambda *_: [elsewhere], tmp_path / "b", NOW).covered == []
 
 
+def test_a_row_stale_code_files_after_its_fix_settled_is_covered_too(tmp_path):
+    """42348504: #812's resolution was settled when the next pass, still running the release
+    before it, filed the group again, and it read as a fix that did not hold."""
+    first = finding(10)
+    head = triage.item_id(first)
+    fixed = resolution("agent/x", days_ago=8 / 24, ref=head)
+    merge = fix_verify.Pr(fix_verify.LANDED, at(3), "https://github.com/o/devkit/pull/812")
+    cache, asked = tmp_path / "v", []
+
+    def lookup(*named):
+        asked.append(named)
+        return [merge]
+
+    fix_verify.verify(items(first, fixed), lookup, cache, NOW)
+    asked.clear()
+    assert fix_verify.verify(items(first, fixed), lookup, cache, NOW).covered == []
+    assert asked == [], "settled, and nothing filed since: GitHub is not asked again"
+
+    again = resolution("812", days_ago=2.5 / 24, ref=triage.item_id(finding(9)))
+    stale = f"{finding(1)}\tfiler=devkit\thead_at={at(20)}"
+    current = f"{finding(1 / 2)}\tfiler=devkit\thead_at={at(3)}"
+    lines = items(first, finding(9), fixed, again, stale, current)
+    covered = fix_verify.verify(lines, lookup, cache, NOW).covered
+    assert [row for row, _, _ in covered] == [triage.item_id(stale)], "once, and not the new one"
+
+
 def test_an_unreadable_start_falls_back_to_when_the_row_was_filed(tmp_path):
     first = finding(10)
     garbled = f"{finding(1)}\tstarted=not a time"
