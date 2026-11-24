@@ -11,11 +11,13 @@ subject is launching sessions.
 
 from __future__ import annotations
 
+import datetime as _dt
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_worktrees as aw
+import fix_reports
 import sweep
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -23,18 +25,21 @@ import worktree_tiers as wt
 
 
 def release(project_dir: Path, held: Path, branch: str) -> bool:
-    """Remove a stray worktree that holds `branch` and nothing else. True once it is gone.
+    """Free `branch` from a tree that holds it and nothing else. True once it is free.
 
     A session that pushed a PR from a tree in its own scratchpad leaves the branch held
     there after it ends, and every later fixer for that PR was refused on the directory
     alone -- three at once on one pass. A tree that is clean and whose branch has no
     commit its upstream lacks holds no work, so it is released and the fixer cuts its own.
 
-    Never the checkout itself, never a box (its lease and reaper would leak), never a tree
-    whose upstream cannot be read, and never with `--force`: git's own refusal of a dirty
-    tree, or Windows' of a directory a live process sits in, stands as the refusal.
+    The checkout itself is parked on its default branch instead (aeee2754: tvshell #16's
+    conflict could get no resolver while the checkout sat on its branch). Never a box (its
+    lease and reaper would leak), never a tree whose upstream cannot be read, and never
+    with `--force`: git's own refusal of a dirty tree, or Windows' of a directory a live
+    process sits in, stands as the refusal.
     """
-    if wt.same_dir(held, project_dir) or held.parent.name == wt.BOXES_DIR_NAME:
+    checkout = wt.same_dir(held, project_dir)
+    if held.parent.name == wt.BOXES_DIR_NAME:
         return False
     inner = sweep.git_for(held)
     status = inner("status", "--porcelain")
@@ -43,10 +48,31 @@ def release(project_dir: Path, held: Path, branch: str) -> bool:
     ahead = inner("rev-list", "--count", f"{branch}@{{u}}..{branch}")
     if ahead.returncode != 0 or (ahead.stdout or "").strip() != "0":
         return False
+    if checkout:
+        return park(project_dir, branch)
     removed = sweep.git_for(project_dir)("worktree", "remove", str(held))
     if removed.returncode != 0:
         return False
     print(f"  released {held}: clean and pushed, so nothing held {branch} but the directory")
+    return True
+
+
+def park(project_dir: Path, branch: str) -> bool:
+    """Switch a clean, pushed checkout to its default branch, the one it belongs on.
+
+    Refused while a session is at work there: a branch switched under it is an edit it
+    did not make. `git switch` keeps the branch, so a person returns with one command.
+    """
+    if fix_reports.active_transcript(project_dir, _dt.datetime.now(_dt.UTC)) is not None:
+        return False
+    git = sweep.git_for(project_dir)
+    head = (git("symbolic-ref", "--short", "refs/remotes/origin/HEAD").stdout or "").strip()
+    home = head.removeprefix("origin/")
+    if not home or home == branch or git("switch", home).returncode != 0:
+        return False
+    # Best effort: a local default branch behind its remote is the sync's to move.
+    git("merge", "--ff-only", "--quiet", head)
+    print(f"  parked {project_dir} on {home}: clean and pushed, so nothing held {branch} but it")
     return True
 
 
