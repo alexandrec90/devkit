@@ -797,6 +797,21 @@ def test_an_agent_reports_person_step_is_read_off_its_message():
     assert triage.awaiting_person(items) == {items[0].signature: "upgrade Git for Windows"}
 
 
+def test_a_friction_report_quoting_the_marker_asks_for_no_step():
+    """d7296545: baca6a76 reported that nothing names the convention's writer, and read as
+    awaiting a person for quoting it."""
+    step = triage.PERSON_STEP
+    quoted = f'reported: an agent files it as `report.py --message "... {step} <command>"` (docs)'
+    row = triage.read_items(_line("session-friction", detail=quoted))[0]
+    assert triage.person_step(row) == "" and triage.awaiting_person([row]) == {}
+    asked = f'reported: "Access is denied." from `x` -- {step} run it elevated'
+    row = triage.read_items(_line("session-friction", detail=asked))[0]
+    assert triage.person_step(row) == "run it elevated"
+    cut = f"fixer-blocked: the call `schtasks /cha {step} run it elevated"
+    row = triage.read_items(_line("fix-pass-finding", detail=cut))[0]
+    assert triage.person_step(row) == "run it elevated", "a finding's head may be cut mid-quote"
+
+
 def test_a_group_reports_its_count_and_every_id(tmp_path):
     a = _line("agent-report", stamp=_STAMPS[0], message="same")
     b = _line("agent-report", stamp=_STAMPS[1], message="same")
@@ -928,6 +943,18 @@ def test_main_resolves_a_whole_group(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(triage, "REPO_ROOT", tmp_path)
     assert triage.main(["--resolve-like", triage.item_id(a), "--note", "fixed"]) == 0
     assert "0 open" in capsys.readouterr().out
+
+
+def test_a_resolution_prints_its_lines_and_not_the_backlog(tmp_path, monkeypatch, capsys):
+    """4f483cb6: twelve resolutions in one call printed the whole backlog twelve times."""
+    a = _line("agent-report", message="fixed one")
+    other = _line("agent-report", message="still here")
+    monkeypatch.setenv("DEVKIT_DIR", str(_ledger(tmp_path, a, other)))
+    monkeypatch.setattr(triage, "REPO_ROOT", tmp_path)
+    assert triage.main(["--resolve-like", triage.item_id(a), "--note", "fixed"]) == 0
+    out = capsys.readouterr().out
+    assert "resolved 1 item(s)" in out and "1 open" in out and "still here" not in out
+    assert "still here" in (tmp_path / triage.ARTIFACT).read_text(encoding="utf-8")
 
 
 def test_main_with_no_ledger_anywhere_still_exits_zero(tmp_path, monkeypatch, capsys):
