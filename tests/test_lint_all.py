@@ -270,11 +270,16 @@ def test_a_fix_that_rewrote_a_file_is_said_not_passed_over_as_ok(tmp_path, colou
     env = {k: v for k, v in os.environ.items() if k not in {"FORCE_COLOR", "NO_COLOR"}}
     if colour is not None:
         env["FORCE_COLOR"] = colour
+    # Both ends pinned to UTF-8: the line carries a multiplication sign, and on Windows
+    # the child's stdout and this side's decoding otherwise follow whatever the caller's
+    # environment says -- under the pre-push hook they disagreed and it read as mojibake.
+    env["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
         [sys.executable, "scripts/lint-all.py", "--changed", "--no-secrets"],
         cwd=root,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=env,
     )
     said = f"ruff --fix changed mid_edit.py -- 1 {TIMES} F841 (unused-variable)"
