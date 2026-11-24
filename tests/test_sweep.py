@@ -2603,6 +2603,30 @@ def test_until_bounds_a_worker_thread_started_inside_it():
         assert pool.submit(lambda: sweep._until).result() == 100.0
 
 
+@pytest.mark.parametrize("timeout", [None, 30])
+def test_a_program_not_on_path_raises_program_missing_naming_it(timeout):
+    """`[WinError 2]` named no file, so three fix-pass steps crashed by `git` off PATH
+    read as three defects (8fec5e52, 2522950b, b48af335)."""
+    with pytest.raises(sweep.ProgramMissing) as raised:
+        sweep.run_bounded(["no-such-program-devkit"], timeout)
+    assert raised.value.program == "no-such-program-devkit"
+    assert isinstance(raised.value, FileNotFoundError), "every older handler still catches it"
+    assert "'no-such-program-devkit' could not be started" in str(raised.value)
+
+
+def test_a_missing_cwd_keeps_its_own_error_not_program_missing(tmp_path):
+    """The program resolves, so the file not found is something else."""
+    with pytest.raises(OSError) as raised:
+        sweep.run_bounded([sys.executable, "-c", "pass"], 30, cwd=tmp_path / "gone")
+    assert not isinstance(raised.value, sweep.ProgramMissing)
+
+
+def test_program_missing_reads_the_path_the_command_ran_with():
+    assert sweep.program_missing([sys.executable]) is None
+    assert sweep.program_missing(["python-devkit-x"], {"Path": ""}) is not None
+    assert sweep.program_missing([]) is None
+
+
 def test_a_bounded_run_returns_what_a_finished_command_said():
     done = sweep.run_bounded([sys.executable, "-c", "print('hi')"], 30)
     assert (done.returncode, done.stdout.strip()) == (0, "hi")

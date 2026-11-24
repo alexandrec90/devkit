@@ -148,6 +148,30 @@ def test_a_step_that_raises_is_a_finding_with_its_traceback_kept(tmp_path):
     assert journal.step("fine", lambda a, b=0: a + b, 1, b=2) == 3
 
 
+def test_steps_a_missing_program_took_down_are_one_finding_naming_it(tmp_path):
+    """8fec5e52, 2522950b, b48af335: `git` off PATH mid-reinstall crashed three steps,
+    filed as three groups saying only `[WinError 2]`. One program is one finding."""
+    journal = fix_findings.Journal(tmp_path)
+
+    def needs_git():
+        raise sweep.ProgramMissing("git")
+
+    for name in ("drift", "migrate", "send"):
+        journal.step(name, needs_git)
+    assert journal.crashed == ["drift", "migrate", "send"], "still crashed: the pass exits red"
+    assert {f.kind for f in journal.findings} == {fix_findings.PROGRAM_MISSING}
+    assert len({fix_findings.signature(f) for f in journal.findings}) == 1
+    assert "'git' is not on PATH" in journal.findings[0].detail
+    assert journal.findings[0].command == "git"
+
+
+def test_a_missing_program_back_on_path_by_filing_time_is_not_filed(tmp_path):
+    gone = fix_findings.crash_finding("drift", sweep.ProgramMissing("git"), "")
+    other = finding()
+    assert fix_findings.present([gone, other], which=lambda _: "C:/Git/cmd/git.exe") == [other]
+    assert fix_findings.present([gone, other], which=lambda _: None) == [gone, other]
+
+
 def test_an_interrupt_is_not_swallowed_as_a_finding(tmp_path):
     """Named families, not `Exception`: stopping the pass must still stop it."""
     journal = fix_findings.Journal(tmp_path)

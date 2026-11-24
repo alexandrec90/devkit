@@ -4890,6 +4890,19 @@ def test_sync_in_time_runs_the_sync_only_when_asked_and_in_time(workspace, monke
     assert calls == [True] and deferred == ["the checkout sync"]
 
 
+def test_a_sync_the_deadline_overtook_is_deferred_not_failed(workspace, monkeypatch):
+    """f7c3da3f: the 720 s budget ran out mid-sync, so nine checkouts read `cannot
+    resolve origin/HEAD` and three fetches were `not started: past the caller's
+    deadline` -- reported as "git refused, which means the state needs a human", exit 1.
+    A sync the clock cut short is the next pass's, like a box it never reached."""
+    monkeypatch.setattr(worktree, "sync_checkouts", lambda ws, apply, fetch: (1, {"failed": True}))
+    passed = iter([False, True])
+    monkeypatch.setattr(worktree.sweep, "past_until", lambda: next(passed))
+    deferred: list[str] = []
+    assert worktree.sync_in_time(workspace, True, True, False, deferred) == (0, {})
+    assert deferred == ["the checkout sync"]
+
+
 def test_render_deferred_and_render_empty_name_what_was_left():
     left = {"deferred": ["demo--a-0806", "the checkout sync"]}
     line = "left to the next pass, this one's time having run out: demo--a-0806, the checkout sync"

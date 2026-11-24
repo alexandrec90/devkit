@@ -794,6 +794,24 @@ def test_command_position_keeps_the_length_and_the_quoted_text():
     assert blanked == "grep -n 'a b' x.py; git log --grep \"c d\""
 
 
+def test_a_heredoc_commit_message_line_is_not_a_test_run():
+    """f2fccb72, filed as a recurrence three times: a commit message in a heredoc had a
+    line opening "pytest its project names.", read as a bare whole-suite pytest."""
+    command = (
+        'cd "C:/x/.claude/worktrees/tab-1" && git add tests/test_a.py && git commit -q -F - '
+        "<<'EOF'\nKeep project sessions out of tests\n\nA session that runs\n"
+        "pytest its project names.\nEOF"
+    )
+    assert not sf.runs_tests(command)
+    assert sf.whole_runs(command) == []
+    assert len(sf.command_position(command)) == len(command)
+
+
+def test_a_heredoc_a_shell_reads_is_still_commands():
+    assert sf.whole_runs("bash <<'EOF'\npytest\nEOF") == [""]
+    assert sf.whole_runs("cat <<'EOF' > x.txt\npytest\nEOF\npytest") == [""], "after EOF it runs"
+
+
 def test_an_error_quoted_inside_a_string_on_its_line_is_not_friction():
     """The first supervised rehearsal would have filed seven groups from text that quoted
     an error: a `git diff` of the rule's prose, pytest echoing an assertion's operands,
