@@ -63,6 +63,16 @@ FAILED_CONCLUSIONS = frozenset(
 # The same, for the legacy status-context shape `statusCheckRollup` still mixes in.
 FAILED_STATES = frozenset({"FAILURE", "ERROR"})
 
+# The workflow file every consumer's gate lives at, as `gh run list --workflow` takes it.
+# Owned here because the scan needs it; `gate_evidence.GATE_WORKFLOW` rebinds this one.
+GATE_WORKFLOW = "pr-gate.yml"
+
+# What GitHub says of a PR whose rollup is clean but whose head commit carries a red
+# check the rollup does not show: a gate run dispatched at the head (`dispatched_gate`).
+UNSTABLE = "UNSTABLE"
+DISPATCHED_FIELDS = "databaseId,headSha,conclusion,url"
+DISPATCHED_LIMIT = 10
+
 # The same question asked of one PR at launch time, plus the base branch, which is what
 # the agent has to merge in when the answer is a conflict, and `state`/`isDraft`, which
 # the scan gets free from `--state open` and this half has to ask for: a closed PR keeps
@@ -145,6 +155,84 @@ def settle_mergeability(project_dir: Path, entries: list[dict]) -> None:
     mergeability.settle(lambda number: pr_view(project_dir, number), entries)
 
 
+def dispatched_gate(gh, pr: dict) -> dict:
+    """A rollup node for a failed gate run dispatched at the PR's head, or {}.
+
+    A workflow that pushes to a PR branch with `GITHUB_TOKEN` -- a Dependabot lock
+    repair -- raises no `pull_request` event, so it dispatches the gate itself, and a
+    `workflow_dispatch` run is not in the PR's rollup. The PR then reads `UNSTABLE` with
+    nothing failing, and carameli #527 sat red that way with nothing sent at it: the
+    drain would not merge it and this scan did not call it broken. Asked only of that
+    shape, so a scan of green PRs costs no extra call.
+    """
+    if not _clean_but_unstable(pr):
+        return {}
+    head, sha = str(pr.get("headRefName") or ""), str(pr.get("headRefOid") or "")
+    if not head or not sha:
+        return {}
+    for run in _dispatched_runs(gh, head):
+        if str(run.get("headSha") or "") != sha:
+            continue
+        conclusion = str(run.get("conclusion") or "").upper()
+        if conclusion not in FAILED_CONCLUSIONS:
+            return {}
+        return {
+            "name": f"{GATE_WORKFLOW} (dispatched)",
+            "conclusion": conclusion,
+            "detailsUrl": str(run.get("url") or ""),
+        }
+    return {}
+
+
+def _clean_but_unstable(pr: object) -> bool:
+    """A non-draft PR GitHub calls UNSTABLE while its rollup holds nothing failing."""
+    if not isinstance(pr, dict) or pr.get("isDraft"):
+        return False
+    if str(pr.get("mergeStateStatus") or "").upper() != UNSTABLE:
+        return False
+    return not failing_checks(pr.get("statusCheckRollup"))
+
+
+def _dispatched_runs(gh, head: str) -> list[dict]:
+    """The gate's recent `workflow_dispatch` runs on `head`, newest first; [] when `gh`
+    cannot say."""
+    try:
+        result = gh(
+            "run",
+            "list",
+            "--branch",
+            head,
+            "--workflow",
+            GATE_WORKFLOW,
+            "--event",
+            "workflow_dispatch",
+            "--limit",
+            str(DISPATCHED_LIMIT),
+            "--json",
+            DISPATCHED_FIELDS,
+        )
+    except OSError:
+        return []
+    if getattr(result, "returncode", 1) != 0:
+        return []
+    try:
+        runs = json.loads(getattr(result, "stdout", "") or "[]")
+    except json.JSONDecodeError:
+        return []
+    return [run for run in runs if isinstance(run, dict)] if isinstance(runs, list) else []
+
+
+def add_dispatched_gates(project_dir: Path, entries: list[dict]) -> None:
+    """Append each PR's `dispatched_gate` to its rollup, so every reader of the rollup --
+    `broken_reason`, `gate_evidence.run_ids_from_rollup` -- sees the red run."""
+    gh = sweep.gh_for(project_dir)
+    for entry in entries:
+        node = dispatched_gate(gh, entry)
+        if node:
+            rollup = entry.get("statusCheckRollup")
+            entry["statusCheckRollup"] = [*(rollup if isinstance(rollup, list) else []), node]
+
+
 def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
     """The open PRs of one checkout that are broken, newest first. Empty on any failure.
 
@@ -169,6 +257,7 @@ def broken_prs(project_dir: Path, limit: int = PR_LIMIT) -> list[dict]:
         return []
     entries = [entry for entry in entries if isinstance(entry, dict)]
     settle_mergeability(project_dir, entries)
+    add_dispatched_gates(project_dir, entries)
     return [entry for entry in entries if entry.get("state", OPEN) == OPEN and broken_reason(entry)]
 
 
