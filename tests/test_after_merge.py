@@ -63,6 +63,7 @@ def test_its_id_hashes_its_path_and_the_commit_that_added_it():
         "pr:alexandrec90/carameli#12",
         "task:rebuild-db",
         "task:carameli/rebuild-db",
+        "adopted:1a95849",
         "outside:09:30-16:00 UTC-05:00 mon-fri",
         "inside:00:00-24:00 UTC",
     ],
@@ -97,6 +98,8 @@ def test_each_action_is_its_own_kind(body, kind):
         ("run = 3", "non-empty"),
         ('run = "x"\nretries = "2"', "unknown keys"),
         ('run = "x"\nwhen = "soon"', "soon"),
+        ('run = "x"\nwhen = "adopted:v0.11.97"', "adopted:v0.11.97"),
+        ('run = "x"\nwhen = "adopted:"', "adopted:"),
         ('run = "x"\nwhen = "pr:carameli"', "pr:carameli"),
         ('run = "x"\nwhen = "pr:carameli#0"', "pr:carameli#0"),
         ('run = "x"\non = "two words"', "two words"),
@@ -165,6 +168,14 @@ def test_green_and_released_ask_about_the_tasks_own_commit():
     assert am.met(task(when=am.GREEN, commit="c1"), found, NOW)
     assert am.met(task(when=am.RELEASED, commit="c2"), found, NOW)
     assert asked == ["c1", "c2"]
+
+
+def test_an_adopted_condition_asks_about_that_devkit_commit():
+    asked = []
+    found = facts(adopted=lambda commit: asked.append(commit) or True)
+    assert am.met(task(when="adopted:1a95849", commit="c1"), found, NOW)
+    assert asked == ["1a95849"], "devkit's commit, not the task's own"
+    assert not am.met(task(when="adopted:1a95849"), facts(), NOW)
 
 
 def test_a_pr_condition_asks_about_that_pr():
