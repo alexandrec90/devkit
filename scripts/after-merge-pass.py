@@ -57,7 +57,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -686,7 +686,12 @@ def _note(task: Task, board: Board, why: str, cycle: Cycle) -> str:
 
 def _facts(board: Board, boards: dict[str, Board], docker: bool, seams: Seams) -> after_merge.Facts:
     git, gh = seams.git_for(board.path), seams.gh_for(board.path)
-    return after_merge_board.facts_for(board, boards, seams.host, docker, git, gh)
+    facts = after_merge_board.facts_for(board, boards, seams.host, docker, git, gh)
+    home = boards.get(DEVKIT)
+    if home is None:
+        return facts
+    adopted = after_merge_board.adopted_fact(board, git, seams.git_for(home.path))
+    return replace(facts, adopted=adopted)
 
 
 def _act(task: Task, verdict: after_merge.Verdict, board: Board, cycle: Cycle) -> str | None:

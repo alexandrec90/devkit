@@ -16,6 +16,7 @@ Tested in `tests/test_after_merge_board.py`.
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
@@ -176,7 +177,8 @@ def read_board(project: str, path: Path, git: sweep.Git) -> Board:
 def facts_for(
     board: Board, boards: dict[str, Board], host: str, docker: bool, git: sweep.Git, gh: sweep.Git
 ) -> after_merge.Facts:
-    """`Facts` answering from `board`'s checkout, and from `boards` for any project's task."""
+    """`Facts` answering from `board`'s checkout, and from `boards` for any project's task;
+    `adopted` is `adopted_fact`'s, which needs devkit's checkout too."""
 
     def green(commit: str) -> bool:
         # See `after_merge`'s docstring: no branch yet is merged in a gated project, not yet
@@ -203,3 +205,17 @@ def facts_for(
         return after_merge.named_done(name, other.tasks, other.successes, other.done_names, host)
 
     return after_merge.Facts(host, docker, green, released, merged, done)
+
+
+def adopted_fact(board: Board, git: sweep.Git, devkit_git: sweep.Git) -> Callable[[str], bool]:
+    """Whether `board`'s vendored copy holds a devkit commit: its stamp on origin, ordered
+    by `devkit_git`, since only devkit's own checkout has those commits."""
+
+    def adopted(commit: str) -> bool:
+        shown = git("show", f"origin/{board.base}:DEVKIT_VERSION")
+        stamp = (shown.stdout or "").strip()
+        if shown.returncode != 0 or not stamp:
+            return False
+        return devkit_git("merge-base", "--is-ancestor", commit, stamp).returncode == 0
+
+    return adopted

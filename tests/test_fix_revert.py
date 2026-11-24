@@ -206,6 +206,7 @@ def test_the_reland_task_is_toml_and_says_what_to_do():
     assert one.sha in prompt and one.subject in prompt and SIG[0] in prompt
     assert "land it again" in prompt and "PR Gate" in prompt
     assert f"Reland-of: {one.sha}" in prompt, "D4: what ends the cycle at one"
+    assert 'when = "adopted:' in prompt, "edbd9812: what a vendored fix waits on"
     assert one.task == Path(".devkit-queue") / "reland-abc1234.toml"
 
 

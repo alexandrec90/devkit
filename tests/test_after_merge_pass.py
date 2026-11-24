@@ -249,6 +249,23 @@ def test_released_waits_for_a_tag_containing_the_commit(world):
     assert world.done(task)
 
 
+def test_adopted_waits_for_a_stamp_that_holds_the_devkit_commit(world):
+    """edbd9812: a re-land whose fix was vendored had no condition to wait on."""
+    world.add_project("devkit")
+    before = git(world.remote("devkit"), "rev-parse", "main").stdout.strip()
+    world.write("devkit", "fix.py", "fixed\n")
+    fix = git(world.remote("devkit"), "rev-parse", "main").stdout.strip()
+    world.write("devkit", "release.py", "released\n")
+    release = git(world.remote("devkit"), "rev-parse", "--short", "main").stdout.strip()
+    world.write("carameli", "DEVKIT_VERSION", f"{before}\n")
+    task = world.queue(f'run = "echo x"\nwhen = "adopted:{fix[:7]}"\n')
+    world.run()
+    assert not world.done(task)
+    world.write("carameli", "DEVKIT_VERSION", f"{release}\n")
+    world.run()
+    assert world.done(task)
+
+
 def test_a_pr_condition_is_asked_of_rest_and_waits_for_merged(world):
     task = world.queue('run = "echo x"\nwhen = "pr:carameli#7"\n')
     world.run()
