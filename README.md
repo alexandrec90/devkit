@@ -570,12 +570,19 @@ list, whose rows carry what each worktree holds (`clean and pushed`, `2 uncommit
 path(s)`): read from a cache, that warning would be as old as the last scheduled pass, and
 it describes what the click is about to destroy.
 
-### Shipping: the built-in `/ship`, or an intent file
+### Shipping: `/land`, or an intent file
 
-A person ships by typing Claude Code's built-in `/ship`. devkit carries no skill of that
-name, and in the direct flow (every project, below) nothing stands in its way: no hook
-gates the commit or the push, and the merge queue lands the PR it opens, unlabelled, as
-soon as it arrives. `tests/test_builtin_ship.py` holds all of that in place.
+A person ships by typing `/land` (`.claude/skills/land/SKILL.md`, vendored). It runs
+`scripts/land.py`, which commits, pushes, opens the PR labelled `merge-now`, waits for the
+merge queue to land it (merging it itself if the queue has not within three minutes),
+and fast-forwards the checkout the worktrees hang off, when that is clean on the default
+branch. A PR touching a path `[delivery] guarded` names -- the code that transacts money
+-- is labelled `automerge` instead, and merges itself once its gate is green; the queue
+holds every such PR to that whatever its label (`merge-dependabot-prs.guarded_paths`). A
+conflict is left labelled for the fix pass's resolver. `/land hold` keeps the PR for a
+person. Claude Code's built-in `/ship` never merges, so devkit takes no skill of that
+name, and the queue merges the unlabelled PR it opens anyway. `tests/test_builtin_ship.py`
+and `scripts/hooks/tests/test_land.py` hold all of that in place.
 
 A session nobody can type `/ship` for -- a fixer, `/go-nuts` -- writes
 `logs/ship-intent.md` into its worktree instead, the commit subject on the first line
@@ -741,6 +748,8 @@ a direct project's PR as it opens: one labelled `merge-now`, and one with no lab
 all, which is what the built-in `/ship` opens (`merge-dependabot-prs.ships_unlabelled`).
 What stays open: a draft, a `hold` label, a `Hold: yes` line in the body, a bot's PR, a
 fork's, a `release/` branch, and anything labelled `automerge`, which asked for its gate.
+A PR touching a `[delivery] guarded` path waits for its gate whatever its label, and
+merges once that is green.
 The global git hook skips the pre-commit framework and the push gate on its own in such a
 repository (`git_policy.framework.flows_directly`), so `/ship`'s plain commit and push
 are not gated either.

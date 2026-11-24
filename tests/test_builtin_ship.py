@@ -81,6 +81,40 @@ def test_every_consumer_loses_its_copy_on_the_next_pull():
     assert OLD_SKILL.replace(".claude/", ".agents/", 1) in devkit_manifest.RETIRED_PATHS
 
 
+LAND = ROOT / ".claude" / "skills" / "land" / "SKILL.md"
+
+
+def test_the_persons_own_ship_skill_is_land_and_is_vendored():
+    """The owner's skill, renamed off `ship` (2026-11-24), with its script and test going
+    to every project together."""
+    head = LAND.read_text(encoding="utf-8").split("---", 2)[1]
+    assert re.search(r"^name:\s*land\s*$", head, re.M)
+    for path in (
+        ".claude/skills/land/SKILL.md",
+        "scripts/land.py",
+        "scripts/hooks/tests/test_land.py",
+    ):
+        assert path in devkit_manifest.MANIFEST, path
+
+
+def test_a_session_asked_to_ship_reaches_land_on_its_own():
+    """Sessions stalled at the end when `/ship` changed under them. The model may invoke
+    `/land`, its description names the words people use, and the always-loaded scope rule
+    sends them there."""
+    head = LAND.read_text(encoding="utf-8").split("---", 2)[1]
+    assert re.search(r"^disable-model-invocation:\s*false\s*$", head, re.M)
+    for words in ("ship it", "create a PR", "merge this"):
+        assert words in head, words
+    assert "`/land`" in _flat(SCOPE)
+
+
+def test_land_runs_the_script_and_never_tells_the_person_to_merge():
+    text = _flat(LAND)
+    assert "python scripts/land.py --title" in text
+    assert 'never end with "you need to merge"' in text
+    assert "[delivery] guarded" in text
+
+
 def test_no_prompt_or_instruction_sends_a_session_to_the_ship_skill():
     """A fixer told to "ship it with the ship skill" now meets the built-in, which only a
     person may start, and stalls on it."""
@@ -247,7 +281,11 @@ def _projects() -> list[tuple[str, Path]]:
 
 
 def _run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+    """UTF-8, never the console's code page: on Windows a PR body with a curly quote
+    failed to decode, `stdout` came back `None`, and the listing read as "no open PRs"."""
+    return subprocess.run(
+        argv, cwd=cwd, capture_output=True, encoding="utf-8", errors="strict", check=False
+    )
 
 
 @needs_live_workspace
@@ -262,6 +300,60 @@ def test_every_project_is_direct_on_its_default_branch():
         if flow.get("flow") != delivery.DIRECT:
             gated.append(name)
     assert gated == [], f"not in the direct flow on origin: {gated}"
+
+
+# The owner's one exception (2026-11-24): the projects whose code transacts money, and
+# so must declare which paths do. Collectors, models and dashboards there stay direct.
+MONEY_PROJECTS = ("ibkr_trader", "sports_betting")
+
+
+def _origin_manifest(root: Path) -> dict:
+    head = _run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], root)
+    shown = _run(["git", "show", f"{head.stdout.strip()}:.devkit.toml"], root)
+    return tomllib.loads(shown.stdout) if shown.returncode == 0 else {}
+
+
+@needs_live_workspace
+def test_every_money_project_guards_its_money_paths_on_origin():
+    """Without `[delivery] guarded`, an order-placing change would merge with no gate."""
+    projects = dict(_projects())
+    unguarded = []
+    for name in MONEY_PROJECTS:
+        if name not in projects:
+            pytest.fail(f"{name} is not registered in the workspace file")
+        delivery_table = _origin_manifest(projects[name]).get("delivery", {})
+        if not delivery_table.get("guarded"):
+            unguarded.append(name)
+    assert unguarded == [], f"no `[delivery] guarded` on origin: {unguarded}"
+
+
+# A PR that should have merged by now. Long enough for a gate and a resolver's turn.
+STUCK_AFTER_HOURS = 6
+
+
+@needs_live_workspace
+def test_no_pr_sits_open_waiting_for_a_person():
+    """**The outcome itself.** Every rule above can hold and PRs still pile up -- on
+    2026-11-24 there were 30 open across 8 repositories, none of them held. Anything
+    neither a draft nor held, open past `STUCK_AFTER_HOURS`, is a defect in the delivery
+    path, and this names each one."""
+    import datetime
+
+    cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=STUCK_AFTER_HOURS)
+    stuck = []
+    for name, root in _projects():
+        url = _run(["git", "remote", "get-url", "origin"], root).stdout.strip()
+        slug = re.sub(r"^.*github\.com[:/]|\.git$", "", url)
+        listed = _run(["gh", "api", f"repos/{slug}/pulls?state=open&per_page=100"], root)
+        assert listed.returncode == 0, f"{name}: {listed.stderr.strip()}"
+        for pr in json.loads(listed.stdout or "[]"):
+            labels = {label["name"] for label in pr.get("labels") or []}
+            body = pr.get("body") or ""
+            held = "hold" in labels or re.search(r"^\s*hold:\s*yes\s*$", body, re.I | re.M)
+            opened = datetime.datetime.fromisoformat(pr["created_at"].replace("Z", "+00:00"))
+            if not pr.get("draft") and not held and opened < cutoff:
+                stuck.append(f"{slug}#{pr['number']}")
+    assert stuck == [], f"open past {STUCK_AFTER_HOURS} h with nothing holding them: {stuck}"
 
 
 @needs_live_workspace

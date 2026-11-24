@@ -188,6 +188,13 @@ MANIFEST: tuple[str, ...] = (
     # Vendored rather than per-user because the operator works across machines, and a
     # skill under `~/.claude/` is one more copy per machine that nothing drift-checks.
     ".claude/skills/go-nuts/SKILL.md",
+    # How a person ships: `/land` commits, opens the PR and gets it merged and synced,
+    # money paths (`[delivery] guarded`) after their gate. Named so it never shadows the
+    # built-in `/ship`, which never merges. The script loads `merge-dependabot-prs.py`
+    # beside it, so the two read `guarded` alike.
+    ".claude/skills/land/SKILL.md",
+    "scripts/land.py",
+    "scripts/hooks/tests/test_land.py",
     # Codex reads CLAUDE.md through its project-document fallback. The remaining
     # compatibility layer mirrors repository skills and, when a project opts into
     # `.codex/`, translates Claude hook wiring.

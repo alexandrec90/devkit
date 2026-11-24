@@ -130,7 +130,7 @@ def test_the_generated_manifest_parses_and_declares_one_delivery_table(tmp_path)
     root = generate(tmp_path, {})
     text = (root / ".devkit.toml").read_text(encoding="utf-8")
     manifest = tomllib.loads(text)
-    assert manifest["delivery"] == {"flow": "direct"}
+    assert manifest["delivery"] == {"flow": "direct", "guarded": []}
     headers = [ln for ln in text.splitlines() if ln.lstrip("# ").startswith("[delivery]")]
     assert headers == ["[delivery]"]
     assert "medium_tier" in text

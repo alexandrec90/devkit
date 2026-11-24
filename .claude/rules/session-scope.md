@@ -7,8 +7,9 @@ description: What a coding session leaves to the fix pass — no full test suite
 Deliberately **unscoped**, and vendored from devkit like `engineering.md`: change it
 there.
 
-Shipping is Claude Code's own business: commit, push and open a PR however it does,
-`/ship` included. An unattended session, or a task for later, goes as
+Shipping is Claude Code's own business. Asked to ship, create a PR or merge, use the
+`/land` skill: it commits, opens the PR and gets it merged, with no person in the loop.
+An unattended session, or a task for later, goes as
 [`.claude/ship-intent.md`](../ship-intent.md) says.
 
 A session does **not** run the whole test suite — `pytest tests`, or any run naming no

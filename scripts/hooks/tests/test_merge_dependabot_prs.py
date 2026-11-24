@@ -401,6 +401,8 @@ ROUTE_SCOPES = {
     # Listing and reading open PRs.
     "pulls": {("pull-requests", "read")},
     "pulls/*": {("pull-requests", "read")},
+    # What a PR changes, read against `[delivery] guarded`.
+    "pulls/*/files": {("pull-requests", "read")},
     # Merging writes a commit to the base branch and closes the PR.
     "pulls/*/merge": {("contents", "write"), ("pull-requests", "write")},
     # Starting the gate on what was just merged: `GITHUB_TOKEN`'s merge raises no `push`.
@@ -663,6 +665,95 @@ def test_a_sentence_mentioning_hold_is_not_a_hold():
     assert merger.ships_unlabelled(shipped(body="We said hold: yes was the old way."))
 
 
+# --- money never skips its gate (`[delivery] guarded`) ----------------------------
+
+MONEY = '[delivery]\nflow = "direct"\nguarded = ["src/app/execution/", "extensions/*.js"]\n'
+
+
+def guarded_project(tmp_path):
+    (tmp_path / ".devkit.toml").write_text(MONEY, encoding="utf-8")
+    return tmp_path
+
+
+def files_world(paths, *, prs, gate="", **extra):
+    """`world`, with `pulls/<n>/files` routed ahead of the `pulls/<n>` it also contains."""
+    files = {f"pulls/{entry['number']}/files": [{"filename": p} for p in paths] for entry in prs}
+    return {**files, **world(prs=prs, gate=gate, **extra)}
+
+
+def guarded_queue(run, tmp_path) -> int:
+    return merger.main(env(MERGE_QUEUE="yes"), run, root=guarded_project(tmp_path))
+
+
+@pytest.mark.parametrize("opened", [shipped, merge_now], ids=["unlabelled", "merge-now"])
+def test_a_pr_touching_money_does_not_merge_without_its_gate(tmp_path, opened):
+    """**The owner's one exception (2026-11-24):** the code that transacts money -- the
+    IBKR trader's orders, a betting extension -- waits for a green gate, label or not."""
+    run = FakeRun(files_world(["README.md", "src/app/execution/broker.py"], prs=[opened()]))
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == []
+
+
+@pytest.mark.parametrize("opened", [shipped, merge_now], ids=["unlabelled", "merge-now"])
+def test_a_pr_touching_money_still_merges_itself_once_green(tmp_path, opened):
+    """Gated is not held: the person never merges anything by hand."""
+    paths = ["extensions/panel.js"]
+    run = FakeRun(files_world(paths, prs=[opened()], gate="success"))
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+
+
+def test_a_pr_beside_the_money_merges_with_no_gate(tmp_path):
+    """Collectors, models and dashboards in the same project are not impeded."""
+    paths = ["src/app/collectors/odds.py", "src/app/execution_report.md", "extensions/a.css"]
+    run = FakeRun(files_world(paths, prs=[shipped()]))
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == [15]
+
+
+def test_a_rename_out_of_the_money_is_still_money(tmp_path):
+    files = {
+        "pulls/15/files": [{"filename": "x.py", "previous_filename": "src/app/execution/b.py"}]
+    }
+    run = FakeRun({**files, **world(prs=[shipped()], gate="")})
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == []
+
+
+def test_an_unreadable_file_list_refuses_rather_than_merges(tmp_path):
+    """Fail closed: "could not tell" must never read as "nothing guarded"."""
+    run = FakeRun(world(prs=[shipped()], gate=""), fail={"/files": (1, "HTTP 502")})
+    assert guarded_queue(run, tmp_path) == 1
+    assert merged_numbers(run) == []
+
+
+def test_a_project_with_nothing_guarded_never_lists_files(tmp_path):
+    run = FakeRun(world(prs=[shipped()], gate=""))
+    assert in_the_queue(run, tmp_path) == 0
+    assert not any("/files" in arg for call in run.calls for arg in call)
+
+
+def test_the_file_list_is_read_past_its_first_page():
+    first = [{"filename": f"f{i}"} for i in range(100)]
+    run = FakeRun({"&page=1": first, "&page=2": [{"filename": "last"}]})
+    assert merger.pr_files(REPO, 15, run)[-1] == "last"
+
+
+@pytest.mark.parametrize(
+    ("text", "globs"),
+    [
+        (MONEY, ("src/app/execution/", "extensions/*.js")),
+        ('[delivery]\nflow = "direct"\n', ()),
+        ('[delivery]\nguarded = "src/"\n', ()),
+        ('[delivery]\nguarded = ["", " a/ "]\n', ("a/",)),
+        ("", ()),
+    ],
+)
+def test_guarded_globs_reads_only_a_list(tmp_path, text, globs):
+    (tmp_path / ".devkit.toml").write_text(text, encoding="utf-8")
+    assert merger.guarded_globs(merger.project_settings(tmp_path)) == globs
+
+
 def test_automerge_still_waits_for_its_gate_in_a_direct_project(tmp_path):
     """An adoption or a Dependabot bump asked for the gate; the direct flow keeps that."""
     labelled = shipped(labels=[{"name": "automerge"}])
@@ -912,14 +1003,16 @@ def test_in_line_keeps_either_label_only_in_the_queue_and_orders_by_age():
 
 def test_take_turn_says_what_became_of_the_pr():
     run = FakeRun(world(prs=[merge_now()], gate=""))
-    outcome, detail = merger.take_turn(REPO, merge_now(), run, lambda _: None, "", queue=True)
+    outcome, detail = merger.take_turn(
+        REPO, merge_now(), run, lambda _: None, "", merger.Lane(queue=True)
+    )
     assert outcome == merger.MERGED and detail["number"] == 15
 
 
 def test_drain_counts_and_names_the_branch_that_moved():
     listing = [merge_now(10, base=ONTO_MAIN), merge_now(20, mergeable=False)]
     run = FakeRun(world(prs=listing, gate=""))
-    assert merger.drain(REPO, listing, run, lambda _: None, "", True) == (1, 0, "main")
+    assert merger.drain(REPO, listing, run, lambda _: None, "", merger.Lane(True)) == (1, 0, "main")
     assert dispatches(run) == [], "the queue's tidy job gates after it"
 
 

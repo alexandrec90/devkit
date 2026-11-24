@@ -1,6 +1,7 @@
 # Finishing a session nobody can type `/ship` for
 
-A person ships with Claude Code's built-in `/ship`. Only a person can start it, so a
+A person ships with `/land`, which merges the PR and syncs their checkout (Claude Code's
+built-in `/ship` opens one the merge queue takes too). A person starts either, so a
 session with nobody at the keyboard -- a fixer the fix pass sent, a `/go-nuts` or a
 `/supervise-fix-pass` run -- finishes here instead, by writing one file and stopping.
 

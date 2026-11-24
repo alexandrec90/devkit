@@ -371,6 +371,8 @@ ALLOWED_MISSING = {
     "ignored `logs/`",
     "logs/ship-intent.shipped.md": "where the pass sets a shipped intent aside, under the "
     "same ignored `logs/`",
+    "logs/land-body.md": "the PR body a `/land` session writes into its own worktree for "
+    "`scripts/land.py` to read; under the ignored `logs/`",
     "logs/fix-blocked.md": "written by a fixer into its own worktree when it cannot "
     "finish; read by the fix pass; under the ignored `logs/`",
     "logs/friction.md": "written by any session into its own worktree, one line per thing "
