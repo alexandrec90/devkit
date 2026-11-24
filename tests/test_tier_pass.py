@@ -123,14 +123,17 @@ def _stored(root: Path, project: str, **fields) -> None:
 # --- what runs ----------------------------------------------------------------------------
 
 
-def test_the_generated_manifest_parses_and_declares_no_delivery_table(tmp_path):
-    """A live header there and package B's commented one become a duplicate table when
-    uncommented; the TOML then fails to parse, and `harness_config.load` returns
-    defaults without a word."""
+def test_the_generated_manifest_parses_and_declares_one_delivery_table(tmp_path):
+    """A new project is `direct`, so its `[delivery]` header is live, and it must be the
+    only one, commented or not: a second becomes a duplicate table when uncommented, the
+    TOML then fails to parse, and `harness_config.load` returns defaults without a word."""
     root = generate(tmp_path, {})
-    manifest = tomllib.loads((root / ".devkit.toml").read_text(encoding="utf-8"))
-    assert "delivery" not in manifest
-    assert "medium_tier" in (root / ".devkit.toml").read_text(encoding="utf-8")
+    text = (root / ".devkit.toml").read_text(encoding="utf-8")
+    manifest = tomllib.loads(text)
+    assert manifest["delivery"] == {"flow": "direct"}
+    headers = [ln for ln in text.splitlines() if ln.lstrip("# ").startswith("[delivery]")]
+    assert headers == ["[delivery]"]
+    assert "medium_tier" in text
 
 
 def test_a_command_that_cannot_start_records_nothing_and_is_the_project_s(tmp_path):

@@ -116,23 +116,8 @@ def run_hook(
     runner: Runner = run_command,
     env: Mapping[str, str] | None = None,
 ) -> int:
-    if hook_name not in SUPPORTED_HOOKS:
-        # Checked before the opt-out: the escape hatch waives the branch checks, not
-        # the question of whether this is a hook we know how to dispatch at all.
-        decision = Decision(errors=(f"unsupported hook: {hook_name}",))
-    elif policy_skipped(os.environ if env is None else env):
-        # A warning rather than a bare print, so it reaches the failure artifact as
-        # well as stderr: an exported variable disables the gate on every commit
-        # thereafter, and the artifact is what explains a protected-branch commit
-        # to whoever reads it later. The downstream hooks below still run.
-        decision = Decision(warnings=(f"branch checks skipped by {SKIP_ENV_VAR}",))
-    elif hook_name == "pre-commit":
-        decision = evaluate_pre_commit(runner)
-    else:
-        remote = args[0] if args else DEFAULT_REMOTE
-        supplied_url = args[1] if len(args) > 1 else ""
-        decision = evaluate_pre_push(remote, supplied_url, input_text, runner)
-
+    environ = os.environ if env is None else env
+    decision = _decide(hook_name, args, input_text, runner, environ)
     artifact = _write_artifact(hook_name, decision, runner)
     for warning in decision.warnings:
         emit(f"[devkit branch policy] WARNING: {warning}", stream=sys.stderr)
@@ -149,12 +134,36 @@ def run_hook(
         return 1
     # A direct project runs every check after the merge, so neither stage gates its
     # commit or its push; the branch policy above still does.
-    skip = framework_skipped(os.environ if env is None else env) or flows_directly(root)
-    if not skip:
+    if not (framework_skipped(environ) or flows_directly(root)):
         framework_result = _run_pre_commit_framework(root, runner, hook_name, input_text)
         if framework_result:
             return framework_result
     return _run_project_hook(hook_name, args, input_text, root, runner)
+
+
+def _decide(
+    hook_name: str,
+    args: Sequence[str],
+    input_text: str,
+    runner: Runner,
+    environ: Mapping[str, str],
+) -> Decision:
+    """The branch policy's verdict on this hook call, before anything downstream runs."""
+    if hook_name not in SUPPORTED_HOOKS:
+        # Checked before the opt-out: the escape hatch waives the branch checks, not
+        # the question of whether this is a hook we know how to dispatch at all.
+        return Decision(errors=(f"unsupported hook: {hook_name}",))
+    if policy_skipped(environ):
+        # A warning rather than a bare print, so it reaches the failure artifact as
+        # well as stderr: an exported variable disables the gate on every commit
+        # thereafter, and the artifact is what explains a protected-branch commit
+        # to whoever reads it later. The downstream hooks still run.
+        return Decision(warnings=(f"branch checks skipped by {SKIP_ENV_VAR}",))
+    if hook_name == "pre-commit":
+        return evaluate_pre_commit(runner)
+    remote = args[0] if args else DEFAULT_REMOTE
+    supplied_url = args[1] if len(args) > 1 else ""
+    return evaluate_pre_push(remote, supplied_url, input_text, runner)
 
 
 def _utf8_console() -> None:

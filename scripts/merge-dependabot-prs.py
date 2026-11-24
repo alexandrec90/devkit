@@ -328,14 +328,23 @@ def ships_unlabelled(pr: dict) -> bool:
     labels = labels_of(pr)
     if any(label in labels for label in MERGE_LABELS) or held(pr) or pr.get("draft"):
         return False
+    if not _same_repo(pr) or _by_bot(pr):
+        return False
+    head = pr.get("head") or {}
+    return not str(head.get("ref") or "").startswith(RELEASE_BRANCH_PREFIX)
+
+
+def _same_repo(pr: dict) -> bool:
+    """Whether `pr`'s head is a branch of its base's repository; unknown reads as no."""
     head, base = pr.get("head") or {}, pr.get("base") or {}
     head_repo = str((head.get("repo") or {}).get("full_name") or "")
-    if not head_repo or head_repo != str((base.get("repo") or {}).get("full_name") or ""):
-        return False
+    return bool(head_repo) and head_repo == str((base.get("repo") or {}).get("full_name") or "")
+
+
+def _by_bot(pr: dict) -> bool:
+    """Whether a bot account opened `pr`."""
     user = pr.get("user") or {}
-    if user.get("type") == "Bot" or str(user.get("login") or "").endswith("[bot]"):
-        return False
-    return not str(head.get("ref") or "").startswith(RELEASE_BRANCH_PREFIX)
+    return user.get("type") == "Bot" or str(user.get("login") or "").endswith("[bot]")
 
 
 def verdict(repo: str, pr: dict, run, env_sha: str = "", queue: bool = False) -> tuple[bool, str]:
