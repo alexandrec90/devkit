@@ -449,15 +449,9 @@ def pass_running(root: Path, clock: Callable[[], float] = time.time) -> bool:
     return clock() - made < FIX_LOCK_STALE
 
 
-<<<<<<< HEAD
 def start(task: str, run: Run = sweep.run_bounded) -> str:
     """Start a scheduled task; "" when the scheduler took it, else why not."""
     done = run(["schtasks", "/Run", "/TN", task], START_SECONDS)
-=======
-def start_pass(run: Run = sweep.run_bounded) -> str:
-    """Start the pass's own scheduled task; "" when the scheduler took it, else why not."""
-    done = run(["schtasks", "/Run", "/TN", FIX_TASK], START_SECONDS)
->>>>>>> origin/main
     if getattr(done, "returncode", 1) == 0:
         return ""
     said = f"{getattr(done, 'stderr', '') or ''} {getattr(done, 'stdout', '') or ''}"
@@ -478,13 +472,13 @@ def pass_for(
     if pass_running(root, clock):
         print(f"fix-trigger: a pass is running; left for the next fire:\n{listed}")
         return False, 0
-    if why := start(PASS_TASK, run):
+    if why := start(FIX_TASK, run):
         # Unspent, so the next fire tries again; a task that never starts is the
         # scheduler's own failure, which the exit code files.
         print(f"fix-trigger: {len(new)} new signal(s):\n{listed}")
-        print(f"error: could not start {PASS_TASK}: {why}", file=sys.stderr)
+        print(f"error: could not start {FIX_TASK}: {why}", file=sys.stderr)
         return False, 1
-    print(f"fix-trigger: started {PASS_TASK} for:\n{listed}")
+    print(f"fix-trigger: started {FIX_TASK} for:\n{listed}")
     return True, 0
 
 
@@ -499,7 +493,6 @@ def run_once(
     root = workspace.parent
     projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
     path = state_path(root)
-<<<<<<< HEAD
     seen, follow = read_state(path)
     repos = repositories(root, projects, run)
     if moved := move_green(repos, run):
@@ -519,29 +512,6 @@ def run_once(
         print(f"fix-trigger: devkit.fixPass is {mode} here, so no pass starts")
     write_state(path, remember(seen, spent, now), follow)
     return code
-=======
-    seen = read_seen(path)
-    current = signals(root, projects, run)
-    new = sorted(current - seen.keys())
-    if not new:
-        write_seen(path, remember(seen, current, now))
-        print(f"fix-trigger: nothing new ({len(current)} standing)")
-        return 0
-    listed = "\n".join(f"  {key}" for key in new)
-    if pass_running(root, clock):
-        print(f"fix-trigger: a pass is running; left for the next fire:\n{listed}")
-        return 0
-    if why := start_pass(run):
-        # Unspent, so the next fire tries again; a task that never starts is the
-        # scheduler's own failure, which the exit code files.
-        print(f"fix-trigger: {len(new)} new signal(s):\n{listed}")
-        print(f"error: could not start {FIX_TASK}: {why}", file=sys.stderr)
-        return 1
-    write_seen(path, remember(seen, current, now))
-    print(f"fix-trigger: started {FIX_TASK} for:\n{listed}")
-    return 0
-
->>>>>>> origin/main
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])

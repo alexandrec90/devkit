@@ -273,7 +273,7 @@ class Machine:
 
     @property
     def starts(self) -> int:
-        return self.started_tasks.count(trigger.PASS_TASK)
+        return self.started_tasks.count(trigger.FIX_TASK)
 
     @property
     def started_tasks(self) -> list[str]:
@@ -318,7 +318,7 @@ def test_a_pass_that_would_not_start_is_tried_again_and_fails_the_job(tmp_path, 
     assert "error: could not start devkit-fix-pass: ERROR: no such task" in capsys.readouterr().err
     machine.started = 0
     assert machine.fire() == 0 and machine.starts == 2
-    assert trigger.start(trigger.PASS_TASK, machine.run) == ""
+    assert trigger.start(trigger.FIX_TASK, machine.run) == ""
     assert trigger.pass_for(tmp_path, ["red:x"], machine.run) == (True, 0)
     assert trigger.pass_for(tmp_path, [], machine.run) == (True, 0)
 
@@ -390,20 +390,14 @@ def test_what_still_stands_is_remembered_and_the_rest_forgotten(tmp_path):
 def test_the_names_spelled_here_are_their_owners():
     fix_pass = load_script("scripts/fix-pass.py")
     installer = load_script("scripts/install-fix-pass-task.py")
-<<<<<<< HEAD
-    assert trigger.PASS_TASK == installer.TASK_NAME
-    assert trigger.PASS_LOCK == fix_pass.RUN_LOCK_NAME
-    assert trigger.PASS_LOCK_STALE == fix_pass.RUN_LOCK_STALE
+    assert trigger.FIX_TASK == installer.TASK_NAME
+    assert trigger.FIX_LOCK == fix_pass.RUN_LOCK_NAME
+    assert trigger.FIX_LOCK_STALE == fix_pass.RUN_LOCK_STALE
     assert trigger.GREEN == load_script("scripts/green-ref.py").GREEN
     assert trigger.FOLLOWERS == (
         load_script("scripts/install-reconcile-task.py").TASK_NAME,
         load_script("scripts/install-collectors.py").TASK_NAME,
     )
-=======
-    assert trigger.FIX_TASK == installer.TASK_NAME
-    assert trigger.FIX_LOCK == fix_pass.RUN_LOCK_NAME
-    assert trigger.FIX_LOCK_STALE == fix_pass.RUN_LOCK_STALE
->>>>>>> origin/main
     assert trigger.REFUSED == fix_pass.ship_intent.REFUSED
     assert trigger.SHIP_STATE == fix_pass.ship_intent.STATE_FILE.name
 
