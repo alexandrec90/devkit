@@ -313,6 +313,87 @@ def test_by_hand_no_wait_runs_whoever_is_at_the_keyboard(tmp_path):
     assert (code, ran) == (0, ["devkit"])
 
 
+# --- the scheduled run ----------------------------------------------------------------------
+
+NOON = _dt.datetime(2026, 11, 25, 12, 0)
+
+
+def _last(status, sha="old", hours=5.0) -> object:
+    finished = (NOON - _dt.timedelta(hours=hours)).isoformat()
+    return results.Result("carameli", status, sha=sha, finished=finished)
+
+
+@pytest.mark.parametrize(
+    ("name", "last", "due"),
+    [
+        ("carameli", None, True),
+        ("carameli", _last(results.PASSED), True),
+        ("carameli", _last(results.PASSED, sha="tip"), False),
+        ("carameli", _last(results.FAILED, sha="tip"), False),
+        ("carameli", _last(results.PASSED, hours=1), False),
+        ("carameli", _last(results.FAILED, hours=1.5), True),
+        ("carameli", _last(results.SKIPPED, sha=""), True),
+        ("devkit", _last(results.PASSED), False),
+        ("devkit", _last(results.PASSED, hours=21), True),
+        ("devkit", _last(results.FAILED), True),
+        ("carameli", results.Result("carameli", results.PASSED, sha="old"), True),
+    ],
+)
+def test_a_project_is_owed_a_run_when_its_tip_moved_and_not_just_now(name, last, due):
+    assert e2e_pass.is_due(name, last, "tip", NOON) is due
+    assert not e2e_pass.is_due(name, last, "", NOON), "origin could not be read"
+
+
+def _due_run(tmp_path, names, idle: float):
+    tmp_path.mkdir(exist_ok=True)
+    workspace = _workspace(tmp_path, names, opted=names)
+    ran, run_one = _recording()
+    log: list = []
+    seams = e2e_pass.Seams(
+        root=tmp_path / "devkit",
+        idle=lambda: idle * 60.0,
+        now=lambda: NOON,
+        git_for=lambda _path: fake_git(log=log),
+    )
+    code = e2e_pass.run_due(workspace, _args(due=True), seams, run_one)
+    return code, ran, log
+
+
+def test_a_pc_in_use_is_left_alone_without_so_much_as_a_fetch(tmp_path, capsys):
+    assert _due_run(tmp_path, ["carameli"], idle=2) == (0, [], [])
+    assert "the PC is in use" in capsys.readouterr().out
+
+
+def test_a_tier_that_opens_windows_waits_for_a_pc_that_was_left(tmp_path):
+    assert "devkit" in e2e_pass.OPENS_WINDOWS
+    assert _due_run(tmp_path / "a", ["carameli", "devkit"], idle=15)[1] == ["carameli"]
+    assert _due_run(tmp_path / "b", ["carameli", "devkit"], idle=90)[1] == ["carameli", "devkit"]
+    assert e2e_pass.idle_minutes_for("carameli", 10) == 10
+    assert e2e_pass.idle_minutes_for("devkit", 10) == e2e_pass.WINDOWED_IDLE_MINUTES
+
+
+def test_a_judged_tip_is_not_run_again(tmp_path):
+    judged = results.Result("carameli", results.PASSED, sha="b31b60cbbbbb", finished="x")
+    results.write(judged, tmp_path / "devkit")
+    assert _due_run(tmp_path, ["carameli"], idle=90)[1] == []
+
+
+def test_the_tip_is_read_fresh_or_not_at_all(tmp_path):
+    seams = e2e_pass.Seams(git_for=lambda _p: fake_git())
+    assert e2e_pass.tip_of(tmp_path, seams) == "b31b60cbbbbb"
+    offline = e2e_pass.Seams(git_for=lambda _p: fake_git(fetch=1))
+    assert e2e_pass.tip_of(tmp_path, offline) == ""
+
+
+def test_a_checkout_someone_is_working_in_never_hides_a_red(tmp_path, monkeypatch):
+    monkeypatch.setattr(e2e_pass.tb, "detect_default_branch", lambda _g, fallback: "main")
+    red = results.Result("carameli", results.FAILED, sha="a", signature=("t::x",))
+    results.write(red, tmp_path / "devkit")
+    result, _ = _project(tmp_path, git=fake_git(branch="agent/x"))
+    assert result.status == results.SKIPPED
+    assert results.read("carameli", tmp_path / "devkit") == red
+
+
 def _assigned(workspace: Path, hosts) -> None:
     """Add `devkit.localE2e` with `hosts` to a `_workspace` file."""
     text = workspace.read_text(encoding="utf-8").rstrip()[:-1]

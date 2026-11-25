@@ -141,7 +141,17 @@ NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) |
 # `devkit-tray` is resident: `installers.py maintain` starts a tray that died
 # (`install-tray.py`, 4e6fe3ae), so the logon trigger can fire beside one already
 # running, and the second start it is refused is the one tray working.
-OVERLAP_EXPECTED = frozenset({"devkit-ship", "devkit-medium-tier", "devkit-tray"})
+# `devkit-fix-trigger` is the ship task's shape again, and `devkit-local-e2e` the medium
+# tier's: a run lasts up to an hour a project on a half-hourly cadence.
+OVERLAP_EXPECTED = frozenset(
+    {
+        "devkit-ship",
+        "devkit-medium-tier",
+        "devkit-tray",
+        "devkit-fix-trigger",
+        "devkit-local-e2e",
+    }
+)
 
 # A fire skipped this soon after the machine came up is its catch-up working: every fire
 # slept or shut through starts at once (`StartWhenAvailable`, `machine_clock`), and the
@@ -198,6 +208,7 @@ ARTIFACTS: dict[str, str] = {
     "devkit-workspace-status": "logs/scheduled-workspace-status.log",
     "devkit-installers": "logs/installers.log",
     "devkit-fix-pass": "logs/fix-pass.log",
+    "devkit-fix-trigger": "logs/scheduled-fix-trigger.log",
     "devkit-ship": "logs/ship-pass.log",
     "devkit-collectors": "logs/collectors.log",
     "devkit-local-e2e": "logs/scheduled-local-e2e.log",

@@ -72,6 +72,7 @@ import delivery
 import fix_plan
 import fix_reports
 import git_policy
+import land_check
 import sweep
 import task_branch as tb
 import worktree_tiers
@@ -748,6 +749,19 @@ def _without_framework() -> dict[str, str]:
     return {**os.environ, git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
 
 
+def unreadable(tree: Path, runner: Runner) -> list[str]:
+    """What `land_check` finds in the staged files: one that does not parse, or a conflict
+    marker a resolver left. The same check a session's `land.py` makes before it pushes."""
+    staged = runner(["git", "diff", "--cached", "--name-only", "--no-renames", "-z"], cwd=tree)
+    paths = [path for path in (staged.stdout or "").split("\0") if path]
+
+    def on_head(path: str) -> str | None:
+        shown = runner(["git", "show", f"HEAD:./{path}"], cwd=tree)
+        return shown.stdout if shown.returncode == 0 and shown.stdout else None
+
+    return land_check.problems(tree, paths, on_head)
+
+
 def _commit_direct(intent: Intent, runner: Runner) -> tuple[str, str]:
     """Add and commit, for `commit_intent`, with no fixers and no framework.
 
@@ -758,6 +772,8 @@ def _commit_direct(intent: Intent, runner: Runner) -> tuple[str, str]:
     added = run_git(["git", "add", "-A"], intent.tree, runner)
     if added.returncode != 0:
         return "add", (added.stdout or "") + (added.stderr or "")
+    if broken := unreadable(intent.tree, runner):
+        return "landing check", "\n".join(f"refused: {line}" for line in broken) + "\n"
     commit = ["git", "commit", "-F", str(INTENT_FILE)]
     committed = run_git(commit, intent.tree, runner, _without_framework())
     if committed.returncode != 0:

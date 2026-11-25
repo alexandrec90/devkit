@@ -1430,9 +1430,13 @@ def test_a_pass_does_not_report_the_fire_it_is_running_under(ctx):
     assert fix_loop.job_findings(ctx, [_own_refused_fire(ctx, 1)], tasks={}) == []
 
 
-def test_a_pass_that_outlived_a_fire_of_its_own_is_still_filed(ctx):
-    """Begun before the refused fire: this run is what held the task past it."""
-    [found] = fix_loop.job_findings(ctx, [_own_refused_fire(ctx, -5)], tasks={})
+def test_a_pass_started_by_the_trigger_does_not_report_the_clock_fire_it_met(ctx):
+    """Begun five minutes before the refused fire, which a triggered pass does any day."""
+    assert fix_loop.job_findings(ctx, [_own_refused_fire(ctx, -5)], tasks={}) == []
+
+
+def test_a_pass_that_outlived_a_whole_half_hour_is_still_filed(ctx):
+    [found] = fix_loop.job_findings(ctx, [_own_refused_fire(ctx, -45)], tasks={})
     assert found.kind == fix_loop.JOB_KIND
 
 

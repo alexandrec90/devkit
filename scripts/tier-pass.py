@@ -80,6 +80,7 @@ import fix_switch
 import harness_events
 import host_memory
 import job_claims
+import low_priority
 import sweep
 import task_branch as tb
 import tier_command
@@ -549,6 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.verb == "status":
         return status(workspace)
+    low_priority.lower()
     return run_pass(workspace, list(args.projects), args)
 
 

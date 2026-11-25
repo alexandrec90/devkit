@@ -136,6 +136,8 @@ def _in_flight(
         return f"already dispatched at {when}"
     if when := fix_ledger.open_medium_session(decision, ledger, now, since):
         return f"a medium tier session went at {when}; one per project at a time"
+    if when := fix_ledger.open_branch_session(decision, ledger, now, since):
+        return f"a session went at this failure at {when}, seen on an earlier commit"
     return ""
 
 

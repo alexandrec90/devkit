@@ -110,29 +110,72 @@ jobs:
         with:
           name: lint-errors
           path: logs/lint-errors.log
-      - name: Hook-script tests (vendored tier)
-        id: hooks-tests
-        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
-        # A junit file, because this step fails before `run-tests.py` writes
-        # `logs/test-failures.log`: without it a red vendored suite uploads nothing the
-        # fix pass can read, and its failing ids come out of `gh run view --log-failed`.
-        run: uv run python -m pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml
-      - name: devkit tests (generator, ports, renderer)
-        # Also after a red vendored tier or a red lint: skipped, this tier's failures
-        # reached the fix pass one gate cycle late (ledgers f07541c7, f872ef7c).
+      - name: devkit tests (generator, and a third of the rest)
+        # Also after a red lint: skipped, this tier's failures reached the fix pass one
+        # gate cycle late (ledgers f07541c7, f872ef7c).
         if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         # Via the wrapper, for the same dogfooding reason as the lint step: this is
         # what `run-tests.py` is for, and a broken wrapper should fail devkit's own CI
         # rather than surface first in a generated project.
-        run: uv run python scripts/run-tests.py
+        #
+        # A third of the suite, with `suite` below running the other two: serially the
+        # tiers took eight minutes, which is how long a red main went unread. This job
+        # keeps its name, its artifact and `test_new_project.py` whatever is moved, because
+        # `release-pipeline.py` reads a release commit's one expected red from them
+        # (`GATE_TEST_JOB`, `EXPECTED_RED_TEST`).
+        run: printf '%s\n' tests/test_*.py | awk '$0 == "tests/test_new_project.py" || NR % 3 == 0' | xargs uv run python scripts/run-tests.py --only
       - name: Upload test artifact
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: test-failures
-          path: |
-            logs/test-failures.log
-            logs/junit-hooks.xml
+          path: logs/test-failures.log
+
+  suite:
+    name: devkit tests (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      # One shard's red says nothing about the other's, and both belong in one verdict.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-python-env
+        with:
+          python-version: "3.12"
+      - name: devkit tests (the rest of the suite)
+        run: printf '%s\n' tests/test_*.py | awk '$0 != "tests/test_new_project.py" && NR % 3 == ${{ matrix.shard }}' | xargs uv run python scripts/run-tests.py --only
+      - name: Upload test artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-failures-${{ matrix.shard }}
+          path: logs/test-failures.log
+
+  hook-tests:
+    name: Hook-script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-python-env
+        with:
+          python-version: "3.12"
+      - name: Hook-script tests (vendored tier)
+        # A junit file, because this step never reaches `run-tests.py`, which writes
+        # `logs/test-failures.log`: without it a red vendored suite uploads nothing the
+        # fix pass can read, and its failing ids come out of `gh run view --log-failed`.
+        run: uv run python -m pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml
+      - name: Upload test artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-failures-hooks
+          path: logs/junit-hooks.xml
 
   pre-commit:
     name: Pre-commit gate (the channel devkit publishes)
@@ -162,8 +205,14 @@ jobs:
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
   generated-project:
-    name: A generated project is green on arrival
+    name: A generated project is green on arrival (${{ matrix.presets }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two halves, not one job each: the account runs a fixed number of jobs at once,
+        # across every repository.
+        presets: ["bare service service-redis data", "fullstack desktop desktop-static desktop-web"]
     # The regression this exists for: the vendored hook tests once pinned carameli's
     # literal credentials and paths, so every generated project failed 12 of them on
     # its very first CI run. Rendering a project and running its suites here is the
@@ -196,7 +245,7 @@ jobs:
       - name: Generate a project of each shape and run its checks
         run: |
           set -euo pipefail
-          for preset in bare service service-redis data fullstack desktop desktop-static desktop-web; do
+          for preset in ${{ matrix.presets }}; do
             name="probe_$(echo "$preset" | tr '-' '_')"
             echo "::group::$preset"
             rm -rf /tmp/gen && mkdir -p /tmp/gen

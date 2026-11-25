@@ -207,9 +207,11 @@ def candidates(commits: list[Commit]) -> list[Commit]:
 def revertible(failure: fix_plan.Failure) -> bool:
     """Whether this red says anything about a commit: a default branch's, read, naming a
     failure, and neither the runner's nor the bill's nor a release's nor, while its grace
-    lasts, tidy's."""
+    lasts, tidy's. Nor one under a tip whose gate is still running: the fix may be in it."""
     sig = failure.signature
     if failure.kind != fix_plan.BRANCH or failure.unread or failure.lost_runs:
+        return False
+    if failure.tip_running:
         return False
     if fix_plan.names_nothing(sig) or fix_plan.is_runner_side(sig):
         return False

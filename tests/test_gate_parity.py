@@ -51,6 +51,10 @@ EXEMPT: dict[tuple[str, str], str] = {
         "A second ruff, which `uvx` downloads the first time: a push must work offline, and "
         "the difference between two ruff releases is rarely what a push changes."
     ),
+    ("suite", "devkit tests (the rest of the suite)"): (
+        "The other two thirds of the same suite, sharded so CI's verdict comes sooner. The "
+        "push gate runs the whole of it in one step, which the `test` job's step matches."
+    ),
     ("pre-commit", "Run every hook over the whole repo"): (
         "`--all-files` has no local equivalent: pre-commit's commit stage sees the staged "
         "diff, so actionlint, detect-secrets and check-yaml pass locally against a diff and "
@@ -179,6 +183,23 @@ def test_every_ci_step_is_reproduced_locally_or_exempt_with_a_reason():
         + f". Add the command to run_push_gate.STEPS, or add an entry to EXEMPT in "
         f"{__file__} saying why the push gate cannot or should not run it."
     )
+
+
+def test_the_shards_run_every_test_file_exactly_once():
+    """A file no shard names is a test CI never runs, with nothing red to say so."""
+    parsed = _yaml().safe_load(PR_GATE.read_text(encoding="utf-8"))
+    runs = {
+        job: step["run"]
+        for job in ("test", "suite")
+        for step in parsed["jobs"][job]["steps"]
+        if "run-tests.py" in str(step.get("run", ""))
+    }
+    generator = 'tests/test_new_project.py"'
+    assert f'$0 == "{generator} || NR % 3 == 0' in runs["test"]
+    assert f'$0 != "{generator} && NR % 3 == ${{{{ matrix.shard }}}}' in runs["suite"]
+    assert parsed["jobs"]["suite"]["strategy"]["matrix"]["shard"] == [1, 2]
+    nested = [p for p in (REPO_ROOT / "tests").rglob("test_*.py") if p.parent.name != "tests"]
+    assert nested == [], "the shards list tests/test_*.py alone"
 
 
 def test_the_coverage_match_actually_matches_something():

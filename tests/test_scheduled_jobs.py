@@ -345,6 +345,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/installers.py": "devkit-installers runs it daily and at logon; it spawns every installer",
     "scripts/fix-pass-watchdog.py": "devkit-fix-pass runs it every half hour; it spawns the pass",
     "scripts/fix-pass.py": "the watchdog spawns it every half hour, behind the workspace switch",
+    "scripts/fix_trigger.py": "devkit-fix-trigger runs it every 2 minutes; it spawns gh and schtasks",
     "scripts/ship-pass.py": "devkit-ship runs it every 2 minutes; it spawns through ship_intent",
     "scripts/ship_intent.py": "the fixers, commit and push the pass makes per intent, and the runner it hands fix-prs.py",
     "scripts/fix-prs.py": "the worktree cut and the session the pass opens; spawns only through the runner it is handed",
@@ -353,7 +354,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/fix_release.py": "the release pipeline the pass starts detached when main owes a tag",
     "scripts/git_trust.py": "the git config --global safe.directory a dispatching pass adds",
     "scripts/log-wrap.py": "the wrapper every job but the tray is launched through",
-    "scripts/e2e-pass.py": "devkit-local-e2e runs it nightly; it spawns each project's e2e.py",
+    "scripts/e2e-pass.py": "devkit-local-e2e runs it every half hour; it spawns each project's e2e.py",
     "scripts/after-merge-pass.py": "devkit-after-merge runs it every 5 min; it spawns queued commands",
     "scripts/e2e.py": "the pass spawns devkit's own; it spawns pytest over the local tier",
     "scripts/tier-pass.py": "devkit-medium-tier runs it every 15 minutes; it spawns each suite",
@@ -406,6 +407,7 @@ DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/after-merge-pass.py": "scripts/sweep.py",
     "scripts/tier-pass.py": "scripts/sweep.py",
     "scripts/disposable_tree.py": "scripts/sweep.py",
+    "scripts/fix_trigger.py": "scripts/sweep.py",
 }
 
 SPAWN_ATTRS = frozenset({"run", "Popen", "call", "check_call", "check_output"})

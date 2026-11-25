@@ -173,6 +173,7 @@ def test_the_jobs_group_names_only_the_branch_delivery_jobs():
         "devkit-upgrade-projects",
         "devkit-release",
         "devkit-fix-pass",
+        "devkit-fix-trigger",
         "devkit-ship",
         "devkit-after-merge",
     }
@@ -323,6 +324,7 @@ def test_standing_one_delivery_job_back_up_leaves_the_rest_of_the_group_down(tmp
     assert harness_state.Ledger.load().jobs == (
         "devkit-after-merge",
         "devkit-fix-pass",
+        "devkit-fix-trigger",
         "devkit-ship",
         "devkit-worktree-reconcile",
     )
