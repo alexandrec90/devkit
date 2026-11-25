@@ -387,6 +387,7 @@ def test_what_still_stands_is_remembered_and_the_rest_forgotten(tmp_path):
     path.write_text("[]", encoding="utf-8")
     assert trigger.read_state(path) == ({}, [])
 
+
 def test_the_names_spelled_here_are_their_owners():
     fix_pass = load_script("scripts/fix-pass.py")
     installer = load_script("scripts/install-fix-pass-task.py")

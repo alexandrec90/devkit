@@ -281,6 +281,7 @@ def github_signals(root: Path, repos: dict[str, dict]) -> set[str]:
     devkit = slug_of(root / DEVKIT)
     return found | ready_signals(devkit, repos.get(devkit, {}))
 
+
 # --- this machine --------------------------------------------------------------------------
 
 
@@ -402,6 +403,7 @@ def read_state(path: Path) -> tuple[dict[str, str], list[str]]:
     kept = {str(k): str(v) for k, v in seen.items()} if isinstance(seen, dict) else {}
     return kept, [n for n in follow if n in FOLLOWERS] if isinstance(follow, list) else []
 
+
 def remember(seen: dict[str, str], current: Iterable[str], now: _dt.datetime) -> dict[str, str]:
     """`seen` with `current` spent as of `now`, less what nobody has seen in `REMEMBER`.
 
@@ -438,6 +440,7 @@ def start_follower(follow: list[str], run: Run = sweep.run_bounded) -> list[str]
     why = start(task, run)
     print(f"fix-trigger: {'did not start' if why else 'started'} {task} for what moved")
     return rest
+
 
 def pass_running(root: Path, clock: Callable[[], float] = time.time) -> bool:
     """Whether a dispatching pass holds its lock. One older than any pass may run is a
@@ -512,6 +515,7 @@ def run_once(
         print(f"fix-trigger: devkit.fixPass is {mode} here, so no pass starts")
     write_state(path, remember(seen, spent, now), follow)
     return code
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
