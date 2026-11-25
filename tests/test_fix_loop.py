@@ -819,6 +819,7 @@ def test_a_working_devkit_session_is_the_harness_busy(ctx, monkeypatch):
     )
     closed, journal = close(ctx)
     assert closed.harness_busy == str(path) and journal.findings == []
+    assert closed.fixing == [str(path)]
 
 
 def test_a_working_sweep_of_the_ledger_alone_is_the_harness_busy(ctx, monkeypatch):
@@ -850,6 +851,7 @@ def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ct
     (path / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
     closed, _ = close(ctx)
     assert closed.busy == {} and closed.harness_busy == "", "idle: finished, holds nothing"
+    assert closed.fixing == [], "a finished fixer leaves the next one alone"
     listed = [{"kind": "background", "state": "working", "cwd": str(path)}]
     monkeypatch.setattr(fix_loop, "session_listing", lambda: listed)
     closed, _ = close(ctx)

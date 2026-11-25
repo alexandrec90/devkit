@@ -321,6 +321,7 @@ def send_all(
     capped: list[tuple[fix_plan.Decision, str]] = []
     worst = EXIT_OK
     room = host_memory.available_mb()
+    floor = MEMORY_FLOOR_MB if closed.fixing else host_memory.LONE_FLOOR_MB
     turn = fix_claims.Turn(ctx.root, ctx.writes, room, closed.harness_busy, left)
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
@@ -335,11 +336,12 @@ def send_all(
         if verdict.finding and journal is not None:
             since = fix_budget.since_for(decision, escalated)
             journal.add(verdict.finding.at(closed.tree_after(problem, since)))
-        if why := _kept_back(decision, verdict, room, left, turn):
+        if why := _kept_back(decision, verdict, room, floor, left, turn):
             capped.append((decision, why))
             continue
-        if room is not None and decision.action not in fix_plan.NO_SESSION:
-            room -= SESSION_MB
+        if decision.action not in fix_plan.NO_SESSION:
+            floor = MEMORY_FLOOR_MB
+            room = None if room is None else room - SESSION_MB
         line, code = _send_one(decision, ctx, launch, verdict.effort, journal)
         sent.append(f"{names} -- {line}{turn.note(decision)}")
         worst = max(worst, code)
@@ -349,25 +351,24 @@ def send_all(
     return sent, capped, worst
 
 
-def _kept_back(decision, verdict, room, left, turn: fix_claims.Turn) -> str:
+def _kept_back(decision, verdict, room, floor, left, turn: fix_claims.Turn) -> str:
     """Why `decision` is not sent this pass, or "". The claim is asked last: it is the one
     question that pushes a ref, so nothing already held costs a call to GitHub."""
-    why = verdict.why if not verdict.go else _no_memory(decision, room)
+    why = verdict.why if not verdict.go else _no_memory(decision, room, floor)
     return why or _no_time(decision, left) or turn.held(decision)
 
 
-def _no_memory(decision: fix_plan.Decision, room: int | None) -> str:
+def _no_memory(decision: fix_plan.Decision, room: int | None, floor: int) -> str:
     """Why the machine cannot take this session now, or "". Not a cap on sessions --
     the pass has none -- but the one limit the machine sets regardless: round four sent
     nine at once and Claude Code killed the supervisor for low memory. A held decision
-    is not recorded, so the next pass sends it; one held too long is a stale wait."""
+    is not recorded, so the next pass sends it; one held too long is a stale wait.
+    `floor` is lower for a fixer that would run alone (`host_memory.LONE_FLOOR_MB`)."""
     if room is None or decision.action in fix_plan.NO_SESSION:
         return ""
-    if room - SESSION_MB >= MEMORY_FLOOR_MB:
+    if host_memory.room_for_session(room, floor):
         return ""
-    return (
-        f"{HELD_FOR_MEMORY}: {room} MB free, a session needs {SESSION_MB} above {MEMORY_FLOOR_MB}"
-    )
+    return f"{HELD_FOR_MEMORY}: {room} MB free, a session needs {SESSION_MB} above {floor}"
 
 
 def _no_time(decision: fix_plan.Decision, left: Callable[[], float] | None) -> str:

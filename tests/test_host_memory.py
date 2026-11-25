@@ -25,6 +25,14 @@ def test_a_session_needs_its_own_size_above_the_floor():
     assert not host_memory.room_for_session(floor - 1)
 
 
+def test_a_caller_may_ask_about_a_lower_floor():
+    lone = host_memory.LONE_FLOOR_MB
+    assert lone < host_memory.FLOOR_MB
+    assert host_memory.room_for_session(lone + host_memory.SESSION_MB, lone)
+    assert not host_memory.room_for_session(lone + host_memory.SESSION_MB - 1, lone)
+    assert not host_memory.room_for_session(lone + host_memory.SESSION_MB)
+
+
 def test_a_probe_that_failed_guards_nothing():
     assert host_memory.room_for_session(None)
 
