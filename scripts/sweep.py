@@ -58,9 +58,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import errno
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -274,6 +276,32 @@ def _within_until(timeout: float | None) -> float | None:
     return left if timeout is None else min(timeout, left)
 
 
+class ProgramMissing(FileNotFoundError):
+    """A command whose program is not on PATH, so it could not be started at all.
+
+    Named apart from any other `FileNotFoundError` because its cause is the machine, not
+    the code that ran it: on 2026-11-23 a session's `winget install --force Git.Git` took
+    `git` off PATH for two minutes, and the fix pass filed its drift, migrate and send
+    steps as three crashes, each `[WinError 2] The system cannot find the file specified`
+    with no word of which file (8fec5e52, 2522950b, b48af335)."""
+
+    def __init__(self, program: str):
+        said = f"{program!r} could not be started: it is not on PATH"
+        super().__init__(errno.ENOENT, said, program)
+        self.program = program
+
+
+def program_missing(argv: list[str], env: Mapping[str, str] | None = None) -> ProgramMissing | None:
+    """`ProgramMissing` for `argv` when its program does not resolve on the PATH it ran
+    with (`env`'s, else this process's); `None` when it does, so a missing `cwd` or a
+    file the program itself could not find keeps its own error."""
+    if not argv:
+        return None
+    path = next((v for k, v in env.items() if k.upper() == "PATH"), None) if env else None
+    program = str(argv[0])
+    return ProgramMissing(program) if shutil.which(program, path=path) is None else None
+
+
 def run_bounded(
     argv: list[str], timeout: float | None, **kwargs
 ) -> subprocess.CompletedProcess[str]:
@@ -295,17 +323,23 @@ def run_bounded(
         said = "not started: past the caller's deadline"
         return subprocess.CompletedProcess(argv, TIMED_OUT, "", said)
     kwargs = {"encoding": "utf-8", "errors": "replace", **kwargs}
-    if timeout is None:
-        return run_windowless(argv, capture_output=True, check=False, **kwargs)
-    process = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        creationflags=NO_WINDOW,
-        start_new_session=sys.platform != "win32",
-        **kwargs,
-    )
+    try:
+        if timeout is None:
+            return run_windowless(argv, capture_output=True, check=False, **kwargs)
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=NO_WINDOW,
+            start_new_session=sys.platform != "win32",
+            **kwargs,
+        )
+    except FileNotFoundError as exc:
+        missing = program_missing(argv, kwargs.get("env"))
+        if missing is None:
+            raise
+        raise missing from exc
     try:
         out, err = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:

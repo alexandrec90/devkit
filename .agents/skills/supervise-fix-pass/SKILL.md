@@ -150,6 +150,7 @@ problem is fixed in the pass like any other defect -- not by adding a cap back.
 
 Memory is the one limit the machine sets regardless: `fix_send` holds a session the
 free memory cannot take (`held for memory` in the record), and the next pass sends it.
+A fixer that would run alone has a lower floor (`host_memory.LONE_FLOOR_MB`).
 A background fixer loads no MCP server for the same reason. Holds on every iteration
 mean something else is eating the memory -- find it (`claude agents` for finished
 sessions still alive, `python scripts/docker_memory.py` for stacks) rather than lowering
@@ -184,6 +185,6 @@ passed since its last row is retired by `fix_loop.retire_passed_jobs`, not taken
 
 ## Reporting
 
-Ship with the ship skill. In the reply, give per iteration: what the pass shipped,
+Ship with the intent file `.claude/ship-intent.md` describes. In the reply, give per iteration: what the pass shipped,
 sent and filed; each violation and what fixed it; each session's cost (calls, failed
 calls) and the friction found in it; and what, if anything, is still open.

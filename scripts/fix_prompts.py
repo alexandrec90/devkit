@@ -4,7 +4,7 @@
 Split out of `fix_plan.py`, which decides *what* gets a session; this is the words.
 Every prompt names the failure the way the record does (`fix_plan.name_of`), the
 evidence directory, the branch the worktree is on and the finish line -- which is the
-ship skill, that is, `logs/ship-intent.md`, never a commit or a push. A fixer fixes
+intent file `.claude/ship-intent.md` describes, never a commit or a push. A fixer fixes
 and stops; everything a script can do -- merging the base in, committing, pushing,
 opening or updating the PR, reading the gate -- the pass does, because a session's
 turn spent on any of it is the expensive way to run a command. What a fixer cannot do
@@ -71,7 +71,24 @@ SUITE_RUNNER_SENTENCE = (
     "module, which no changed file names -- a whole suite is the gate's to run, not yours. "
 )
 
-# How every prompt's body ends. The ship skill is the finish line and the blocked file
+# Where an unattended session reads how to finish: the vendored reference that replaced
+# the `ship` skill once the harness deferred `/ship` to Claude Code's built-in, which only
+# a person can start.
+SHIP_INTENT_DOC = ".claude/ship-intent.md"
+
+# How a fixer waits for its own checks. The rule every session loads says it, and a fixer
+# still sat in an until loop on a run moved out at its 600 s timeout (fbf4aebc, the rule's
+# own fix having failed before it): this prompt tells it that ending with no intent reads
+# as dying, so it must also say that ending on a pending task does not
+# (`fix_reports.awaiting_task`).
+WAIT_SENTENCE = (
+    "Start a run that may take minutes with run_in_background, do what else is left, and "
+    "then end your turn: its notice wakes you, as it does for a call Claude Code moves to "
+    "the background itself, and the pass reads a session with a background task out as "
+    "still working, not as dead. Never wait in a sleep or until loop. "
+)
+
+# How every prompt's body ends. The ship intent is the finish line and the blocked file
 # is the only other way out, for the blockers `STOP` names right after it; both are
 # files, so the pass reads the outcome without a session. Nothing to change is still an
 # intent (`ship_intent.EMPTY`): a fixer whose nightly was green at the tip left neither
@@ -90,7 +107,8 @@ FINISH = (
     "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
     "-- in every tree you changed. "
     f"{RUNNER_SENTENCE}"
-    "Then ship it with the ship skill and stop: the fix pass "
+    f"{WAIT_SENTENCE}"
+    f"Then ship it with the intent file {SHIP_INTENT_DOC} describes and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. A failure "
     "already fixed where this tree was cut, with nothing left to change, ships the same "
     f"way: {INTENT_FILE.as_posix()} saying what fixed it, which the pass sets aside and "
@@ -446,7 +464,18 @@ def pr_prompt(failure: Failure, tree: TreeNotes | None = None) -> str:
         + _head_state(tree, failure)
         + _described(failure.number)
         + " Fix what the gate is failing on, and nothing else about "
-        f"the PR.{tree_notes} {FINISH}"
+        f"the PR.{_obsolete(failure.number, failure.base)}{tree_notes} {FINISH}"
+    )
+
+
+def _obsolete(number: int, base: str) -> str:
+    """The one way a red PR ends without a fix. A PR whose change has no reason left to
+    land was otherwise either fixed for nothing or left open and red forever."""
+    return (
+        f" If the PR is obsolete -- origin/{base} already holds its change, or a newer PR "
+        f"supersedes it -- close it instead (gh pr close {number} --delete-branch --comment "
+        "with why, naming what superseded it) and say so in the intent; never leave it open "
+        "and red."
     )
 
 
@@ -572,7 +601,7 @@ def _held(failure: Failure) -> str:
 # ships an intent from any worktree (`ship_intent.find_intents`), so it pushes this too.
 OWN_DIFF = (
     "A PR whose failure does not reproduce here is red on its own diff: fetch its head, "
-    "add a worktree on it, fix it there and ship it with the ship skill from that "
+    f"add a worktree on it, fix it there and ship it as {SHIP_INTENT_DOC} says from that "
     "worktree, and name it in the intent here."
 )
 

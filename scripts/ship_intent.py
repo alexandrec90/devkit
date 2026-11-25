@@ -379,7 +379,7 @@ def hand_named(tree: Path, branch: str, base: str) -> bool:
     The namespace rule (`ship.is_shippable`) keeps a PR from opening off a long-lived home
     branch. An agent CLI's worktree or a box is never one, whatever its branch is called:
     a session in social-scraper's spent fixer tree cut `reddit-import-memory-cap` and
-    wrote its intent, and every pass refused it (32f97dae). The ship skill never names
+    wrote its intent, and every pass refused it (32f97dae). `.claude/ship-intent.md` never names
     the rule, so the session had no way to know. The default branch and the static
     checkout stay blocked.
     """

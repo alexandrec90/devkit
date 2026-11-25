@@ -50,6 +50,7 @@ class World:
         self.slept: list[float] = []
         self.merged_prs: set[tuple[str, int]] = set()
         self.merged_branches: set[str] = set()
+        self.pr_states: dict[str, str] = {}
         self.host = "pc-a"
         self.spool = base / "spool"
         self.mode = "dispatch"
@@ -139,6 +140,11 @@ class World:
                 repo = args[1].split("/")[2]
                 answer = "true" if (repo, number) in self.merged_prs else "false"
                 return subprocess.CompletedProcess(args, 0, f"{answer}\n", "")
+            if args[:2] == ("pr", "view"):
+                state = self.pr_states.get(args[2], "")
+                return subprocess.CompletedProcess(
+                    args, 0 if state else 1, json.dumps({"state": state}), ""
+                )
             if args[:2] == ("pr", "list") and "--head" in args:
                 merged = args[args.index("--head") + 1] in self.merged_branches
                 return subprocess.CompletedProcess(

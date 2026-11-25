@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import shutil
 import subprocess
 import sys
 import time
@@ -139,7 +140,7 @@ def record_all(
     Bar one that says a name could not be looked up while this machine still cannot
     (`networked`). A `FINDING` also says which code judged it (`running_code`, or `code`
     in its place); a `FRICTION` row is a session's turn, dated by that session."""
-    written = networked(fresh(findings, items))
+    written = present(networked(fresh(findings, items)))
     if code is None and any(finding.event == FINDING for finding in written):
         code = running_code()
     for finding in written:
@@ -300,6 +301,32 @@ def kept(artifact: Path, devkit_dir: Path, stem: str) -> str:
     return evidence_file(text, devkit_dir, stem) or str(artifact)
 
 
+PROGRAM_MISSING = "program-missing"
+
+
+def crash_finding(name: str, exc: BaseException, where: str) -> Finding:
+    """The finding for step `name` raising `exc`, its traceback kept at `where`.
+
+    A program missing from PATH is one finding per program, whichever steps it took down,
+    with no step name in the detail: the cause is the machine, and three steps that each
+    needed `git` while an install had it off PATH are one problem (8fec5e52, 2522950b,
+    b48af335). `present` drops it again if the program is back by the time it is filed."""
+    if isinstance(exc, sweep.ProgramMissing):
+        detail = f"{exc.program!r} is not on PATH, so the fix-pass steps that run it raised"
+        return Finding(PROGRAM_MISSING, "devkit", detail, evidence=where, command=exc.program)
+    detail = f"fix-pass step {name!r} raised {type(exc).__name__}: {exc}"
+    return Finding("pass-step-crashed", "devkit", detail, evidence=where)
+
+
+def present(
+    findings: list[Finding], which: Callable[[str], str | None] = shutil.which
+) -> list[Finding]:
+    """`findings` bar each `PROGRAM_MISSING` whose program resolves again: an install or
+    upgrade took it off PATH for minutes, the next pass runs those steps again, and a
+    session sent at it would find nothing missing. One still missing is filed."""
+    return [f for f in findings if f.kind != PROGRAM_MISSING or which(f.command) is None]
+
+
 @dataclass
 class Journal:
     """What one pass found, gathered as it goes, and the steps that raised."""
@@ -348,14 +375,7 @@ class Journal:
             trace = traceback.format_exc()
             where = evidence_file(trace, self.devkit_dir, f"step-{name}")
             self.crashed.append(name)
-            self.add(
-                Finding(
-                    "pass-step-crashed",
-                    "devkit",
-                    f"fix-pass step {name!r} raised {type(exc).__name__}: {exc}",
-                    evidence=where,
-                )
-            )
+            self.add(crash_finding(name, exc, where))
             return default
 
 

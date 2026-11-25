@@ -8,6 +8,7 @@ there. It is a queue, not a change to merging, so it works for a gated project a
 direct one alike. The file is the task:
 
     when = "green"          # or merged, released, pr:<repo>#<n>, task:<name>, task:<repo>/<name>,
+                            # adopted:<devkit commit>,
                             # after:<ISO 8601 time with its UTC offset>,
                             # inside:/outside:<HH:MM>-<HH:MM> <zone> [<days>] (`queue_window`)
     on = "any"             # or every-machine, docker, or a hostname
@@ -46,6 +47,12 @@ to re-queue with `when = "merged"`, a session and a PR each time a merge fired i
 (ibkr_trader, 39940185 and 7cc17daf). The offset is required: a bare clock time means a
 different moment on each PC that reads it. A time not yet come is a wait and never
 "late", since nothing is overdue before its own time (`_unmet`).
+
+**`adopted:` waits for this project's vendored copy to hold a devkit commit.** Work that
+needs a vendored change is blocked until a release carries it and the project pulls that
+release, neither of which is a merge or a moment anyone can name (ibkr_trader's re-land
+of 29216e4, edbd9812). It holds once `DEVKIT_VERSION` on the project's default branch is
+that commit or a descendant of it.
 
 **`green` is the `green` branch, wherever it exists.** The post-merge job keeps one in
 every project, gated or direct, and a commit is green once that branch has reached it.
@@ -131,6 +138,7 @@ SESSION_KEY = "after-merge:"
 
 PR_WHEN = re.compile(r"pr:(?P<repo>[\w.-]+(?:/[\w.-]+)?)#(?P<number>[1-9]\d*)$")
 TASK_WHEN = re.compile(r"task:(?:(?P<repo>[\w.-]+)/)?(?P<name>[\w.-]+)$")
+ADOPTED_WHEN = re.compile(r"adopted:(?P<commit>[0-9a-f]{7,40})$")
 AFTER = "after:"
 HOSTNAME = re.compile(r"[A-Za-z0-9][\w.-]*$")
 TASK_NAME = re.compile(r"[A-Za-z0-9][\w.-]*$")
@@ -211,6 +219,7 @@ class Facts:
     released: Callable[[str], bool] = lambda commit: False
     merged: Callable[[str, int], bool] = lambda repo, number: False
     done: Callable[[str, str], bool] = lambda project, name: False
+    adopted: Callable[[str], bool] = lambda commit: False
 
 
 @dataclass(frozen=True)
@@ -304,7 +313,8 @@ def _check_when(when: str, name: str) -> None:
             raise _Malformed(str(why)) from why
         return
     named = TASK_WHEN.match(when)
-    if when not in (GREEN, MERGED, RELEASED) and not PR_WHEN.match(when) and not named:
+    shaped = named or PR_WHEN.match(when) or ADOPTED_WHEN.match(when)
+    if when not in (GREEN, MERGED, RELEASED) and not shaped:
         raise _Malformed(f"when = {when!r} is not a condition this queue knows")
     if named and not named["repo"] and named["name"] == name:
         raise _Malformed("it waits on itself")
@@ -386,6 +396,8 @@ def met(task: Task, facts: Facts, now: float) -> bool:
         return facts.released(task.commit)
     if found := PR_WHEN.match(when):
         return facts.merged(found["repo"], int(found["number"]))
+    if found := ADOPTED_WHEN.match(when):
+        return facts.adopted(found["commit"])
     named = TASK_WHEN.match(when)
     if named is None:
         return False

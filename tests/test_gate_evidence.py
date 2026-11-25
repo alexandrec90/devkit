@@ -73,6 +73,22 @@ def test_a_run_for_another_sha_is_not_this_prs_evidence():
     assert ev.gate_run(gh, "agent/x", "old") == {}
 
 
+def test_a_run_held_for_approval_yields_to_one_at_the_same_sha_that_ran():
+    """carameli #527: a newer `pull_request` gate held as action_required, and an older
+    dispatched gate that failed, both at the head. Only the second has jobs to read."""
+    runs = [
+        {"databaseId": 3, "headSha": "head", "conclusion": "action_required"},
+        {"databaseId": 2, "headSha": "head", "conclusion": "failure"},
+        {"databaseId": 1, "headSha": "old", "conclusion": "failure"},
+    ]
+    assert ev.gate_run(table({("run", "list"): runs}), "b", "head")["databaseId"] == 2
+
+
+def test_a_run_held_for_approval_is_still_read_when_it_is_all_there_is():
+    runs = [{"databaseId": 3, "headSha": "head", "conclusion": "action_required"}]
+    assert ev.gate_run(table({("run", "list"): runs}), "b", "head")["databaseId"] == 3
+
+
 def test_with_no_sha_the_newest_run_is_taken():
     gh = table({("run", "list"): [{"databaseId": 2, "headSha": "new"}, {"databaseId": 1}]})
     assert ev.gate_run(gh, "agent/x", "")["databaseId"] == 2

@@ -20,7 +20,7 @@ branch with `origin/<head>` as its upstream and a bare push lands where the PR i
 looking. (Claude Code's `--from-pr` *resumes a session linked to a PR*, which needs that
 session to still exist here; cutting the worktree works on a PR nobody touched this
 week.) A failure with no branch of its own -- a nightly, a shared vendored failure --
-gets a fresh branch off the default one and a prompt that ends with the ship skill.
+gets a fresh branch off the default one and a prompt that ends with the ship intent (`.claude/ship-intent.md`).
 
 **New worktrees go under `.claude/worktrees/`.** `agent-worktree.py` lists and removes
 them. Existing Claude and Codex worktrees are reused, as are live devkit boxes whose
@@ -123,7 +123,7 @@ def fix_branch(decision: fix_plan.Decision, now=None) -> str:
     """The fresh branch a fix with no branch of its own starts on.
 
     Under `tb.BRANCH_PREFIX` rather than the automation namespace: a person clicked,
-    and the PR the ship skill opens from it is one they asked for. The date suffix is
+    and the PR the pass opens from its intent is one they asked for. The date suffix is
     `tb.branch_name`'s, so the branch reads beside every other agent cut; the counter
     against the checkout's own branches is `cut_fresh_tree`'s.
     """
@@ -186,6 +186,7 @@ def run_one(
     # this view says "nothing wrong with it now" -- a session that opens nothing,
     # reports success, and leaves the PR exactly as red as it was.
     menu.settle_mergeability(project_dir, [pr])
+    menu.add_dispatched_gates(project_dir, [pr])
     if not menu.broken_reason(pr):
         print(f"{pick.project} #{pick.number}: nothing wrong with it now -- nothing to do")
         return EXIT_OK

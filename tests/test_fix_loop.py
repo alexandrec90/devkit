@@ -837,6 +837,7 @@ def test_a_working_devkit_session_is_the_harness_busy(ctx, monkeypatch):
     )
     closed, journal = close(ctx)
     assert closed.harness_busy == str(path) and journal.findings == []
+    assert closed.fixing == [str(path)]
 
 
 def test_a_working_sweep_of_the_ledger_alone_is_the_harness_busy(ctx, monkeypatch):
@@ -868,6 +869,7 @@ def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ct
     (path / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
     closed, _ = close(ctx)
     assert closed.busy == {} and closed.harness_busy == "", "idle: finished, holds nothing"
+    assert closed.fixing == [], "a finished fixer leaves the next one alone"
     listed = [{"kind": "background", "state": "working", "cwd": str(path)}]
     monkeypatch.setattr(fix_loop, "session_listing", lambda: listed)
     closed, _ = close(ctx)
@@ -1769,23 +1771,23 @@ def test_a_job_the_scheduler_only_remembers_failing_is_not_filed(ctx, monkeypatc
 
 
 def test_the_files_sessions_are_told_to_write_are_the_files_the_pass_reads():
-    """Prose has no compiler: the channel the ship skill, the engineering rule and every
+    """Prose has no compiler: the channel the ship intent reference, the engineering rule and every
     fixer prompt name must be the path `fix_reports` reads, or the lines go nowhere."""
     root = Path(__file__).resolve().parents[1]
     channel = fix_reports.FRICTION_FILE.as_posix()
-    for doc in (".claude/skills/ship/SKILL.md", ".claude/rules/engineering.md"):
+    for doc in (".claude/ship-intent.md", ".claude/rules/engineering.md"):
         assert channel in (root / doc).read_text(encoding="utf-8"), doc
     assert channel in fix_loop.fix_findings.__doc__ or channel in fix_reports.__doc__
 
 
-def test_the_ship_skill_adds_to_the_friction_file_rather_than_replacing_it():
+def test_the_ship_intent_reference_adds_to_the_friction_file_rather_than_replacing_it():
     """ "Write one line per thing" read as the Write tool: a resolver replaced the two lines
     a live ledger sweep had left in the same tree, which only survived because that
     sweep noticed and put them back."""
     root = Path(__file__).resolve().parents[1]
-    skill = " ".join((root / ".claude/skills/ship/SKILL.md").read_text(encoding="utf-8").split())
+    skill = " ".join((root / ".claude/ship-intent.md").read_text(encoding="utf-8").split())
     assert "add one line per thing" in skill and "keeping the lines already there" in skill
-    # Every session ships through the skill, not only a fixer the prompt told.
+    # Every unattended session finishes through it, not only a fixer the prompt told.
     assert "`fixed on this branch`" in skill and fix_reports.fixed_here("fixed on this branch")
 
 

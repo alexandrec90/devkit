@@ -171,6 +171,62 @@ def test_attempts_are_counted_on_the_remote_and_then_it_fails_visibly(world):
     assert any("failed after" in line and "job" in line for line in world.findings())
 
 
+WAITED = "https://github.com/alexandrec90/devkit/pull/813"
+
+
+def _stopped_waiting(world, state: str) -> str:
+    """A task whose session ended naming `WAITED`, which reads `state`."""
+    task = world.queue('agent = "x"\nwhen = "merged"\n')
+    world.run()
+    blocked = world.trees[0] / fix_reports.BLOCKED_FILE
+    blocked.write_text(f"Waits on: {WAITED}\n", encoding="utf-8")
+    # What the fix pass on this PC does with the report, often before the queue looks.
+    fix_reports.file_away(world.trees[0], fix_reports.BLOCKED_FILE)
+    world.session = fix_reports.NO_OUTCOME
+    world.pr_states[WAITED] = state
+    return task
+
+
+@pytest.mark.parametrize("state", ["OPEN", ""])
+def test_a_session_waiting_on_an_open_pr_holds_the_task_and_spends_nothing(world, state):
+    """7231b0c9, 1a419168: three sessions in a row were sent at a wall only a release
+    removed, and the task failed before the release was out."""
+    task = _stopped_waiting(world, state)
+    for _cycle in range(2 * am.MAX_ATTEMPTS + 2):
+        world.run()
+    assert len(world.launches) == 1 and not world.on_remote(jc.failed_ref(task))
+    world.pr_states[WAITED] = "MERGED"
+    world.run()
+    world.session = fix_reports.WORKING
+    world.run()
+    assert len(world.launches) == 2
+    assert world.result(task)["attempt"] == 1, "the wait gave its attempt back"
+
+
+def test_pr_state_reads_any_repositorys_pr_by_url_and_an_unreadable_one_as_empty(world):
+    gh = world.gh_for(world.checkout)
+    assert after_merge_pass.fix_send.pr_state(gh, WAITED) == ""
+    world.pr_states[WAITED] = "MERGED"
+    assert after_merge_pass.fix_send.pr_state(gh, WAITED) == "MERGED"
+
+
+def test_a_session_waiting_on_a_pr_already_closed_spends_its_attempt(world):
+    task = _stopped_waiting(world, "CLOSED")
+    for _cycle in range(2 * am.MAX_ATTEMPTS + 2):
+        world.run()
+    assert len(world.launches) == am.MAX_ATTEMPTS and world.on_remote(jc.failed_ref(task))
+
+
+def test_a_wait_past_its_days_is_an_attempt_spent(world):
+    task = _stopped_waiting(world, "OPEN")
+    world.run()
+    world.advance(am.UNCLAIMED_AFTER_DAYS + 1)
+    world.run()
+    world.session = fix_reports.WORKING
+    world.run()
+    assert len(world.launches) == 2 and world.result(task)["attempt"] == 2
+
+
 def test_a_failed_task_is_visible_in_status_and_stays_in_the_repo(world, capsys):
     task = world.queue('agent = "x"\nwhen = "merged"\n')
     world.run()

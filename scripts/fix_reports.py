@@ -384,12 +384,23 @@ def waits_on(tree: Path) -> str:
     no more merge #66 than the fixer could -- and resolving it sent a fresh fixer at the
     same wall. A wait is not a defect: the pass holds the problem until that PR closes.
     """
+    return _waits_in(tree / BLOCKED_FILE)
+
+
+def _waits_in(report: Path) -> str:
+    """The last PR `report` says it waits on: a filed report is appended to."""
     try:
-        text = (tree / BLOCKED_FILE).read_text(encoding="utf-8", errors="replace")
+        text = report.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    found = WAITS_LINE.search(text)
-    return found.group(1) if found else ""
+    found = WAITS_LINE.findall(text)
+    return found[-1] if found else ""
+
+
+def waited_on(tree: Path) -> str:
+    """`waits_on`, whether or not the fix pass has filed the report away: what the
+    after-merge queue, which reads the tree on its own clock, asks of its session's."""
+    return waits_on(tree) or _waits_in(tree / filed(BLOCKED_FILE))
 
 
 def agent_trees(
@@ -470,7 +481,7 @@ def friction_lines(tree: Path) -> tuple[str, ...]:
 
 
 # How a session says it fixed what a friction line reports, in the tree that wrote it:
-# the spelling `fix_prompts.FINISH` and the ship skill ask for, and its near variants.
+# the spelling `fix_prompts.FINISH` and `.claude/ship-intent.md` ask for, and its near variants.
 FIXED_HERE = re.compile(r"\bfixed (?:it )?(?:on|in) this (?:branch|tree)\b", re.I)
 
 
@@ -634,7 +645,12 @@ def active_transcript(
 
 # A background task a session started, and the notification that it ended. Read as
 # text, not parsed: both are in the transcript verbatim, a JSON escape or two aside.
-_TASK_LAUNCHED = re.compile(r"running in background with ID: ([A-Za-z0-9_-]+)")
+# The second wording is a foreground call Claude Code took out of the foreground, held to
+# the start of a result: a session reading these tests quotes it inside one.
+_TASK_LAUNCHED = re.compile(
+    r'(?:running in background with ID: |"(?:content|text)":\s?"Command [^"\\]{0,60}?'
+    r"moved to the background \(ID: )([A-Za-z0-9_-]+)"
+)
 _TASK_NOTIFIED = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
 
 

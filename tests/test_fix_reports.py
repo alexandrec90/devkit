@@ -197,6 +197,19 @@ def test_waits_on_reads_the_pr_a_blocked_report_names_on_its_own_line(tmp_path):
     assert fix_reports.waits_on(tmp_path) == "", "a URL, so gh can read it from anywhere"
 
 
+def test_waited_on_reads_a_report_the_pass_has_filed_away_and_the_last_one_in_it(tmp_path):
+    (tmp_path / "logs").mkdir()
+    url = "https://github.com/alexandrec90/devkit/pull/"
+    report = tmp_path / fix_reports.BLOCKED_FILE
+    assert fix_reports.waited_on(tmp_path) == ""
+    for number in ("809", "813"):
+        report.write_text(f"Waits on: {url}{number}\n", encoding="utf-8")
+        assert fix_reports.waited_on(tmp_path) == url + number
+        fix_reports.file_away(tmp_path, fix_reports.BLOCKED_FILE)
+    assert fix_reports.waits_on(tmp_path) == ""
+    assert fix_reports.waited_on(tmp_path) == f"{url}813"
+
+
 def listing(*entries: tuple[Path, str]) -> str:
     return "".join(
         f"worktree {path.as_posix()}\nHEAD 1\nbranch refs/heads/{branch}\n\n"
@@ -593,6 +606,22 @@ def test_a_session_waiting_on_its_own_background_task_is_not_done_with_an_intent
     assert fix_reports.pending_tasks(log) == frozenset()
     assert not fix_reports.awaiting_task(tree, now, projects)
     assert fix_reports.session_state(tree, now, projects) == (fix_reports.DONE, str(log))
+
+
+def test_a_call_moved_to_the_background_is_a_task_out_until_it_reports(tmp_path):
+    """fbf4aebc: the prompt tells a fixer it may end its turn on one, so the pass must see
+    it. A result that only quotes the words names no task."""
+    log = tmp_path / "s.jsonl"
+    moved = "was moved to the background (ID: b0ysilsms). Output is being written to x."
+    timed_out = f"Command did not complete within its 600s timeout and {moved}"
+    for said in (f"Command {moved}", timed_out):
+        log.write_text(json.dumps({"content": said}) + "\n", encoding="utf-8")
+        assert fix_reports.pending_tasks(log) == {"b0ysilsms"}
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("<task-id>b0ysilsms</task-id>\n")
+    assert fix_reports.pending_tasks(log) == frozenset()
+    log.write_text(json.dumps({"content": f'x = "{timed_out}"'}) + "\n", encoding="utf-8")
+    assert fix_reports.pending_tasks(log) == frozenset()
 
 
 def test_only_the_stamped_live_session_is_asked_about_background_tasks(tmp_path):

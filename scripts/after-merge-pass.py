@@ -24,7 +24,8 @@
 `devkit.fixPass` says on that PC (`_read_back`): an intent in the tree or a merged PR is
 done, the fix pass's own `fix_reports.session_state` says whether a session is alive,
 and one that died offers the task again, up to `MAX_ATTEMPTS`, after which it is failed
-and filed. The worker's taking a request is done too. A PC gone quiet for days loses its
+and filed. One that stopped on an open PR (`Waits on:`) is held until that closes
+(`_waits`). The worker's taking a request is done too. A PC gone quiet for days loses its
 handed task to another.
 
 **A claim says who, a done ref says it is over.** `job_claims` decides which PC takes a
@@ -57,7 +58,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -68,6 +69,7 @@ import after_merge_tidy
 import agent_models
 import agent_worktrees as aw
 import devkit_project
+import fix_budget
 import fix_findings
 import fix_loop
 import fix_prompts
@@ -517,10 +519,15 @@ def _spent_attempt(
     if held.attempts >= after_merge.MAX_ATTEMPTS:
         _give_up(task, board, why, cycle)
         return
+    _offer(task, held.attempts, board, why, cycle)
+
+
+def _offer(task: Task, attempts: int, board: Board, why: str, cycle: Cycle) -> None:
+    """`task` open to be taken again, with `attempts` spent."""
     ref = job_claims.handed_ref(_key(task, cycle))
-    subject = after_merge.handed_subject(task, cycle.seams.host, held.attempts, offered=True)
+    subject = after_merge.handed_subject(task, cycle.seams.host, attempts, offered=True)
     if job_claims.stamp(cycle.git(board), ref, subject, _ref_sha(board, ref), cycle.seams.now()):
-        _write_result(task, cycle.seams, status=OFFERED, offered_because=why)
+        _write_result(task, cycle.seams, status=OFFERED, offered_because=why, waits="")
         _release(task, board, cycle)
         cycle.say(f"{task.project} {task.name}: offered again: {why}")
 
@@ -567,8 +574,36 @@ def _read_back(task: Task, board: Board, cycle: Cycle) -> None:
     elif outcome:
         if outcome.endswith(fix_reports.UNTRUSTED):
             _untrusted(task, board, cycle)
+        if _waits(task, held, result, board, cycle):
+            return
         _spent_attempt(task, held, board, outcome, cycle)
         _bury(result, outcome)
+
+
+def _waits(task: Task, held: after_merge.Handed, result: dict, board: Board, cycle: Cycle) -> bool:
+    """Whether `task`'s stopped session named a PR its work waits on, and that is in hand:
+    held while the PR is open, then offered again with the attempt it did not use given back.
+
+    7231b0c9, 1a419168: sports_betting's re-land of cddef05 needed a devkit release. Three
+    sessions in a row each wrote `Waits on:`, which only the fix pass read, so the queue sent
+    the next at the same wall five minutes later and the task failed before the release was
+    out. Only a wait seen open gives the attempt back, so a session naming a PR already
+    closed uses one up; and one past `UNCLAIMED_AFTER_DAYS` is an attempt spent.
+    """
+    tree = str(result.get("tree", ""))
+    url = fix_reports.waited_on(Path(tree)) if tree else ""
+    if not url or cycle.seams.now() - held.at >= after_merge.UNCLAIMED_SECONDS:
+        return False
+    state = fix_send.pr_state(cycle.seams.gh_for(board.path), url)
+    if state not in fix_budget.SETTLED:
+        _write_result(task, cycle.seams, waits=url)
+        said = state.lower() or "its state is unreadable"
+        cycle.say(f"{task.project} {task.name}: waits on {url}: {said}")
+        return True
+    if result.get("waits") != url:
+        return False
+    _offer(task, held.attempts - 1, board, f"{url} is {state.lower()}", cycle)
+    return True
 
 
 def _bury(result: dict, outcome: str) -> None:
@@ -687,7 +722,12 @@ def _note(task: Task, board: Board, why: str, cycle: Cycle) -> str:
 
 def _facts(board: Board, boards: dict[str, Board], docker: bool, seams: Seams) -> after_merge.Facts:
     git, gh = seams.git_for(board.path), seams.gh_for(board.path)
-    return after_merge_board.facts_for(board, boards, seams.host, docker, git, gh)
+    facts = after_merge_board.facts_for(board, boards, seams.host, docker, git, gh)
+    home = boards.get(DEVKIT)
+    if home is None:
+        return facts
+    adopted = after_merge_board.adopted_fact(board, git, seams.git_for(home.path))
+    return replace(facts, adopted=adopted)
 
 
 def _act(task: Task, verdict: after_merge.Verdict, board: Board, cycle: Cycle) -> str | None:

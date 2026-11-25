@@ -54,7 +54,7 @@ def red_main(**fields) -> fix_plan.Failure:
 
 def test_the_pr_prompt_names_the_pr_the_fault_the_ids_the_logs_and_the_finish_line():
     text = fix_prompts.pr_prompt(failure(evidence="C:/ev/carameli-pr-412"))
-    assert "ship skill" in text
+    assert "ship-intent.md" in text
     for expected in (
         "#412",
         "carameli",
@@ -80,7 +80,7 @@ def test_the_upstream_prompt_names_every_project_and_pr_and_ends_in_the_ship_ski
     # of a project's own runner is fixed in that project.
     assert "A template reaches no project already generated" in text
     assert all(owned in text for owned in fix_plan.PROJECT_OWNED)
-    assert "ship skill" in text and "agent/fix-x-0918" in text
+    assert "ship-intent.md" in text and "agent/fix-x-0918" in text
 
 
 def test_the_upstream_prompt_sends_a_pr_red_on_its_own_diff_to_that_pr():
@@ -88,7 +88,7 @@ def test_the_upstream_prompt_sends_a_pr_red_on_its_own_diff_to_that_pr():
     only stop: nothing on a fresh branch off a green default lands on the PR."""
     text = fix_prompts.upstream_prompt((failure(),), "agent/fix")
     assert fix_prompts.OWN_DIFF in text
-    assert "ship it with the ship skill from that worktree" in text
+    assert "ship it as .claude/ship-intent.md says from that worktree" in text
     assert text.index(fix_prompts.OWN_DIFF) < text.index(fix_prompts.STOP)
 
 
@@ -433,6 +433,18 @@ def test_a_pr_prompt_sends_its_fixer_to_the_prs_own_description():
     assert "gh pr view" not in fix_prompts.pr_prompt(commit), "a refused commit has no PR yet"
 
 
+def test_a_red_pr_fixer_may_close_an_obsolete_pr_rather_than_leave_it_red():
+    """carameli #527 sat red for days with nothing sent at it; a PR the base has already
+    overtaken is fixed by closing it, never by leaving it open."""
+    red = failure()
+    text = fix_prompts.pr_prompt(red)
+    assert f"gh pr close {red.number} --delete-branch" in text
+    assert f"origin/{red.base} already holds its change" in text
+    assert text.endswith(fix_prompts.STOP)
+    conflicted = fix_prompts.pr_prompt(failure(signature=(fix_plan.CONFLICT,)))
+    assert "gh pr close" not in conflicted, "a resolver's job is the merge alone"
+
+
 def test_a_resolver_is_told_the_true_base_when_the_base_squashed_part_of_its_branch():
     """6c10216b: #96 squashed #98's first two commits into main, so `git merge` called
     eight files add/add against a merge base older than both."""
@@ -558,7 +570,7 @@ def test_the_branch_prompt_names_the_base_the_run_the_ids_and_the_fresh_branch()
         "tests/t.py::a",
         fix_plan.EVIDENCE_DIR,
         "agent/fix-pr-gate-0919",
-        "ship skill",
+        "ship-intent.md",
     ):
         assert expected in text
 
@@ -614,7 +626,7 @@ def test_every_prompt_ends_at_the_ship_skill_or_the_blocked_file_and_never_at_a_
     any of them is the expensive way to run a command. The PR prompt used to say "merge
     origin/main in ... push" and the resolver used to commit and push itself."""
     for text in every_prompt():
-        assert "ship skill" in text and "logs/fix-blocked.md" in text
+        assert "ship-intent.md" in text and "logs/fix-blocked.md" in text
         assert "the fix pass commits, pushes, opens or updates the PR" in text
         assert "git push" not in text and "Merge origin/main in, fix" not in text
         assert "bare git push" not in text
@@ -755,14 +767,14 @@ def test_every_prompt_names_the_ratchets_and_forbids_a_question():
 
 
 def test_the_nothing_to_change_outcome_is_the_one_the_pass_sets_aside():
-    """The prompt sends an already-fixed failure through the ship skill; that only holds
-    if the skill says so and the pass reads an intent over a clean tree as done."""
-    skill = " ".join((REPO_ROOT / ".claude/skills/ship/SKILL.md").read_text("utf-8").split())
+    """The prompt sends an already-fixed failure through the ship intent; that only holds
+    if the reference says so and the pass reads an intent over a clean tree as done."""
+    skill = " ".join((REPO_ROOT / ".claude/ship-intent.md").read_text("utf-8").split())
     assert "a failure already fixed where the tree was cut" in skill
     assert "ship-intent.md" in fix_prompts.FINISH
     assert fix_prompts.INTENT_FILE in fix_reports.OUTCOME_FILES
     fixer = " ".join((REPO_ROOT / ".claude/fixer.md").read_text("utf-8").split())
-    assert "already fixed" in fixer and "the ship skill" in fixer
+    assert "already fixed" in fixer and "the ship intent" in fixer
 
 
 def test_a_red_gate_prompt_names_the_readable_failures_and_that_the_gate_is_linux(tmp_path):
@@ -787,7 +799,7 @@ def test_a_friction_line_quotes_what_the_session_saw():
     words the harness printed are the only evidence a paraphrase cannot lose."""
     for text in every_prompt():
         assert "quote the harness words you saw, not your paraphrase" in text
-    skill = " ".join((REPO_ROOT / ".claude/skills/ship/SKILL.md").read_text("utf-8").split())
+    skill = " ".join((REPO_ROOT / ".claude/ship-intent.md").read_text("utf-8").split())
     assert "quoting the harness words you saw, not your paraphrase" in skill
 
 
@@ -840,6 +852,15 @@ def test_a_tree_whose_runner_runs_the_suite_bare_is_told_so_as_a_fact():
         assert told.endswith(fix_prompts.STOP)
         assert fix_prompts.for_runner(text, suite_bare=False) == text
     assert fix_prompts.RUNNER_SENTENCE in fix_prompts.FINISH
+
+
+def test_the_finish_says_a_long_check_is_waited_for_by_ending_the_turn():
+    """fbf4aebc: a fixer held its turn in an until loop on its own test run, told in the
+    same prompt that ending with no intent reads as dying."""
+    text = fix_prompts.pr_prompt(failure())
+    assert fix_prompts.WAIT_SENTENCE in text
+    assert "run_in_background" in text and "end your turn" in text
+    assert not set("\"'`") & set(fix_prompts.WAIT_SENTENCE), "it crosses a wt command line"
 
 
 def test_a_prompt_names_the_log_that_came_down_when_no_junit_report_failed(tmp_path):

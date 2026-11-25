@@ -5382,14 +5382,22 @@ def sync_in_time(
     workspace: Path, checkouts: bool, apply: bool, fetch: bool, deferred: list[str]
 ) -> tuple[int, dict]:
     """`sync_checkouts` for `reconcile`, unless `checkouts` is off -- or a caller's
-    `sweep.until` deadline has passed, which names the sync in `deferred` instead."""
+    `sweep.until` deadline has passed, which names the sync in `deferred` instead.
+
+    So does a deadline passed *during* the sync: every git call past it is not started,
+    which reads as no origin/HEAD and a failed fetch in every checkout it had left, and
+    was reported as git refusing, "the state needs a human" (f7c3da3f)."""
     if not checkouts:
         return 0, {}
     if sweep.past_until():
         deferred.append("the checkout sync")
         return 0, {}
     reconcile_journal.step("sync checkouts")
-    return sync_checkouts(workspace, apply=apply, fetch=fetch)
+    code, summary = sync_checkouts(workspace, apply=apply, fetch=fetch)
+    if sweep.past_until():
+        deferred.append("the checkout sync")
+        return 0, {}
+    return code, summary
 
 
 def bounded_cli(

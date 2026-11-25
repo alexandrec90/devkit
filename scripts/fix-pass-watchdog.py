@@ -473,7 +473,7 @@ def rescue_prompt(kind: str, detail: str, branch: str) -> str:
         f"{FAILURE_LOG.as_posix()} in this worktree, which is devkit on the fresh branch "
         f"{branch} off the default branch. You are the fix pass's own repair: find why "
         "scripts/fix-pass.py, or a module it loads, fails this way; fix it with a regression "
-        "test that fails without the fix; then ship it with the ship skill and stop. Nothing "
+        "test that fails without the fix; then ship it as .claude/ship-intent.md says and stop. Nothing "
         "else is in scope, and nothing else is shipped until the pass runs again. Once the "
         f"fix is in your intent, retire the {EVENT} group whose detail starts `{kind}:` -- "
         "its id is in python scripts/harness_triage.py's output -- with python "

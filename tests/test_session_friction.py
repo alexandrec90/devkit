@@ -565,6 +565,15 @@ def test_a_subagent_waiting_on_a_run_it_backgrounded_itself_is_not_polling():
     ], "only the file of a call of its own"
 
 
+def test_a_call_moved_out_at_its_own_timeout_is_moved_too():
+    """fbf4aebc: the other wording Claude Code answers a call it moves out with."""
+    moved = MOVED.replace("Command was", "Command did not complete within its 600s timeout and was")
+    rows = [call("python -m pytest tests/test_x.py", "1"), result(moved, "1", error=False)]
+    rows += [call(WAIT_ON_MOVED, "2"), result("3 passed", "2", error=False)]
+    assert subagent(rows) == []
+    assert classes(rows) == ["poll"], "a top-level session gets the notice, so it can stop"
+
+
 def test_a_subagents_loop_on_anything_else_is_still_a_poll():
     """Only the call Claude Code moved: its other waits are the habit."""
     rows = [call("python -m pytest tests/test_x.py", "1"), result(MOVED, "1", error=False)]
@@ -794,6 +803,24 @@ def test_command_position_keeps_the_length_and_the_quoted_text():
     assert blanked == "grep -n 'a b' x.py; git log --grep \"c d\""
 
 
+def test_a_heredoc_commit_message_line_is_not_a_test_run():
+    """f2fccb72, filed as a recurrence three times: a commit message in a heredoc had a
+    line opening "pytest its project names.", read as a bare whole-suite pytest."""
+    command = (
+        'cd "C:/x/.claude/worktrees/tab-1" && git add tests/test_a.py && git commit -q -F - '
+        "<<'EOF'\nKeep project sessions out of tests\n\nA session that runs\n"
+        "pytest its project names.\nEOF"
+    )
+    assert not sf.runs_tests(command)
+    assert sf.whole_runs(command) == []
+    assert len(sf.command_position(command)) == len(command)
+
+
+def test_a_heredoc_a_shell_reads_is_still_commands():
+    assert sf.whole_runs("bash <<'EOF'\npytest\nEOF") == [""]
+    assert sf.whole_runs("cat <<'EOF' > x.txt\npytest\nEOF\npytest") == [""], "after EOF it runs"
+
+
 def test_an_error_quoted_inside_a_string_on_its_line_is_not_friction():
     """The first supervised rehearsal would have filed seven groups from text that quoted
     an error: a `git diff` of the rule's prose, pytest echoing an assertion's operands,
@@ -869,7 +896,11 @@ def test_the_rules_every_session_reads_answer_the_two_frictions_they_file():
     and the ban sat in a subordinate clause of the worktree-guard section, below
     bypass mode's own advice to use the shell for small edits. 2ca551a4's session ran
     `uv run pytest` in a fresh `claude --worktree` tree, which no git hook provisions,
-    and got a `.venv` with no pytest. Both answers lead their own sentence now."""
+    and got a `.venv` with no pytest. Both answers lead their own sentence now.
+
+    The second answer was once "run `run-tests.py` bare, it builds the `.venv`", and
+    sessions then spent their turns provisioning trees. A project session now runs no
+    tests and provisions nothing; that work, and the instructions for it, are a fixer's."""
     rules = Path(__file__).resolve().parents[1] / ".claude" / "rules"
     engineering = (rules / "engineering.md").read_text(encoding="utf-8")
     assert (
@@ -877,7 +908,12 @@ def test_the_rules_every_session_reads_answer_the_two_frictions_they_file():
     )
     assert "`python -` patch script" in engineering
     scope = " ".join((rules / "session-scope.md").read_text(encoding="utf-8").split())
-    assert "run it bare: it builds the `.venv` a `claude --worktree` tree arrives without" in scope
+    assert "run any tests at all, or the linter by hand" in scope
+    assert "A `claude --worktree` tree arrives bare and stays bare." in scope
+    for told_to_provision in ("run it bare", 'worktree.py" provision', "is part of the fix"):
+        assert told_to_provision not in scope, f"session-scope.md still says {told_to_provision!r}"
+    fixer = " ".join((rules.parent / "fixer.md").read_text(encoding="utf-8").split())
+    assert "## An environment that cannot run the checks is part of the fix" in fixer
 
 
 def test_the_scope_rule_names_the_whole_run_sessions_type():
