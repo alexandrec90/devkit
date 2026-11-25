@@ -235,7 +235,7 @@ def test_a_red_found_while_a_pass_runs_starts_the_next_one(tmp_path):
     """The running pass may already have read that gate, so it does not spend the signal."""
     machine = Machine(tmp_path)
     machine.repo = repo([commit("a", "FAILURE")])
-    lock = tmp_path / ".worktrees" / trigger.PASS_LOCK
+    lock = tmp_path / ".worktrees" / trigger.FIX_LOCK
     lock.mkdir(parents=True)
     assert machine.fire() == 0 and machine.starts == 0
     lock.rmdir()
@@ -243,12 +243,12 @@ def test_a_red_found_while_a_pass_runs_starts_the_next_one(tmp_path):
 
 
 def test_a_lock_a_dead_pass_left_holds_nothing(tmp_path):
-    lock = tmp_path / ".worktrees" / trigger.PASS_LOCK
+    lock = tmp_path / ".worktrees" / trigger.FIX_LOCK
     assert not trigger.pass_running(tmp_path)
     lock.mkdir(parents=True)
     made = lock.stat().st_mtime
     assert trigger.pass_running(tmp_path, lambda: made + 60)
-    assert not trigger.pass_running(tmp_path, lambda: made + trigger.PASS_LOCK_STALE)
+    assert not trigger.pass_running(tmp_path, lambda: made + trigger.FIX_LOCK_STALE)
 
 
 def test_a_pass_that_would_not_start_is_tried_again_and_fails_the_job(tmp_path, capsys):
@@ -295,9 +295,9 @@ def test_what_still_stands_is_remembered_and_the_rest_forgotten(tmp_path):
 def test_the_names_spelled_here_are_their_owners():
     fix_pass = load_script("scripts/fix-pass.py")
     installer = load_script("scripts/install-fix-pass-task.py")
-    assert trigger.PASS_TASK == installer.TASK_NAME
-    assert trigger.PASS_LOCK == fix_pass.RUN_LOCK_NAME
-    assert trigger.PASS_LOCK_STALE == fix_pass.RUN_LOCK_STALE
+    assert trigger.FIX_TASK == installer.TASK_NAME
+    assert trigger.FIX_LOCK == fix_pass.RUN_LOCK_NAME
+    assert trigger.FIX_LOCK_STALE == fix_pass.RUN_LOCK_STALE
     assert trigger.REFUSED == fix_pass.ship_intent.REFUSED
     assert trigger.SHIP_STATE == fix_pass.ship_intent.STATE_FILE.name
 
