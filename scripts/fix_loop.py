@@ -111,6 +111,9 @@ class Closed:
     stopped: list[str] = field(default_factory=list)
     # Each tree some session is at work in now, as the record names it (`where`).
     at_work: list[str] = field(default_factory=list)
+    # The trees a dispatched session is still working in, a person's own tabs left out:
+    # with none, the next fixer runs alone (`host_memory.LONE_FLOOR_MB`).
+    fixing: list[str] = field(default_factory=list)
     # When the newest stamped session that reached an outcome began: proof the machine's
     # login worked then, which retires a `LOGIN_KIND` row older than it (`retire_login`).
     signed_in: str = ""
@@ -322,11 +325,19 @@ def _judge_session(
     running = bg_sessions.busy_in(closed.working, tree.path)
     if tree.branch and (running or (live and str(live) != transcript)):
         closed.busy[(tree.project, tree.branch)] = str(tree.path)
+    at_work = state == fix_reports.WORKING or running
+    _note_fixing(closed, tree, key, at_work)
     if state in fix_reports.DEAD:
         closed.lines.extend(judge_dead(ctx, tree, where, state, transcript, journal))
-    elif (state == fix_reports.WORKING or running) and fix_ledger.is_upstream(key):
+    elif at_work and fix_ledger.is_upstream(key):
         closed.harness_busy = str(tree.path)
     return running or live is not None
+
+
+def _note_fixing(closed: Closed, tree: fix_reports.Tree, key: str, at_work: bool) -> None:
+    """Record in `closed.fixing` a tree a dispatched session (`key`) is still at work in."""
+    if key and at_work:
+        closed.fixing.append(str(tree.path))
 
 
 def _note_signed_in(closed: Closed, transcript: str) -> None:

@@ -27,6 +27,10 @@ SESSION_MB = 500
 # What anything a job starts must leave free: the person at the machine's room for their
 # own work.
 FLOOR_MB = 2048
+# What the fix pass's only fixer must leave free. Held to `FLOOR_MB`, 35 of 43 passes on
+# 2026-11-23/24 held a session, 33 of them with over 1 GB free, and every PR behind it
+# waited. The kill above was nine at once, so one alone is let in.
+LONE_FLOOR_MB = 512
 
 
 class _MemoryStatus(ctypes.Structure):
@@ -72,10 +76,10 @@ def available_mb() -> int | None:
         return None
 
 
-def room_for_session(free_mb: int | None) -> bool:
-    """`free_mb` holds one more session above the floor; True for a probe that failed,
+def room_for_session(free_mb: int | None, floor: int = FLOOR_MB) -> bool:
+    """`free_mb` holds one more session above `floor`; True for a probe that failed,
     for the reason the module docstring gives."""
-    return free_mb is None or free_mb - SESSION_MB >= FLOOR_MB
+    return free_mb is None or free_mb - SESSION_MB >= floor
 
 
 if __name__ == "__main__":
