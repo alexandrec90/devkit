@@ -21,6 +21,7 @@ import json
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -39,7 +40,17 @@ GRACE = 40 * 60
 # The longest one claim takes: its turn, a push, the read of who holds it, a second push.
 BOUND = job_claims.MAX_DELAY_SECONDS + 2 * job_claims.PUSH_SECONDS + sweep.NETWORK_TIMEOUT
 
-Say = Callable[[str], None]
+
+@dataclass(frozen=True)
+class Claimant:
+    """The machine asking for a claim, and what it asks through."""
+
+    git: job_claims.Git
+    host: str
+    say: Callable[[str], None]
+    now: Callable[[], float] = time.time
+    free_mb: Callable[[], int | None] = host_memory.available_mb
+    sleep: Callable[[float], None] = time.sleep
 
 
 def claim_id(project: str) -> str:
@@ -79,13 +90,7 @@ def resolve(
     collectors: Sequence[config.Collector],
     assignment: Mapping[str, str],
     path: Path,
-    git: job_claims.Git,
-    host: str,
-    say: Say,
-    *,
-    now: Callable[[], float] = time.time,
-    free_mb: Callable[[], int | None] = host_memory.available_mb,
-    sleep: Callable[[float], None] = time.sleep,
+    here: Claimant,
 ) -> dict[str, str]:
     """Claim, renew or give back each `failover` collector's claim; the assignment to act
     on. Touches nothing, and asks nothing, where none is declared."""
@@ -98,10 +103,10 @@ def resolve(
         name = collector.project
         known = record.get(name, {})
         if assignment.get(name) == config.RUN:
-            if not _hold(name, known, record, git, host, say, now, free_mb, sleep):
+            if not _hold(name, known, record, here):
                 acted[name] = config.STOP
             changed = True
-        elif known and _let_go(name, known, git, host, now()):
+        elif known and _let_go(name, known, here):
             record.pop(name)
             changed = True
     if changed:
@@ -109,49 +114,40 @@ def resolve(
     return acted
 
 
-def _let_go(name: str, known: Mapping, git: job_claims.Git, host: str, moment: float) -> bool:
+def _let_go(name: str, known: Mapping, here: Claimant) -> bool:
     """Give the claim back; whether its record is done with. One that could not be given
     back is kept, so the next pass retries, until it is old enough for anyone to break."""
-    if not known.get(HELD) or job_claims.release(git, claim_id(name), host):
+    moment = here.now()
+    if not known.get(HELD) or job_claims.release(here.git, claim_id(name), here.host):
         return True
     ttl = job_claims.ttl_of(job_claims.COLLECTOR).total_seconds()
     return moment - float(known.get(AT, 0)) >= ttl
 
 
-def _hold(
-    name: str,
-    known: Mapping,
-    record: dict[str, dict],
-    git: job_claims.Git,
-    host: str,
-    say: Say,
-    now: Callable[[], float],
-    free_mb: Callable[[], int | None],
-    sleep: Callable[[float], None],
-) -> bool:
+def _hold(name: str, known: Mapping, record: dict[str, dict], here: Claimant) -> bool:
     """Whether this machine may run `name` for this pass; what it learned, in `record`."""
     mine = bool(known.get(HELD))
     if not mine:
         # A short machine only goes last: refused, it would run nowhere with no other PC on.
-        job_claims.wait_turn(free_mb(), sleep)
+        job_claims.wait_turn(here.free_mb(), here.sleep)
     # Read before the push: the claim's commit carries this moment, so a slow push must
     # not make this machine believe it renewed later than the ref says.
-    moment = now()
-    got = job_claims.claim(git, claim_id(name), job_claims.COLLECTOR, host, moment)
+    moment = here.now()
+    got = job_claims.claim(here.git, claim_id(name), job_claims.COLLECTOR, here.host, moment)
     if got.won:
-        record[name] = {HELD: True, HOLDER: host, AT: moment}
+        record[name] = {HELD: True, HOLDER: here.host, AT: moment}
         if got.broke:
-            say(f"{name}: taken over from {got.broke}, which stopped renewing")
+            here.say(f"{name}: taken over from {got.broke}, which stopped renewing")
         elif not mine:
-            say(f"{name}: claimed by this machine")
+            here.say(f"{name}: claimed by this machine")
         return True
     if got.outcome == job_claims.LOST:
         record[name] = {HELD: False, HOLDER: got.holder, AT: moment}
-        say(f"{name}: {got.holder or 'another machine'} runs it -- standing by here")
+        here.say(f"{name}: {got.holder or 'another machine'} runs it -- standing by here")
         return False
     if mine and 0 <= moment - float(known.get(AT, 0)) < GRACE:
-        say(f"{name}: could not renew the claim ({got.said}) -- still inside its grace")
+        here.say(f"{name}: could not renew the claim ({got.said}) -- still inside its grace")
         return True
     record[name] = {HELD: False, HOLDER: "", AT: moment}
-    say(f"{name}: no claim could be made ({got.said}) -- not run here")
+    here.say(f"{name}: no claim could be made ({got.said}) -- not run here")
     return False

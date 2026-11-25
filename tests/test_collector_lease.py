@@ -38,12 +38,14 @@ def pc(tmp_path):
             [collector],
             assignment,
             path / "claims.json",
-            sweep.git_for(path),
-            name,
-            said.append,
-            now=lambda: at,
-            free_mb=lambda: free,
-            sleep=slept.append,
+            lease.Claimant(
+                sweep.git_for(path),
+                name,
+                said.append,
+                now=lambda: at,
+                free_mb=lambda: free,
+                sleep=slept.append,
+            ),
         )
         one.said, one.slept = said, slept
         return acted.get("sports")
@@ -111,6 +113,19 @@ def test_the_tray_sees_stop_on_a_standby_and_run_on_the_holder():
     assert lease.effective([C], RUN, standby) == {"sports": config.STOP}
     assert lease.effective([C], RUN, holder) == RUN
     assert lease.effective([C], RUN, {}) == RUN
+
+
+def test_each_collector_has_a_claim_of_its_own():
+    assert lease.claim_id("sports") != lease.claim_id("news")
+    # Machines on different devkits must agree on it, or two run the collector at once.
+    assert lease.claim_id("sports") == "collector-sports"
+
+
+def test_a_saved_record_reads_back_and_its_folder_is_made(tmp_path):
+    path = tmp_path / "logs" / "claims.json"
+    record = {"sports": {lease.HELD: True, lease.HOLDER: "a", lease.AT: NOW}}
+    lease.save(path, record)
+    assert lease.load(path) == record
 
 
 def test_a_record_that_does_not_parse_is_empty(tmp_path):
