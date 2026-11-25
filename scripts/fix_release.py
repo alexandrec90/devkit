@@ -27,6 +27,7 @@ Each refusal is one line on the record, as is the start.
 from __future__ import annotations
 
 import datetime as _dt
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
 import adoption_prs
+import devkit_project
 import fix_cycle
 import fix_plan
 import gate_evidence
@@ -52,8 +54,21 @@ LABEL = "Fix pass: Devkit Release"
 RECORD = Path("logs") / "fix-pass-devkit-release.log"
 # Written in the devkit checkout when a start goes out; its mtime is the cooldown clock.
 STARTED = Path("logs") / "fix-pass-release.started"
-# Longer than the pipeline's slowest honest run: two gates, the tag workflow, adoption.
-STARTED_COOLDOWN = _dt.timedelta(hours=2)
+# Past the pipeline's own run: two gates, the tag workflow, adoption. Its PR and its tag
+# workflow are both seen while they last (`release_pr_in_flight`, `tag_in_flight`), so this
+# covers only the minutes neither exists. At two hours it was the longest wait between a
+# merged fix and the projects that needed it.
+STARTED_COOLDOWN = _dt.timedelta(minutes=45)
+
+# An adoption pass of its own, for a release whose adoptions did not all open.
+ADOPT_LABEL = "Fix pass: Adopt Release"
+ADOPT_RECORD = Path("logs") / "fix-pass-adopt-release.log"
+ADOPT_STARTED = Path("logs") / "fix-pass-adopt.started"
+# How long a tag is the pipeline's own to adopt, and how long between retries: a project
+# whose adoption someone closed is behind for good, and is asked again no oftener.
+ADOPT_AFTER = _dt.timedelta(hours=1)
+ADOPT_COOLDOWN = _dt.timedelta(hours=6)
+PINNED_REF = re.compile(r"^\s*ref:\s*(v\d+\.\d+\.\d+)\s*$", re.M)
 # A child that outlives the pass must not share its console control group.
 NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
@@ -170,9 +185,14 @@ def release_pr_in_flight(devkit: Path) -> int:
     return 0
 
 
-def last_started(devkit: Path) -> _dt.datetime | None:
+def tag_in_flight(devkit: Path) -> int:
+    """The tag workflow's run still going, or 0: a release between its merge and its tag."""
+    return release_pipeline.tag_run_in_flight(devkit)
+
+
+def last_started(devkit: Path, stamp_file: Path = STARTED) -> _dt.datetime | None:
     try:
-        stamp = (devkit / STARTED).stat().st_mtime
+        stamp = (devkit / stamp_file).stat().st_mtime
     except OSError:
         return None
     return _dt.datetime.fromtimestamp(stamp, _dt.UTC)
@@ -200,9 +220,14 @@ def release_argv(devkit: Path, workspace: Path, python: str) -> list[str]:
 
 def start_release(devkit: Path, workspace: Path) -> str:
     """Spawn the pipeline detached and stamp the start; "" on success, else why not."""
+    return spawn(devkit, release_argv(devkit, workspace, sweep.console_python()), STARTED)
+
+
+def spawn(devkit: Path, argv: list[str], stamp_file: Path) -> str:
+    """`argv` started detached, and `stamp_file` written; "" on success, else why not."""
     try:
         subprocess.Popen(
-            release_argv(devkit, workspace, sweep.console_python()),
+            argv,
             cwd=str(devkit),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -211,10 +236,66 @@ def start_release(devkit: Path, workspace: Path) -> str:
         )
     except OSError as exc:
         return str(exc)
-    stamp = devkit / STARTED
+    stamp = devkit / stamp_file
     stamp.parent.mkdir(parents=True, exist_ok=True)
     stamp.write_text("", encoding="utf-8")
     return ""
+
+
+def unadopted(root: Path, projects: list[str], tag: str) -> list[str]:
+    """Projects whose default branch pins another release than `tag`, with no PR open that
+    would change it. A pin nobody can read is not behind."""
+    behind = []
+    for name in projects:
+        if name == fix_cycle.DEVKIT or not (root / name).is_dir():
+            continue
+        shown = sweep.git_for(root / name)("show", "origin/HEAD:.github/workflows/pr-gate.yml")
+        pins = PINNED_REF.findall(shown.stdout or "") if shown.returncode == 0 else []
+        if pins and tag not in pins and not adoption_prs.open_adoption_pr(root / name, tag):
+            behind.append(name)
+    return behind
+
+
+def tagged_at(devkit: Path, tag: str) -> _dt.datetime | None:
+    """When `tag`'s commit was made, or None."""
+    done = sweep.git_for(devkit)("log", "-1", "--format=%ct", tag)
+    stamp = (done.stdout or "").strip() if done.returncode == 0 else ""
+    return _dt.datetime.fromtimestamp(int(stamp), _dt.UTC) if stamp.isdigit() else None
+
+
+def retry_adoptions(workspace: Path, tag: str, dispatching: bool, now: _dt.datetime) -> str:
+    """Open the adoptions a release's own pass did not: a line for the record, or "".
+
+    On 2026-11-25 GitHub answered 500 to six of them, and the next thing to try was the
+    03:00 job (8a1e0b41).
+    """
+    devkit = workspace.parent / fix_cycle.DEVKIT
+    made = tagged_at(devkit, tag)
+    if made is None or now - made < ADOPT_AFTER:
+        return ""
+    last = last_started(devkit, ADOPT_STARTED)
+    if last and now - last < ADOPT_COOLDOWN:
+        return ""
+    try:
+        projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+    behind = unadopted(workspace.parent, projects, tag)
+    if not behind:
+        return ""
+    what = f"{tag} has no adoption PR in {', '.join(behind)}"
+    if not dispatching:
+        return f"would open the adoptions -- {what}"
+    if failed := spawn(devkit, adopt_argv(devkit, sweep.console_python()), ADOPT_STARTED):
+        return f"FAILED to start the adoptions -- {failed}"
+    return f"opening the adoptions -- {what}; record at {ADOPT_RECORD.as_posix()}"
+
+
+def adopt_argv(devkit: Path, python: str) -> list[str]:
+    """The daily upgrade job's command, under this pass's own label."""
+    upgrade = [python, str(devkit / "scripts" / "upgrade-project.py"), "--all", "--yes"]
+    wrapper = [python, str(devkit / "scripts" / "log-wrap.py"), "--always", ADOPT_LABEL, "--"]
+    return wrapper + upgrade
 
 
 def cut_release(
@@ -234,10 +315,12 @@ def cut_release(
     if why := release_refusal(owed, tag, devkit_green, in_flight, last_started(devkit), now):
         return f"not started -- {why}"
     if not owed:
-        return ""
+        return retry_adoptions(workspace, tag, dispatching, now)
     what = f"{len(owed)} change(s) {tag} cannot deliver: {', '.join(owed)}"
     if not dispatching:
         return f"would start -- {what}"
+    if run_id := tag_in_flight(devkit):
+        return f"not started -- {what}; run {run_id} is cutting a tag"
     if failed := start_release(devkit, workspace):
         return f"FAILED to start -- {failed}"
     return f"started -- {what}; record at {RECORD.as_posix()}"
