@@ -123,13 +123,26 @@ jobs:
         # keeps its name, its artifact and `test_new_project.py` whatever is moved, because
         # `release-pipeline.py` reads a release commit's one expected red from them
         # (`GATE_TEST_JOB`, `EXPECTED_RED_TEST`).
-        run: printf '%s\n' tests/test_*.py | awk '$0 == "tests/test_new_project.py" || NR % 3 == 0' | xargs uv run python scripts/run-tests.py --only
+        #
+        # Split by position, not by time, and that is enough while no file dominates: one
+        # did, a test sleeping 549s on a freshly booted runner (`tests/machine_clock_plugin.py`),
+        # and with it gone each third finishes inside the generated-project jobs, which set
+        # the verdict. The junit file is how the next imbalance is found: `run-tests.py`
+        # prints nothing of a passing run, so `--durations` never reaches the log.
+        run: printf '%s\n' tests/test_*.py | awk '$0 == "tests/test_new_project.py" || NR % 3 == 0' | xargs uv run python scripts/run-tests.py --only --junit-xml=logs/junit-tests.xml
       - name: Upload test artifact
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: test-failures
           path: logs/test-failures.log
+      - name: Upload test timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-timings-0
+          path: logs/junit-tests.xml
+          if-no-files-found: ignore
 
   suite:
     name: devkit tests (shard ${{ matrix.shard }})
@@ -147,13 +160,20 @@ jobs:
         with:
           python-version: "3.12"
       - name: devkit tests (the rest of the suite)
-        run: printf '%s\n' tests/test_*.py | awk '$0 != "tests/test_new_project.py" && NR % 3 == ${{ matrix.shard }}' | xargs uv run python scripts/run-tests.py --only
+        run: printf '%s\n' tests/test_*.py | awk '$0 != "tests/test_new_project.py" && NR % 3 == ${{ matrix.shard }}' | xargs uv run python scripts/run-tests.py --only --junit-xml=logs/junit-tests.xml
       - name: Upload test artifact
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: test-failures-${{ matrix.shard }}
           path: logs/test-failures.log
+      - name: Upload test timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-timings-${{ matrix.shard }}
+          path: logs/junit-tests.xml
+          if-no-files-found: ignore
 
   hook-tests:
     name: Hook-script tests
