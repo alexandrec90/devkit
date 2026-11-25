@@ -246,6 +246,10 @@ def devkit(tmp_path, monkeypatch):
         fix_release.release_pipeline, "release_needed", lambda d, tag: table["owed"]
     )
     monkeypatch.setattr(fix_release, "release_pr_in_flight", lambda d: table["in_flight"])
+    table["tag_run"] = 0
+    monkeypatch.setattr(
+        fix_release.release_pipeline, "tag_run_in_flight", lambda d: table["tag_run"]
+    )
     monkeypatch.setattr(
         fix_release,
         "start_release",
@@ -279,6 +283,91 @@ def test_the_step_names_its_refusal_and_starts_nothing(devkit):
     line = fix_release.cut_release(devkit["workspace"], "v0.11.25", True, True, NOW)
     assert line.startswith("not started -- ") and "#401" in line
     assert devkit["started"] == []
+
+
+def test_a_tag_being_cut_is_a_release_in_flight(devkit):
+    """Between the PR merging and the tag landing there is no PR to see."""
+    devkit["tag_run"] = 77
+    assert fix_release.tag_in_flight(devkit["workspace"].parent / "devkit") == 77
+    line = fix_release.cut_release(devkit["workspace"], "v0.11.25", True, True, NOW)
+    assert line.startswith("not started -- ") and "run 77 is cutting a tag" in line
+    assert devkit["started"] == []
+
+
+@pytest.fixture
+def behind(devkit, monkeypatch):
+    """Nothing owed, the tag hours old, and one project still pinning the last release."""
+    devkit["owed"] = []
+    devkit["workspace"].write_text(
+        '{"folders": [{"path": "devkit"}, {"path": "radio"}, {"path": "carameli"}]}',
+        encoding="utf-8",
+    )
+    root = devkit["workspace"].parent
+    pins = {"radio": "v0.11.24", "carameli": "v0.11.25"}
+    for name in pins:
+        (root / name).mkdir()
+
+    def git_for(checkout):
+        def git(*args):
+            out = ""
+            if args[0] == "log":
+                out = str(int((NOW - _dt.timedelta(hours=3)).timestamp()))
+            elif args[0] == "show":
+                out = f"jobs:\n        ref: {pins[checkout.name]}\n"
+            return subprocess.CompletedProcess(args, 0, stdout=out)
+
+        return git
+
+    monkeypatch.setattr(fix_release.sweep, "git_for", git_for)
+    devkit["adopting"] = ""
+    monkeypatch.setattr(
+        fix_release.adoption_prs, "open_adoption_pr", lambda _p, _tag: devkit["adopting"]
+    )
+    devkit["spawned"] = []
+
+    def popen(argv, **_kwargs):
+        devkit["spawned"].append(argv)
+
+    monkeypatch.setattr(fix_release.subprocess, "Popen", popen)
+    return devkit
+
+
+def test_a_release_a_project_never_got_a_pr_for_is_adopted_again(behind):
+    """2026-11-25: GitHub answered 500 to six adoptions, and the 03:00 job was next."""
+    root = behind["workspace"].parent
+    assert fix_release.unadopted(root, ["devkit", "radio", "carameli"], "v0.11.25") == ["radio"]
+    line = fix_release.cut_release(behind["workspace"], "v0.11.25", True, True, NOW)
+    assert line.startswith("opening the adoptions -- v0.11.25 has no adoption PR in radio")
+    [argv] = behind["spawned"]
+    assert argv[-3:] == [str(root / "devkit" / "scripts" / "upgrade-project.py"), "--all", "--yes"]
+    assert argv == fix_release.adopt_argv(root / "devkit", argv[0])
+    stamped = fix_release.last_started(root / "devkit", fix_release.ADOPT_STARTED)
+    assert stamped is not None
+    soon = stamped + _dt.timedelta(hours=1)
+    assert fix_release.retry_adoptions(behind["workspace"], "v0.11.25", True, soon) == ""
+    assert len(behind["spawned"]) == 1, "asked again only after the cooldown"
+
+
+def test_an_open_adoption_a_fresh_tag_and_a_dry_run_start_nothing(behind):
+    root = behind["workspace"].parent
+    made = fix_release.tagged_at(root / "devkit", "v0.11.25")
+    fresh = made + _dt.timedelta(minutes=5)
+    assert fix_release.retry_adoptions(behind["workspace"], "v0.11.25", True, fresh) == ""
+    dry = fix_release.retry_adoptions(behind["workspace"], "v0.11.25", False, NOW)
+    assert dry.startswith("would open the adoptions")
+    behind["adopting"] = "#7 url"
+    assert fix_release.retry_adoptions(behind["workspace"], "v0.11.25", True, NOW) == ""
+    assert behind["spawned"] == []
+
+
+def test_a_spawn_that_fails_says_why_and_stamps_nothing(behind, monkeypatch):
+    def refuse(*_a, **_k):
+        raise OSError("no such interpreter")
+
+    monkeypatch.setattr(fix_release.subprocess, "Popen", refuse)
+    root = behind["workspace"].parent / "devkit"
+    assert fix_release.spawn(root, ["x"], fix_release.ADOPT_STARTED) == "no such interpreter"
+    assert fix_release.last_started(root, fix_release.ADOPT_STARTED) is None
 
 
 def test_a_failed_start_is_on_the_record(devkit, monkeypatch):

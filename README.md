@@ -968,7 +968,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
 | `devkit-local-e2e` | `scripts/install-e2e-schedule.py` | every 30 min, what moved, only while the PC is idle | `logs/scheduled-local-e2e.log`, results under `logs/e2e/` |
 | `devkit-medium-tier` | `scripts/install-tier-schedule.py` | every 15 min, whatever the person is doing, behind `devkit.fixPass` being `dispatch` | `logs/scheduled-medium-tier.log`, results under `logs/medium-tier/` |
-| `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00 | `logs/scheduled-devkit-release.log` |
+| `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00, the backstop: a fix pass cuts an owed release once devkit's gate passes (`scripts/fix_release.py`) | `logs/scheduled-devkit-release.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |
@@ -979,7 +979,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-installers` | `scripts/install-installers-schedule.py` | daily 08:45, and at logon | `logs/installers.log` |
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
 | `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, and whenever `devkit-fix-trigger` starts it, behind `devkit.fixPass` | `logs/fix-pass.log` |
-| `devkit-fix-trigger` | `scripts/install-fix-trigger.py` | every 2 min; starts the fix pass when something is newly red (`scripts/fix_trigger.py`) | `logs/scheduled-fix-trigger.log` |
+| `devkit-fix-trigger` | `scripts/install-fix-trigger.py` | every 2 min; starts the fix pass when something is newly red or a devkit commit passed, moves `green`, and starts the checkout sync and collectors for what moved (`scripts/fix_trigger.py`) | `logs/scheduled-fix-trigger.log` |
 | `devkit-ship` | `scripts/install-ship-schedule.py` | every 2 min, on every PC; a fire with nothing to ship exits within seconds | `logs/ship-pass.log` |
 | `devkit-collectors` | `scripts/install-collectors.py` | every 15 min, and at logon; acts only where `run-here`/`stop-here` assigned | `logs/collectors.log` |
 | `devkit-elevated` | `scripts/install-elevated-worker.py` | every 5 min, elevated; installed once per PC by an administrator, never by a job | `C:\ProgramData\devkit\elevated\worker.log` |

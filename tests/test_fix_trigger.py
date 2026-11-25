@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import itertools
 import json
 import subprocess
 from pathlib import Path
@@ -34,9 +35,14 @@ def pull(number=7, mergeable="MERGEABLE", state="SUCCESS", draft=False) -> dict:
     }
 
 
-def repo(commits=(), prs=()) -> dict:
+def repo(commits=(), prs=(), green="") -> dict:
+    """`commits` newest first, each the first parent of the one before it."""
+    chained = list(commits)
+    for child, parent in itertools.pairwise(chained):
+        child.setdefault("parents", {"nodes": [{"oid": parent["oid"]}]})
     return {
-        "defaultBranchRef": {"target": {"history": {"nodes": list(commits)}}},
+        "ref": {"target": {"oid": green}} if green else None,
+        "defaultBranchRef": {"target": {"history": {"nodes": chained}}},
         "pullRequests": {"nodes": list(prs)},
     }
 
@@ -75,6 +81,51 @@ def test_a_branch_that_recovered_lets_what_was_held_go():
     assert trigger.branch_signals("me/p", {"defaultBranchRef": None}) == set()
 
 
+def test_a_merged_branchs_own_commits_say_nothing_of_the_branch():
+    """An adoption merges as a merge commit, so its PR's red and green runs are history."""
+    merge = commit("m", None)
+    merge["parents"] = {"nodes": [{"oid": "base"}]}
+    noise = commit("pr", "FAILURE")
+    base = commit("base", "SUCCESS")
+    nodes = [merge, noise, base]
+    assert [c["oid"] for c in trigger.first_parents(nodes)] == ["m", "base"]
+    assert trigger.first_parents([]) == []
+    history = {"defaultBranchRef": {"target": {"history": {"nodes": nodes}}}}
+    assert trigger.judged(history) == [("base", True)]
+
+
+def test_green_is_owed_the_newest_commit_that_passed_and_never_goes_back():
+    commits = [commit("c", None), commit("b", "SUCCESS"), commit("a", "SUCCESS")]
+    assert trigger.green_owed(repo(commits, green="a")) == "b"
+    assert trigger.green_owed(repo(commits, green="b")) == ""
+    assert trigger.green_owed(repo(commits, green="c")) == "", "already past it"
+    assert trigger.green_owed(repo(commits, green="far behind")) == "b"
+    assert trigger.green_owed(repo(commits)) == "", "the workflow's to create"
+    assert trigger.green_owed(repo([commit("a", "FAILURE")], green="z")) == ""
+
+
+def test_green_moves_forward_only_and_a_refusal_moves_nothing():
+    asked: list[list[str]] = []
+
+    def run(argv, _timeout):
+        asked.append(argv)
+        return subprocess.CompletedProcess(argv, 0 if "me/a" in argv[4] else 1, "", "422")
+
+    owed = repo([commit("b", "SUCCESS"), commit("a", "SUCCESS")], green="a")
+    assert trigger.move_green({"me/a": owed, "me/b": owed, "me/c": repo()}, run) == ["me/a to b"]
+    assert all("force=false" in argv for argv in asked) and len(asked) == 2
+    assert not trigger.advance_green("me/b", "b", run)
+
+
+def test_a_passing_commit_is_devkits_to_release_and_every_projects_to_run():
+    passing = repo([commit("b", None), commit("a", "SUCCESS")])
+    red = repo([commit("b", "FAILURE"), commit("a", "SUCCESS")])
+    assert trigger.ready_signals("me/devkit", passing) == {"ready:me/devkit@a"}
+    assert trigger.ready_signals("me/devkit", red) == set() == trigger.ready_signals("", {})
+    assert trigger.passed_signals("me/p", red) == {"passed:me/p@a"}
+    assert trigger.passed_signals("me/p", repo()) == set()
+
+
 def test_a_conflicted_or_red_pr_is_a_signal_and_an_undecided_or_draft_one_is_not():
     prs = [
         pull(1, mergeable="CONFLICTING"),
@@ -108,7 +159,8 @@ def test_every_repository_is_asked_in_one_call(tmp_path):
         return subprocess.CompletedProcess(argv, 1, json.dumps({"data": data}), "gone")
 
     assert trigger.slug_of(tmp_path / "c") == "" == trigger.slug_of(tmp_path / "missing")
-    assert trigger.github_signals(tmp_path, ["a", "b", "c"], run) == {"red:me/a@x"}
+    repos = trigger.repositories(tmp_path, ["a", "b", "c"], run)
+    assert trigger.github_signals(tmp_path, repos) == {"red:me/a@x"}
     [argv] = asked
     assert 'owner: "me", name: "b"' in argv[-1] and "fragment R" in argv[-1]
 
@@ -204,12 +256,16 @@ class Machine:
         checkout(tmp_path, "devkit", "https://github.com/me/devkit.git")
         self.repo = repo()
         self.calls: list[list[str]] = []
+        self.busy: set[str] = set()
 
     def run(self, argv, _timeout):
         self.calls.append(argv)
         if argv[0] == "gh":
             out = json.dumps({"data": {"r0": self.repo}})
             return subprocess.CompletedProcess(argv, 0, out, "")
+        if "/Query" in argv:
+            says = "Running" if argv[3] in self.busy else "Ready"
+            return subprocess.CompletedProcess(argv, 0, f'"{argv[3]}","x","{says}"', "")
         return subprocess.CompletedProcess(argv, self.started, "", "ERROR: no such task")
 
     def fire(self, now=NOW) -> int:
@@ -217,7 +273,11 @@ class Machine:
 
     @property
     def starts(self) -> int:
-        return sum(argv[0] == "schtasks" for argv in self.calls)
+        return self.started_tasks.count(trigger.PASS_TASK)
+
+    @property
+    def started_tasks(self) -> list[str]:
+        return [argv[3] for argv in self.calls if argv[:2] == ["schtasks", "/Run"]]
 
 
 def test_a_new_red_starts_one_pass_and_the_same_red_no_second(tmp_path):
@@ -258,14 +318,47 @@ def test_a_pass_that_would_not_start_is_tried_again_and_fails_the_job(tmp_path, 
     assert "error: could not start devkit-fix-pass: ERROR: no such task" in capsys.readouterr().err
     machine.started = 0
     assert machine.fire() == 0 and machine.starts == 2
-    assert trigger.start_pass(machine.run) == ""
+    assert trigger.start(trigger.PASS_TASK, machine.run) == ""
+    assert trigger.pass_for(tmp_path, ["red:x"], machine.run) == (True, 0)
+    assert trigger.pass_for(tmp_path, [], machine.run) == (True, 0)
 
 
 @pytest.mark.parametrize("mode", ["off", "plan"])
 def test_nothing_starts_where_the_pass_sends_no_one(tmp_path, mode, capsys):
     machine = Machine(tmp_path, mode)
-    assert machine.fire() == 0 and machine.calls == []
+    machine.repo = repo([commit("a", "FAILURE")])
+    assert machine.fire() == 0 and machine.starts == 0
     assert f"devkit.fixPass is {mode}" in capsys.readouterr().out
+
+
+def test_a_commit_that_passed_moves_green_and_then_what_runs_it(tmp_path):
+    """A fire each, because the collectors' redeploy reads the checkout the sync moves."""
+    machine = Machine(tmp_path, mode="off")
+    machine.repo = repo([commit("b", "SUCCESS"), commit("a", "SUCCESS")], green="a")
+    assert machine.fire() == 0
+    assert any("PATCH" in argv for argv in machine.calls)
+    assert machine.started_tasks == ["devkit-worktree-reconcile"]
+    machine.repo = repo([commit("b", "SUCCESS"), commit("a", "SUCCESS")], green="b")
+    machine.busy = {"devkit-collectors"}
+    assert machine.fire() == 0 and len(machine.started_tasks) == 1, "never beside itself"
+    machine.busy = set()
+    assert machine.fire() == 0
+    assert machine.started_tasks == list(trigger.FOLLOWERS)
+    assert machine.fire() == 0 and len(machine.started_tasks) == 2, "once per commit"
+
+
+def test_devkits_passing_commit_starts_a_pass_which_is_what_releases_it(tmp_path):
+    machine = Machine(tmp_path)
+    machine.repo = repo([commit("b", "SUCCESS")], green="b")
+    assert machine.fire() == 0 and machine.starts == 1
+    assert machine.fire() == 0 and machine.starts == 1
+
+
+def test_a_follower_that_will_not_start_is_dropped(tmp_path):
+    machine = Machine(tmp_path, started=1)
+    assert trigger.start_follower(list(trigger.FOLLOWERS), machine.run) == ["devkit-collectors"]
+    assert trigger.start_follower([], machine.run) == []
+    assert not trigger.running("devkit-collectors", machine.run)
 
 
 def test_signals_gathers_every_source(tmp_path):
@@ -276,7 +369,8 @@ def test_signals_gathers_every_source(tmp_path):
     results.write(red, tmp_path / "devkit")
     ledger = tmp_path / "devkit" / "logs" / "harness-events.log"
     ledger.write_text(row("workspace-failure", project="p") + "\n", encoding="utf-8")
-    found = trigger.signals(tmp_path, ["devkit"], machine.run)
+    repos = trigger.repositories(tmp_path, ["devkit"], machine.run)
+    found = trigger.signals(tmp_path, ["devkit"], repos)
     assert {key.split(":")[0] for key in found} == {"red", "conflict", "tree", "local", "event"}
 
 
@@ -285,12 +379,13 @@ def test_what_still_stands_is_remembered_and_the_rest_forgotten(tmp_path):
     kept = trigger.remember({"gone": long_ago, "standing": long_ago}, ["standing"], NOW)
     assert kept == {"standing": NOW.isoformat()}
     path = trigger.state_path(tmp_path)
-    assert trigger.read_seen(path) == {}
-    trigger.write_seen(path, kept)
-    assert trigger.read_seen(path) == kept
+    assert trigger.read_state(path) == ({}, [])
+    trigger.write_state(path, kept, ["devkit-collectors"])
+    assert trigger.read_state(path) == (kept, ["devkit-collectors"])
+    trigger.write_state(path, kept, ["not a follower"])
+    assert trigger.read_state(path) == (kept, [])
     path.write_text("[]", encoding="utf-8")
-    assert trigger.read_seen(path) == {}
-
+    assert trigger.read_state(path) == ({}, [])
 
 def test_the_names_spelled_here_are_their_owners():
     fix_pass = load_script("scripts/fix-pass.py")
@@ -298,6 +393,11 @@ def test_the_names_spelled_here_are_their_owners():
     assert trigger.PASS_TASK == installer.TASK_NAME
     assert trigger.PASS_LOCK == fix_pass.RUN_LOCK_NAME
     assert trigger.PASS_LOCK_STALE == fix_pass.RUN_LOCK_STALE
+    assert trigger.GREEN == load_script("scripts/green-ref.py").GREEN
+    assert trigger.FOLLOWERS == (
+        load_script("scripts/install-reconcile-task.py").TASK_NAME,
+        load_script("scripts/install-collectors.py").TASK_NAME,
+    )
     assert trigger.REFUSED == fix_pass.ship_intent.REFUSED
     assert trigger.SHIP_STATE == fix_pass.ship_intent.STATE_FILE.name
 

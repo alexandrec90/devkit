@@ -5,9 +5,9 @@ The pass's own task fires every half hour; this one asks every two minutes wheth
 anything is newly red and starts that task when it is, so a red waits minutes rather than
 the rest of a half hour. `fix_trigger.py` says what counts.
 
-**Registered on every PC, and it starts something only where `devkit.fixPass` is
-`dispatch`.** Elsewhere a fire says so in one line and exits 0, and nothing is
-re-registered when the switch moves.
+**Registered on every PC.** It starts a pass only where `devkit.fixPass` is `dispatch`; moving
+`green` and starting what runs the code it moved to are every PC's. Nothing is re-registered
+when the switch moves.
 
 Everything else follows `install-tier-schedule.py`: `log-wrap.py --always` around the
 runner through `devkit_schtasks.logged`, so a run that crashes is on the ledger;
@@ -42,7 +42,8 @@ GROUP = "delivery"
 
 EVERY_MINUTES = 2
 
-# Past both of the runner's bounded calls (`GRAPHQL_SECONDS`, `START_SECONDS`).
+# Past the runner's bounded calls (`GRAPHQL_SECONDS`, `START_SECONDS`, and `REF_SECONDS` for
+# the few `green` refs one fire has to move).
 TIME_LIMIT = "PT5M"
 
 # The wrapper's title and the artifact it therefore writes (`log_wrap.slug`); a test

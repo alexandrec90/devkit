@@ -15,6 +15,7 @@ refuses to send twice at one problem, so a signal too many costs a pass that sen
 | --- | --- |
 | `red:` the newest judged commit of a default branch failed its gate | GitHub |
 | `green:` it passed, where the one before failed: held fixers may go | GitHub |
+| `ready:` a commit of devkit passed: a release may be owed, and this machine's copy is old | GitHub |
 | `conflict:` an open PR stopped merging | GitHub |
 | `pr-red:` an open PR's checks failed: the PRs that do wait for a gate | GitHub |
 | `local:` a local end-to-end or medium tier run came back red | `logs/e2e`, `logs/medium-tier` |
@@ -24,10 +25,17 @@ refuses to send twice at one problem, so a signal too many costs a pass that sen
 Rows the pass writes itself (`fix-pass-finding`, `session-friction`) are not signals, or
 each pass would start the next.
 
+**It also moves what waits on a passing gate**, on every PC, whatever `devkit.fixPass` says.
+`green` is what the harness, a deploy and every queued task follow, and the workflow's own
+merge raises no event that would move it, so it waited for an hourly job GitHub may drop
+(on 2026-11-25 it sat two commits behind for over an hour). `advance_green` fast-forwards
+it, and `FOLLOWERS` -- the checkouts' sync, then the collectors' redeploy -- are started
+once it has moved, one a fire, since each reads what the one before it did.
+
 **A signal is spent only by a pass that starts after it.** While one is running
 (`PASS_LOCK`) the new ones are left unspent, and the next fire starts a pass for them.
 
-Sends nothing and starts nothing unless `devkit.fixPass` is `dispatch`. Exits 0 on an
+Starts no pass unless `devkit.fixPass` is `dispatch`. Exits 0 on an
 unreadable GitHub: the next fire is two minutes away, and the outage is not a defect.
 
 Tested in `tests/test_fix_trigger.py`.
@@ -68,9 +76,10 @@ STATE_NAME = "fix-trigger.json"
 REMEMBER = _dt.timedelta(days=7)
 
 GATE = "PR Gate"
-COMMITS = 10
+COMMITS = 20
 PRS = 40
 GRAPHQL_SECONDS = 60
+REF_SECONDS = 20
 START_SECONDS = 30
 
 # What a ledger row must be to start a pass: what something outside the pass writes.
@@ -83,13 +92,21 @@ REPORTS = ("fix-blocked.md", "friction.md")
 SHIP_STATE = "ship-state.json"
 REFUSED = "refused"  # ship_intent.REFUSED
 
+GREEN = "green"  # green-ref.GREEN
+DEVKIT = "devkit"
+# What runs the code `green` just moved to, in the order each needs the one before it:
+# `install-reconcile-task.TASK_NAME` syncs the checkouts, `install-collectors.TASK_NAME`
+# redeploys a collector whose checkout moved.
+FOLLOWERS = ("devkit-worktree-reconcile", "devkit-collectors")
+
 Run = Callable[..., object]
 
 REPOSITORY = f"""
 fragment R on Repository {{
   defaultBranchRef {{ target {{ ... on Commit {{ history(first: {COMMITS}) {{ nodes {{
-    oid checkSuites(first: 20) {{ nodes {{ conclusion workflowRun {{ workflow {{ name }} }} }} }}
+    oid parents(first: 1) {{ nodes {{ oid }} }} checkSuites(first: 20) {{ nodes {{ conclusion workflowRun {{ workflow {{ name }} }} }} }}
   }} }} }} }} }}
+  ref(qualifiedName: "refs/heads/{GREEN}") {{ target {{ oid }} }}
   pullRequests(states: OPEN, first: {PRS}, orderBy: {{field: UPDATED_AT, direction: DESC}}) {{
     nodes {{
       number isDraft mergeable headRefOid
@@ -161,17 +178,75 @@ def verdict(commit: dict) -> bool | None:
     return False if said & {"FAILURE", "TIMED_OUT", "STARTUP_FAILURE"} else None
 
 
+def first_parents(commits: list[dict]) -> list[dict]:
+    """The branch's own commits, newest first. A merge commit's history lists the merged
+    branch's commits too, with that PR's gate runs, which say nothing of this branch."""
+    by_oid = {commit.get("oid"): commit for commit in commits}
+    chain: list[dict] = []
+    commit = commits[0] if commits else None
+    while commit is not None and commit not in chain:
+        chain.append(commit)
+        parent = next((node.get("oid") for node in _nodes(commit, "parents")), None)
+        commit = by_oid.get(parent)
+    return chain
+
+
+def judged(repo: dict) -> list[tuple[str, bool]]:
+    """`(commit, passed)` for each of the default branch's commits the gate has judged,
+    newest first, so one still running never hides what is known of the one under it."""
+    commits = first_parents(_nodes(repo, "defaultBranchRef", "target", "history"))
+    return [(str(c.get("oid", "")), said) for c in commits if (said := verdict(c)) is not None]
+
+
+def green_owed(repo: dict) -> str:
+    """The commit `green` should be at and is not, or "". A `green` the branch does not
+    have yet is the workflow's to create; one this query cannot see is too far behind to
+    place, and the server refuses a move that is not forward."""
+    at = ((repo.get("ref") or {}).get("target") or {}).get("oid")
+    newest = next((oid for oid, passed in judged(repo) if passed), "")
+    if not at or not newest or at == newest:
+        return ""
+    chain = first_parents(_nodes(repo, "defaultBranchRef", "target", "history"))
+    oids = [str(commit.get("oid", "")) for commit in chain]
+    return "" if at in oids[: oids.index(newest)] else newest
+
+
+def advance_green(slug: str, oid: str, run: Run = sweep.run_bounded) -> bool:
+    """Fast-forward `green` to `oid`. A refusal is a run that got there first, or GitHub
+    being down: the next fire asks again."""
+    path = f"repos/{slug}/git/refs/heads/{GREEN}"
+    argv = ["gh", "api", "--method", "PATCH", path, "-f", f"sha={oid}", "-F", "force=false"]
+    return getattr(run(argv, REF_SECONDS), "returncode", 1) == 0
+
+
+def move_green(repos: dict[str, dict], run: Run = sweep.run_bounded) -> list[str]:
+    """Each `green` that was behind and now is not, as the line the record says."""
+    owed = [(slug, oid) for slug, repo in repos.items() if (oid := green_owed(repo))]
+    return [f"{slug} to {oid[:9]}" for slug, oid in owed if advance_green(slug, oid, run)]
+
+
+def ready_signals(slug: str, repo: dict) -> set[str]:
+    """devkit's newest passing commit: what `fix_release.cut_release` waits for, and what
+    the pass brings this machine's own copy, jobs and tray up to."""
+    said = judged(repo)
+    return {f"ready:{slug}@{said[0][0][:12]}"} if said and said[0][1] else set()
+
+
+def passed_signals(slug: str, repo: dict) -> set[str]:
+    """Any project's newest passing commit, which the FOLLOWERS are started for."""
+    newest = next((oid for oid, passed in judged(repo) if passed), "")
+    return {f"passed:{slug}@{newest[:12]}"} if newest else set()
+
+
 def branch_signals(slug: str, repo: dict) -> set[str]:
-    """The default branch's: judged commits only, newest first, so a gate still running on
-    the tip never hides what is already known of the commit under it."""
-    commits = _nodes(repo, "defaultBranchRef", "target", "history")
-    judged = [(str(c.get("oid", "")), said) for c in commits if (said := verdict(c)) is not None]
-    if not judged:
+    """The default branch's, off its newest judged commit."""
+    said = judged(repo)
+    if not said:
         return set()
-    oid, passed = judged[0]
+    oid, passed = said[0]
     if not passed:
         return {f"red:{slug}@{oid[:12]}"}
-    recovered = len(judged) > 1 and not judged[1][1]
+    recovered = len(said) > 1 and not said[1][1]
     return {f"green:{slug}@{oid[:12]}"} if recovered else set()
 
 
@@ -191,13 +266,19 @@ def pr_signals(slug: str, repo: dict) -> set[str]:
     return found
 
 
-def github_signals(root: Path, projects: Iterable[str], run: Run = sweep.run_bounded) -> set[str]:
-    slugs = sorted({slug for name in projects if (slug := slug_of(root / name))})
-    found: set[str] = set()
-    for slug, repo in ask(slugs, run).items():
-        found |= branch_signals(slug, repo) | pr_signals(slug, repo)
-    return found
+def repositories(
+    root: Path, projects: Iterable[str], run: Run = sweep.run_bounded
+) -> dict[str, dict]:
+    """What GitHub answered for each project that is a repository there."""
+    return ask(sorted({slug for name in projects if (slug := slug_of(root / name))}), run)
 
+
+def github_signals(root: Path, repos: dict[str, dict]) -> set[str]:
+    found: set[str] = set()
+    for slug, repo in repos.items():
+        found |= branch_signals(slug, repo) | pr_signals(slug, repo)
+    devkit = slug_of(root / DEVKIT)
+    return found | ready_signals(devkit, repos.get(devkit, {}))
 
 # --- this machine --------------------------------------------------------------------------
 
@@ -290,10 +371,10 @@ def event_signals(devkit: Path) -> set[str]:
     return {key for row in rows if (key := event_key(row))}
 
 
-def signals(root: Path, projects: list[str], run: Run = sweep.run_bounded) -> set[str]:
-    devkit = root / "devkit"
+def signals(root: Path, projects: list[str], repos: dict[str, dict]) -> set[str]:
+    devkit = root / DEVKIT
     return (
-        github_signals(root, projects, run)
+        github_signals(root, repos)
         | local_signals(devkit, projects)
         | tree_signals(root, projects)
         | event_signals(devkit)
@@ -307,15 +388,17 @@ def state_path(root: Path) -> Path:
     return root / worktree_tiers.BOXES_DIR_NAME / STATE_NAME
 
 
-def read_seen(path: Path) -> dict[str, str]:
-    """Spent signal to when. Unreadable is empty: one pass too many, never one too few."""
+def read_state(path: Path) -> tuple[dict[str, str], list[str]]:
+    """`(spent signal to when, followers still to start)`. Unreadable is empty: one pass
+    too many, never one too few."""
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    seen = loaded.get("seen") if isinstance(loaded, dict) else None
-    return {str(k): str(v) for k, v in seen.items()} if isinstance(seen, dict) else {}
-
+        return {}, []
+    loaded = loaded if isinstance(loaded, dict) else {}
+    seen, follow = loaded.get("seen"), loaded.get("follow")
+    kept = {str(k): str(v) for k, v in seen.items()} if isinstance(seen, dict) else {}
+    return kept, [n for n in follow if n in FOLLOWERS] if isinstance(follow, list) else []
 
 def remember(seen: dict[str, str], current: Iterable[str], now: _dt.datetime) -> dict[str, str]:
     """`seen` with `current` spent as of `now`, less what nobody has seen in `REMEMBER`.
@@ -328,11 +411,31 @@ def remember(seen: dict[str, str], current: Iterable[str], now: _dt.datetime) ->
     return kept | dict.fromkeys(current, now.isoformat())
 
 
-def write_seen(path: Path, seen: dict[str, str]) -> None:
+def write_state(path: Path, seen: dict[str, str], follow: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps({"seen": seen}, indent=1, sort_keys=True) + "\n"
+    text = json.dumps({"seen": seen, "follow": follow}, indent=1, sort_keys=True) + "\n"
     path.write_text(text, encoding="utf-8")
 
+
+def running(task: str, run: Run = sweep.run_bounded) -> bool:
+    """Whether the scheduler has `task` running now. Started beside itself, a task is
+    refused, and that refusal is filed as its runs overlapping."""
+    done = run(["schtasks", "/Query", "/TN", task, "/FO", "CSV", "/NH"], START_SECONDS)
+    return '"Running"' in str(getattr(done, "stdout", "") or "")
+
+
+def start_follower(follow: list[str], run: Run = sweep.run_bounded) -> list[str]:
+    """Start the first of `follow` unless it is already going; what is left for later
+    fires. One that will not start -- stood down, not installed here -- is dropped: its
+    own clock is the backstop, and its state is not this job's to report."""
+    if not follow:
+        return []
+    task, *rest = follow
+    if running(task, run):
+        return follow
+    why = start(task, run)
+    print(f"fix-trigger: {'did not start' if why else 'started'} {task} for what moved")
+    return rest
 
 def pass_running(root: Path, clock: Callable[[], float] = time.time) -> bool:
     """Whether a dispatching pass holds its lock. One older than any pass may run is a
@@ -344,13 +447,37 @@ def pass_running(root: Path, clock: Callable[[], float] = time.time) -> bool:
     return clock() - made < PASS_LOCK_STALE
 
 
-def start_pass(run: Run = sweep.run_bounded) -> str:
-    """Start the pass's own scheduled task; "" when the scheduler took it, else why not."""
-    done = run(["schtasks", "/Run", "/TN", PASS_TASK], START_SECONDS)
+def start(task: str, run: Run = sweep.run_bounded) -> str:
+    """Start a scheduled task; "" when the scheduler took it, else why not."""
+    done = run(["schtasks", "/Run", "/TN", task], START_SECONDS)
     if getattr(done, "returncode", 1) == 0:
         return ""
     said = f"{getattr(done, 'stderr', '') or ''} {getattr(done, 'stdout', '') or ''}"
     return " ".join(said.split()) or "schtasks said nothing"
+
+
+def pass_for(
+    root: Path,
+    new: list[str],
+    run: Run = sweep.run_bounded,
+    clock: Callable[[], float] = time.time,
+) -> tuple[bool, int]:
+    """Start the pass for `new`: `(whether they are spent, the exit code)`."""
+    if not new:
+        print("fix-trigger: nothing new")
+        return True, 0
+    listed = "\n".join(f"  {key}" for key in new)
+    if pass_running(root, clock):
+        print(f"fix-trigger: a pass is running; left for the next fire:\n{listed}")
+        return False, 0
+    if why := start(PASS_TASK, run):
+        # Unspent, so the next fire tries again; a task that never starts is the
+        # scheduler's own failure, which the exit code files.
+        print(f"fix-trigger: {len(new)} new signal(s):\n{listed}")
+        print(f"error: could not start {PASS_TASK}: {why}", file=sys.stderr)
+        return False, 1
+    print(f"fix-trigger: started {PASS_TASK} for:\n{listed}")
+    return True, 0
 
 
 def run_once(
@@ -361,33 +488,28 @@ def run_once(
 ) -> int:
     now = now or _dt.datetime.now(_dt.UTC)
     mode = fix_switch.workspace_mode(workspace)
-    if mode != fix_switch.DISPATCH:
-        print(f"fix-trigger: devkit.fixPass is {mode} here, so nothing starts")
-        return 0
     root = workspace.parent
     projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
     path = state_path(root)
-    seen = read_seen(path)
-    current = signals(root, projects, run)
-    new = sorted(current - seen.keys())
-    if not new:
-        write_seen(path, remember(seen, current, now))
-        print(f"fix-trigger: nothing new ({len(current)} standing)")
-        return 0
-    listed = "\n".join(f"  {key}" for key in new)
-    if pass_running(root, clock):
-        print(f"fix-trigger: a pass is running; left for the next fire:\n{listed}")
-        return 0
-    if why := start_pass(run):
-        # Unspent, so the next fire tries again; a task that never starts is the
-        # scheduler's own failure, which the exit code files.
-        print(f"fix-trigger: {len(new)} new signal(s):\n{listed}")
-        print(f"error: could not start {PASS_TASK}: {why}", file=sys.stderr)
-        return 1
-    write_seen(path, remember(seen, current, now))
-    print(f"fix-trigger: started {PASS_TASK} for:\n{listed}")
-    return 0
-
+    seen, follow = read_state(path)
+    repos = repositories(root, projects, run)
+    if moved := move_green(repos, run):
+        print(f"fix-trigger: moved {GREEN}: {', '.join(moved)}")
+    # Keyed on the commit, not on who moved it: whichever PC or workflow did, this PC's
+    # own checkouts and collectors are owed the code.
+    passing = {key for slug, repo in repos.items() for key in passed_signals(slug, repo)}
+    if passing - seen.keys():
+        follow = list(FOLLOWERS)
+    follow = start_follower(follow, run)
+    spent, code = passing, 0
+    if mode == fix_switch.DISPATCH:
+        current = signals(root, projects, repos)
+        done, code = pass_for(root, sorted(current - seen.keys()), run, clock)
+        spent = spent | (current if done else current & seen.keys())
+    else:
+        print(f"fix-trigger: devkit.fixPass is {mode} here, so no pass starts")
+    write_state(path, remember(seen, spent, now), follow)
+    return code
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
