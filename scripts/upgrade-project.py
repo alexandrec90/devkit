@@ -802,6 +802,22 @@ def push_with_retry(git, branch: str, sleep=time.sleep) -> subprocess.CompletedP
     return pushed
 
 
+def open_pr_with_retry(gh, plan: sweep.Plan, sleep=time.sleep) -> tuple[str, bool, str]:
+    """`sweep.ensure_pr`, asked again after each `PUSH_WAITS` while GitHub fails on its own
+    side (`sweep.transient`). Safe to repeat: it reuses a PR an earlier try opened.
+
+    8a1e0b41: GitHub answered HTTP 500, 502 and 503 for minutes while v0.11.101 was being
+    adopted, and six pushed branches were left with no PR.
+    """
+    answer = sweep.ensure_pr(gh, plan)
+    for wait in PUSH_WAITS:
+        if not answer[2] or not sweep.transient(answer[2]):
+            break
+        sleep(wait)
+        answer = sweep.ensure_pr(gh, plan)
+    return answer
+
+
 def _status(git) -> str:
     """Raw `status --porcelain`, **status codes and all**.
 
@@ -1001,7 +1017,7 @@ def upgrade_one(
     # judges: the diff is a vendored copy of an already-released devkit tag, so a
     # green gate is the whole review. The label is what lets `reconcile --merge
     # --merge-label automerge` and the vendored workflow land it unattended.
-    url, created, error = sweep.ensure_pr(
+    url, created, error = open_pr_with_retry(
         sweep.gh_for(box),
         sweep.Plan(
             pr_title=commit_message(tag, len(changed)),
@@ -1012,7 +1028,7 @@ def upgrade_one(
         ),
     )
     if error:
-        return failed(2, f"upgrade: {name} -- pushed, but the PR failed: {error}")
+        return failed(2, f"upgrade: {name} -- {PR_FAILED}{error}")
     print(f"upgrade: PR {'opened' if created else 'already open'}: {url}")
     return Outcome(name, 0)
 
@@ -1086,6 +1102,24 @@ def owes_only_a_release(body: str) -> bool:
     """
     names = unresolved_names(body)
     return bool(names) and all(name == RELEASE_SCOPED for name in names)
+
+
+# How a checkout whose branch is pushed and whose PR would not open says so.
+PR_FAILED = "pushed, but the PR failed: "
+
+
+def waits_only_on_github(body: str) -> bool:
+    """Is every checkout this artifact holds against its run a PR that GitHub's own failure
+    kept from opening (an owed release aside)?
+
+    The daily `--all` run reads a release with no open PR as still to adopt, so it retries
+    each one: a GitHub outage is nothing a devkit session can fix (8a1e0b41).
+    """
+    sections = [s for s in re.split(r"^=== ", body, flags=re.M)[1:]]
+    checkouts = [s for s in sections if not s.startswith(f"{RELEASE_SCOPED} ")]
+    return bool(checkouts) and all(
+        PR_FAILED in said and sweep.transient(said.split(PR_FAILED, 1)[1]) for said in checkouts
+    )
 
 
 def write_artifact(root: Path, body: str) -> Path | None:

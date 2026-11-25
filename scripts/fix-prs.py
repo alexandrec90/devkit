@@ -149,8 +149,10 @@ def open_session(
     runner=sweep.run_windowless,
 ) -> int:
     """The one place a mode becomes a tab or a background session, and so the one place
-    a prompt learns whether `tree`'s own runner runs the whole suite bare."""
+    a prompt learns what `tree` itself holds: whether its own runner runs the whole suite
+    bare, and which ship reference it has."""
     prompt = fix_prompts.for_runner(prompt, session_friction.runs_suite_bare(tree))
+    prompt = fix_prompts.for_ship_doc(prompt, tree)
     if AGENT_MODES[launch.agent][1] == BACKGROUND:
         off = agent_tabs.harness_switch.hooks_are_off()
         return agent_tabs.launch_background(launch, tree, prompt, off, runner)

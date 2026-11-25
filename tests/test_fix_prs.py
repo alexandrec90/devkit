@@ -838,6 +838,29 @@ def test_open_session_tells_a_tree_whose_runner_runs_the_suite_bare_so(monkeypat
     assert sent[1] == prompt
 
 
+def test_open_session_names_the_ship_reference_the_tree_holds(monkeypatch, tmp_path):
+    """b9dc71cd: tvshell, on v0.11.99, had no `.claude/ship-intent.md` to read."""
+    sent = []
+    monkeypatch.setattr(
+        fix_prs.agent_tabs,
+        "launch_background",
+        lambda launch, tree, prompt, off, run: sent.append(prompt) or 0,
+    )
+    prompt = fix_prs.tab_safe(fix_prs.fix_prompts.pr_prompt(failure()))
+    new, old = fix_prs.fix_prompts.SHIP_INTENT_DOC, fix_prs.fix_prompts.OLD_SHIP_DOC
+
+    def send():
+        fix_prs.open_session(agent_models.Launch("claude-bg"), tmp_path, "agent/x", prompt, "t")
+        return sent[-1]
+
+    assert new in send(), "neither file: nothing better to name"
+    for doc in (old, new):
+        (tmp_path / doc).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / doc).write_text("x", encoding="utf-8")
+        assert doc in send()
+        assert (new if doc == old else old) not in sent[-1]
+
+
 def test_the_model_and_effort_reach_both_modes_and_neither_invents_a_default(monkeypatch, tmp_path):
     """One pick, two ways of opening, the same flags -- and nothing when nothing was picked.
 

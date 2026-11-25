@@ -1748,6 +1748,44 @@ def test_a_push_the_remote_or_a_hook_refused_is_not_retried(refusal):
     assert len(git.calls) == 1 and slept == []
 
 
+@pytest.mark.parametrize(
+    ("errors", "slept", "error"),
+    [
+        ([""], 0, ""),
+        (["HTTP 500 (https://api.github.com/x)", ""], 1, ""),
+        (["HTTP 502: Server Error"] * 3, 2, "HTTP 502: Server Error"),
+        (["HTTP 422: refused"], 0, "HTTP 422: refused"),
+    ],
+)
+def test_an_adoption_pr_is_asked_for_again_only_while_github_fails(
+    monkeypatch, errors, slept, error
+):
+    answers, waits = list(errors), []
+    monkeypatch.setattr(up.sweep, "ensure_pr", lambda gh, plan: ("", False, answers.pop(0)))
+    answer = up.open_pr_with_retry(None, up.sweep.Plan(), sleep=waits.append)
+    assert answer[2] == error
+    assert waits == list(up.PUSH_WAITS[:slept]) and answers == []
+
+
+def test_an_artifact_waits_only_on_github_when_every_checkout_is_its_outage():
+    """8a1e0b41: six adoption PRs GitHub would not open were filed as a failed job."""
+
+    def body(*details, release=False):
+        outcomes = [up.Outcome(f"p{i}", 2, text) for i, text in enumerate(details)]
+        if release:
+            outcomes.insert(0, up.Outcome(up.RELEASE_SCOPED, 1, "cut a release"))
+        return up.artifact_body("v0.11.101", False, outcomes)
+
+    outage = f"upgrade: x -- {up.PR_FAILED}HTTP 500 (https://api.github.com/labels)"
+    assert up.waits_only_on_github(body(outage, outage))
+    assert up.waits_only_on_github(body(outage, release=True))
+    assert not up.waits_only_on_github(body(outage, "upgrade: y -- the pull refused"))
+    assert not up.waits_only_on_github(body(f"upgrade: x -- {up.PR_FAILED}HTTP 422: no"))
+    assert not up.waits_only_on_github(body("upgrade: x -- FAILED at `git push`\nHTTP 500"))
+    assert not up.waits_only_on_github(body(release=True))
+    assert not up.waits_only_on_github("")
+
+
 def test_every_adoption_push_skips_the_local_gate():
     """1720b7f4: v0.11.76's adoption stopped at `git push` in two consumers. The pre-push
     gate ran the whole suite in a box with no stack, which productivity-tracker's

@@ -5642,7 +5642,7 @@ def reconcile(
                 # rather than on the state read before the merge happened.
                 pr = replace(pr, state="MERGED")
                 action = REAP
-            else:
+            elif not sweep.transient(message):  # an outage is the next pass's to retry
                 worst = 1
 
         if action == REAP:

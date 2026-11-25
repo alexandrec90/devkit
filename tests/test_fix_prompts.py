@@ -854,6 +854,19 @@ def test_a_tree_whose_runner_runs_the_suite_bare_is_told_so_as_a_fact():
     assert fix_prompts.RUNNER_SENTENCE in fix_prompts.FINISH
 
 
+def test_every_prompt_names_the_old_ship_reference_where_only_that_exists(tmp_path):
+    """b9dc71cd: a project behind the release that replaced the skill has only the skill."""
+    old = tmp_path / fix_prompts.OLD_SHIP_DOC
+    for text in every_prompt():
+        assert fix_prompts.for_ship_doc(text, tmp_path) == text
+    old.parent.mkdir(parents=True)
+    old.write_text("x", encoding="utf-8")
+    for text in every_prompt():
+        told = fix_prompts.for_ship_doc(text, tmp_path)
+        assert fix_prompts.OLD_SHIP_DOC in told
+        assert fix_prompts.SHIP_INTENT_DOC not in told
+
+
 def test_the_finish_says_a_long_check_is_waited_for_by_ending_the_turn():
     """fbf4aebc: a fixer held its turn in an until loop on its own test run, told in the
     same prompt that ending with no intent reads as dying."""

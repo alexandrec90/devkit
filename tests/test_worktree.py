@@ -4618,6 +4618,16 @@ def test_a_failed_merge_leaves_the_box_alone_and_reddens_the_pass(workspace, mon
     assert "demo--stuck-0806" in worktree.read_leases(root)
 
 
+def test_a_merge_github_failed_on_its_own_side_waits_for_the_next_pass(workspace, monkeypatch):
+    root = _reconcilable(
+        workspace, monkeypatch, "demo--stuck-0806", sweep.NEEDS_PR, "pushed", "OPEN"
+    )
+    monkeypatch.setattr(worktree, "merge_pr", lambda gh, number: (False, "HTTP 502: Server Error"))
+    code, _report = worktree.reconcile(workspace, apply=True, automerge=True)
+    assert code == 0
+    assert "demo--stuck-0806" in worktree.read_leases(root)
+
+
 def test_reconcile_dry_run_changes_nothing(workspace, monkeypatch):
     root = _reconcilable(
         workspace, monkeypatch, "demo--done-0806", sweep.NEEDS_PR, "pushed", "MERGED"
