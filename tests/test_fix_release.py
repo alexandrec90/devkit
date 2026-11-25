@@ -68,6 +68,15 @@ def test_green_adoptions_are_merged_through_the_reconcile_merge(monkeypatch, tmp
     assert merged == [5] and lines == ["carameli #5 -- merged PR #5"]
 
 
+def test_a_merge_github_failed_on_its_own_side_is_deferred_and_a_refusal_is_not():
+    """a0e74427: filed as a defect, and merged by the very next pass."""
+    said = "GraphQL: Something went wrong while executing your query on 2026-11-25T16:00:16Z."
+    assert "FAILED" not in fix_release.merge_line(False, said)
+    assert "deferred" in fix_release.merge_line(False, said)
+    assert fix_release.merge_line(False, "merge conflict") == "FAILED: merge conflict"
+    assert fix_release.merge_line(True, "merged PR #5") == "merged PR #5"
+
+
 # --- when a release starts ----------------------------------------------------------------
 
 

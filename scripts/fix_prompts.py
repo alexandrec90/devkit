@@ -202,6 +202,18 @@ def _framed(body: str) -> str:
     return f"{ROLE} {body} {STOP}"
 
 
+# The same reference in a project that has not adopted the release that replaced it.
+OLD_SHIP_DOC = ".claude/skills/ship/SKILL.md"
+
+
+def for_ship_doc(prompt: str, tree: Path) -> str:
+    """`prompt` naming the ship reference `tree` holds: a tvshell fixer on v0.11.99 was sent
+    to `SHIP_INTENT_DOC`, which its project had not adopted (b9dc71cd)."""
+    if (tree / SHIP_INTENT_DOC).is_file() or not (tree / OLD_SHIP_DOC).is_file():
+        return prompt
+    return prompt.replace(SHIP_INTENT_DOC, OLD_SHIP_DOC)
+
+
 def for_runner(prompt: str, suite_bare: bool) -> str:
     """`prompt` for a tree whose runner runs the whole suite bare (`suite_bare`): the
     runner sentence said as a fact of that tree, not as a condition its session checks."""

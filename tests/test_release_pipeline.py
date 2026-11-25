@@ -391,6 +391,14 @@ def test_a_checkout_that_failed_beside_the_owed_release_still_stops(capsys):
     assert "adoption pass exited 2" in capsys.readouterr().err
 
 
+def test_adoption_prs_github_would_not_open_are_the_daily_upgrades(capsys):
+    """8a1e0b41: six consumers' PRs met HTTP 5xx and the release was filed as failed."""
+    said = f"upgrade: radio -- {up.PR_FAILED}HTTP 502: Server Error"
+    artifact = _owed_artifact(up.Outcome("radio", 2, said))
+    assert rp.adoption_outcome("v0.11.101", "--all", 2, artifact) == 0
+    assert "next daily upgrade run" in capsys.readouterr().out
+
+
 def test_an_adoption_that_left_no_artifact_stops(capsys):
     """A pass that crashed writes nothing; `run_pipeline` empties the file first so a
     previous run's owed-release verdict cannot stand in for this one."""

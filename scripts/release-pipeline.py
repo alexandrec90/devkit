@@ -1011,6 +1011,14 @@ def adoption_outcome(version: str, scope: str, code: int, artifact: str) -> int:
     if code == 0:
         _say(f"{version} released and up for adoption everywhere.")
         return 0
+    if upgrade_module().waits_only_on_github(artifact):
+        # A GitHub outage past every retry (8a1e0b41): the daily upgrade job adopts what
+        # has no PR yet, and is filed if GitHub is still failing then.
+        _say(
+            f"{version} is released; GitHub failed to open some adoption PRs "
+            "(logs/upgrade.log names them), and the next daily upgrade run opens them."
+        )
+        return 0
     # Not a release failure: the release is cut and tagged. Adoption is a separate
     # per-consumer act with its own artifact, and `logs/upgrade.log` says which.
     return _stop(

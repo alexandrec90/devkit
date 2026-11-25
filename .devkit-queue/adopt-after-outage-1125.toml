@@ -1,0 +1,4 @@
+# GitHub's outage on 2026-11-25 left six consumers of v0.11.101 with no adoption PR
+# (8a1e0b41). A project already adopted, or with its PR open, is skipped.
+when = "merged"
+run = "python scripts/upgrade-project.py --all --yes"

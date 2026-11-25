@@ -97,10 +97,19 @@ def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
             rows = []
         for row in adoption_prs.green_adoptions(rows, prefixes, sweep.AUTOMERGE_LABEL):
             ok, message = worktree.merge_pr(gh, int(row.get("number", 0)))
-            merged.append(
-                f"{name} #{row.get('number')} -- {message if ok else 'FAILED: ' + message}"
-            )
+            merged.append(f"{name} #{row.get('number')} -- {merge_line(ok, message)}")
     return merged
+
+
+def merge_line(ok: bool, message: str) -> str:
+    """A merge's outcome as the record says it. One that GitHub failed on its own side is
+    deferred, without the `FAILED` that files it: the PR is still green and open, so the
+    next pass merges it (a0e74427: roguelike #165, merged by the pass after)."""
+    if ok:
+        return message
+    if sweep.transient(message):
+        return f"merge deferred to the next pass: {message}"
+    return f"FAILED: {message}"
 
 
 def release_verdict(
