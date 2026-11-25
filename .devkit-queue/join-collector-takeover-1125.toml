@@ -1,0 +1,30 @@
+# The unprivileged half of what session 4f3ee5b9 left its person to do (7f36f72f): each PC
+# that can take part in `sports_betting`'s takeover (#825) joins it. `every-machine`, not a
+# hostname: a hostname's task goes to some other PC after three days, and these PCs are off
+# for weeks. A PC reads this only once its own devkit jobs run.
+on = "every-machine"
+agent = """
+Check this PC's part in the `sports_betting` collector takeover, which devkit #825 added
+(scripts/collector_lease.py). Read the hostname first and work on this PC only: send no
+message to another machine's session and open no SSH connection to one.
+
+On any host other than desktop-900mt6f and desktop-b9fc8vp there is nothing to do: say so
+in the intent.
+
+On either of those two, check that this devkit checkout contains #825 and, with
+`python scripts/collectors.py status`, what this PC does about sports_betting.
+
+desktop-b9fc8vp: its older devkit ignored the claim and may have started a second copy. If
+the claim belongs to another PC, run `python scripts/collectors.py maintain` and confirm
+this PC stands by. Delete no data.
+
+desktop-900mt6f: if docker already works here, the devkit-collectors task is already
+registered and enabled, and the sports_betting checkout already has its .env, run
+`python scripts/collectors.py run-here sports_betting` and confirm this PC claims it or
+stands by. If any of those is missing, change nothing and name it in the intent.
+
+On both: do not install Docker, do not enable or register any scheduled task, do not add an
+SSH key, do not set up Syncthing autostart, and do not copy a .env from anywhere. The
+person strips desktop-900mt6f down for gaming, and its own session holds those steps until
+they say yes there.
+"""
