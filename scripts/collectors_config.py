@@ -208,8 +208,8 @@ def _container_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     service = raw.get("service")
     if not isinstance(service, str) or not service:
         return None, f"{project}: no `service` -- which compose service is the collector?"
-    health = raw.get("health", [])
-    if not isinstance(health, list) or not all(isinstance(part, str) and part for part in health):
+    health = _argv(raw.get("health", []))
+    if health is None:
         return None, f"{project}: `health` must be a list of strings (argv, not a shell line)"
     settle = raw.get("settle", DEFAULT_SETTLE)
     # `bool` is an `int`, as for `minutes`.
@@ -227,7 +227,7 @@ def _container_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     return Collector(
         project,
         service,
-        tuple(health),
+        health,
         settle=settle,
         builds_from=builds_from,
         failover=failover,

@@ -2443,9 +2443,7 @@ def run_pass(
             [c for c in collectors if args.mode == "maintain" or c.project in assignment],
             assignment,
             here.base / lease.RECORD,
-            sweep.git_for(here.base),
-            here.name,
-            here.report.say,
+            lease.Claimant(sweep.git_for(here.base), here.name, here.report.say),
         )
         chosen = targets(collectors, assignment, here.workspace)
         if not chosen:

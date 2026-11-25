@@ -106,9 +106,13 @@ TRAY_MODULES = (
     "collector_build",
     # `tray_rows` reads the handoffs this machine sent (`collector_handoff.OUTGOING`).
     "collector_handoff",
+    # A standby's row reads `stop`, off what `collector_lease` last learned.
+    "collector_lease",
     "collector_tasks",
     "collectors_config",
     "docker_memory",
+    "host_memory",
+    "job_claims",
     "machine_clock",
     "devkit_jsonc",
     "sweep",
