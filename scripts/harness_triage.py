@@ -361,11 +361,18 @@ def person_step(item: Item) -> str:
     Read off `said` before `cause`: `cause` is cut at `log-wrap.CAUSE_WIDTH`, and the step
     comes last on its line, after what went wrong. A pass finding has neither and says it
     in its `detail` (`fix_loop.LOGIN_DETAIL`), and an agent report in its `message`
-    (c480340e)."""
+    (c480340e).
+
+    A marker inside a backtick span is a mention, not a step: baca6a76, a friction report
+    quoting how a step is written, was parked for a person to run `<command>"` and kept
+    from the fixer its friction was for."""
     for name in ("said", "cause", "detail", "message"):
         text = item.fields.get(name, "")
-        if PERSON_STEP in text:
-            return text.split(PERSON_STEP, 1)[1].strip(" -")
+        at = text.find(PERSON_STEP)
+        while at >= 0:
+            if text.count("`", 0, at) % 2 == 0:
+                return text[at + len(PERSON_STEP) :].strip(" -")
+            at = text.find(PERSON_STEP, at + 1)
     return ""
 
 

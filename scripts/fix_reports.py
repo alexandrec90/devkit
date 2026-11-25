@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import re
 import sys
 from collections.abc import Callable, Iterator
@@ -242,8 +243,52 @@ def untrusted(said: str) -> bool:
     return UNTRUSTED_SAID in said
 
 
-# Where Claude Code keeps the answer to its trust prompt, per directory.
-CLAUDE_CONFIG = Path.home() / ".claude.json"
+TRUST_KEY = "hasTrustDialogAccepted"
+
+
+def claude_config() -> Path:
+    """Where Claude Code keeps the answer to its trust prompt, per directory: `.claude.json`
+    under `CLAUDE_CONFIG_DIR` when that is set, as Claude Code reads it, else in home."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR", "")
+    return (Path(base) if base else Path.home()) / ".claude.json"
+
+
+def trust(checkout: Path, config: Path | None = None) -> bool:
+    """Answer Claude Code's trust prompt yes for `checkout`, as a person running `claude`
+    there would, and say whether it is trusted now.
+
+    It was a person's step -- "run `claude` in <checkout> once and accept the trust
+    prompt" -- that stood on the tray for eight passes, for checkouts the pass itself
+    registered. Only a git checkout is answered for, and nothing is written over a config
+    that cannot be read. The rest of the file is kept, and the write is a rename, so a
+    session reading it sees the old file or the new one. A running Claude Code that
+    rewrites the file from its own copy can drop the answer; the next pass finds the
+    checkout untrusted again and answers again."""
+    path = config or claude_config()
+    if trusted(checkout, path):
+        return True
+    if not (checkout / ".git").exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        projects = data["projects"] = {}
+    key = checkout.as_posix()
+    entry = projects.get(key)
+    projects[key] = {**(entry if isinstance(entry, dict) else {}), TRUST_KEY: True}
+    scratch = path.with_name(f"{path.name}.devkit-{os.getpid()}.tmp")
+    try:
+        scratch.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(scratch, path)
+    except OSError:
+        scratch.unlink(missing_ok=True)
+        return False
+    return trusted(checkout, path)
 
 
 def trusted(checkout: Path, config: Path | None = None) -> bool:
@@ -256,7 +301,7 @@ def trusted(checkout: Path, config: Path | None = None) -> bool:
     the hold this feeds (`fix_send._untrusted`) lasts while a refusal is open, and the
     person's documented step of resolving that group still ends it."""
     try:
-        text = (config or CLAUDE_CONFIG).read_text(encoding="utf-8")
+        text = (config or claude_config()).read_text(encoding="utf-8")
         projects = json.loads(text).get("projects")
     except (OSError, ValueError, AttributeError):
         return False
@@ -265,7 +310,7 @@ def trusted(checkout: Path, config: Path | None = None) -> bool:
     accepted = {
         Path(key)
         for key, entry in projects.items()
-        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+        if isinstance(entry, dict) and entry.get(TRUST_KEY) is True
     }
     return checkout in accepted
 

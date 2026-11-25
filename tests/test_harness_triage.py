@@ -797,6 +797,25 @@ def test_an_agent_reports_person_step_is_read_off_its_message():
     assert triage.awaiting_person(items) == {items[0].signature: "upgrade Git for Windows"}
 
 
+def test_a_marker_quoted_in_backticks_is_a_mention_not_a_step():
+    """baca6a76: a friction report quoting how a step is written -- `... a person's step:
+    <command>"` -- was parked as a person's step, so the tray asked the person to run a
+    sentence fragment and no fixer was sent at the friction it reported."""
+    quoted = (
+        "it took four searches to find that an agent files it as `python x.py --message "
+        f'"... {triage.PERSON_STEP} <command>"` (the convention lives only in a docstring)'
+    )
+    items = triage.open_items(triage.read_items(_line("session-friction", message=quoted)))
+    assert triage.person_step(items[0]) == ""
+    assert triage.awaiting_person(items) == {}
+    # A real step after a quoted mention is still read, and a step whose command carries
+    # backticks of its own is read whole.
+    both = triage.Item("", "", {"message": f"{quoted} -- {triage.PERSON_STEP} reboot"})
+    assert triage.person_step(both) == "reboot"
+    ticked = triage.Item("", "", {"message": f"x -- {triage.PERSON_STEP} run `a` then `b`"})
+    assert triage.person_step(ticked) == "run `a` then `b`"
+
+
 def test_a_group_reports_its_count_and_every_id(tmp_path):
     a = _line("agent-report", stamp=_STAMPS[0], message="same")
     b = _line("agent-report", stamp=_STAMPS[1], message="same")

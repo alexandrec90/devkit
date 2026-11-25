@@ -1765,6 +1765,8 @@ def test_a_checkout_nobody_trusted_is_sent_nothing_until_someone_does(world, tmp
     ctx = _ctx(tmp_path)
     history = _untrusted_ledger(ctx)
     monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "trusted", lambda _checkout: False)
+    # Only one whose prompt the pass cannot answer itself (`fix_reports.trust`).
+    monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "trust", lambda _checkout: False)
     go = [fix_plan.Decision(fix_plan.DISPATCH, "red", (failure(),))]
     sent, capped, worst = fix_pass.fix_send.send_all(go, ctx, "claude", items=history)
     assert sent == [] and world["dispatched"] == [] and worst == fix_pass.fix_send.EXIT_OK
@@ -1779,6 +1781,38 @@ def test_a_checkout_trusted_since_its_refusal_is_sent_at_once(world, tmp_path, m
     go = [fix_plan.Decision(fix_plan.DISPATCH, "red", (failure(),))]
     sent, capped, _ = fix_pass.fix_send.send_all(go, ctx, "claude", items=history)
     assert len(sent) == 1 and capped == []
+
+
+def test_an_untrusted_checkout_the_pass_can_answer_for_is_trusted_and_sent(
+    world, tmp_path, monkeypatch
+):
+    """ "run `claude` in <checkout> once and accept the trust prompt" stood on the tray 8
+    times; the pass answers the prompt itself and sends the session the same pass."""
+    ctx = _ctx(tmp_path)
+    history = _untrusted_ledger(ctx)
+    monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "trusted", lambda _checkout: False)
+    answered: list = []
+    monkeypatch.setattr(
+        fix_pass.fix_loop.fix_reports, "trust", lambda c: answered.append(c.name) or True
+    )
+    go = [fix_plan.Decision(fix_plan.DISPATCH, "red", (failure(),))]
+    sent, capped, _ = fix_pass.fix_send.send_all(go, ctx, "claude", items=history)
+    assert len(sent) == 1 and capped == [] and answered == ["carameli"]
+
+
+def test_a_dispatch_refused_untrusted_is_answered_not_filed(world, monkeypatch):
+    world["failures"] = [failure()]
+
+    def refused(*_args, **_kwargs):
+        print("Workspace not trusted. Run `claude` in C:\\x once and accept it.", file=sys.stderr)
+        return 1
+
+    monkeypatch.setattr(fix_pass.fix_send, "dispatch", refused)
+    monkeypatch.setattr(fix_pass.fix_send.fix_reports, "trust", lambda _checkout: True)
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
+    text = artifact(world)
+    assert "trusted it; sent again next pass" in text
+    assert fix_pass.fix_loop.UNTRUSTED_KIND not in text
 
 
 def test_what_an_untrusted_checkout_cannot_stop(world, tmp_path, monkeypatch):

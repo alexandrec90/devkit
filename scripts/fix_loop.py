@@ -396,6 +396,8 @@ def judge_dead(
             # a person -- the re-send is what shows the login is back.
             journal.add(Finding(LOGIN_KIND, "devkit", LOGIN_DETAIL, evidence=transcript))
         elif state == fix_reports.UNTRUSTED:
+            if ctx.writes and fix_reports.trust(ctx.root / tree.project):
+                return [f"{where} -- {state}; trusted {tree.project}, sent again"]
             detail = untrusted_detail(ctx.root / tree.project)
             cited = str(tree.path / fix_reports.LAUNCH_FILE)
             journal.add(Finding(UNTRUSTED_KIND, tree.project, detail, evidence=cited))

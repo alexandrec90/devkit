@@ -232,5 +232,5 @@ def make_world(tmp_path: Path, monkeypatch) -> World:
     config.write_text("[user]\n\tname = t\n\temail = t@example.com\n", encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setattr(after_merge_pass.fix_reports, "trusted", lambda _checkout: True)
+    monkeypatch.setattr(after_merge_pass.fix_reports, "trust", lambda _checkout: True)
     return World(tmp_path)

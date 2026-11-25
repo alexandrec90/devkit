@@ -1447,7 +1447,9 @@ of zero jobs is the most misleading thing it could say.
 The fix pass gets rows of its own, read off the newest line of
 `logs/fix-pass.history.jsonl` and judged by the pass, not the tray. A **`your step`** row,
 red, for each step the harness-defect ledger awaits a person for (`claude auth login`, a
-checkout to trust), with the command that retires it. And one **`fixers`** row: how many
+command only an administrator can run), with the command that retires it. A step the pass
+can take itself is never one: it starts a quit Docker Desktop, and answers Claude Code's
+trust prompt for a checkout (`fix_reports.trust`). And one **`fixers`** row: how many
 are at work, waiting, owed, and when one was last sent. It turns amber when a red harness
 holds every send, or when a fixer has been owed for `tray_state.STUCK_PASSES` passes with
 none sent, at work or waiting. Clicking either opens `logs/fix-pass.log`. A stale login
