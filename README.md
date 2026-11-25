@@ -462,7 +462,7 @@ python scripts/harness-switch.py --off --job devkit-tray  # one scheduled job, f
 | --- | --- | --- |
 | `hooks` | every switchable hook script — none is wired today, so this changes nothing until one is | `DEVKIT_HOOKS_OFF=1` in the user settings and the user environment |
 | `instructions` | every `CLAUDE.md` and `.claude/rules/*.md`, at every tier | moved to `logs/harness-switch/`, tracked ones marked `skip-worktree` |
-| `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release`, `devkit-fix-pass`, `devkit-ship` | `schtasks /Change /DISABLE` |
+| `jobs` | `devkit-worktree-reconcile`, `devkit-upgrade-projects`, `devkit-release`, `devkit-fix-pass`, `devkit-fix-trigger`, `devkit-ship` | `schtasks /Change /DISABLE` |
 
 Nothing is deleted: files are held and restored byte for byte, jobs are disabled rather
 than unregistered, and `--on` is the inverse of `--off`. A job stood down by name or by
@@ -590,7 +590,7 @@ and the body after a blank one, and stops (`.claude/ship-intent.md`). It may com
 push itself too; the intent is what tells the pass it is done, and the only thing it
 knows that nothing else can recover is *why* the change was made.
 
-`scripts/fix-pass.py` is what does the rest, every half hour once `devkit.fixPass` in the
+`scripts/fix-pass.py` is what does the rest, every half hour and whenever `scripts/fix_trigger.py` sees something newly red (asked every two minutes), once `devkit.fixPass` in the
 workspace file is switched on (`scripts/install-fix-pass-task.py` registers it, wired and
 off, and `off` means this PC sends no fixers: the ship task below still ships), or by hand through the *Agent: Fix What Is Red* task, which passes `dispatch`
 explicitly and asks only which agent. One pass, in order:
@@ -966,7 +966,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | Job | Installer | Cadence | Its record |
 | --- | --- | --- | --- |
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
-| `devkit-local-e2e` | `scripts/install-e2e-schedule.py` | nightly 01:00, each project once the PC is idle | `logs/scheduled-local-e2e.log`, results under `logs/e2e/` |
+| `devkit-local-e2e` | `scripts/install-e2e-schedule.py` | every 30 min, what moved, only while the PC is idle | `logs/scheduled-local-e2e.log`, results under `logs/e2e/` |
 | `devkit-medium-tier` | `scripts/install-tier-schedule.py` | every 15 min, whatever the person is doing, behind `devkit.fixPass` being `dispatch` | `logs/scheduled-medium-tier.log`, results under `logs/medium-tier/` |
 | `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00 | `logs/scheduled-devkit-release.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
@@ -978,7 +978,8 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-tray` | `scripts/install-tray.py` | at logon, resident | `logs/tray.log` |
 | `devkit-installers` | `scripts/install-installers-schedule.py` | daily 08:45, and at logon | `logs/installers.log` |
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
-| `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, behind `devkit.fixPass` | `logs/fix-pass.log` |
+| `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, and whenever `devkit-fix-trigger` starts it, behind `devkit.fixPass` | `logs/fix-pass.log` |
+| `devkit-fix-trigger` | `scripts/install-fix-trigger.py` | every 2 min; starts the fix pass when something is newly red (`scripts/fix_trigger.py`) | `logs/scheduled-fix-trigger.log` |
 | `devkit-ship` | `scripts/install-ship-schedule.py` | every 2 min, on every PC; a fire with nothing to ship exits within seconds | `logs/ship-pass.log` |
 | `devkit-collectors` | `scripts/install-collectors.py` | every 15 min, and at logon; acts only where `run-here`/`stop-here` assigned | `logs/collectors.log` |
 | `devkit-elevated` | `scripts/install-elevated-worker.py` | every 5 min, elevated; installed once per PC by an administrator, never by a job | `C:\ProgramData\devkit\elevated\worker.log` |
@@ -1810,14 +1811,14 @@ Some tests need *this workstation*: the live workspace file, VS Code itself, a p
 Docker stack, a browser session, a credential. CI deselects them, a session never runs the
 whole suite, and a box is not the static checkout -- so until this tier they ran only
 when a person happened to run the suite on `main`. Now `devkit-local-e2e`
-(`scripts/install-e2e-schedule.py`) runs them every night once the PC has been idle for
-ten minutes, and a red one reaches the fix pass as that project's red default branch.
+(`scripts/install-e2e-schedule.py`) runs what moved every half hour the PC has been idle for
+ten minutes (an hour, for a tier that opens windows), and a red one reaches the fix pass as that project's red default branch.
 
 | Piece | What it does |
 | --- | --- |
 | `scripts/e2e.py` in a project | **The contract.** Exit 0 green, anything else red; print each failure as pytest's `FAILED <id>` line. Every project owes one: a project whose `origin/<default>` has none is recorded red (`e2e_results.MISSING`), and its fixer is sent to write the tier. |
-| `scripts/e2e-pass.py run` | Waits for idle, fast-forwards each static checkout to `origin/<default>` (skipping, with the reason, one a person is working in), runs its `scripts/e2e.py`, writes `logs/e2e/<project>/result.json` and `output.log` in devkit. Exits 0 on a red result. |
-| `scripts/e2e_results.py` | Turns a red result into a `fix_plan.LOCAL` failure, read by `fix_red.collect_red`. A result older than the tip is held until the next night. |
+| `scripts/e2e-pass.py run --due` | Ends at once on a PC in use; else, for each project whose tip moved, fast-forwards each static checkout to `origin/<default>` (skipping, with the reason, one a person is working in), runs its `scripts/e2e.py`, writes `logs/e2e/<project>/result.json` and `output.log` in devkit. Exits 0 on a red result. |
+| `scripts/e2e_results.py` | Turns a red result into a `fix_plan.LOCAL` failure, read by `fix_red.collect_red`. A result older than the tip is held until the next run re-tests it. A finished red starts a fix pass within two minutes (`scripts/fix_trigger.py`). |
 | `scripts/e2e-pass.py status` | Each project's last result. |
 | `devkit.localE2e` in `workspace.jsonc` | **Which PC tests which project.** `hosts` takes `devkit.remoteControl`'s shape: one machine name, or `{"*": "pc-a", "carameli": "pc-b"}`. Every PC registers the job and tests only what this assigns it, so moving the job is editing this value. |
 

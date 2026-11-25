@@ -1212,6 +1212,38 @@ def test_a_gate_still_running_at_the_tip_is_running_not_unreadable(monkeypatch, 
     assert ev.read_default_branch("devkit", tmp_path, tmp_path / "ev") == (fix_plan.RUNNING, None)
 
 
+def test_a_red_under_a_running_tip_is_that_red(monkeypatch, tmp_path):
+    """The tip of a busy branch is nearly always running, so a red read at the tip alone
+    reached no fixer until merging stopped."""
+    running = {"databaseId": 3, "status": "queued", "conclusion": "", "headSha": "fb17a310"}
+    cancelled = {
+        "databaseId": 2,
+        "status": "completed",
+        "conclusion": "cancelled",
+        "headSha": "b",
+    }
+    red = {"databaseId": 7, "status": "completed", "conclusion": "failure", "headSha": "a"}
+    routes = {("run", "list"): [running, cancelled, red], ("run", "view"): {"jobs": [LINT_JOB]}}
+    monkeypatch.setattr(ev.sweep, "gh_for", lambda _p: table(routes))
+    tip = subprocess.CompletedProcess([], 0, "fb17a310\n", "")
+    monkeypatch.setattr(ev.sweep, "git_for", lambda _p: lambda *a: tip)
+    monkeypatch.setattr(ev.tb, "detect_default_branch", lambda _git, fallback="main": "main")
+    green, failure = ev.read_default_branch("devkit", tmp_path, tmp_path / "ev")
+    assert green is False and failure is not None
+    assert (failure.sha, failure.run_id, failure.tip_running) == ("a", "7", True)
+
+
+def test_the_run_that_last_judged_the_branch_decides_what_a_running_tip_inherits():
+    def run(conclusion, status="completed"):
+        return {"conclusion": conclusion, "status": status}
+
+    running, red, passed = run("", "in_progress"), run("failure"), run("success")
+    assert ev.red_behind([running, red, passed]) is red
+    assert ev.red_behind([running, run("cancelled"), red]) is red
+    assert ev.red_behind([running, passed, red]) == {}, "a later commit passed"
+    assert ev.red_behind([running]) == {} == ev.red_behind([])
+
+
 def test_a_cancelled_run_at_the_tip_is_no_verdict_rather_than_red(monkeypatch, tmp_path):
     """Anything but success read as red, so a cancelled run became a devkit session sent
     at an empty signature."""

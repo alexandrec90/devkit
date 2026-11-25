@@ -100,6 +100,30 @@ def test_a_project_s_open_medium_session_is_found_whatever_its_signature():
     assert fix_ledger.open_medium_session(pr, ledger, now) == ""
 
 
+def _branch_decision(sha: str, *signature: str) -> fix_plan.Decision:
+    red = failure(kind=fix_plan.BRANCH, number=0, head="", sha=sha, signature=signature)
+    return fix_plan.Decision(fix_plan.DISPATCH, "n", (red,))
+
+
+def test_one_session_at_a_time_works_on_one_branch_failure_whatever_the_commit(tmp_path):
+    """Every merge over a red main is judged red too, under a new key."""
+    path, now = tmp_path / "dispatch.json", _dt.datetime(2026, 11, 25, 12, 0, tzinfo=_dt.UTC)
+    first, again = _branch_decision("a", "t::x"), _branch_decision("b", "t::x")
+    key = fix_ledger.decision_key(first)
+    fix_ledger.record(path, key, "n", now, fix_ledger.problem_key(first))
+    ledger = fix_ledger.read_ledger(path)
+    assert fix_ledger.already_sent(again, ledger, now) == ""
+    assert fix_ledger.open_branch_session(again, ledger, now) == now.isoformat()
+    later = now + fix_ledger.BRANCH_SETTLE
+    assert fix_ledger.open_branch_session(again, ledger, later) == "", "the fix did not take"
+    other = _branch_decision("b", "t::y")
+    assert fix_ledger.open_branch_session(other, ledger, now) == "", "another failure"
+    dead = {key: {**ledger[key], "dead": "no"}}
+    assert fix_ledger.open_branch_session(again, dead, now) == ""
+    pr = fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(),))
+    assert fix_ledger.open_branch_session(pr, ledger, now) == ""
+
+
 def test_a_local_e2e_red_keeps_its_key_shape():
     key = fix_ledger.failure_key(
         failure(kind=fix_plan.LOCAL, number=0, workflow="Local E2E", sha="s", tip="t")

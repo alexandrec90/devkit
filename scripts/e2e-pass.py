@@ -6,15 +6,20 @@ stack, a browser, a credential -- run here, on the workstation that has all of t
 what they find reaches the fix pass as a red default branch (`e2e_results.py` owns that
 half and says why it is a result file rather than this job's exit code).
 
-    e2e-pass.py run [PROJECT ...]     # what `devkit-local-e2e` runs every night
+    e2e-pass.py run --due             # what `devkit-local-e2e` runs every half hour
+    e2e-pass.py run [PROJECT ...]     # by hand: these, once the PC is idle
     e2e-pass.py run --no-wait devkit  # now, by hand, whoever is at the keyboard
     e2e-pass.py status                # each project's last result
 
-**Night, and idle.** The scheduled task fires at night (`install-e2e-schedule.py`), and
-a run that opens a VS Code window under someone's cursor is worse than a run a night
-late. So before each project the pass waits until the keyboard and mouse have been
-still for `--idle-minutes`, and gives up at `--until`, leaving the last result in place.
-The wait is ours rather than the scheduler's `RunOnlyIfIdle`: the scheduler's idle wait
+**Only while the PC is idle, behind everything else on it.** The scheduled fire
+(`install-e2e-schedule.py`) runs each project whose tip moved since its last verdict
+(`is_due`), and only while the keyboard and mouse have been still for `--idle-minutes`,
+or far longer for a tier that opens windows (`OPENS_WINDOWS`): a window under someone's
+cursor is worse than a run an hour late. A PC in use is the next fire's. Once a night was
+too slow for a tip that moves a hundred times a day: the fix pass holds a red whose commit
+the tip has passed, so a night's red was moot by the time it was read. Everything runs at
+below-normal priority (`low_priority.py`). By hand without `--due`, the pass waits for
+that stillness itself and gives up at `--until`. The wait is ours rather than the scheduler's `RunOnlyIfIdle`: the scheduler's idle wait
 is a setting no test can drive and that newer Windows versions document as ignored,
 while `GetLastInputInfo` is one stdlib call a test can replace.
 
@@ -62,6 +67,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_project
 import e2e_results
+import low_priority
 import rc_config
 import sweep
 import task_branch as tb
@@ -217,7 +223,11 @@ def run_project(
     sha, why = prepare(git, base)
     if why:
         result = replace(result, reason=why, finished=stamp())
-        e2e_results.write(result, seams.root)
+        last = e2e_results.read(name, seams.root)
+        # A red stays on record until a run says otherwise: a person's dirty checkout is
+        # not a pass, and this fires through the day they are working in it.
+        if last is None or last.status != e2e_results.FAILED:
+            e2e_results.write(result, seams.root)
         return result
     done = run_contract(project_dir, timeout, seams.runner)
     output = f"{getattr(done, 'stdout', '') or ''}\n{getattr(done, 'stderr', '') or ''}"
@@ -330,6 +340,87 @@ def run_pass(
     return 0
 
 
+# --- the scheduled run ---------------------------------------------------------------------
+
+# Projects whose tier opens windows on this desktop: VS Code, tkinter. A person back at
+# the keyboard mid-run would find one under their cursor, so these wait for a PC that has
+# been left for much longer, and run about once a day.
+OPENS_WINDOWS = frozenset({"devkit", "radio"})
+WINDOWED_IDLE_MINUTES = 60.0
+WINDOWED_GAP = _dt.timedelta(hours=20)
+# How long after a run the next may start, however often the tip moves.
+GAP = _dt.timedelta(hours=3)
+# After a red it is shorter: a fix that merged has moved the tip, and until a run at the
+# new one the fix pass holds that red (`fix_plan.is_stale_local`).
+RED_GAP = _dt.timedelta(hours=1)
+
+
+def idle_minutes_for(name: str, asked: float) -> float:
+    return max(asked, WINDOWED_IDLE_MINUTES) if name in OPENS_WINDOWS else asked
+
+
+def is_due(name: str, result: e2e_results.Result | None, tip: str, now: _dt.datetime) -> bool:
+    """Whether `name` is owed a run at `tip`: never judged there, and not run just now. A
+    tip that could not be read is owed nothing."""
+    if not tip:
+        return False
+    if result is None:
+        return True
+    if result.status != e2e_results.SKIPPED and result.sha == tip:
+        return False
+    gap = WINDOWED_GAP if name in OPENS_WINDOWS else GAP
+    if result.status == e2e_results.FAILED:
+        gap = RED_GAP
+    try:
+        return now - _dt.datetime.fromisoformat(result.finished) >= gap
+    except (ValueError, TypeError):
+        return True
+
+
+def tip_of(project_dir: Path, seams: Seams) -> str:
+    """origin's tip as it is now, or "" when origin cannot be read."""
+    git = seams.git_for(project_dir)
+    if not e2e_results.ok(git("fetch", "--quiet", "origin")):
+        return ""
+    return e2e_results.origin_tip(git, tb.detect_default_branch(git, fallback="main"))
+
+
+def run_due(
+    workspace: Path,
+    args: argparse.Namespace,
+    seams: Seams | None = None,
+    run_one: Callable[[str, Path, float, Seams | None], e2e_results.Result] = run_project,
+) -> int:
+    """What the scheduled job runs, every half hour: each project owed a run, for as long
+    as the PC stays idle.
+
+    Nothing waits here. A PC in use is the next fire's, a half hour on, so a red is
+    re-tested the first time its person steps away rather than the next night. Idle is
+    asked again before each project, and first of all, so a fire at a PC in use fetches
+    nothing.
+    """
+    seams = seams or Seams()
+    if seams.idle() < args.idle_minutes * 60.0:
+        print("e2e-pass: the PC is in use; the next fire looks again")
+        return 0
+    names = tested_here(workspace, registered(workspace), seams.host)
+    due = []
+    for name in names:
+        last = e2e_results.read(name, seams.root)
+        if is_due(name, last, tip_of(workspace.parent / name, seams), seams.now()):
+            due.append(name)
+    having, lacking = opted_in(workspace, due)
+    having += to_run_after_all(workspace, lacking, seams)
+    for name in having:
+        if seams.idle() < idle_minutes_for(name, args.idle_minutes) * 60.0:
+            print(f"{name}: not idle long enough; the next fire looks again", flush=True)
+            continue
+        print(f"{name}: running {e2e_results.CONTRACT}", flush=True)
+        result = run_one(name, workspace.parent / name, args.timeout_minutes * 60.0, seams)
+        print(line_for(result), flush=True)
+    return 0
+
+
 def status(workspace: Path) -> int:
     for name in registered(workspace):
         result = e2e_results.read(name)
@@ -344,6 +435,9 @@ def build_parser() -> argparse.ArgumentParser:
     verbs = parser.add_subparsers(dest="verb", required=True)
     run = verbs.add_parser("run", help="run each project's scripts/e2e.py")
     run.add_argument("projects", nargs="*", help="registered checkouts; none means all")
+    run.add_argument(
+        "--due", action="store_true", help="what origin has moved past, while the PC is idle"
+    )
     run.add_argument("--no-wait", action="store_true", help="run now, idle or not")
     run.add_argument("--idle-minutes", type=float, default=DEFAULT_IDLE_MINUTES)
     run.add_argument("--until", default=DEFAULT_UNTIL, help="give up waiting at HH:MM")
@@ -360,6 +454,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.verb == "status":
         return status(workspace)
+    low_priority.lower()
+    if args.due:
+        return run_due(workspace, args)
     return run_pass(workspace, list(args.projects), args)
 
 

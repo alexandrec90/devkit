@@ -421,15 +421,15 @@ def already_sent(
     return when if _recent(when, now) else ""
 
 
-def _recent(when: str, now: _dt.datetime) -> bool:
-    """Whether `when` is inside `RESEND_AFTER` of `now`; a time it cannot read is."""
+def _recent(when: str, now: _dt.datetime, window: _dt.timedelta = RESEND_AFTER) -> bool:
+    """Whether `when` is inside `window` of `now`; a time it cannot read is."""
     try:
         sent_at = _dt.datetime.fromisoformat(when)
     except ValueError:
         return True
     if sent_at.tzinfo is None:
         sent_at = sent_at.replace(tzinfo=_dt.UTC)
-    return now - sent_at < RESEND_AFTER
+    return now - sent_at < window
 
 
 def open_medium_session(
@@ -458,7 +458,33 @@ def open_medium_session(
     return ""
 
 
-def render(decisions: Iterable[fix_plan.Decision], ledger: dict[str, dict]) -> str:
+# How long one fixer has at a default branch's failure before the same failure, seen again
+# at a later commit, sends another. Every merge over a red is judged red too and is a key
+# of its own, so without this each would buy a session while the first still worked, and
+# `ATTEMPTS` would be spent in minutes. Past what a fixer takes to land and be judged.
+BRANCH_SETTLE = _dt.timedelta(minutes=45)
+
+
+def open_branch_session(
+    decision: fix_plan.Decision, ledger: dict[str, dict], now: _dt.datetime, since: str = ""
+) -> str:
+    """When a session that may still be fixing this very default-branch failure was sent,
+    at whatever commit, or "". One that died or reported itself blocked is not."""
+    if not all(f.kind == fix_plan.BRANCH for f in decision.failures):
+        return ""
+    problem = problem_key(decision)
+    for key, entry in ledger.items():
+        if not isinstance(entry, dict) or problem_of(key, entry) != problem:
+            continue
+        if not _since(entry, since) or entry.get("dead") or entry.get("blocked"):
+            continue
+        when = str(entry.get("when", "?"))
+        if _recent(when, now, BRANCH_SETTLE):
+            return when
+    return ""
+
+
+def render(decisions:Iterable[fix_plan.Decision], ledger: dict[str, dict]) -> str:
     """The plan, for the terminal: what will be sent, what was already, what is skipped."""
     lines = []
     for decision in decisions:

@@ -759,11 +759,27 @@ def test_a_direct_commit_runs_no_fixers_and_skips_only_the_framework(tmp_path):
     assert ship_intent.commit_intent(direct(tmp_path), "py", run) == ("", "")
     argvs = [argv for argv, _cwd, _env in run.calls]
     assert ["py", "scripts/ship.py", "--fix"] not in argvs
-    assert run.verbs() == ["git add", "git commit"]
+    assert run.verbs() == ["git add", "git diff", "git commit"]
     assert "--no-verify" not in argvs[-1]
     env = run.calls[-1][2]
     assert env[ship_intent.git_policy.FRAMEWORK_SKIP_ENV_VAR] == "1"
     assert ship_intent.git_policy.SKIP_ENV_VAR not in env, "the policy is what still runs"
+
+
+def test_a_direct_intent_with_a_file_nothing_can_read_is_refused_and_not_pushed(tmp_path):
+    """A resolver that left a marker, or a fixer's syntax error: a stored refusal, which
+    the pass turns into a fixer like any refused commit."""
+    one = direct(tmp_path)
+    (one.tree / "a.py").write_text("def broken(:\n", encoding="utf-8")
+    run = Runner({"git diff": (0, "a.py\0", ""), "git show": (0, "def fine(): ...\n", "")})
+    out = ship_intent.ship_one(one, "py", "main", run, gh_ok, NOW)
+    assert out.stage == ship_intent.REFUSED
+    assert "git commit" not in run.verbs() and "git push" not in run.verbs()
+    state = ship_intent.read_state(one.tree)
+    assert state["step"] == "landing check"
+    assert "a.py: does not parse" in ship_intent.refusal_line(state["output"])
+    was_broken = Runner({"git diff": (0, "a.py\0", ""), "git show": (0, "def x(:\n", "")})
+    assert ship_intent.unreadable(one.tree, was_broken) == []
 
 
 def test_a_gated_commit_keeps_the_framework(tmp_path):

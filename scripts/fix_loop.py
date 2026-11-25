@@ -663,20 +663,21 @@ def _filed_elsewhere(
 
 
 def _covered_by_this_pass(ctx: Context, job: schedule_health.Job) -> bool:
-    """`job` is the pass's own task, refused at a fire this pass began at or after, inside
-    that fire's half hour: the half hour got its pass, and the pass is the one reading.
+    """`job` is the pass's own task, refused at a fire within a half hour of this pass
+    beginning: the half hour got its pass, and the pass is the one reading.
 
     c4192c14 came back three times this way. On 2026-11-03 the pass that began at 22:00:58
     read its own task as "a run was still going at 22:00" sixteen minutes in, and its
     record, written only when it ends, as an earlier run's: a defect report about itself.
-    A pass begun *before* the refused fire did outlive it, and is still filed; a run
-    stopped at the bound is the watchdog's `pass-hung`."""
+    A fire refused *during* this pass is ordinary too, since `fix_trigger.py` starts a pass
+    at any minute and the clock's own fire then finds it running. A run that really hung
+    is the watchdog's `pass-hung`, at its bound."""
     if job.name != OWN_TASK or job.last_result not in schedule_health.OVERLAPPING:
         return False
     if job.last_run is None or job.interval is None:
         return False
     began = ctx.now.astimezone().replace(tzinfo=None)  # the scheduler speaks local time
-    return _dt.timedelta(0) <= began - job.last_run < job.interval
+    return abs(began - job.last_run) < job.interval
 
 
 def _run_began(ctx: Context, finding: Finding, job: schedule_health.Job) -> _dt.datetime | None:

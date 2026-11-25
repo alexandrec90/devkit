@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Install the nightly local end-to-end pass (`scripts/e2e-pass.py`) as a Scheduled Task.
+"""Install the local end-to-end pass (`scripts/e2e-pass.py`) as a Scheduled Task.
 
 The tests no hosted runner can run -- the live workspace file, VS Code itself, a Docker
-stack, a browser -- run on this workstation every night, and a red one reaches the fix
-pass as that project's red default branch (`e2e_results.py`). Without this job they ran
-only when a person ran the suite by hand on `main`.
+stack, a browser -- run on this workstation, and a red one reaches the fix pass as that
+project's red default branch (`e2e_results.py`). Without this job they ran only when a
+person ran the suite by hand on `main`.
 
-**Night, then idle.** The task fires at `DEFAULT_AT`, and `e2e-pass.py run` waits before
-each project until the keyboard and mouse have been still for its `--idle-minutes`,
-giving up at its `--until`: a run may open a VS Code window, and one opened under
-someone working late is the failure this ordering refuses. The wait is the runner's,
-not the scheduler's `RunOnlyIfIdle` -- see that script's docstring for why -- so the
-document is the shared one (`devkit_schtasks.task_xml`) with a long enough limit:
-`TIME_LIMIT` covers the whole waiting window plus every project's own ceiling.
+**Every half hour, and only while the PC is idle.** `e2e-pass.py run --due` ends at once
+when the keyboard and mouse have not been still for its `--idle-minutes`, and otherwise
+runs what origin has moved past. Once a night, a red was about a commit the tip had
+passed before any fixer read it. The idle check is the runner's, not the scheduler's
+`RunOnlyIfIdle` -- see that script's docstring for why -- and a fire during a run is
+dropped by the shared document's `IgnoreNew`.
 
 Everything else follows `install-workspace-status.py`: `log-wrap.py --always` around the
 runner through `devkit_schtasks.logged`, so a run that crashes is on the ledger;
@@ -45,11 +44,9 @@ TASK_NAME = "devkit-local-e2e"
 # Machine maintenance: it delivers no branch -- what it finds, the fix pass delivers.
 GROUP = "maintenance"
 
-# 01:00, ahead of the release (02:00) and upgrade (03:00) passes, so a red found tonight
-# is on the fix pass's desk before either moves anything. The runner then waits for idle.
-DEFAULT_AT = "01:00"
+EVERY_MINUTES = 30
 
-# The waiting window (01:00 to the runner's 06:30) plus room for the runs themselves.
+# Room for several projects' own ceilings (`e2e-pass.DEFAULT_TIMEOUT_MINUTES`) in one fire.
 TIME_LIMIT = "PT8H"
 
 # The wrapper's title and the artifact it therefore writes (`log_wrap.slug`); a test
@@ -57,7 +54,7 @@ TIME_LIMIT = "PT8H"
 LABEL = "Scheduled: Local E2E"
 ARTIFACT = "logs/scheduled-local-e2e.log"
 
-RUN_ARGS = ("run",)
+RUN_ARGS = ("run", "--due")
 
 WINDOWS = os.name == "nt"
 
@@ -74,11 +71,11 @@ def pass_arguments(python: str, root: Path = REPO_ROOT) -> str:
     return devkit_schtasks.logged(LABEL, python, inner, root)
 
 
-def task_document(python: str, arguments: str, at: str, root: Path = REPO_ROOT) -> str:
+def task_document(python: str, arguments: str, minutes: int, root: Path = REPO_ROOT) -> str:
     return devkit_schtasks.task_xml(
         python,
         arguments,
-        devkit_schtasks.daily_trigger(at),
+        devkit_schtasks.repeating_trigger(minutes),
         time_limit=TIME_LIMIT,
         working_dir=str(root),
         enabled=TASK_NAME not in harness_state.stood_down(),
@@ -105,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="report whether the registered task is the one this checkout would register",
     )
     parser.add_argument("--name", default=TASK_NAME)
-    parser.add_argument("--at", default=DEFAULT_AT, help="nightly start time, HH:MM (24-hour)")
+    parser.add_argument("--minutes", type=int, default=EVERY_MINUTES, help="minutes between fires")
     parser.add_argument("--yes", dest="apply", action="store_true", help="actually call schtasks")
     return parser
 
@@ -135,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     python = windowless(sys.executable)
-    document = task_document(python, pass_arguments(python), args.at)
+    document = task_document(python, pass_arguments(python), args.minutes)
     if args.check:
         code, message = devkit_schtasks.run_check(args.name, document, _run_argv)
         print(message, file=sys.stderr if code else sys.stdout)
@@ -143,15 +140,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.apply:
         print(
             f'Would run: "{python}" {pass_arguments(python)}\n\n'
-            f"  nightly at {args.at}, then waits for the PC to be idle\n"
-            f"  in         {REPO_ROOT}\n"
-            f"  records    {ARTIFACT}, and each project's result under logs/e2e/\n"
-            f"  limit      {TIME_LIMIT}\n\n"
+            f"  every {args.minutes} minutes, what moved, while the PC is idle\n"
+            f"  in        {REPO_ROOT}\n"
+            f"  records   {ARTIFACT}, and each project's result under logs/e2e/\n"
+            f"  limit     {TIME_LIMIT}\n\n"
             f"Dry run -- re-run with --yes."
         )
         return 0
     ok, out = devkit_schtasks.register(args.name, document, _run_argv)
-    print(out or f"installed {args.name} (nightly at {args.at})")
+    print(out or f"installed {args.name} (every {args.minutes} minutes)")
     return 0 if ok else 1
 
 

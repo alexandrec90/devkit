@@ -254,8 +254,9 @@ class Failure:
     # COMMIT only: the worktree the refused intent sits in, which is where the fixer opens.
     tree: str = ""
     # NIGHTLY and LOCAL: origin/<base>'s tip when the evidence was read, which the red run at
-    # `sha` may predate; whether a run of the workflow at that tip is still going; and
-    # the workflow's file when it takes `workflow_dispatch`, so the pass can run it there.
+    # `sha` may predate; whether a run of the workflow at that tip is still going (a BRANCH
+    # says that too, of a red under the tip); and the workflow's file when it takes
+    # `workflow_dispatch`, so the pass can run it there.
     tip: str = ""
     tip_running: bool = False
     rerun_file: str = ""

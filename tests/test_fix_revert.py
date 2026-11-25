@@ -189,6 +189,7 @@ def test_red_that_says_nothing_about_a_commit_reverts_nothing(fields):
 
 def test_a_test_failure_says_something_about_a_commit():
     assert fix_revert.revertible(red())
+    assert not fix_revert.revertible(red(tip_running=True)), "the fix may be what is running"
 
 
 def test_a_tidy_red_past_its_grace_is_eligible_like_any_other():

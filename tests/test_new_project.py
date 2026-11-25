@@ -671,8 +671,9 @@ def test_every_preset_is_generated_by_the_gate():
     """The loop named five of them, RELEASING.md said every one, and the two desktop bugs
     the loop could have shown went unseen until someone launched a generated app."""
     gate = (REPO_ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
-    loop = re.search(r"for preset in ([^;]+);", gate)
-    assert loop and set(loop[1].split()) == set(new_project.PRESETS)
+    assert "for preset in ${{ matrix.presets }};" in gate
+    halves = re.search(r"presets: \[([^\]]+)\]", gate)
+    assert halves and sorted(re.findall(r"[\w-]+", halves[1])) == sorted(new_project.PRESETS)
 
 
 def test_every_preset_is_offered_by_the_task_picker():

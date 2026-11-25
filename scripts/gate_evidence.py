@@ -478,6 +478,20 @@ def _tip_verdict(runs: list[dict], tip: str) -> tuple[bool | str | None, dict]:
     return (None, {}) if conclusion in NO_VERDICT else (False, run)
 
 
+def red_behind(runs: list[dict]) -> dict:
+    """The run that last judged the branch, when it judged it red; {} otherwise.
+
+    What a tip whose gate is still running is known to inherit. At a hundred merges a day
+    the tip is nearly always running, so reading the tip alone left a red unfixed for as
+    long as merges kept landing on it.
+    """
+    for run in runs:
+        conclusion = str(run.get("conclusion", "")).lower()
+        if str(run.get("status", "")) == "completed" and conclusion not in NO_VERDICT:
+            return {} if conclusion == "success" else run
+    return {}
+
+
 def last_green(runs: list[dict]) -> str:
     """When the newest run among `runs` that passed was started, ISO; "" when none did.
 
@@ -623,6 +637,8 @@ def read_default_branch(
     proving it stale; a verdict that is not about the current commit is no verdict. It
     is `fix_plan.RUNNING` when the run at the tip has not finished: the pass after every
     merge to devkit main used to read that as unreadable and hold every project fixer.
+    A running tip over a commit that was judged red is that red (`red_behind`), marked
+    `tip_running`: its fixer goes now, and nothing is reverted until the tip has spoken.
     A red run whose only failure is the newest-tag test is a release commit's: green
     once the tag points at that commit (the release workflow accepted it, and the test
     passes on the next push), and a failure the plan skips out loud while the tag does
@@ -636,7 +652,10 @@ def read_default_branch(
     if not tip:
         return None, None
     verdict, run = _tip_verdict(runs, tip)
-    if verdict is not False:
+    running = verdict == fix_plan.RUNNING
+    if running:
+        run = red_behind(runs)
+    if not run:
         return verdict, None
     run_id = str(run.get("databaseId", "") or "")
     failure = fix_plan.Failure(
@@ -650,6 +669,7 @@ def read_default_branch(
         run_id=run_id,
         workflow=str(run.get("workflowName") or GATE_WORKFLOW),
         green_at=last_green(runs),
+        tip_running=running,
     )
     where = root / evidence_slot(failure)
     texts, jobs = run_evidence(gh, run_id, where) if run_id else ([], [])
