@@ -295,7 +295,10 @@ HEREDOC_SPAN = re.compile(
     r"<<-?\s*(['\"]?)(?P<tag>\w+)\1(?P<rest>[^\n]*)\n[\s\S]*?(?:^[ \t]*(?P=tag)[ \t]*$|\Z)",
     re.M,
 )
-WRITTEN_HEREDOC = "<<HEREDOC"
+# What `printed_back` leaves where a heredoc was: a word opening `<`, so `heredoc_target`
+# skips it as it skips a redirect, and no heredoc's spelling, so `command_position` does
+# not read it as one and blank the rest of the command.
+WRITTEN_HEREDOC = "<<@heredoc"
 REDIRECT_TARGET = re.compile(r">>?\s*(\"[^\"]*\"|'[^']*'|\S+)")
 # An output redirect, not a descriptor merge like `2>&1` or a `2>/dev/null`.
 WRITES_OUTPUT = re.compile(r"(?<![\d&])>")
@@ -334,6 +337,9 @@ SEES_ENVIRONMENT = re.compile(r"(?:^|[;&|]\s*)(?:\S*python\S*\s+-m\s+pytest|pyte
 # grepped quoted "No module named pytest" (0d422fe7).
 QUOTED_ARGUMENT = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
 SEPARATOR = re.compile(r"[;&|\n]")
+# A shell reading a heredoc as its script: `bash <<EOF`, `sh -s <<'EOF'`. That body is
+# commands; any other heredoc's is data, as a commit message is.
+SHELL_READER = re.compile(r"(?:^|[\s;&|(])(?:ba|z|da)?sh(?:\.exe)?\b|\bpwsh\b|\bpowershell\b", re.I)
 # The statements of a command line; within one, only what leads its pipeline prints.
 STATEMENT = re.compile(r"&&|\|\||[;\n]")
 # Git's own voice. Everything else these subcommands print is the repository's text -- a
@@ -573,8 +579,23 @@ def _snippet(text: str, pattern: re.Pattern[str]) -> str:
 def command_position(command: str) -> str:
     """`command` with every separator inside a quoted argument blanked, so a pattern
     anchored on one finds only what the shell would run. Same length, and the quoted
-    text is otherwise kept: `pytest "tests/x.py"` still names its file."""
+    text is otherwise kept: `pytest "tests/x.py"` still names its file.
+
+    A heredoc's body is blanked whole, unless a shell reads it as its script: its lines
+    start no statement. A `git commit -F - <<'EOF'` whose message had a line opening
+    "pytest its project names." was filed as a whole-suite run (f2fccb72)."""
+    command = HEREDOC_SPAN.sub(lambda found: _blank_body(command, found), command)
     return QUOTED_ARGUMENT.sub(lambda quoted: SEPARATOR.sub(" ", quoted.group()), command)
+
+
+def _blank_body(command: str, found: re.Match[str]) -> str:
+    """`found`, a `HEREDOC_SPAN`, with all past its first line as spaces; kept as it is
+    where the statement feeding it is a shell's."""
+    head, _, body = found.group().partition("\n")
+    line = command[command.rfind("\n", 0, found.start()) + 1 : found.start()]
+    if SHELL_READER.search(line):
+        return found.group()
+    return f"{head} {' ' * len(body)}"
 
 
 def runs_tests(command: str) -> bool:

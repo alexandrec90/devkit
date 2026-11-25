@@ -219,6 +219,30 @@ def ran_from(item: triage.Item, repo: str = "") -> _dt.datetime | None:
     return min(began, head) if began and head else began
 
 
+def _covered_late(
+    items: list[triage.Item], resolution: Resolution, lookup: Lookup
+) -> list[tuple[str, str, str]]:
+    """`covered`, for a resolution already settled: the rows a checkout still behind the
+    merge filed after `verify` cached it.
+
+    42348504: #812 merged at 17:10Z and settled aeee2754; the 17:37Z pass, still on the
+    release before it, filed the group once more, and nothing looked at a settled
+    resolution again, so it read as a fix that did not hold. Asks GitHub only while such
+    a row is open.
+    """
+    head = {item.id: item for item in items}.get(resolution.ref)
+    start = _moment(resolution.stamp)
+    if head is None or start is None:
+        return []
+    later = (
+        _moment(item.stamp) for item in triage.open_items(items) if item.signature == head.signature
+    )
+    if not any(when is not None and when > start for when in later):
+        return []
+    merge = landed(resolution, lookup(*target(resolution.pr)))
+    return covered(items, resolution, merge) if merge else []
+
+
 def verify(
     items: list[triage.Item],
     lookup: Lookup,
@@ -237,6 +261,7 @@ def verify(
     outcome = Outcome()
     for resolution in recent(items, now):
         if resolution.ref in settled:
+            outcome.covered += _covered_late(items, resolution, lookup)
             continue
         project, what = target(resolution.pr)
         prs = lookup(project, what)
@@ -251,6 +276,8 @@ def verify(
                 outcome.covered += covered(items, resolution, merge)
         elif verdict:
             outcome.reopen.append((resolution.ref, verdict))
+    # Two resolutions of one group can cover one row; the ledger is told once.
+    outcome.covered = list({entry[0]: entry for entry in outcome.covered}.values())
     settled.update(row for row, _, _ in outcome.covered)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(sorted(settled)) + "\n", encoding="utf-8")

@@ -239,6 +239,35 @@ def test_released_needs_a_tag_containing_the_commit():
     assert not facts(tags="v1\n")[0].released("")
 
 
+@pytest.mark.parametrize(
+    ("stamp", "show_code", "ancestor_code", "expected"),
+    [
+        ("fff1234\n", 0, 0, True),
+        ("fff1234\n", 0, 1, False),  # adopted, but a release without it
+        ("fff1234\n", 0, 128, False),  # a commit devkit's checkout does not have
+        ("", 128, 0, False),  # never vendored devkit
+        ("\n", 0, 0, False),
+    ],
+)
+def test_adopted_orders_the_projects_stamp_in_devkits_history(
+    stamp, show_code, ancestor_code, expected
+):
+    asked = []
+
+    def git(*args, env=None):
+        assert args == ("show", "origin/main:DEVKIT_VERSION")
+        return done(args, stamp, show_code)
+
+    def devkit_git(*args, env=None):
+        asked.append(args)
+        return done(args, code=ancestor_code)
+
+    board = board_module.Board("carameli", Path("x"), base="main")
+    assert board_module.adopted_fact(board, git, devkit_git)("1a95849") is expected
+    if stamp.strip():
+        assert asked == [("merge-base", "--is-ancestor", "1a95849", "fff1234")]
+
+
 def test_a_bare_repo_name_is_asked_of_this_checkouts_owner():
     found, calls = facts()
     assert found.merged("carameli", 7)

@@ -235,7 +235,11 @@ def reland_task(commit: Commit, failure: fix_plan.Failure) -> str:
         f"that commit was in the range that could have caused it. The failure: "
         f"{_shown(failure.signature)}. Read the reverted work with `git show {commit.sha}`, "
         f"land it again on a new branch with that failure fixed, and ship it, with "
-        f"`Reland-of: {commit.sha}` on a line of its own in the intent's body."
+        f"`Reland-of: {commit.sha}` on a line of its own in the intent's body. If the fix is "
+        f"to a file vendored from devkit, it cannot be made here: when it is already on "
+        f"devkit's main and not in this project's DEVKIT_VERSION, do not land the work yet "
+        f"but ship a new file in {QUEUE_DIR.as_posix()} with this same prompt and "
+        f'`when = "adopted:<that devkit commit>"`, which waits for the adoption.'
     )
     return f'when = "merged"\nagent = {json.dumps(prompt, ensure_ascii=False)}\n'
 

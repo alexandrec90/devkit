@@ -361,11 +361,18 @@ def person_step(item: Item) -> str:
     Read off `said` before `cause`: `cause` is cut at `log-wrap.CAUSE_WIDTH`, and the step
     comes last on its line, after what went wrong. A pass finding has neither and says it
     in its `detail` (`fix_loop.LOGIN_DETAIL`), and an agent report in its `message`
-    (c480340e)."""
+    (c480340e).
+
+    A `session-friction` row is a report in prose, so a marker inside its quotation marks
+    or backticks is the convention being quoted, not a step asked for (baca6a76, which no
+    fixer was sent at). Only there: a job's own line may be cut mid-quote."""
     for name in ("said", "cause", "detail", "message"):
-        text = item.fields.get(name, "")
-        if PERSON_STEP in text:
-            return text.split(PERSON_STEP, 1)[1].strip(" -")
+        before, marker, step = item.fields.get(name, "").partition(PERSON_STEP)
+        if not marker:
+            continue
+        if item.event == "session-friction" and any(before.count(q) % 2 for q in '"`'):
+            continue
+        return step.strip(" -")
     return ""
 
 
@@ -878,7 +885,9 @@ def main(argv: list[str] | None = None) -> int:
     # `logs/harness-triage.log` is what the next session reads, and one written under a
     # `--agent` filter would read as "this is everything" while hiding the other runtime.
     path = write_artifact(render(open_items(items), items, pending, held))
-    print(text, end="")
+    # A resolution owes its one line: twelve in a call buried theirs in 56 KB (4f483cb6).
+    if not (args.resolve or args.resolve_like):
+        print(text, end="")
     still = open_items(items)
     print(f"harness-triage: {count_line(still, pending, awaiting_person(still))} -- {path}")
     return 0
