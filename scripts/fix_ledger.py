@@ -484,7 +484,7 @@ def open_branch_session(
     return ""
 
 
-def render(decisions:Iterable[fix_plan.Decision], ledger: dict[str, dict]) -> str:
+def render(decisions: Iterable[fix_plan.Decision], ledger: dict[str, dict]) -> str:
     """The plan, for the terminal: what will be sent, what was already, what is skipped."""
     lines = []
     for decision in decisions:

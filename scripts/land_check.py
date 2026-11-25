@@ -38,7 +38,9 @@ CONFLICT = re.compile(
 )
 
 # JSON by name, comments by habit: each of these tools reads JSON with comments.
-JSONC = re.compile(r"(^|/)(\.vscode|\.devcontainer)/|(^|/)[tj]sconfig[^/]*\.json$|\.code-workspace$")
+JSONC = re.compile(
+    r"(^|/)(\.vscode|\.devcontainer)/|(^|/)[tj]sconfig[^/]*\.json$|\.code-workspace$"
+)
 
 BaseText = Callable[[str], "str | None"]
 
