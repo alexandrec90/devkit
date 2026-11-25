@@ -283,21 +283,22 @@ def test_lint_runs_before_the_test_tiers_in_both_gates():
     """The one ordering both gates genuinely share, and the only one either depends on:
     lint auto-fixes, so anything that could rewrite a file has to come after it.
 
-    Their *test* tiers are deliberately not compared. CI runs the vendored hook tests
-    before devkit's own suite so a broken vendored tier still reports when devkit's suite
-    is red; the push gate runs them the other way and stops at the first failure, which is
-    what keeps the artifact under `logs/` the one the refusal points at.
+    Their *test* tiers are deliberately not compared. CI runs the hook tests and two
+    shards of the suite in jobs of their own, each on a fresh checkout no lint has
+    touched, so only the tier sharing lint's job can be ordered against it; the push gate
+    runs them one after another and stops at the first failure, which is what keeps the
+    artifact under `logs/` the one the refusal points at.
     """
     names = [step.name for step in gate.STEPS]
     assert names[0] == "lint", f"push gate runs {names[0]!r} before lint; the order is {names}"
 
     test_job = [key for job, key, _ in _run_steps() if job == "test"]
     lint = test_job.index("Lint + typecheck via the wrapper devkit ships")
-    for tier in ("Hook-script tests (vendored tier)", "devkit tests (generator, ports, renderer)"):
-        assert lint < test_job.index(tier), (
-            f"{PR_GATE.name}'s test job runs {tier!r} before lint-all.py, which auto-fixes — "
-            f"whatever it repairs, the later step then reports clean. Job order: {test_job}"
-        )
+    tier = "devkit tests (generator, and a third of the rest)"
+    assert lint < test_job.index(tier), (
+        f"{PR_GATE.name}'s test job runs {tier!r} before lint-all.py, which auto-fixes — "
+        f"whatever it repairs, the later step then reports clean. Job order: {test_job}"
+    )
 
 
 def test_ci_never_claims_a_release_prepare():
@@ -323,11 +324,28 @@ def test_a_red_vendored_suite_in_devkits_own_gate_uploads_what_failed():
     """245a2eb9: the hook-script step fails before `run-tests.py` ever writes
     `logs/test-failures.log`, so devkit's gate uploaded nothing for it, and #407's
     fixer read the failing ids out of `gh run view --log-failed`. The generated gate
-    was fixed first; this is devkit's own."""
-    gate = PR_GATE.read_text(encoding="utf-8")
-    assert "pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml" in gate
-    upload = gate.split("name: test-failures", 1)[1].split("\n\n", 1)[0]
-    assert "logs/junit-hooks.xml" in upload and "logs/test-failures.log" in upload
+    was fixed first; this is devkit's own. Each job that runs tests uploads the report its
+    own runner writes, under a name no other job takes."""
+    jobs = _yaml().safe_load(PR_GATE.read_text(encoding="utf-8"))["jobs"]
+    hook_runs = [step.get("run", "") for step in jobs["hook-tests"]["steps"]]
+    assert any(
+        "pytest scripts/hooks/tests/ -q --junit-xml=logs/junit-hooks.xml" in run
+        for run in hook_runs
+    )
+    uploads = {
+        job: step["with"]
+        for job in ("test", "suite", "hook-tests")
+        for step in jobs[job]["steps"]
+        if step.get("if") == "failure()" and step.get("name") == "Upload test artifact"
+    }
+    assert {job: upload["path"] for job, upload in uploads.items()} == {
+        "test": "logs/test-failures.log",
+        "suite": "logs/test-failures.log",
+        "hook-tests": "logs/junit-hooks.xml",
+    }
+    names = [upload["name"] for upload in uploads.values()]
+    assert len(set(names)) == len(names)
+    assert all(name.startswith("test-failures") for name in names)
 
 
 def test_the_push_gate_writes_the_report_ci_uploads_for_the_same_tier():

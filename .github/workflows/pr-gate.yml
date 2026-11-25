@@ -165,7 +165,7 @@ jobs:
       - uses: ./.github/actions/setup-python-env
         with:
           python-version: "3.12"
-      - name: Hook-script tests (vendored tier)
+      - name: Hook-script tests
         # A junit file, because this step never reaches `run-tests.py`, which writes
         # `logs/test-failures.log`: without it a red vendored suite uploads nothing the
         # fix pass can read, and its failing ids come out of `gh run view --log-failed`.
