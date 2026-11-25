@@ -429,6 +429,24 @@ def test_a_launch_refused_as_untrusted_is_sent_again_and_awaits_a_person(ctx, mo
     assert triage.awaiting_person([row]) == {row.signature: step}
 
 
+def test_a_launch_refused_as_untrusted_is_trusted_by_the_pass_and_sent_again(ctx, monkeypatch):
+    """A checkout whose prompt the pass can answer (`fix_reports.trust`) files nothing for
+    a person: its re-send is the next pass's, as for any interrupted session."""
+    fix_ledger.record(ctx.ledger_path, KEY, "n", NOW - _dt.timedelta(hours=2))
+    path = tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=2))
+    done = subprocess.CompletedProcess(["claude"], 1, "", fix_reports.UNTRUSTED_SAID)
+    fix_reports.record_launch(path, ["claude", "--bg", "--", "fix it all"], done)
+    answered: list = []
+    monkeypatch.setattr(fix_reports, "trust", lambda c: answered.append(c) or True)
+    closed, journal = close(ctx)
+    assert closed.lines == [
+        f"carameli agent/x-0919 -- {fix_reports.UNTRUSTED}; trusted carameli, sent again"
+    ]
+    assert journal.findings == [] and answered == [ctx.root / "carameli"]
+    entry = fix_ledger.read_ledger(ctx.ledger_path)[KEY]
+    assert entry["dead"] == fix_reports.UNTRUSTED and fix_ledger.sends(entry) == 0
+
+
 def test_a_session_gone_quiet_without_an_outcome_is_dead(ctx, monkeypatch):
     tree(ctx, monkeypatch, sent=NOW - _dt.timedelta(hours=5), transcript_age=_dt.timedelta(hours=3))
     _, journal = close(ctx)

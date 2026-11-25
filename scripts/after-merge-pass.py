@@ -347,12 +347,13 @@ def _held_here(task: Task, board: Board, cycle: Cycle) -> str:
 def _untrusted(task: Task, board: Board, cycle: Cycle) -> str:
     """Why no session may start in `board`'s checkout, or "".
 
-    Claude Code refuses a session in a checkout it was never told to trust. That is a
-    person's step, filed as the fix pass files it (`fix_loop.UNTRUSTED_KIND`), so its group
-    awaits them and `fix_loop.retire_trusted` retires it. Unread, the queue cut four
+    Claude Code refuses a session in a checkout it was never told to trust, so the pass
+    answers its prompt first (`fix_reports.trust`). Only a checkout that answer cannot
+    reach is filed, as the fix pass files it (`fix_loop.UNTRUSTED_KIND`), so its group
+    awaits a person and `fix_loop.retire_trusted` retires it. Unread, the queue cut four
     host-scripts trees in 13 hours, each refused at launch, and filed nothing.
     """
-    if fix_reports.trusted(board.path):
+    if fix_reports.trust(board.path):
         return ""
     detail = fix_loop.untrusted_detail(board.path)
     cycle.journal.add(Finding(fix_loop.UNTRUSTED_KIND, task.project, detail))

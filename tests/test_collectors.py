@@ -1149,7 +1149,7 @@ def test_a_hung_wsl_fails_at_once_without_a_restart_it_cannot_reach(tmp_path, in
     assert "elevated" in collectors.WSL_HUNG and "reboot" in collectors.WSL_HUNG
 
 
-@pytest.mark.parametrize("said", ["WSL_HUNG", "DESKTOP_QUIT"])
+@pytest.mark.parametrize("said", ["WSL_HUNG"])
 def test_a_step_only_a_person_can_take_reaches_the_ledger_marked_as_theirs(said):
     """aa6a9022, 28a97046: the fix pass sent a fixer at a hung `WslService`, which its
     unelevated session could not restart. The failure's line, as `log-wrap.py` files it,
@@ -1161,16 +1161,17 @@ def test_a_step_only_a_person_can_take_reaches_the_ledger_marked_as_theirs(said)
         f"2026-10-13T06:01:04+00:00\tevent=scheduled-job-failed\tproject=devkit\tsaid={line}"
     )[0]
     step = triage.person_step(row)
-    assert step and step in {collectors.collector_tasks.WSL_REMEDY, "start Docker Desktop"}
+    assert step == collectors.collector_tasks.WSL_REMEDY
 
 
 def test_engine_down_asks_wsl_only_of_an_engine_a_revival_would_try():
     docker, report = FakeDocker(None), collectors.Report()
     docker.stopped = "user requested"
-    _wedged, refused, _busy = collectors.engine_down(docker, report)
-    assert refused == collectors.DESKTOP_QUIT and docker.wsl_asks == 0, (
-        "a quit Desktop is a person's"
-    )
+    assert collectors.engine_down(docker, report, ["social-scraper"]) == (
+        collectors.DESKTOP_STOPPED,
+        "",
+        (),
+    ), "a quit Desktop is started again, held for no run: it serves none"
     docker.stopped = WSL_HUNG
     assert collectors.engine_down(docker, report, ["social-scraper"]) == (
         "docker is not answering: Docker Desktop's engine failed to start",
@@ -1247,13 +1248,6 @@ def test_an_engine_that_failed_to_start_is_not_held_for_the_run_waiting_on_it(tm
     assert ("restart",) in docker.calls and report.failures == 0
     assert not any("scheduled run" in line for line in report.lines)
     assert collectors.HOLD_SINCE not in collectors.restart_record(restarts)
-
-
-def test_a_desktop_stopped_for_no_failure_is_still_left_to_a_person(tmp_path, instant):
-    docker, report = Wedged(tmp_path / "restarts.json"), collectors.Report()
-    docker.desktop, docker.stopped = False, "user requested"
-    collectors.maintain([target(tmp_path)], docker, report, {})
-    assert ("restart",) not in docker.calls and report.lines[-1] == collectors.DESKTOP_QUIT
 
 
 def test_docker_reads_desktops_stop_reason_only_on_windows(tmp_path, monkeypatch):
@@ -1698,13 +1692,25 @@ def test_off_windows_there_is_no_vm_to_reset(monkeypatch):
     assert docker.reset_vm()[0] is False
 
 
-def test_a_docker_desktop_someone_quit_is_not_started_behind_their_back(tmp_path):
+def test_a_docker_desktop_someone_quit_is_started_again_not_relayed(tmp_path, instant):
+    """ "start Docker Desktop" stood on the tray as a person's step for 32 passes: the
+    machine needs its engine, and a step the pass can take itself is never a person's."""
     docker, report = Wedged(tmp_path / "r.json"), collectors.Report()
-    docker.desktop = False
+    docker.desktop, docker.stopped = False, "user requested"
     collectors.maintain([target(tmp_path)], docker, report, {})
-    assert ("restart",) not in docker.calls
-    assert report.failures == 1 and "Docker Desktop is not running" in report.lines[0]
-    assert not (tmp_path / "r.json").exists()
+    assert ("restart",) in docker.calls and report.failures == 0
+    assert report.lines[0] == collectors.DESKTOP_STOPPED + " (user requested) -- starting it"
+    assert sum(instant.slept) == 0, "no wait for an engine a stopped Desktop cannot answer"
+    assert collectors.last_restart(tmp_path / "r.json") is not None
+
+
+def test_a_quit_desktop_that_will_not_start_fails_the_pass_not_a_person(tmp_path, instant):
+    docker = Wedged(tmp_path / "r.json", revives=False)
+    docker.desktop, report = False, collectors.Report()
+    collectors.maintain([target(tmp_path)], docker, report, {})
+    assert report.failures == 1
+    assert report.lines[-1].startswith(collectors.DESKTOP_STOPPED)
+    assert collectors.PERSON_STEP not in report.lines[-1]
 
 
 def test_a_stop_machine_never_restarts_docker(tmp_path):

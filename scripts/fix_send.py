@@ -410,8 +410,8 @@ def _occupied(decision: fix_plan.Decision, closed: fix_loop.Closed) -> str:
 
 def _untrusted(decision: fix_plan.Decision, ctx: fix_loop.Context, history: list) -> str:
     """Why this session would only be refused, or "": its checkout has a launch refusal
-    open and is not trusted yet. The reason names a person's step, so it is no stale wait
-    (`fix_stall.tracked`).
+    open and is not trusted yet, nor can the pass answer its prompt (`fix_reports.trust`).
+    The reason names a person's step, so it is no stale wait (`fix_stall.tracked`).
 
     Each re-send cut a fresh tree and was refused the same way, and a failure with no PR
     has no tree to find again: 94 under photolab in three days (0edfe2b4). The devkit
@@ -422,6 +422,8 @@ def _untrusted(decision: fix_plan.Decision, ctx: fix_loop.Context, history: list
     project = decision.failures[0].project
     checkout = ctx.root / project
     if project not in fix_loop.awaiting_trust(history) or fix_reports.trusted(checkout):
+        return ""
+    if ctx.writes and fix_reports.trust(checkout):
         return ""
     return f"held: {fix_loop.untrusted_detail(checkout)}"
 
@@ -473,8 +475,14 @@ def _send_one(
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         detail, kind = f"{names}: {decision.note[:160]}", f"{decision.action}-failed"
         if fix_reports.untrusted(said):
-            # The machine's setup, not this problem: the group the dead session files
-            # too, awaiting the person who trusts the checkout (`fix_loop.UNTRUSTED_KIND`).
+            if fix_reports.trust(ctx.root / first.project):
+                # The machine's setup, not this problem, and the pass's own to answer.
+                return (
+                    "refused, its checkout untrusted -- trusted it; sent again next pass",
+                    EXIT_OK,
+                )
+            # One the pass cannot answer for: the group the dead session files too,
+            # awaiting the person who trusts the checkout (`fix_loop.UNTRUSTED_KIND`).
             detail = fix_loop.untrusted_detail(ctx.root / first.project)
             kind = fix_loop.UNTRUSTED_KIND
         # Why it failed is only ever printed, and a scheduled pass's streams go nowhere:

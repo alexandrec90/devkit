@@ -360,6 +360,61 @@ def test_a_config_that_cannot_say_is_not_trust(tmp_path, text):
     assert not fix_reports.trusted(tmp_path, tmp_path / "gone.json")
 
 
+def test_trust_answers_the_prompt_for_a_checkout_and_keeps_everything_else(tmp_path):
+    """ "run `claude` in <checkout> once and accept the trust prompt" stood on the tray as
+    a person's step 8 times: the pass writes the same answer the prompt would."""
+    checkout = tmp_path / "vs-code" / "photolab"
+    (checkout / ".git").mkdir(parents=True)
+    config = _claude_config(
+        tmp_path, {checkout.as_posix(): {"hasTrustDialogAccepted": False, "history": [1]}}
+    )
+    raw = json.loads(config.read_text(encoding="utf-8"))
+    config.write_text(json.dumps({**raw, "numStartups": 7}), encoding="utf-8")
+    assert fix_reports.trust(checkout, config)
+    assert fix_reports.trusted(checkout, config)
+    written = json.loads(config.read_text(encoding="utf-8"))
+    assert written["numStartups"] == 7
+    assert written["projects"][checkout.as_posix()] == {
+        "hasTrustDialogAccepted": True,
+        "history": [1],
+    }
+    assert [p.name for p in tmp_path.iterdir() if p.is_file()] == [".claude.json"]
+
+
+def test_trust_adds_an_entry_for_a_checkout_the_config_never_saw(tmp_path):
+    checkout = tmp_path / "new-project"
+    (checkout / ".git").mkdir(parents=True)
+    config = tmp_path / ".claude.json"
+    config.write_text("{}", encoding="utf-8")
+    assert fix_reports.trust(checkout, config)
+    assert fix_reports.trusted(checkout, config)
+
+
+@pytest.mark.parametrize("text", ["not json", "[]"])
+def test_trust_writes_nothing_over_a_config_it_cannot_read(tmp_path, text):
+    checkout = tmp_path / "x"
+    (checkout / ".git").mkdir(parents=True)
+    config = tmp_path / ".claude.json"
+    config.write_text(text, encoding="utf-8")
+    assert not fix_reports.trust(checkout, config)
+    assert config.read_text(encoding="utf-8") == text
+    assert not fix_reports.trust(checkout, tmp_path / "gone.json")
+    assert not (tmp_path / "gone.json").exists()
+
+
+def test_trust_answers_only_for_a_git_checkout(tmp_path):
+    config = _claude_config(tmp_path, {})
+    assert not fix_reports.trust(tmp_path / "not-a-checkout", config)
+    assert json.loads(config.read_text(encoding="utf-8")) == {"projects": {}}
+
+
+def test_the_config_is_where_claude_code_reads_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    assert fix_reports.claude_config() == tmp_path / ".claude.json"
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    assert fix_reports.claude_config() == Path.home() / ".claude.json"
+
+
 def test_a_launch_refused_for_an_untrusted_checkout_is_its_own_dead_state(tmp_path):
     """10a9810d, 18e737b9: `claude --bg` exits 1 in a checkout nobody trusted, a step only
     a person can take, so it is told apart from a launcher that failed on its own."""

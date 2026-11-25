@@ -276,12 +276,11 @@ WSL_HUNG = (
     f"{WSL_PROBE_TIMEOUT}s), and no restart of Docker Desktop or its VM reaches a hung WSL "
     f"-- {PERSON_STEP} {collector_tasks.WSL_REMEDY}"
 )
-# A Desktop nobody's failure stopped was most likely quit by a person, and is theirs to
-# start (`engine_down`); marked like `WSL_HUNG`, for the same reason.
-DESKTOP_QUIT = (
-    f"docker is not answering and Docker Desktop is not running -- {PERSON_STEP} "
-    "start Docker Desktop"
-)
+# A Desktop nobody's failure stopped, quit by a person or never started, is started again
+# by the same restart a failed start gets (`engine_down`), under the same `RESTART_EVERY`.
+# It was a person's step, "start Docker Desktop", and stood on the tray for 32 passes of a
+# machine whose collectors needed the engine: a step the pass can take is never relayed.
+DESKTOP_STOPPED = "docker is not answering: Docker Desktop is not running"
 DESKTOP_STOP_TIMEOUT = 120
 # Recorded in `RESTARTED` as `VM_RESET_AT`, so a VM is reset once per restart: a pass
 # inside a restart's `RESTART_EVERY` that finds the engine silent still resets the VM
@@ -1199,15 +1198,18 @@ def engine_down(
 ) -> tuple[str, str, Sequence[str]]:
     """`(how the silent engine is down, why no revival is tried, the runs a restart is
     held for)`; the second is "" when `revive_engine` should go on to try one. A Desktop
-    not running for no failure is a person's to start, and a hung WSL is a person's to
-    restart (`WSL_HUNG`). An engine that failed to start is held for no run in `busy`."""
+    that is not running -- its engine failed to start, or it was quit (`DESKTOP_STOPPED`)
+    -- is started again and held for no run in `busy`, since it serves none. A hung WSL is
+    a person's to restart (`WSL_HUNG`): every start goes through it."""
     wedged = "docker is not answering though Docker Desktop says it is running"
     if not docker.desktop_running():
         stopped = docker.stop_reason()
-        if FAILED_TO_START not in stopped.lower():
-            return wedged, DESKTOP_QUIT, busy
-        report.say(f"Docker Desktop says its engine stopped: {stopped}")
-        wedged = "docker is not answering: Docker Desktop's engine failed to start"
+        if FAILED_TO_START in stopped.lower():
+            report.say(f"Docker Desktop says its engine stopped: {stopped}")
+            wedged = "docker is not answering: Docker Desktop's engine failed to start"
+        else:
+            report.say(f"{DESKTOP_STOPPED} ({stopped or 'no reason given'}) -- starting it")
+            wedged = DESKTOP_STOPPED
         busy = ()
     return wedged, "" if docker.wsl_answers() else WSL_HUNG, busy
 
@@ -1219,10 +1221,10 @@ def revive_engine(
 
     Only a *wedged* engine is restarted: Docker Desktop says `running` and its engine
     does not answer for `WEDGE_CONFIRM` more seconds -- one that answers in that time was
-    slow, not wedged. A Desktop that is not running was most likely quit by a person, and
-    a timer does not start it behind their back; the answer then says so. Unless Desktop
-    itself says its engine `FAILED_TO_START` (`Docker.stop_reason`): that is a stop nobody
-    asked for, revived like a wedge. One restart per `RESTART_EVERY`; `clock` is POSIX now.
+    slow, not wedged. A Desktop that is not running is revived like a wedge, whether its
+    engine `FAILED_TO_START` (`Docker.stop_reason`) or it was quit (`DESKTOP_STOPPED`), and
+    a quit one is not waited on first: nothing is starting it. One restart per
+    `RESTART_EVERY`; `clock` is POSIX now.
 
     Nor is it restarted while a scheduled collector's run is in flight (`busy`, from
     `scheduled_in_flight`) and the wedge is new: its services may outlive a silent engine
@@ -1257,7 +1259,11 @@ def revive_engine(
     wedged, refused, busy = engine_down(docker, report, busy)
     if refused:
         return None, refused
-    containers = wait_for_engine(docker, ENGINE_STARTUP - WEDGE_CONFIRM)
+    containers = (
+        None
+        if wedged == DESKTOP_STOPPED
+        else wait_for_engine(docker, ENGINE_STARTUP - WEDGE_CONFIRM)
+    )
     if containers is not None:
         report.say("docker was slow to answer, not wedged -- it answered when asked again")
         return containers, ""
