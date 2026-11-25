@@ -1246,6 +1246,8 @@ def test_a_row_that_cannot_be_rejudged_is_never_called_outdated(tmp_path, monkey
     that is no longer the event the row names (a transcript rewritten since), and a class
     the whole session decides all stay open."""
     session = transcript(tmp_path / "s.jsonl", [user("go"), call("sleep 300", "1")], "c")
+    (tmp_path / ".claude" / "rules").mkdir(parents=True)
+    (tmp_path / sf.ENGINEERING_RULE).write_text(f"{sf.WAITING_RULE}\n", encoding="utf-8")
     [row] = _rows(sf.session_findings(session, st.read_new(session, 0), str(tmp_path), tmp_path))
     monkeypatch.setattr(sf, "COMMAND_PATTERNS", ())
     assert [ref for ref, _ in sf.outdated([row])] == [row.id], "the premise: it would retire"
@@ -1257,6 +1259,8 @@ def test_a_row_that_cannot_be_rejudged_is_never_called_outdated(tmp_path, monkey
 
 def test_a_transcript_first_seen_old_is_not_read_back(tmp_path):
     """Adopting the harvest must not file a month of history in one pass."""
+    (tmp_path / ".claude" / "rules").mkdir(parents=True)
+    (tmp_path / sf.ENGINEERING_RULE).write_text(f"{sf.WAITING_RULE}\n", encoding="utf-8")
     old = transcript(
         tmp_path / "p" / "s.jsonl", [user("go"), call("sleep 300", "1")], str(tmp_path)
     )
@@ -1653,6 +1657,33 @@ def test_a_heredoc_write_is_friction_only_where_the_rule_bans_it(tmp_path):
     assert kinds(held, f"You are a fixer. ... {sf.DISPATCHED} ...") == ["heredoc-write"]
     assert sf.bans_shell_writes(str(REPO_ROOT), tmp_path, "devkit"), (
         "devkit's own rule carries the ban in the spelling the detector reads"
+    )
+
+
+def test_a_poll_is_friction_only_where_the_rules_say_how_to_wait(tmp_path):
+    """507a7a04: a person's session at the workspace root, which is no project and loads no
+    rules, paced a merge inside a script it ran. Filed against a project named `vs-code`."""
+    wait = (
+        "cat > pushpr.sh <<'E'\nfor i in $(seq 1 24); do s=$(gh pr view $1); "
+        'case "$s" in MERGED*) break;; esac; sleep 10; done; echo "PR $1: $s"\nE\n'
+        "bash pushpr.sh 19 worktree-tab"
+    )
+
+    def kinds(cwd: Path, opening: str = "unblock my PRs") -> list[str]:
+        chunk = st.Chunk(((1, user(opening)), (2, call(wait, "1"))), 0)
+        return [
+            f.kind for f in sf.session_findings(tmp_path / "s.jsonl", chunk, str(cwd), tmp_path)
+        ]
+
+    project = tmp_path / "carameli"
+    (project / ".claude" / "rules").mkdir(parents=True)
+    (project / sf.ENGINEERING_RULE).write_text(f"{sf.WAITING_RULE}\n", encoding="utf-8")
+    assert kinds(tmp_path) == [], "the workspace root has no rule to break"
+    assert kinds(project) == ["poll"]
+    assert kinds(tmp_path, f"You are a fixer. ... {sf.DISPATCHED} ...") == ["poll"]
+    assert kinds(tmp_path / "elsewhere") == ["poll"], "nothing to read: it stands"
+    assert sf.asks_for_backgrounded_waits(str(REPO_ROOT), tmp_path, "devkit"), (
+        "devkit's own rule carries the section in the spelling the detector reads"
     )
 
 

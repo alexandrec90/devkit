@@ -1309,16 +1309,35 @@ ENGINEERING_RULE = ".claude/rules/engineering.md"
 FILE_WRITES_BAN = "**Write and edit files with the Write and Edit tools, never through Bash**"
 
 
-def bans_shell_writes(cwd: str, workspace_root: Path, project: str) -> bool:
-    """The session's tree carries `FILE_WRITES_BAN`; its project's checkout decides once
-    the tree is gone. Neither there to read: it may well have, so the finding stands."""
+def _engineering_says(phrase: str, cwd: str, workspace_root: Path, project: str) -> bool:
+    """The session's tree carries `phrase` in `ENGINEERING_RULE`; its project's checkout
+    decides once the tree is gone. Neither there to read: it may well have, so the
+    finding stands."""
     for root in (Path(cwd), workspace_root / project):
         if root.is_dir():
             try:
-                return FILE_WRITES_BAN in (root / ENGINEERING_RULE).read_text(encoding="utf-8")
+                return phrase in (root / ENGINEERING_RULE).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 return False
     return True
+
+
+def bans_shell_writes(cwd: str, workspace_root: Path, project: str) -> bool:
+    """The session's rules carried `FILE_WRITES_BAN`, per `_engineering_says`."""
+    return _engineering_says(FILE_WRITES_BAN, cwd, workspace_root, project)
+
+
+# The vendored rule's section on waiting. A session started at the workspace root loads
+# no project's rules, so nobody told it how to wait and no project can fix that it was
+# not: 507a7a04, a person's session at `C:\Users\alexa\vs-code` pacing a merge, was filed
+# against a project named `vs-code`. A poll's cost is an instruction unheeded, and it is
+# judged as a heredoc write is: where the instruction was.
+WAITING_RULE = "## Waiting: one backgrounded call, not a poll loop"
+
+
+def asks_for_backgrounded_waits(cwd: str, workspace_root: Path, project: str) -> bool:
+    """The session's rules carried `WAITING_RULE`, per `_engineering_says`."""
+    return _engineering_says(WAITING_RULE, cwd, workspace_root, project)
 
 
 # "No module named 'x'" -- quoted, as Python names a module import failed on. Unquoted
@@ -1542,8 +1561,9 @@ def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tupl
     targeted bare, whether it was asked for targeted runs at all, and whether it had a
     suite to narrow (`suite_is_this_change`). The one judgement
     both the pass's filing and `fix-pass-supervise.py`'s audit make, so they agree.
-    A dispatched session was handed the ban in its system prompt (`agent_tabs.FILE_WRITES`),
-    so a stale rule excuses none of its heredoc writes."""
+    A dispatched session was handed the ban in its system prompt (`agent_tabs.FILE_WRITES`)
+    and how to wait in its opening one (`fix_prompts.WAIT_SENTENCE`), so a stale rule
+    excuses none of its heredoc writes or polls."""
     events = list(events)
     project = harness_events.project_name(Path(cwd))
     targeted = runner_defaults_targeted(cwd, workspace_root, project)
@@ -1555,10 +1575,19 @@ def judged(events: Iterable[Event], cwd: str, workspace_root: Path) -> list[tupl
     ]
     if _whole_run_excused(found, cwd, workspace_root, project):
         found = [row for row in found if row[0] != "full-suite"]
-    dispatched = any(event.kind == "user" and DISPATCHED in event.text for event in events)
-    if not dispatched and not bans_shell_writes(cwd, workspace_root, project):
-        found = [row for row in found if row[0] != "heredoc-write"]
+    if not any(event.kind == "user" and DISPATCHED in event.text for event in events):
+        untold = _untold(cwd, workspace_root, project)
+        found = [row for row in found if row[0] not in untold]
     return _unqueued(found, cwd)
+
+
+def _untold(cwd: str, workspace_root: Path, project: str) -> set[str]:
+    """The classes whose instruction the session's rules did not carry."""
+    told = {
+        "heredoc-write": bans_shell_writes(cwd, workspace_root, project),
+        "poll": asks_for_backgrounded_waits(cwd, workspace_root, project),
+    }
+    return {cls for cls, was in told.items() if not was}
 
 
 def _unqueued(found: list, cwd: str) -> list:
