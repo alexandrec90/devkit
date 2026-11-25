@@ -60,7 +60,8 @@ def test_a_person_named_as_the_next_step_is_a_violation_in_any_wording():
 def test_a_hold_for_memory_is_a_wait_the_pass_tracks():
     """The pass re-sends it next pass, and a hold that lasts is a stale wait it files."""
     fix_send = load_script("scripts/fix_send.py")
-    why = fix_send._no_memory(fix_send.fix_plan.Decision(fix_send.fix_plan.DISPATCH, "n", ()), 100)
+    decision = fix_send.fix_plan.Decision(fix_send.fix_plan.DISPATCH, "n", ())
+    why = fix_send._no_memory(decision, 100, fix_send.MEMORY_FLOOR_MB)
     assert why.startswith(fix_send.HELD_FOR_MEMORY)
     assert supervise.check_record(f"capped   carameli #1 -- {why}", 0, set()) == []
 
