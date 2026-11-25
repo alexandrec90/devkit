@@ -56,6 +56,8 @@ def python_version(root: Path) -> tuple[int, int]:
 
 
 def python_problem(text: str) -> str:
+    if "\0" in text:
+        return ""  # data, not source; a ValueError or a SyntaxError by the patch release
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # an invalid escape is the linter's
@@ -63,7 +65,7 @@ def python_problem(text: str) -> str:
     except SyntaxError as broken:
         return f"does not parse: {broken.msg} (line {broken.lineno})"
     except (ValueError, RecursionError, MemoryError):
-        return ""  # a null byte, or a file too deep to read: not this check's to judge
+        return ""  # a file too deep to read: not this check's to judge
     return ""
 
 

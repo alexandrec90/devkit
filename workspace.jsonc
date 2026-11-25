@@ -1928,6 +1928,7 @@
 								"docker-stop-idle",
 								"e2e-schedule",
 								"fix-pass-task",
+								"fix-trigger",
 								"git-policy",
 								"global-tools",
 								"installers-schedule",

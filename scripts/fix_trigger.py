@@ -25,7 +25,7 @@ Rows the pass writes itself (`fix-pass-finding`, `session-friction`) are not sig
 each pass would start the next.
 
 **A signal is spent only by a pass that starts after it.** While one is running
-(`PASS_LOCK`) the new ones are left unspent, and the next fire starts a pass for them.
+(`FIX_LOCK`) the new ones are left unspent, and the next fire starts a pass for them.
 
 Sends nothing and starts nothing unless `devkit.fixPass` is `dispatch`. Exits 0 on an
 unreadable GitHub: the next fire is two minutes away, and the outage is not a defect.
@@ -58,9 +58,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # `install-fix-pass-task.TASK_NAME`, and `fix-pass.RUN_LOCK_NAME` / `RUN_LOCK_STALE`; a
 # test holds each to its owner, since importing the pass would load all of it every fire.
-PASS_TASK = "devkit-fix-pass"
-PASS_LOCK = "fix-pass.lock"
-PASS_LOCK_STALE = 26 * 60.0
+# Not spelled `PASS_*`: ruff's S105 reads a string under that name as a password.
+FIX_TASK = "devkit-fix-pass"
+FIX_LOCK = "fix-pass.lock"
+FIX_LOCK_STALE = 26 * 60.0
 
 STATE_NAME = "fix-trigger.json"
 # How long a spent signal is remembered. A key carries its commit, so it comes back only
@@ -233,7 +234,8 @@ def worktrees(root: Path, projects: Iterable[str]) -> list[Path]:
     found: list[Path] = []
     for home in homes:
         try:
-            found += [tree for tree in home.iterdir() if tree.is_dir()]
+            # Sorted: Linux lists a directory in no order.
+            found += sorted(tree for tree in home.iterdir() if tree.is_dir())
         except OSError:
             continue
     return found
@@ -338,15 +340,15 @@ def pass_running(root: Path, clock: Callable[[], float] = time.time) -> bool:
     """Whether a dispatching pass holds its lock. One older than any pass may run is a
     pass that died, which the pass started here breaks."""
     try:
-        made = (root / worktree_tiers.BOXES_DIR_NAME / PASS_LOCK).stat().st_mtime
+        made = (root / worktree_tiers.BOXES_DIR_NAME / FIX_LOCK).stat().st_mtime
     except OSError:
         return False
-    return clock() - made < PASS_LOCK_STALE
+    return clock() - made < FIX_LOCK_STALE
 
 
 def start_pass(run: Run = sweep.run_bounded) -> str:
     """Start the pass's own scheduled task; "" when the scheduler took it, else why not."""
-    done = run(["schtasks", "/Run", "/TN", PASS_TASK], START_SECONDS)
+    done = run(["schtasks", "/Run", "/TN", FIX_TASK], START_SECONDS)
     if getattr(done, "returncode", 1) == 0:
         return ""
     said = f"{getattr(done, 'stderr', '') or ''} {getattr(done, 'stdout', '') or ''}"
@@ -382,10 +384,10 @@ def run_once(
         # Unspent, so the next fire tries again; a task that never starts is the
         # scheduler's own failure, which the exit code files.
         print(f"fix-trigger: {len(new)} new signal(s):\n{listed}")
-        print(f"error: could not start {PASS_TASK}: {why}", file=sys.stderr)
+        print(f"error: could not start {FIX_TASK}: {why}", file=sys.stderr)
         return 1
     write_seen(path, remember(seen, current, now))
-    print(f"fix-trigger: started {PASS_TASK} for:\n{listed}")
+    print(f"fix-trigger: started {FIX_TASK} for:\n{listed}")
     return 0
 
 
