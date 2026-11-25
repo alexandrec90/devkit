@@ -3229,7 +3229,9 @@
 				],
 				// Its one container's cap. `rebalance`: the only collector whose move is cheap.
 				"memoryGb": 0.5,
-				"rebalance": true
+				"rebalance": true,
+				// Its datasets merge by union, so a second PC may take it over without a move.
+				"failover": true
 			},
 			// On the host, not in a container: it drives the installed Chrome with the
 			// browser profiles in its checkout. `handoff`: dumps its `db` through the

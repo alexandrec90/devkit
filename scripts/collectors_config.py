@@ -103,6 +103,10 @@ class Collector:
     `memory_gb` (`memoryGb`) and `rebalance` are for `fleet.py`: what the collector costs a
     machine where `docker stats` cannot see it, and whether a rebalance may pick it. Only
     one whose move is cheap should say `rebalance`, and it takes a `handoff` to move.
+
+    `failover` lets several machines be assigned `run` at once and has exactly one act on
+    it, by a claim on GitHub (`collector_lease`). Containers only, and only where a second
+    machine collecting into its own copy of the data loses nothing: no data moves.
     """
 
     project: str
@@ -116,6 +120,7 @@ class Collector:
     handoff: tuple[str, ...] = ()
     memory_gb: float = 0.0
     rebalance: bool = False
+    failover: bool = False
 
     @property
     def scheduled(self) -> bool:
@@ -174,6 +179,8 @@ def _scheduled_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     needs = _argv(raw.get("needs", []))
     if needs is None:
         return None, f"{project}: `needs` must be a list of compose service names"
+    if raw.get("failover"):
+        return None, f"{project}: `failover` is for a `service`, not a scheduled `command`"
     if project.startswith(DEVKIT_PREFIX):
         # The task is named after the collector, and `devkit-` is devkit's own jobs'
         # namespace: `schedule_health` and the fix pass would report it as a devkit job.
@@ -211,11 +218,20 @@ def _container_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     builds_from = _argv(raw.get("buildsFrom", []))
     if builds_from is None or any("/" in name or "\\" in name for name in builds_from):
         return None, f"{project}: `buildsFrom` must be a list of sibling checkout names"
+    failover = raw.get("failover", False)
+    if not isinstance(failover, bool):
+        return None, f"{project}: `failover` must be true or false"
     movement, why = _movement(project, raw)
     if why:
         return None, why
     return Collector(
-        project, service, tuple(health), settle=settle, builds_from=builds_from, **movement
+        project,
+        service,
+        tuple(health),
+        settle=settle,
+        builds_from=builds_from,
+        failover=failover,
+        **movement,
     ), ""
 
 

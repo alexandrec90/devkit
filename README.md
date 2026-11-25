@@ -1293,6 +1293,15 @@ destination keeps at least four gigabytes afterwards. `memoryGb` declares what a
 costs where `docker stats` cannot see it. A named `move` needs only a `handoff`, and is
 refused unless the destination has the project's checkout and `.env`.
 
+#### One collector, several PCs: `failover`
+
+A container collector declaring `"failover": true` may be assigned `run` on several PCs at
+once. `scripts/collector_lease.py` has exactly one run it, by a claim on GitHub that the
+holder renews every pass. When the holder goes quiet for the claim's TTL, another PC takes
+it over, the one with most free memory first; a PC that comes back stands by. No data
+moves, so it suits only a collector whose copies can be merged afterwards. A PC on a devkit
+older than this ignores the claim.
+
 #### Remote Control servers, and why keeping them up is a job
 
 `claude remote-control` puts a session running on this machine in front of the phone at

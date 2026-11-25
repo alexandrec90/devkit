@@ -79,6 +79,7 @@ ELEVATED = "elevated"  # a queue task's spool request
 TIDY = "tidy"  # the queue's daily clean-up PR
 FIX = "fix"  # one fixer at one problem at one commit
 HARNESS = "harness"  # the single devkit session
+COLLECTOR = "collector"  # one `failover` collector, renewed every pass (`collector_lease`)
 TIER = "tier"  # one medium-tier run of one project at one commit (`tier-pass.py`)
 TTL: dict[str, _dt.timedelta] = {
     # Past `after-merge-pass.RUN_TIMEOUT` and its fast-forward, or a live run is broken.
@@ -86,6 +87,8 @@ TTL: dict[str, _dt.timedelta] = {
     AGENT: _dt.timedelta(hours=1),
     ELEVATED: _dt.timedelta(hours=1),
     TIDY: _dt.timedelta(hours=1),
+    # Four passes of `devkit-collectors`: a machine that misses them all has gone.
+    COLLECTOR: _dt.timedelta(hours=1),
     # A session that died leaves its claim as it leaves its ledger entry, so another PC
     # looks again when this one would: `fix_ledger.RESEND_AFTER`, held equal by a test.
     FIX: _dt.timedelta(hours=6),
