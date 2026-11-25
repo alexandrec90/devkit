@@ -47,12 +47,13 @@ testpaths = ["tests"]
 # `local` is deselected like `paid`: the tier that needs this workstation includes a run
 # that drives VS Code for half an hour, and the push gate runs this suite on this machine.
 # `scripts/e2e.py` selects it by name, nightly, once the PC is idle.
-addopts = '-m "not paid and not local" -p devkit_temproot'
+addopts = '-m "not paid and not local" -p devkit_temproot -p claude_config_plugin'
 # The vendored plugin that gives each run a temp root of its own; `-p` above loads it.
 # What makes it importable: pytest applies this before it loads a `-p` plugin, which is
 # also why the floor above is 9.1. `scripts` too, so a test's `import fix_plan` does not
 # depend on another module having put it on the path first (`tests/support.py` does).
-pythonpath = ["scripts/pytest-plugins", "scripts"]
+# `tests` is where `claude_config_plugin` is.
+pythonpath = ["scripts/pytest-plugins", "scripts", "tests"]
 # A test that hangs prints its stack after this many seconds instead of silently running
 # until a tool call's limit kills it. Dumps only; nothing fails on it.
 faulthandler_timeout = 120
