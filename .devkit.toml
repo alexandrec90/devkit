@@ -33,6 +33,12 @@ unit_tests = "tests"
 [python]
 version = "3.12"
 
+# The direct flow, like every project the owner runs (2026-11-23). Safe for devkit too:
+# consumers pin a tag, and a tag is cut only after the full suite passes on it
+# (`RELEASING.md`), while the fix pass runs from `green`, not the tip it might break.
+[delivery]
+flow = "direct"
+
 # The Bash output cap `invoke-capped.py` applies (the capped-Bash hook that also read it
 # is no longer wired). devkit takes the
 # defaults; they are stated explicitly rather than omitted so that this file documents

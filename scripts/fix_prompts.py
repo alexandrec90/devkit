@@ -4,7 +4,7 @@
 Split out of `fix_plan.py`, which decides *what* gets a session; this is the words.
 Every prompt names the failure the way the record does (`fix_plan.name_of`), the
 evidence directory, the branch the worktree is on and the finish line -- which is the
-ship skill, that is, `logs/ship-intent.md`, never a commit or a push. A fixer fixes
+intent file `.claude/ship-intent.md` describes, never a commit or a push. A fixer fixes
 and stops; everything a script can do -- merging the base in, committing, pushing,
 opening or updating the PR, reading the gate -- the pass does, because a session's
 turn spent on any of it is the expensive way to run a command. What a fixer cannot do
@@ -71,7 +71,12 @@ SUITE_RUNNER_SENTENCE = (
     "module, which no changed file names -- a whole suite is the gate's to run, not yours. "
 )
 
-# How every prompt's body ends. The ship skill is the finish line and the blocked file
+# Where an unattended session reads how to finish: the vendored reference that replaced
+# the `ship` skill once the harness deferred `/ship` to Claude Code's built-in, which only
+# a person can start.
+SHIP_INTENT_DOC = ".claude/ship-intent.md"
+
+# How every prompt's body ends. The ship intent is the finish line and the blocked file
 # is the only other way out, for the blockers `STOP` names right after it; both are
 # files, so the pass reads the outcome without a session. Nothing to change is still an
 # intent (`ship_intent.EMPTY`): a fixer whose nightly was green at the tip left neither
@@ -90,7 +95,7 @@ FINISH = (
     "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
     "-- in every tree you changed. "
     f"{RUNNER_SENTENCE}"
-    "Then ship it with the ship skill and stop: the fix pass "
+    f"Then ship it with the intent file {SHIP_INTENT_DOC} describes and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. A failure "
     "already fixed where this tree was cut, with nothing left to change, ships the same "
     f"way: {INTENT_FILE.as_posix()} saying what fixed it, which the pass sets aside and "
@@ -583,7 +588,7 @@ def _held(failure: Failure) -> str:
 # ships an intent from any worktree (`ship_intent.find_intents`), so it pushes this too.
 OWN_DIFF = (
     "A PR whose failure does not reproduce here is red on its own diff: fetch its head, "
-    "add a worktree on it, fix it there and ship it with the ship skill from that "
+    f"add a worktree on it, fix it there and ship it as {SHIP_INTENT_DOC} says from that "
     "worktree, and name it in the intent here."
 )
 

@@ -436,7 +436,7 @@ def friction_lines(tree: Path) -> tuple[str, ...]:
 
 
 # How a session says it fixed what a friction line reports, in the tree that wrote it:
-# the spelling `fix_prompts.FINISH` and the ship skill ask for, and its near variants.
+# the spelling `fix_prompts.FINISH` and `.claude/ship-intent.md` ask for, and its near variants.
 FIXED_HERE = re.compile(r"\bfixed (?:it )?(?:on|in) this (?:branch|tree)\b", re.I)
 
 

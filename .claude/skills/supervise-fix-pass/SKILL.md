@@ -184,6 +184,6 @@ passed since its last row is retired by `fix_loop.retire_passed_jobs`, not taken
 
 ## Reporting
 
-Ship with the ship skill. In the reply, give per iteration: what the pass shipped,
+Ship with the intent file `.claude/ship-intent.md` describes. In the reply, give per iteration: what the pass shipped,
 sent and filed; each violation and what fixed it; each session's cost (calls, failed
 calls) and the friction found in it; and what, if anything, is still open.

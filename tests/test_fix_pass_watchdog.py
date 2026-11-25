@@ -850,7 +850,7 @@ def test_the_rescue_prompt_names_the_failure_the_log_and_the_one_way_out():
     text = watchdog.rescue_prompt("pass-hung", "ran past 25 minutes", "agent/fix-pass-rescue-x")
     assert "(pass-hung): ran past 25 minutes" in text
     assert "logs/fix-pass.watchdog.log" in text and "agent/fix-pass-rescue-x" in text
-    assert "regression test" in text and "ship skill" in text
+    assert "regression test" in text and "ship-intent.md" in text
 
 
 def test_the_rescue_retires_its_own_finding_against_its_branch():
@@ -859,7 +859,7 @@ def test_the_rescue_retires_its_own_finding_against_its_branch():
     text = watchdog.rescue_prompt("pass-hung", "ran past 25 minutes", "agent/fix-pass-rescue-x")
     assert f"retire the {watchdog.EVENT} group whose detail starts `pass-hung:`" in text
     assert "--resolve-like <id>" in text and "--pr agent/fix-pass-rescue-x" in text
-    assert text.index("ship skill") < text.index("--resolve-like"), "after the fix, not before"
+    assert text.index("ship-intent.md") < text.index("--resolve-like"), "after the fix, not before"
 
 
 def test_the_marks_spelled_here_are_the_ones_the_pass_reads():

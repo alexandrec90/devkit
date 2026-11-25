@@ -570,12 +570,25 @@ list, whose rows carry what each worktree holds (`clean and pushed`, `2 uncommit
 path(s)`): read from a cache, that warning would be as old as the last scheduled pass, and
 it describes what the click is about to destroy.
 
-### Shipping is an intent file; the fix pass does the rest
+### Shipping: `/land`, or an intent file
 
-A session that is done writes `logs/ship-intent.md` into its worktree — the commit
-subject on the first line, the body after a blank one — and stops. That is the whole of
-the `ship` skill now. No session commits, pushes, opens a PR or waits on a gate: the only
-thing it knows that nothing else can recover is *why* the change was made.
+A person ships by typing `/land` (`.claude/skills/land/SKILL.md`, vendored). It runs
+`scripts/land.py`, which commits, pushes, opens the PR labelled `merge-now`, waits for the
+merge queue to land it (merging it itself if the queue has not within three minutes),
+and fast-forwards the checkout the worktrees hang off, when that is clean on the default
+branch. A PR touching a path `[delivery] guarded` names -- the code that transacts money
+-- is labelled `automerge` instead, and merges itself once its gate is green; the queue
+holds every such PR to that whatever its label (`merge-dependabot-prs.guarded_paths`). A
+conflict is left labelled for the fix pass's resolver. `/land hold` keeps the PR for a
+person. Claude Code's built-in `/ship` never merges, so devkit takes no skill of that
+name, and the queue merges the unlabelled PR it opens anyway. `tests/test_builtin_ship.py`
+and `scripts/hooks/tests/test_land.py` hold all of that in place.
+
+A session nobody can type `/ship` for -- a fixer, `/go-nuts` -- writes
+`logs/ship-intent.md` into its worktree instead, the commit subject on the first line
+and the body after a blank one, and stops (`.claude/ship-intent.md`). It may commit and
+push itself too; the intent is what tells the pass it is done, and the only thing it
+knows that nothing else can recover is *why* the change was made.
 
 `scripts/fix-pass.py` is what does the rest, every half hour once `devkit.fixPass` in the
 workspace file is switched on (`scripts/install-fix-pass-task.py` registers it, wired and
@@ -590,8 +603,7 @@ each, run here.
 
 1. **Ship every gated intent.** Run the tree's commit-stage fixers, commit with the message,
    push with the push gate skipped, open the PR -- labelled `automerge`, so it merges once
-   green whoever shipped it, unless it was shipped `/ship hold` (the intent carries
-   `Hold: yes`), which keeps it for a person through any resolver's ship
+   green whoever shipped it, unless the intent carries `Hold: yes`, which keeps it for a person through any resolver's ship
    (`ship_intent.labels_for`) -- record
    the outcome in `logs/ship-state.json` beside the intent, and set the intent aside as `logs/ship-intent.shipped.md`. A dirty
    tree with no intent is a session still working — a fixer's, too — and is never
@@ -661,7 +673,7 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
   the affected PRs named. This is the shape a devkit release fans out into, and the one
   the old per-PR dropdown cost eight sessions on.
 - **A failing scheduled workflow** gets a fresh branch off the default branch in that
-  project, the run's logs, and a prompt that ends with the ship skill; its PR carries
+  project, the run's logs, and a prompt that ends with the ship intent; its PR carries
   `Closes #N` for the issue it was sent at, and the issue also closes itself when the
   workflow next passes.
 - **What Dependabot cannot do** gets one fresh branch per project, with every alert and
@@ -724,16 +736,30 @@ was closed or was merged since the scan is reported and skipped.
 
 ### The direct flow: nothing between a finished session and `main`
 
-A project opts in with `flow = "direct"` under `[delivery]` in its `.devkit.toml`
-(`scripts/delivery.py` reads it; absent, or anything else, is `gated`, and everything in
-this section is inert). Every check then runs after the merge and repairs what it finds.
+Every project is in it, by the owner's decision (2026-11-23): `flow = "direct"` under
+`[delivery]` in its `.devkit.toml`, which the template writes (`scripts/delivery.py`
+reads it; absent, or anything else, is `gated`, kept for code that moves real money).
+Every check then runs after the merge and repairs what it finds, and the `local` tier of
+`tests/test_builtin_ship.py` fails any project whose default branch says otherwise, or
+whose GitHub rules require a check before a merge.
 
-`scripts/ship-pass.py` (`devkit-ship`, every two minutes, on every PC) is what ships: it
-commits with no `ship.py --fix` and no pre-commit framework, pushes, and opens the PR
-labelled `merge-now`, which means merge now with no gate consulted, where `automerge`
-means once the gate passes. `/ship hold` puts `Hold: yes` on a line of its own in the
-intent and the PR gets no merge label: it waits for you, and a resolver sent at it leaves
-it waiting. Any doubt reads as held: if `gh` cannot say, no `merge-now` goes on. The task
+The merge queue (`dependabot-automerge.yml`'s `sweep` job, run on every PR event) merges
+a direct project's PR as it opens: one labelled `merge-now`, and one with no label at
+all, which is what the built-in `/ship` opens (`merge-dependabot-prs.ships_unlabelled`).
+What stays open: a draft, a `hold` label, a `Hold: yes` line in the body, a bot's PR, a
+fork's, a `release/` branch, and anything labelled `automerge`, which asked for its gate.
+A PR touching a `[delivery] guarded` path waits for its gate whatever its label, and
+merges once that is green.
+The global git hook skips the pre-commit framework and the push gate on its own in such a
+repository (`git_policy.framework.flows_directly`), so `/ship`'s plain commit and push
+are not gated either.
+
+`scripts/ship-pass.py` (`devkit-ship`, every two minutes, on every PC) ships the intents
+of sessions nobody typed `/ship` for: it commits with no `ship.py --fix` and no pre-commit
+framework, pushes, and opens the PR labelled `merge-now`, which means merge now with no
+gate consulted, where `automerge` means once the gate passes. An intent with `Hold: yes`
+on a line of its own gets no merge label: it waits for you, and a resolver sent at it
+leaves it waiting. Any doubt reads as held: if `gh` cannot say, no `merge-now` goes on. The task
 holds where the fix pass holds, sends no one, and never runs beside a dispatching pass's
 ship step: both take `ship_step.SHIP_LOCK_NAME`.
 
@@ -966,7 +992,7 @@ or an elevated verb. `devkit-after-merge` reads every project's queue off
 `origin/<default>` on every PC, one PC claims each task with a ref on GitHub
 (`scripts/job_claims.py`), and a failure goes to an agent rather than to a log.
 `scripts/after-merge-pass.py status` says what is due and what this machine would do.
-The format is the ship skill's last section; the decisions are `scripts/after_merge.py`.
+The format is `.claude/ship-intent.md`'s last section; the decisions are `scripts/after_merge.py`.
 
 #### A project's own scheduled tasks
 
@@ -1858,12 +1884,13 @@ lockfiles) stay optional and skip explicitly.
 ### The shared instruction tier
 
 The same argument applies to prose. `.claude/rules/engineering.md`,
-`.claude/rules/authoring.md`, and the `/ship` workflow are in the `MANIFEST` and
-vendored byte-identical. `/ship` has a concrete lifecycle job and delegates its
-mechanical checks to the tested `scripts/ship.py` driver. The one other shared skill is
-`/go-nuts <goal>`, for an unattended run: it decides instead of asking, logs each
-judgement call to `logs/overnight.md` so it can be reversed, and finishes through
-`/ship`. Only a user can invoke it; the model never starts one on its own.
+`.claude/rules/authoring.md`, and `.claude/ship-intent.md` are in the `MANIFEST` and
+vendored byte-identical. `/ship` is Claude Code's built-in, and no skill here takes its
+name (`tests/test_builtin_ship.py`); `.claude/ship-intent.md` is how a session nobody can
+type `/ship` for finishes. The one shared skill is `/go-nuts <goal>`, for an unattended
+run: it decides instead of asking, logs each judgement call to `logs/overnight.md` so it
+can be reversed, and finishes with an intent. Only a user can invoke it; the model never
+starts one on its own.
 
 Generic audits, compatibility smoke commands, stateful refactor sweeps, and model-to-model
 handoff prompts do not belong in every project. Mechanical constraints such as the
@@ -2055,5 +2082,5 @@ POSIX syntax but masks the exit code behind `head`'s.
 ## Scope note
 
 The current `MANIFEST` is the reviewed, coupling-free core, including the branch
-lifecycle and `/ship`. Default branches are resolved from `origin/HEAD` with `main`/
+lifecycle and the ship intent. Default branches are resolved from `origin/HEAD` with `main`/
 `master` fallbacks; no vendored workflow hard-codes one repository's base branch.
