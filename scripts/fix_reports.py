@@ -600,7 +600,12 @@ def active_transcript(
 
 # A background task a session started, and the notification that it ended. Read as
 # text, not parsed: both are in the transcript verbatim, a JSON escape or two aside.
-_TASK_LAUNCHED = re.compile(r"running in background with ID: ([A-Za-z0-9_-]+)")
+# The second wording is a foreground call Claude Code took out of the foreground, held to
+# the start of a result: a session reading these tests quotes it inside one.
+_TASK_LAUNCHED = re.compile(
+    r'(?:running in background with ID: |"(?:content|text)":\s?"Command [^"\\]{0,60}?'
+    r"moved to the background \(ID: )([A-Za-z0-9_-]+)"
+)
 _TASK_NOTIFIED = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
 
 

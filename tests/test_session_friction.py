@@ -565,6 +565,15 @@ def test_a_subagent_waiting_on_a_run_it_backgrounded_itself_is_not_polling():
     ], "only the file of a call of its own"
 
 
+def test_a_call_moved_out_at_its_own_timeout_is_moved_too():
+    """fbf4aebc: the other wording Claude Code answers a call it moves out with."""
+    moved = MOVED.replace("Command was", "Command did not complete within its 600s timeout and was")
+    rows = [call("python -m pytest tests/test_x.py", "1"), result(moved, "1", error=False)]
+    rows += [call(WAIT_ON_MOVED, "2"), result("3 passed", "2", error=False)]
+    assert subagent(rows) == []
+    assert classes(rows) == ["poll"], "a top-level session gets the notice, so it can stop"
+
+
 def test_a_subagents_loop_on_anything_else_is_still_a_poll():
     """Only the call Claude Code moved: its other waits are the habit."""
     rows = [call("python -m pytest tests/test_x.py", "1"), result(MOVED, "1", error=False)]

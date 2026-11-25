@@ -553,6 +553,22 @@ def test_a_session_waiting_on_its_own_background_task_is_not_done_with_an_intent
     assert fix_reports.session_state(tree, now, projects) == (fix_reports.DONE, str(log))
 
 
+def test_a_call_moved_to_the_background_is_a_task_out_until_it_reports(tmp_path):
+    """fbf4aebc: the prompt tells a fixer it may end its turn on one, so the pass must see
+    it. A result that only quotes the words names no task."""
+    log = tmp_path / "s.jsonl"
+    moved = "was moved to the background (ID: b0ysilsms). Output is being written to x."
+    timed_out = f"Command did not complete within its 600s timeout and {moved}"
+    for said in (f"Command {moved}", timed_out):
+        log.write_text(json.dumps({"content": said}) + "\n", encoding="utf-8")
+        assert fix_reports.pending_tasks(log) == {"b0ysilsms"}
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("<task-id>b0ysilsms</task-id>\n")
+    assert fix_reports.pending_tasks(log) == frozenset()
+    log.write_text(json.dumps({"content": f'x = "{timed_out}"'}) + "\n", encoding="utf-8")
+    assert fix_reports.pending_tasks(log) == frozenset()
+
+
 def test_only_the_stamped_live_session_is_asked_about_background_tasks(tmp_path):
     now = _dt.datetime.now(_dt.UTC)
     projects = tmp_path / "projects"

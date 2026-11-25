@@ -118,7 +118,11 @@ SETTLE_MAX = 30  # seconds: longer than a run takes to attach is a wait, not a s
 # whatever the call's `timeout` said. A top-level session is told when it ends and can
 # stop; a subagent that stops has returned, so the rule has it run the job in the
 # foreground, and this leaves it one loop on the file it was told to read (2d4d52ac).
-MOVED_TO_BACKGROUND = re.compile(r"\ACommand was moved to the background \(ID: (\w+)\)")
+# A call that outlives its own `timeout` is told so in other words (fbf4aebc).
+MOVED_TO_BACKGROUND = re.compile(
+    r"\ACommand (?:did not complete within its \w+ timeout and )?"
+    r"was moved to the background \(ID: (\w+)\)"
+)
 # And a call it ran with `run_in_background` itself: the notice that answer promises
 # cannot reach a subagent either, so its one loop on that file is the same wait at the
 # same cost -- filed as the poll group's thirteenth recurrence (be233ab6).

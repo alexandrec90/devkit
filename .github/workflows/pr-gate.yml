@@ -87,6 +87,13 @@ jobs:
       - name: Lint
         if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         run: uv run ruff check .
+      - name: Lint under the ruff consumers pin
+        if: ${{ !cancelled() && steps.env.outcome == 'success' }}
+        # A consumer lints the vendored files with the ruff-pre-commit rev its project
+        # was generated with, not with devkit's ruff. 0.17 accepts a frozen dataclass
+        # in a default that 0.16 refuses (B008), so v0.11.100 was green here and red in
+        # seven adoption PRs. `tests/test_gate_parity.py` holds this to the template's rev.
+        run: uvx ruff@0.16.0 check .
       - name: Lint + typecheck via the wrapper devkit ships
         if: ${{ !cancelled() && steps.env.outcome == 'success' }}
         # Runs devkit's own `scripts/lint-all.py` — the entrypoint the pre-push gate

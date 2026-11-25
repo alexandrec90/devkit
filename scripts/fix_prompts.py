@@ -76,6 +76,18 @@ SUITE_RUNNER_SENTENCE = (
 # a person can start.
 SHIP_INTENT_DOC = ".claude/ship-intent.md"
 
+# How a fixer waits for its own checks. The rule every session loads says it, and a fixer
+# still sat in an until loop on a run moved out at its 600 s timeout (fbf4aebc, the rule's
+# own fix having failed before it): this prompt tells it that ending with no intent reads
+# as dying, so it must also say that ending on a pending task does not
+# (`fix_reports.awaiting_task`).
+WAIT_SENTENCE = (
+    "Start a run that may take minutes with run_in_background, do what else is left, and "
+    "then end your turn: its notice wakes you, as it does for a call Claude Code moves to "
+    "the background itself, and the pass reads a session with a background task out as "
+    "still working, not as dead. Never wait in a sleep or until loop. "
+)
+
 # How every prompt's body ends. The ship intent is the finish line and the blocked file
 # is the only other way out, for the blockers `STOP` names right after it; both are
 # files, so the pass reads the outcome without a session. Nothing to change is still an
@@ -95,6 +107,7 @@ FINISH = (
     "and, where the tree has it, python scripts/hot-budget.py for the instruction files "
     "-- in every tree you changed. "
     f"{RUNNER_SENTENCE}"
+    f"{WAIT_SENTENCE}"
     f"Then ship it with the intent file {SHIP_INTENT_DOC} describes and stop: the fix pass "
     "commits, pushes, opens or updates the PR and reads what the gate says. A failure "
     "already fixed where this tree was cut, with nothing left to change, ships the same "

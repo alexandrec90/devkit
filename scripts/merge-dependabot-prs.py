@@ -540,8 +540,13 @@ class Lane:
     guarded: tuple[str, ...] = ()
 
 
+# The line outside the queue. A name because ruff's B008 refuses a call in a default: ruff
+# 0.17 knows a frozen dataclass of this module, and the 0.16 that consumers pin does not.
+SWEEP = Lane()
+
+
 def take_turn(
-    repo: str, pr: dict, run, sleep, gated_sha: str, lane: Lane = Lane()
+    repo: str, pr: dict, run, sleep, gated_sha: str, lane: Lane = SWEEP
 ) -> tuple[str, dict]:
     """Judge and merge one PR: `(MERGED, REFUSED or LEFT, the PR as last read)`.
 

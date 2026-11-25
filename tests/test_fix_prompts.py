@@ -854,6 +854,15 @@ def test_a_tree_whose_runner_runs_the_suite_bare_is_told_so_as_a_fact():
     assert fix_prompts.RUNNER_SENTENCE in fix_prompts.FINISH
 
 
+def test_the_finish_says_a_long_check_is_waited_for_by_ending_the_turn():
+    """fbf4aebc: a fixer held its turn in an until loop on its own test run, told in the
+    same prompt that ending with no intent reads as dying."""
+    text = fix_prompts.pr_prompt(failure())
+    assert fix_prompts.WAIT_SENTENCE in text
+    assert "run_in_background" in text and "end your turn" in text
+    assert not set("\"'`") & set(fix_prompts.WAIT_SENTENCE), "it crosses a wt command line"
+
+
 def test_a_prompt_names_the_log_that_came_down_when_no_junit_report_failed(tmp_path):
     """8f622cc6: devkit's suite reports only in `test-failures.log`, and a fixer told to
     read `failures.txt` first went looking for a file nothing had written."""
