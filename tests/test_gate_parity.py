@@ -20,6 +20,8 @@ gate, and fails the moment the two drift in either direction.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from support import REPO_ROOT, checks_a_red_check_skips, load_script
 
@@ -44,6 +46,10 @@ EXEMPT: dict[tuple[str, str], str] = {
         "`ruff check .` runs inside `scripts/lint-all.py`, which is push-gate step 1 — the "
         "workflow spells it a second time only so a lint failure is one step rather than "
         "buried in the wrapper's artifact."
+    ),
+    ("test", "Lint under the ruff consumers pin"): (
+        "A second ruff, which `uvx` downloads the first time: a push must work offline, and "
+        "the difference between two ruff releases is rarely what a push changes."
     ),
     ("pre-commit", "Run every hook over the whole repo"): (
         "`--all-files` has no local equivalent: pre-commit's commit stage sees the staged "
@@ -322,6 +328,17 @@ def test_a_red_check_does_not_hide_the_checks_after_it():
             f"{workflow.name}: a red check skips the one after it, so that check's "
             f"failures reach the fix pass a gate cycle late: {checks_a_red_check_skips(parsed)}"
         )
+
+
+def test_the_gate_lints_with_the_ruff_a_generated_project_pins():
+    """v0.11.100 was lint-clean under devkit's ruff and failed B008 under the one every
+    consumer's pre-commit pins, in seven adoption PRs at once."""
+    config = REPO_ROOT / "templates" / "core" / "dot-pre-commit-config.yaml.tmpl"
+    pinned = re.search(r"ruff-pre-commit\n\s+rev: v(\S+)", config.read_text(encoding="utf-8"))
+    assert pinned, "the template pins no ruff-pre-commit rev"
+    steps = _yaml().safe_load(PR_GATE.read_text(encoding="utf-8"))["jobs"]["test"]["steps"]
+    runs = [step.get("run") for step in steps]
+    assert f"uvx ruff@{pinned[1]} check ." in runs
 
 
 def test_the_skipped_check_check_is_not_vacuous():
