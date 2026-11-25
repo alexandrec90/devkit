@@ -83,6 +83,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import collector_build
 import harness_events
 import collector_handoff as handoff
+import collector_lease as lease
 import collector_tasks
 import collectors_config as config
 import docker_memory
@@ -2050,7 +2051,8 @@ def assigned(root: Path = REPO_ROOT) -> tuple[list[config.Collector], list[Targe
     if not assignment:
         return [], []
     collectors, _notes = config.declared(base)
-    return collectors, targets(collectors, assignment, sweep.default_workspace(base).parent)
+    acted = lease.effective(collectors, assignment, lease.load(base / lease.RECORD))
+    return collectors, targets(collectors, acted, sweep.default_workspace(base).parent)
 
 
 def scheduled_tasks(root: Path = REPO_ROOT) -> dict[str, str]:
@@ -2408,7 +2410,8 @@ def pass_bound(
     acted_on = {c.project for c in containers if c.project in assignment}
     acted_on |= {c.project for c in takers if not c.scheduled}
     pickups = len(takers) * (PICKUP_BOUND + handoff.PENDING_TIMEOUT)
-    return PS_TIMEOUT + max(1, len(acted_on)) * TARGET_BOUND + pickups
+    claims = sum(c.failover for c in collectors) * lease.BOUND
+    return PS_TIMEOUT + max(1, len(acted_on)) * TARGET_BOUND + pickups + claims
 
 
 def run_pass(
@@ -2436,6 +2439,14 @@ def run_pass(
         if args.mode == "maintain":
             assignment = pick_up(collectors, assignment, here)
             follow_handoffs(collectors, assignment, here)
+        assignment = lease.resolve(
+            [c for c in collectors if args.mode == "maintain" or c.project in assignment],
+            assignment,
+            here.base / lease.RECORD,
+            sweep.git_for(here.base),
+            here.name,
+            here.report.say,
+        )
         chosen = targets(collectors, assignment, here.workspace)
         if not chosen:
             here.report.say("no collector is assigned to this machine -- nothing to do")
