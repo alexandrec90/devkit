@@ -17,20 +17,12 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 from support import LIVE_WORKSPACE, REPO_ROOT, load_script, needs_live_workspace, sweep
 
 ws = load_script("scripts/workspace-status.py")
 harness_triage = load_script("scripts/harness_triage.py")
 log_wrap = load_script("scripts/log-wrap.py")
 status_installer = load_script("scripts/install-workspace-status.py")
-
-
-@pytest.fixture(autouse=True)
-def _machine_long_up(monkeypatch):
-    """`main --notify` waits out a fresh boot (`catch_up_wait`), and a CI runner is
-    always one: no test here may depend on how long the machine running it has been up."""
-    monkeypatch.setattr(ws.machine_clock, "awake_since", lambda now=None: None)
 
 
 def result(name: str, verdict: str) -> sweep.Result:

@@ -11,6 +11,9 @@ from support import load_script
 
 clock = load_script("scripts/machine_clock.py")
 
+# The clock itself is what this module tests, so `machine_clock_plugin` leaves it real.
+READS_THE_REAL_MACHINE_CLOCK = True
+
 
 def _can_answer() -> bool:
     # What the machine can answer from, not what it calls itself: the POSIX rehearsal is
