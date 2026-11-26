@@ -143,6 +143,44 @@ def test_nothing_matching_the_tip_is_no_range():
     assert fix_revert.red_range([], {"a": TESTS}, TESTS) == []
 
 
+X, Y = "tests/test_x.py::test_x", "tests/test_y.py::test_y"
+
+
+def test_a_failure_a_later_commit_adds_inside_a_red_job_widens_the_range_to_it():
+    """7af7392e: `a` turned Tests red, `c` added `Y` inside the same red job, and the
+    tip fails both. Reverting `a` alone left the tip red on `Y`."""
+    commits = [commit(sha) for sha in "abcd"]
+    verdicts = {"a": TESTS, "c": TESTS, "d": TESTS}
+    named = {"a": frozenset({X}), "c": frozenset({X, Y}), "d": frozenset({X, Y})}
+    tip = frozenset({X, Y})
+    assert fix_revert.red_range(commits, verdicts, TESTS, named, tip) == commits[:3]
+    # Without the finer evidence the range is the job-level one, as before.
+    assert fix_revert.red_range(commits, verdicts, TESTS) == commits[:1]
+
+
+def test_a_tip_entry_already_on_the_first_red_commit_widens_nothing():
+    commits = [commit(sha) for sha in "abc"]
+    verdicts = {"a": TESTS, "c": TESTS}
+    named = {"a": frozenset({X, Y}), "c": frozenset({X, Y})}
+    assert fix_revert.red_range(commits, verdicts, TESTS, named, frozenset({X, Y})) == commits[:1]
+
+
+def test_an_entry_a_release_first_shows_is_placed_on_the_commit_after_it():
+    """A release is never the culprit, the same as at job level."""
+    commits = [commit("a"), commit("r", "Release v1.2.3"), commit("c"), commit("d")]
+    verdicts = {"a": TESTS, "r": TESTS, "c": TESTS, "d": TESTS}
+    named = {"a": frozenset({X}), "r": frozenset({X, Y}), "c": frozenset({X, Y})}
+    assert fix_revert.red_range(commits, verdicts, TESTS, named, frozenset({X, Y})) == commits[:3]
+
+
+def test_an_entry_from_before_a_cleared_commit_does_not_reach_back():
+    """A commit that ran the tip's jobs clean still clears what came before it."""
+    commits = [commit(sha) for sha in "abcd"]
+    verdicts = {"a": TESTS, "b": PASSED, "c": TESTS, "d": TESTS}
+    named = {"a": frozenset({Y}), "c": frozenset({X}), "d": frozenset({X, Y})}
+    assert fix_revert.red_range(commits, verdicts, TESTS, named, frozenset({X, Y})) == commits[2:]
+
+
 def test_a_range_is_not_overdue_before_the_grace_runs_out():
     assert fix_revert.RED_GRACE == _dt.timedelta(hours=2)
     assert not fix_revert.overdue(NOW, NOW + _dt.timedelta(hours=1, minutes=59))
@@ -256,6 +294,7 @@ class World:
         self.pulls: dict[str, list] = {}
         self.runs: list[dict] = []
         self.jobs: dict[str, list[dict]] = {}
+        self.logs: dict[str, str] = {}
         self.gh_fails = False
         self.view_fails = False
         self.started = _dt.datetime.now(_dt.UTC)
@@ -295,11 +334,21 @@ class World:
         _git(self.author, "push", "origin", "main")
         return _git(self.author, "rev-parse", "HEAD")
 
-    def fail(self, sha: str, *jobs: str, conclusion: str = "failure") -> None:
-        """The gate failed `sha` on `jobs`: this run is the newest."""
+    def fail(
+        self, sha: str, *jobs: str, conclusion: str = "failure", said: tuple[str, ...] = ()
+    ) -> None:
+        """The gate failed `sha` on `jobs`: this run is the newest. `said` is what each
+        failed job's log names, as pytest's `FAILED <id>` lines."""
         run_id = str(len(self.runs) + 100)
         self.runs.insert(0, run(sha, conclusion, run_id=int(run_id)))
         self.jobs[run_id] = [job(name) for name in jobs or ("Tests",)]
+        if said:
+            for index, one in enumerate(self.jobs[run_id]):
+                one["databaseId"] = f"{run_id}{index}"
+                stamp = "2026-11-06T12:00:00.0000000Z"
+                self.logs[one["databaseId"]] = "".join(
+                    f"{stamp} FAILED {ident} - assert 0\n" for ident in said
+                )
 
     def passes(self, sha: str) -> None:
         self.runs.insert(0, run(sha, "success", run_id=len(self.runs) + 100))
@@ -312,6 +361,9 @@ class World:
                 return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
             jobs = {"jobs": self.jobs[args[2]]}
             return subprocess.CompletedProcess(args, 0, json.dumps(jobs), "")
+        if args[:1] == ("api",) and args[-1].endswith("/logs"):
+            job_id = args[-1].split("/")[-2]
+            return subprocess.CompletedProcess(args, 0, self.logs.get(job_id, ""), "")
         if args[:2] == ("pr", "list"):
             if self.gh_fails:
                 return subprocess.CompletedProcess(args, 1, "", "HTTP 502")
@@ -421,6 +473,19 @@ def test_a_commit_that_failed_other_jobs_is_left_alone(world):
     world.fail(lint, "Lint")
     world.fail(bad, "Tests")
     assert [line.split()[1] for line in world.tend()] == [bad[:7]]
+
+
+def test_a_later_commit_that_adds_a_failure_inside_a_red_job_is_reverted_too(world):
+    """7af7392e: the job-level range named the first red commit only, and the revert
+    left main red on what a later commit added; the job logs say which commit that was."""
+    first = world.write("a.txt", "two\n", "Break x (#1)")
+    between = world.write("b.txt", "b\n", "Add b (#2)")
+    later = world.write("c.txt", "c\n", "Break y (#3)")
+    world.fail(first, said=(X,))
+    world.fail(between, said=(X,))
+    world.fail(later, said=(X, Y))
+    lines = world.tend()
+    assert [line.split()[1] for line in lines] == [later[:7], between[:7], first[:7]]
 
 
 def test_nothing_is_reverted_when_nothing_matches_the_tips_jobs(world):

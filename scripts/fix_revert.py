@@ -168,7 +168,11 @@ def failed_jobs(jobs: list[dict]) -> frozenset[str]:
 
 
 def red_range(
-    commits: list[Commit], verdicts: dict[str, frozenset[str]], tip_jobs: frozenset[str]
+    commits: list[Commit],
+    verdicts: dict[str, frozenset[str]],
+    tip_jobs: frozenset[str],
+    named: dict[str, frozenset[str]] | None = None,
+    tip_named: frozenset[str] = frozenset(),
 ) -> list[Commit]:
     """The commits that may have turned the branch red the way the tip is red, oldest first.
 
@@ -177,6 +181,11 @@ def red_range(
     failing jobs miss `tip_jobs` ran those jobs clean, so it and everything before it are
     cleared of this red. The range ends at the oldest commit since then that overlaps them,
     and a release never ends it: `[Release vX, Y]` red on one job is Y's. Empty when none does.
+
+    A job already red hides what a later commit adds inside it, so `named` (a red commit's
+    failing test ids and lint findings, `fix_plan.signature_from_logs`) widens the range to
+    the commit each of `tip_named` first appears on: 7af7392e reverted the oldest red
+    commit alone, and the tip's other failures, from commits after it, left main red.
     """
     start, first_red = 0, None
     for index, commit in enumerate(commits):
@@ -187,7 +196,25 @@ def red_range(
             start, first_red = index + 1, None
         elif first_red is None and not commit.is_release:
             first_red = index
-    return [] if first_red is None else commits[start : first_red + 1]
+    if first_red is None:
+        return []
+    return commits[start : _first_named(commits, start, first_red, named or {}, tip_named) + 1]
+
+
+def _first_named(
+    commits: list[Commit],
+    start: int,
+    end: int,
+    named: dict[str, frozenset[str]],
+    tip_named: frozenset[str],
+) -> int:
+    """The newest of `end` and each commit from `start` where a tip entry first appears."""
+    unplaced = set(tip_named)
+    for index in range(start, len(commits)):
+        found = unplaced & named.get(commits[index].sha, frozenset())
+        if found and not commits[index].is_release:
+            end, unplaced = max(end, index), unplaced - found
+    return end
 
 
 def overdue(seen: _dt.datetime, now: _dt.datetime) -> bool:
@@ -301,6 +328,7 @@ def read_range(checkout: Path, failure: fix_plan.Failure) -> list[Commit]:
     gh = sweep.gh_for(checkout)
     judged = judged_runs(gate_evidence.default_branch_runs(gh, failure.base, limit=RUN_WINDOW))
     verdicts: dict[str, frozenset[str]] = {}
+    named: dict[str, frozenset[str]] = {}
     for commit in commits:
         passed, run_id = judged.get(commit.sha, (None, ""))
         if passed:
@@ -311,7 +339,11 @@ def read_range(checkout: Path, failure: fix_plan.Failure) -> list[Commit]:
                 return []
             if failed := failed_jobs(jobs):
                 verdicts[commit.sha] = failed
-    return red_range(commits, verdicts, verdicts.get(failure.sha, frozenset()))
+                logs = gate_evidence.failed_job_logs(gh, jobs)
+                named[commit.sha] = frozenset(fix_plan.signature_from_logs([logs]))
+    tip_named = frozenset(failure.signature) | named.get(failure.sha, frozenset())
+    tip_jobs = verdicts.get(failure.sha, frozenset())
+    return red_range(commits, verdicts, tip_jobs, named, tip_named)
 
 
 def touched(checkout: Path, commit: Commit) -> frozenset[str]:
