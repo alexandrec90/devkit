@@ -38,6 +38,8 @@ from support import (
     vendor_manifest,
 )
 
+import project_registry  # on sys.path once `support` is imported
+
 new_project = load_script("scripts/new-project.py")
 GeneratorError = new_project.GeneratorError
 
@@ -1228,17 +1230,19 @@ def test_registration_lands_in_the_canonical_copy_too(
     assert f"commit devkit's {canonical_copy.name}" in out
 
 
-def _devkit_checkout(path: Path, *, ports: bool = False) -> Path:
+def _devkit_checkout(path: Path, *, ports: bool = False, projects: bool = False) -> Path:
     """A static checkout on `main` holding devkit's `workspace.jsonc` (and, with `ports`,
-    its `ports.toml`), committed. Its own `core.hooksPath` points nowhere, since this
-    machine installs a global branch policy as a hooks path and a fixture repo must not be
-    judged by it."""
+    its `ports.toml`; with `projects`, its `projects.toml`), committed. Its own
+    `core.hooksPath` points nowhere, since this machine installs a global branch policy as
+    a hooks path and a fixture repo must not be judged by it."""
     path.mkdir(parents=True)
     canonical = path / "workspace.jsonc"
     canonical.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
-    if ports:
-        shipped = (REPO_ROOT / devkit_ports.REGISTRY_NAME).read_text(encoding="utf-8")
-        (path / devkit_ports.REGISTRY_NAME).write_text(shipped, encoding="utf-8", newline="\n")
+    shipped_names = [devkit_ports.REGISTRY_NAME] if ports else []
+    shipped_names += [project_registry.REGISTRY_NAME] if projects else []
+    for name in shipped_names:
+        shipped = (REPO_ROOT / name).read_text(encoding="utf-8")
+        (path / name).write_text(shipped, encoding="utf-8", newline="\n")
     for args in (
         ("init", "--quiet", "-b", "main"),
         ("config", "core.hooksPath", str(path / ".nohooks")),
@@ -1463,6 +1467,121 @@ def test_a_canonical_copy_that_could_not_be_registered_gets_no_slot_either(
 
     assert the_plan.name not in devkit_ports.load(canonical.parent).slots
     assert "Next: register the slot" in capsys.readouterr().out
+
+
+def _registered_in(path: Path) -> list[str]:
+    return project_registry.parse_registry(path.read_text(encoding="utf-8"))
+
+
+def _live_beside(tmp_path: Path, canonical: Path, monkeypatch) -> Path:
+    live = tmp_path / "live.code-workspace"
+    live.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
+    return live
+
+
+def test_the_registration_branch_carries_projects_toml_too(tmp_path, capsys, monkeypatch):
+    """`tests/test_project_registry.py` holds `projects.toml` to `workspace.jsonc`'s
+    folders, so a registration branch carrying one without the other is a red PR -- every
+    generated project's, the day the two files began to coexist."""
+    canonical = _devkit_checkout(tmp_path / "devkit", projects=True)
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    _live_beside(tmp_path, canonical, monkeypatch)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    checkout = canonical.parent
+    assert _git_out(checkout, "status", "--porcelain", "--untracked-files=no") == ""
+    assert the_plan.name not in _registered_in(checkout / project_registry.REGISTRY_NAME)
+    (tree,) = (checkout / ".claude" / "worktrees").iterdir()
+    assert sorted(_git_out(tree, "diff", "--name-only").splitlines()) == [
+        "projects.toml",
+        "workspace.jsonc",
+    ]
+    names = _registered_in(tree / project_registry.REGISTRY_NAME)
+    assert names[-1] == the_plan.name
+    assert names == devkit_project.known_projects(
+        (tree / "workspace.jsonc").read_text(encoding="utf-8")
+    ), "the two registries agree on the branch, order included"
+    out = capsys.readouterr().out
+    assert "update  projects.toml (projects)" in out
+    assert "workspace.jsonc and projects.toml registration" in out
+
+
+def test_a_registration_left_in_place_names_projects_toml_beside_it(
+    tmp_path, capsys, monkeypatch
+):
+    canonical = _devkit_checkout(tmp_path / "devkit", ports=True, projects=True)
+    checkout = canonical.parent
+    subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", "-b", "agent/x-1126"])
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    _live_beside(tmp_path, canonical, monkeypatch)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    assert not (checkout / ".claude").exists(), "nothing was handed off"
+    assert the_plan.name in _registered_in(checkout / project_registry.REGISTRY_NAME)
+    changed = sorted(_git_out(checkout, "diff", "--name-only").splitlines())
+    assert changed == ["ports.toml", "projects.toml", "workspace.jsonc"]
+    out = capsys.readouterr().out
+    assert "commit devkit's workspace.jsonc, projects.toml and ports.toml on a branch" in out
+
+
+def test_a_hand_edit_already_in_projects_toml_is_never_carried_off(
+    tmp_path, capsys, monkeypatch
+):
+    canonical = _devkit_checkout(tmp_path / "devkit", projects=True)
+    toml = canonical.parent / project_registry.REGISTRY_NAME
+    toml.write_text(toml.read_text(encoding="utf-8") + "\n", encoding="utf-8", newline="\n")
+    monkeypatch.setattr(devkit_project, "CANONICAL_WORKSPACE", canonical)
+    the_plan = new_project.plan(make_args(parent=str(tmp_path)), registry())
+    _live_beside(tmp_path, canonical, monkeypatch)
+
+    new_project.register_in_workspace(the_plan, dry_run=False)
+
+    assert not (canonical.parent / ".claude").exists()
+    assert the_plan.name in _registered_in(toml)
+    assert "commit devkit's workspace.jsonc and projects.toml on a branch" in (
+        capsys.readouterr().out
+    )
+
+
+def test_register_in_registry_writes_once_and_says_so(tmp_path, capsys):
+    toml = tmp_path / project_registry.REGISTRY_NAME
+    toml.write_text('projects = [\n    "devkit",\n]\n', encoding="utf-8", newline="\n")
+    assert new_project.register_in_registry(toml, ["fresh"], dry_run=False) is True
+    assert _registered_in(toml) == ["devkit", "fresh"]
+    assert new_project.register_in_registry(toml, ["fresh"], dry_run=False) is False
+    assert capsys.readouterr().out.count("update  projects.toml") == 1
+
+
+def test_register_in_registry_without_a_file_is_silent(tmp_path, capsys):
+    """A checkout from before `projects.toml` existed: the workspace file is still the
+    whole registry there, and a fresh file holding one name would shadow the rest."""
+    toml = tmp_path / project_registry.REGISTRY_NAME
+    assert new_project.register_in_registry(toml, ["fresh"], dry_run=False) is False
+    assert not toml.exists()
+    assert capsys.readouterr().out == ""
+
+
+def test_register_in_registry_dry_run_names_the_file_and_writes_nothing(tmp_path, capsys):
+    toml = tmp_path / project_registry.REGISTRY_NAME
+    text = 'projects = [\n    "devkit",\n]\n'
+    toml.write_text(text, encoding="utf-8", newline="\n")
+    assert new_project.register_in_registry(toml, ["fresh"], dry_run=True) is False
+    assert toml.read_text(encoding="utf-8") == text
+    assert "update  projects.toml (projects: fresh)" in capsys.readouterr().out
+
+
+def test_a_projects_toml_it_cannot_edit_is_a_warning(tmp_path, capsys):
+    toml = tmp_path / project_registry.REGISTRY_NAME
+    text = 'projects = [\n    "a", "b",\n]\n'
+    toml.write_text(text, encoding="utf-8", newline="\n")
+    assert new_project.register_in_registry(toml, ["fresh"], dry_run=False) is False
+    assert toml.read_text(encoding="utf-8") == text
+    assert "WARNING could not register in projects.toml" in capsys.readouterr().out
 
 
 def test_an_unwritable_canonical_copy_still_registers_the_live_file(tmp_path, capsys, monkeypatch):

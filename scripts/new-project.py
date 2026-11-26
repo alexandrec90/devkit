@@ -24,8 +24,8 @@ Steps, in order:
   3. `git init` + initial commit
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
   5. register the project in the shared `alex-projects.code-workspace` and, on a task
-     branch with a ship intent, in devkit's `workspace.jsonc` (the one step that writes
-     OUTSIDE the new directory; `--no-register` skips it)
+     branch with a ship intent, in devkit's `projects.toml` and `workspace.jsonc` (the
+     one step that writes OUTSIDE the new directory; `--no-register` skips it)
   6. create the public GitHub repo and push           <- outward-facing
 """
 
@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import canonical_handoff
 import devkit_ports
 import devkit_project
+import project_registry
 from devkit_render import TemplateError, render
 from project_env import (
     lock_dependencies,
@@ -772,7 +773,7 @@ def git_init(plan: Plan, dry_run: bool) -> None:
 
 
 def register_in_workspace(plan: Plan, dry_run: bool) -> None:
-    """Add the project to `workspace.jsonc` and `alex-projects.code-workspace`.
+    """Add the project to `projects.toml`, `workspace.jsonc` and the live workspace file.
 
     This used to write a *new* `<name>.code-workspace` per project, to keep the task
     quick-pick free of every other repo's tasks. Two things made that wrong. The task
@@ -824,10 +825,13 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
         print(f"          move it to {live.parent} and add {plan.name} to its folders by hand")
         return
     canonical = devkit_project.CANONICAL_WORKSPACE
+    toml = canonical.parent / project_registry.REGISTRY_NAME
     # Asked before the write, so a hand edit already sitting there is never carried off
     # onto a branch under this project's name.
-    clean_before = not dry_run and not canonical_handoff.dirty(canonical)
+    clean_before = not dry_run and not any(canonical_handoff.dirty(p) for p in (canonical, toml))
     registered: set[Path] = set()
+    if register_in_registry(toml, names, dry_run):
+        registered.add(toml)
     for path in (canonical, live):
         shown = path.name if path == canonical else f"../{path.name}"
         if dry_run:
@@ -848,16 +852,58 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
         _hand_off_or_carry_slot(plan, canonical, registered, clean_before=clean_before)
 
 
+def register_in_registry(registry: Path, names: list[str], dry_run: bool) -> bool:
+    """Add `names` to devkit's `projects.toml`; whether the file was written.
+
+    The registry's new home (`scripts/project_registry.py`), written beside the
+    canonical `workspace.jsonc` until that file is deleted: `tests/test_project_registry.py`
+    fails the two the moment they disagree, so a registration in one alone is a red PR.
+    No file there is no write and no warning -- a checkout from before the file existed,
+    where the workspace file is still the whole registry and a fresh `projects.toml`
+    holding one name would shadow the rest.
+    """
+    if not registry.is_file():
+        return False
+    if dry_run:
+        print(f"  update  {registry.name} (projects: {', '.join(names)})")
+        return False
+    try:
+        written = project_registry.register_file(
+            registry, *names, before=devkit_project.NOT_PROJECTS
+        )
+    except (OSError, project_registry.RegistryError) as exc:
+        print(f"  WARNING could not register in {registry.name}: {exc}")
+        print(f"          add {', '.join(names)} to its projects list by hand")
+        return False
+    if written:
+        print(f"  update  {registry.name} (projects)")
+    return written
+
+
+def _and_list(items: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
 def _hand_off_or_carry_slot(
     plan: Plan, canonical: Path, registered: set[Path], *, clean_before: bool
 ) -> None:
     """Put the canonical registration on a task branch, or leave the slot beside it.
 
     `clean_before` says devkit's checkout was clean before this run wrote to it, so the
-    edit on it is this project's alone and may be carried onto a branch.
+    edit on it is this project's alone and may be carried onto a branch. `registered`
+    holds every devkit-side file this run wrote: `projects.toml` among them moves with
+    `workspace.jsonc`, onto the same branch and into the same commit.
     """
     slot = plan.context.get("slot")
-    handed = hand_off_registration(plan.name, canonical, slot=slot) if clean_before else Handoff()
+    also = tuple(
+        p.name for p in sorted(registered) if p != canonical and p.parent == canonical.parent
+    )
+    handed = (
+        hand_off_registration(plan.name, canonical, slot=slot, also=also)
+        if clean_before
+        else Handoff()
+    )
     plan.slot_on_branch = handed.slot
     if handed.said and not handed.said.lstrip().startswith("WARNING"):
         print(handed.said)
@@ -872,7 +918,7 @@ def _hand_off_or_carry_slot(
     registry = canonical.parent / devkit_ports.REGISTRY_NAME
     beside = canonical in registered and _carry_slot(registry, plan.name, slot)
     plan.slot_on_branch = beside
-    files = f"{canonical.name} and {registry.name}" if beside else canonical.name
+    files = _and_list([canonical.name, *also, *([registry.name] if beside else [])])
     if handed.said:
         print(handed.said.replace(f"devkit's {canonical.name}", f"devkit's {files}"))
     else:
@@ -882,8 +928,9 @@ def _hand_off_or_carry_slot(
 REGISTRATION_INTENT = """Register {name} in the workspace registry
 
 `scripts/new-project.py` generated `{name}` and registered it in the live workspace file
-and in devkit's canonical `workspace.jsonc`. The live half is in effect already; this is
-the canonical half, which every machine shares and so goes through a PR.
+and in devkit's `projects.toml` and canonical `workspace.jsonc`. The live half is in
+effect already; this is the canonical half, which every machine shares and so goes
+through a PR.
 
 The generator cut this branch itself rather than leave the edit uncommitted in devkit's
 static checkout: the fix pass runs from that checkout and will not fast-forward a dirty
@@ -937,7 +984,11 @@ def register_slot(text: str, name: str, slot: int) -> str | None:
 
 
 def hand_off_registration(
-    name: str, canonical: Path, runner=subprocess.run, slot: object = None
+    name: str,
+    canonical: Path,
+    runner=subprocess.run,
+    slot: object = None,
+    also: tuple[str, ...] = (),
 ) -> Handoff:
     """Move the registry edit off devkit's static checkout onto a task branch: what was done.
 
@@ -959,6 +1010,8 @@ def hand_off_registration(
     hand: a linked worktree or a task branch (the edit is already on a branch), a checkout
     git cannot read, or a cut that failed (said as a WARNING, with the file left as it was).
     The cut itself is `canonical_handoff.hand_off`, which `plug-projects.py` shares.
+    `also` names the other registry files this run wrote beside `canonical` --
+    `projects.toml` -- which go onto the same branch with it.
     """
     carried: list[bool] = []
 
@@ -967,7 +1020,9 @@ def hand_off_registration(
         return SLOT_INTENT.format(name=name, slot=slot) if carried[-1] else ""
 
     intent = REGISTRATION_INTENT.format(name=name)
-    cut = canonical_handoff.hand_off(canonical, f"register-{name}", intent, runner, carry)
+    cut = canonical_handoff.hand_off(
+        canonical, f"register-{name}", intent, runner, carry, also=also
+    )
     if cut.said:
         return Handoff(
             f"  WARNING {cut.said}\n          commit devkit's {canonical.name} on a branch and ship it"
@@ -975,7 +1030,7 @@ def hand_off_registration(
     if cut.tree is None:
         return Handoff()
     went = any(carried)
-    what = f"{canonical.name}'s registration" + (
+    what = f"{_and_list([canonical.name, *also])} registration" + (
         f" and {devkit_ports.REGISTRY_NAME} slot {slot}" if went else ""
     )
     return Handoff(

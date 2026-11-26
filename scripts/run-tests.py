@@ -78,7 +78,11 @@ COVERED_BY_SOURCE = "tests/test_test_contract.py"
 # as a fixture; `tests/test_run_tests.py` fails an entry whose file or test is gone.
 READ_BY: dict[str, tuple[str, ...]] = {
     "ports.toml": ("tests/test_devkit_ports.py", "tests/test_worktree_port.py"),
-    "projects.toml": ("tests/test_project_registry.py",),
+    "projects.toml": (
+        "tests/test_project_registry.py",
+        "tests/test_project_registry_writers.py",
+        "tests/test_devkit_ports.py",
+    ),
     "workspace.jsonc": (
         "tests/test_devkit_ports.py",
         "tests/test_project_registry.py",

@@ -89,6 +89,7 @@ import canonical_handoff
 import devkit_jsonc
 import devkit_project
 import picker_rows
+import project_registry
 import project_retire
 import sweep
 import task_branch
@@ -855,6 +856,43 @@ def apply_registry(text: str, steps: list[Step]) -> str:
     return text
 
 
+def apply_projects(text: str, steps: list[Step]) -> str:
+    """`apply_registry` for `projects.toml` text: the same steps, the same order.
+
+    The registry's new home, written beside `workspace.jsonc` until that file is gone --
+    `tests/test_project_registry.py` fails the two the moment they disagree. Raises
+    `project_registry.RegistryError` on an edit that did not take.
+    """
+    retiring = [s.name for s in steps if s.action == UNPLUG]
+    adding = [s.name for s in steps if s.action == PLUG]
+    text = project_registry.unregister_text(text, *retiring)
+    return project_registry.register_text(text, *adding, before=devkit_project.NOT_PROJECTS)
+
+
+def write_registry(canonical: Path, steps: list[Step]) -> list[Path]:
+    """Write `steps`' registry half to `canonical` and the `projects.toml` beside it;
+    the files written, `canonical` first (`projects.toml` only when it changed).
+
+    Both edits are computed before either is written, so a refusal from one leaves the
+    other untouched rather than the two registries disagreeing. A checkout with no
+    `projects.toml` writes `canonical` alone: there the workspace file is still the
+    whole registry (`project_registry.all_projects`).
+    """
+    toml = canonical.parent / project_registry.REGISTRY_NAME
+    edits = [(canonical, apply_registry(canonical.read_text(encoding="utf-8"), steps))]
+    if toml.is_file():
+        before = toml.read_text(encoding="utf-8")
+        try:
+            after = apply_projects(before, steps)
+        except project_registry.RegistryError as exc:
+            raise PlugError(f"{exc} -- nothing was written") from exc
+        if after != before:
+            edits.append((toml, after))
+    for path, text in edits:
+        path.write_text(text, encoding="utf-8", newline="\n")
+    return [path for path, _ in edits]
+
+
 def write_artifact(problems: list[str]) -> None:
     """Persist this run's failures under `logs/`, per `.claude/rules/engineering.md`.
 
@@ -949,19 +987,24 @@ def registry_change(steps: list[Step]) -> tuple[str, str]:
     return slug, REGISTRY_INTENT.format(subject=subject, what=what)
 
 
-def hand_off_registry(steps: list[Step], canonical: Path, runner=subprocess.run) -> str:
+def hand_off_registry(
+    steps: list[Step], canonical: Path, runner=subprocess.run, also: tuple[str, ...] = ()
+) -> str:
     """Put the registry edit on a task branch off the static checkout: the line to print,
-    or "" when nothing was handed off and the person still has to commit it."""
+    or "" when nothing was handed off and the person still has to commit it. `also`
+    names the other registry files written beside `canonical` (`projects.toml`), which
+    go onto the same branch."""
     slug, intent = registry_change(steps)
     if not slug:
         return ""
-    cut = canonical_handoff.hand_off(canonical, slug, intent, runner)
+    cut = canonical_handoff.hand_off(canonical, slug, intent, runner, also=also)
     if cut.said:
         return f"  WARNING {cut.said}"
     if cut.tree is None:
         return ""
+    files = " and ".join([canonical.name, *also])
     return (
-        f"  branch  {cut.branch}: {canonical.name}, for the fix pass to ship and merge once "
+        f"  branch  {cut.branch}: {files}, for the fix pass to ship and merge once "
         f"green\n          {cut.tree}"
     )
 
@@ -985,17 +1028,18 @@ def _apply(steps: list[Step], owner: str, out) -> bool:
     # already -- and still publishes: the live file is this machine's view, and the
     # checkout that just appeared is what puts the folder into it.
     canonical = devkit_project.CANONICAL_WORKSPACE
+    toml = canonical.parent / project_registry.REGISTRY_NAME
     edits = any(s.action in REGISTRY_EDITS for s in steps)
     # Asked before the write, so an edit already sitting there is never carried off onto
     # a branch under this pick's name.
-    clean_before = edits and not canonical_handoff.dirty(canonical)
+    clean_before = edits and not any(canonical_handoff.dirty(p) for p in (canonical, toml))
+    also: tuple[str, ...] = ()
     if edits:
-        canonical.write_text(
-            apply_registry(canonical.read_text(encoding="utf-8"), steps),
-            encoding="utf-8",
-            newline="\n",
-        )
+        written = write_registry(canonical, steps)
         out(f"  update  {canonical.name} (folders + every maintained picker)")
+        also = tuple(p.name for p in written[1:])
+        for name in also:
+            out(f"  update  {name} (projects)")
 
     outcome, changes = devkit_project.publish_workspace(LIVE_WORKSPACE)
     if outcome == devkit_project.RENDER_REFUSED:
@@ -1004,7 +1048,7 @@ def _apply(steps: list[Step], owner: str, out) -> bool:
             "wrote and was not published -- `--render-workspace --force` discards it"
         )
     out(f"  publish {LIVE_WORKSPACE.name} ({len(changes)} change(s)) -- reload the window")
-    handed = hand_off_registry(steps, canonical) if clean_before else ""
+    handed = hand_off_registry(steps, canonical, also=also) if clean_before else ""
     if handed:
         out(handed)
     local_halves(steps, owner, out)

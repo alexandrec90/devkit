@@ -66,19 +66,26 @@ def hand_off(
     intent: str,
     runner=subprocess.run,
     carry: Callable[[Path], str] | None = None,
+    also: tuple[str, ...] = (),
 ) -> Cut:
     """Put the uncommitted edit of `canonical` on `agent/<slug>-<mmdd>`, in a
     `.claude/worktrees/` tree off the checkout's `HEAD` -- the commit the edit was made
     against -- with `intent` as its ship intent, and put the static checkout's copy back.
 
+    `also` names other files beside `canonical` that the same edit wrote -- the registry
+    is written to `projects.toml` and `workspace.jsonc` both until the latter is gone --
+    and each moves with it the same way; one that is absent or unedited is skipped.
     `carry(tree)` writes whatever else the branch takes and returns the text to add to
     the intent. An empty `Cut` when there is nothing to hand off: a linked worktree or
     a task branch (the edit is on a branch already), a checkout git cannot read, or no
-    edit. A cut that failed says so in `said`, with the file left as it was.
+    edit. A cut that failed says so in `said`, with the files left as they were.
     """
     checkout = canonical.parent
     git = git_in(checkout, runner)
-    if not (checkout / ".git").is_dir() or not dirty(canonical, runner):
+    if not (checkout / ".git").is_dir():
+        return Cut()
+    edited = [p for p in (canonical, *(checkout / n for n in also)) if dirty(p, runner)]
+    if not edited:
         return Cut()
     branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     if branch != tb.detect_default_branch(git, fallback="main"):
@@ -90,10 +97,12 @@ def hand_off(
     if cut.returncode != 0:
         said = (cut.stderr or cut.stdout or "").strip().splitlines()
         return Cut(said=f"could not cut {task}: {said[-1] if said else cut.returncode}")
-    edited = canonical.read_text(encoding="utf-8")
-    (tree / canonical.name).write_text(edited, encoding="utf-8", newline="\n")
+    for path in edited:
+        text = path.read_text(encoding="utf-8")
+        (tree / path.name).write_text(text, encoding="utf-8", newline="\n")
     message = intent + (carry(tree) if carry else "")
     (tree / INTENT).parent.mkdir(parents=True, exist_ok=True)
     (tree / INTENT).write_text(message, encoding="utf-8", newline="\n")
-    git("checkout", "--", canonical.name)
+    for path in edited:
+        git("checkout", "--", path.name)
     return Cut(branch=task, tree=tree)
