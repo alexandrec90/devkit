@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import ast
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -155,8 +156,14 @@ def filter_output(raw: str) -> str:
     """
     lines = raw.splitlines()
     keep: list[str] = []
-    in_failures = False
+    in_failures = in_durations = False
     for line in lines:
+        # `--durations=0` prints between the failures and the summary: what it times
+        # is `durations_report`'s, not the artifact's.
+        if line.startswith("="):
+            in_durations = bool(DURATIONS_BANNER.search(line))
+        if in_durations:
+            continue
         if "=== FAILURES ===" in line or "= FAILURES =" in line:
             in_failures = True
         if "= short test summary info =" in line:
@@ -169,6 +176,37 @@ def filter_output(raw: str) -> str:
                 continue
             keep.append(line)
     return "\n".join(keep).strip()
+
+
+# What `--durations=0` prints: its banner, and a line per phase of a test that took
+# 5 ms or more, `0.52s call     tests/test_x.py::test_y`.
+DURATIONS_FLAG = "--durations=0"
+DURATIONS_BANNER = re.compile(r"=+ slowest (?:\d+ )?durations =+")
+DURATION_LINE = re.compile(
+    r"^\s*(?P<secs>\d+(?:\.\d+)?)s\s+(?:setup|call|teardown)\s+(?P<file>[^\s:]+)::", re.M
+)
+SLOWEST_FILES = 10
+
+
+def file_durations(raw: str) -> list[tuple[str, float]]:
+    """Seconds per test file in a `--durations=0` run's output, slowest first. Pure."""
+    totals: dict[str, float] = {}
+    for found in DURATION_LINE.finditer(raw):
+        totals[found["file"]] = totals.get(found["file"], 0.0) + float(found["secs"])
+    return sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+
+
+def durations_report(raw: str, limit: int = SLOWEST_FILES) -> list[str]:
+    """The lines naming a run's slowest test files; none where it timed nothing.
+
+    Printed pass or fail, because a passing run otherwise says only "passed", and a
+    session sharding a CI suite by time then measured it by running the whole suite
+    itself (6dfc93ab)."""
+    ranked = file_durations(raw)
+    if not ranked:
+        return []
+    head = f"run-tests: slowest test files, seconds per file ({len(ranked)} timed):"
+    return [head, *(f"run-tests:   {secs:8.2f}  {path}" for path, secs in ranked[:limit])]
 
 
 SUMMARY_BANNER = "= short test summary info ="
@@ -480,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
     args, extra = parser.parse_known_args(argv)
     targets = [a for a in extra if a]
 
-    cmd = [sys.executable, "-m", "pytest", "--tb=short", "-q"]
+    cmd = [sys.executable, "-m", "pytest", DURATIONS_FLAG, "--tb=short", "-q"]
     cmd += _parallel_args()
     if args.changed:
         cmd += ["--last-failed", "--last-failed-no-failures", "all"]
@@ -577,7 +615,10 @@ def _pytest(cmd: list[str]) -> tuple[str, int]:
         result = subprocess.run(
             run, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace"
         )
-    return (result.stdout or "") + (result.stderr or ""), result.returncode
+    raw = (result.stdout or "") + (result.stderr or "")
+    for line in durations_report(raw):
+        print(line)
+    return raw, result.returncode
 
 
 def _finish(failures: list[str]) -> int:
