@@ -632,7 +632,7 @@ def no_worker_note(workers: Workers) -> str:
     """What a workstation says when it runs a heavy job at once because no worker is
     there to wait for; "" when one is."""
     if workers is None:
-        return "no worker to wait for: no worker heartbeat could be read, so it runs here now"
+        return "no worker to wait for: the worker heartbeats could not be read, so it runs here now"
     if not workers:
         minutes = WORKER_ALIVE.total_seconds() / 60
         return f"no worker to wait for: none has beaten in {minutes:.0f} min, so it runs here now"
