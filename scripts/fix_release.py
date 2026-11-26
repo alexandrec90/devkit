@@ -22,6 +22,11 @@ checkout and a click or the nightly run cannot overwrite it. A start is refused 
   merging and the tag landing has neither a PR nor a tag to see.
 
 Each refusal is one line on the record, as is the start.
+
+**Skew holds.** `land.py` holds a project PR whose `.devkit.toml` uses a key the project's
+pinned devkit does not know (`land_check.skew`). Once an adoption brings a release whose
+vendored schema knows every key the PR names, this pass takes the hold off and the merge
+queue merges it as it would have (`release_skew_holds`).
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ import devkit_project
 import fix_cycle
 import fix_plan
 import gate_evidence
+import land_check
 import sweep
 import worktree
 from _loader import load_by_path
@@ -73,6 +79,8 @@ PINNED_REF = re.compile(r"^\s*ref:\s*(v\d+\.\d+\.\d+)\s*$", re.M)
 NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
 adoption_prefixes = adoption_prs.adoption_prefixes
+# The label the merge queue holds a PR by (`merge-dependabot-prs.HOLD_LABEL`).
+HOLD_LABEL = "hold"
 
 
 def pending_adoptions(root: Path, projects: list[str], tag: str) -> list[str]:
@@ -89,7 +97,8 @@ def pending_adoptions(root: Path, projects: list[str], tag: str) -> list[str]:
 
 
 def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
-    """The one merge the pass makes; `(lines for the record)`."""
+    """The one merge the pass makes; `(lines for the record)`. After it, the skew holds an
+    adoption may have answered are released (`release_skew_holds`)."""
     merged: list[str] = []
     prefixes = adoption_prefixes()
     for name in projects:
@@ -105,7 +114,7 @@ def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
             "--limit",
             "50",
             "--json",
-            "number,headRefName,isDraft,labels,mergeable,statusCheckRollup",
+            "number,headRefName,isDraft,labels,mergeable,statusCheckRollup,body",
         )
         rows = gate_evidence.gh_json(listed)
         if not isinstance(rows, list):
@@ -113,7 +122,81 @@ def merge_green_adoptions(root: Path, projects: list[str]) -> list[str]:
         for row in adoption_prs.green_adoptions(rows, prefixes, sweep.AUTOMERGE_LABEL):
             ok, message = worktree.merge_pr(gh, int(row.get("number", 0)))
             merged.append(f"{name} #{row.get('number')} -- {merge_line(ok, message)}")
+        merged.extend(release_skew_holds(name, project_dir, rows, gh))
     return merged
+
+
+def label_names(row: dict) -> list[str]:
+    return [
+        str(item.get("name") or "") if isinstance(item, dict) else str(item)
+        for item in row.get("labels") or []
+    ]
+
+
+def skew_releases(rows: list, schema: land_check.Schema) -> list[dict]:
+    """The skew-held PRs (`land_check.SKEW_LABEL`) whose every named key `schema`, the
+    default branch's vendored one, now knows: the release that adds them was adopted.
+    Pure. Only land's own hold is released; a person's `hold` without the label is not."""
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and land_check.SKEW_LABEL in label_names(row)
+        and land_check.releasable(str(row.get("body") or ""), schema)
+    ]
+
+
+def routing_label(row: dict) -> str:
+    """The label land routed the held PR by, re-applied on release so the queue (or the
+    gate) runs on its `labeled` event; `merge-now` when it carries neither."""
+    names = label_names(row)
+    return sweep.AUTOMERGE_LABEL if sweep.AUTOMERGE_LABEL in names else sweep.MERGE_NOW_LABEL
+
+
+def default_branch_schema(project_dir: Path) -> land_check.Schema | None:
+    """The `.devkit.toml` schema the project's default branch vendors now, or None."""
+    git = sweep.git_for(project_dir)
+    git("fetch", "--quiet", "origin")
+    shown = git("show", f"origin/HEAD:{land_check.HARNESS_CONFIG}")
+    if shown.returncode != 0 or not shown.stdout:
+        return None
+    try:
+        return land_check.schema_from_source(shown.stdout)
+    except Exception:  # an unreadable copy releases nothing; the next pass asks again
+        return None
+
+
+def release_skew_holds(name: str, project_dir: Path, rows: list, gh) -> list[str]:
+    """Un-hold the PRs `land.py` held for version skew once an adopted release knows their
+    keys; a line each for the record. The hold and the skew label go, and the routing label
+    is applied again, so the queue merges it now; one that conflicts is the resolver's."""
+    if not any(land_check.SKEW_LABEL in label_names(r) for r in rows if isinstance(r, dict)):
+        return []
+    schema = default_branch_schema(project_dir)
+    if schema is None:
+        return []
+    lines = []
+    for row in skew_releases(rows, schema):
+        number = str(row.get("number"))
+        failed = ""
+        for flag, labels in unhold_steps(row):
+            done = gh("pr", "edit", number, flag, labels)
+            if done.returncode != 0:
+                failed = (done.stderr or done.stdout or "").strip()
+                break
+        said = f"FAILED to release: {failed}" if failed else "released, its devkit knows the keys"
+        lines.append(f"{name} #{number} skew hold -- {said}")
+    return lines
+
+
+def unhold_steps(row: dict) -> list[tuple[str, str]]:
+    """The `gh pr edit` flags that release a skew hold. Pure. The routing label comes off
+    with the hold when the PR carries it and goes back on after, because only a `labeled`
+    event starts the queue's run (or the gate's) at once."""
+    names = label_names(row)
+    routing = routing_label(row)
+    off = [n for n in (HOLD_LABEL, land_check.SKEW_LABEL, routing) if n in names]
+    return [("--remove-label", ",".join(off)), ("--add-label", routing)]
 
 
 def merge_line(ok: bool, message: str) -> str:

@@ -9,6 +9,10 @@ in the person's own checkout, with nobody asked to merge anything. The owner's d
    the default one. No local hook gates it: `git_policy` runs no framework at all.
 2. Push, and open the branch's PR, or reuse the one already open -- unless a changed file
    is one nothing could read (`land_check.py`), which is said and nothing is pushed.
+   **Version skew** holds instead: a `.devkit.toml` key the project's own vendored
+   `harness_config.py` does not know would redden its contract test until a release, so
+   the PR opens with `hold`, `land_check.SKEW_LABEL` and a line naming the keys, and the
+   fix pass releases it once an adopted release knows them (`fix_release`).
 3. **Money.** A change to a path `[delivery] guarded` names (`.devkit.toml`) is labelled
    `automerge`: it merges itself once its gate is green, and this script does not wait.
 4. **Everything else** is labelled `merge-now`, which the merge queue
@@ -187,16 +191,43 @@ def changed_files(repo: Repo, run) -> list[str]:
     return [path for path in listed.split("\0") if path]
 
 
-def refuse_unreadable(repo: Repo, files: list[str], run) -> None:
+def refuse_unreadable(repo: Repo, files: list[str], run, check=None) -> None:
     """Raise `LandError` naming what `land_check` finds: a file nothing could read once
     it landed. The commit stays; the session fixes the file and runs this again."""
 
     def on_base(path: str) -> str | None:
         return git(["show", f"origin/{repo.default}:{path}"], run, repo.root, check=False) or None
 
-    found = load_beside("land_check", CHECK_PATH).problems(repo.root, files, on_base)
+    check = check or load_beside("land_check", CHECK_PATH)
+    found = check.problems(repo.root, files, on_base)
     if found:
         raise LandError("fix these and run this again, nothing was pushed:\n" + "\n".join(found))
+
+
+def skew_keys(repo: Repo, files: list[str], merger, run, check) -> list[str]:
+    """The `.devkit.toml` keys this change adds that the project's pinned devkit does not
+    know (`land_check.skew`). Only a change to `.devkit.toml` can add one; any error is
+    none, so this never stands in a change's way."""
+    if ".devkit.toml" not in files:
+        return []
+    try:
+        return check.skew(repo.root, settings_at(repo, f"origin/{repo.default}", merger, run))
+    except Exception:  # fail-open by contract, like `land_check.skew` itself
+        return []
+
+
+def hold_for_skew(repo: Repo, number: int, keys: list[str], pr: dict, merger, run, check):
+    """Hold the PR until a release knows `keys`: the `hold` label, which the queue honours,
+    `land_check.SKEW_LABEL`, which the fix pass releases by, and the skew line in the body,
+    which names what it waits for. Applied before the routing label, so the queue's run for
+    that label already sees the hold."""
+    body = str(pr.get("body") or "")
+    if not check.named_keys(body):
+        path = f"repos/{repo.slug}/pulls/{number}"
+        merged_body = check.with_skew_line(body, keys)
+        merger.gh(["api", "--method", "PATCH", path, "-f", f"body={merged_body}"], run)
+    label(repo, number, merger.HOLD_LABEL, merger, run)
+    label(repo, number, check.SKEW_LABEL, merger, run)
 
 
 def open_pr(repo: Repo, branch: str, title: str, body: str, merger, run) -> int:
@@ -314,7 +345,9 @@ def needs_gate(repo: Repo, files: list[str], merger, run) -> str:
     return f"touches {', '.join(money)}" if money else ""
 
 
-def land(args, run=utf8_run, sleep=time.sleep, clock=time.monotonic, merger=None) -> str:
+def land(
+    args, run=utf8_run, sleep=time.sleep, clock=time.monotonic, merger=None, check=None
+) -> str:
     """Every step; the outcome: `LANDED`, `GATED`, `CONFLICT`, `QUEUED` or `HELD`."""
     merger = merger or load_merger()
     repo = read_repo(Path(args.cwd), run)
@@ -326,15 +359,29 @@ def land(args, run=utf8_run, sleep=time.sleep, clock=time.monotonic, merger=None
     files = changed_files(repo, run)
     if not files:
         raise LandError(f"nothing differs from origin/{repo.default}: there is nothing to land")
-    refuse_unreadable(repo, files, run)
+    check = check or load_beside("land_check", CHECK_PATH)
+    refuse_unreadable(repo, files, run, check)
+    skew = skew_keys(repo, files, merger, run, check)
+    body = check.with_skew_line(args.body, skew) if skew else args.body
     git(["push", "--quiet", "-u", "origin", f"HEAD:refs/heads/{branch}"], run, repo.root)
-    number = open_pr(repo, branch, args.title, args.body, merger, run)
+    number = open_pr(repo, branch, args.title, body, merger, run)
     # A reused PR may already be held, whatever this run was told.
     pr = merger.gh_json(f"repos/{repo.slug}/pulls/{number}", run) or {}
     if merger.held({"body": args.body, "labels": []}) or merger.held(pr) or pr.get("draft"):
         print(f"#{number} is held or a draft: it waits for the person.")
         return HELD
     gate_for = needs_gate(repo, files, merger, run)
+    if skew:
+        # Merged now, it reddens the project's vendored contract test until a release
+        # carrying the keys is adopted; held, the fix pass releases it at that adoption.
+        hold_for_skew(repo, number, skew, pr, merger, run, check)
+        routing = merger.AUTOMERGE_LABEL if gate_for else merger.MERGE_NOW_LABEL
+        label(repo, number, routing, merger, run)
+        print(
+            f"#{number} uses {', '.join(skew)}, which this project's devkit does not know: "
+            "held, it waits for the devkit release that adds them."
+        )
+        return HELD
     if gate_for:
         label(repo, number, merger.AUTOMERGE_LABEL, merger, run)
         print(f"#{number} {gate_for}: it merges itself once its gate is green.")
