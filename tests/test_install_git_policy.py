@@ -315,10 +315,11 @@ def test_installing_records_what_was_installed(tmp_path):
 
     assert (target / installer.RECEIPT_NAME).is_file()
     assert receipt.ref == installer.WORKTREE_REF
-    # Every destination *except* the layout this ref does not have. `RUNTIME_FILES`
-    # carries the policy in both spellings so an install from a tag cut before the
-    # package still works, which means one of the two is always legitimately skipped.
-    expected = set(installer.RUNTIME_FILES.values()) - {"devkit_git_policy.py"}
+    # Every destination *except* what this tree does not have. `RUNTIME_FILES` carries
+    # the policy in both spellings so an install from a tag cut before the package still
+    # works, and the framework tier the tags before 2026-11-26 still import.
+    gone = {"devkit_git_policy.py", "devkit_git_policy/framework.py"}
+    expected = set(installer.RUNTIME_FILES.values()) - gone
     assert set(receipt.files) == expected
     assert installer.read_receipt(target) == receipt
 

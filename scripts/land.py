@@ -6,7 +6,7 @@ in the person's own checkout, with nobody asked to merge anything. The owner's d
 (2026-11-24): a PR merges as it opens, except one touching the code that transacts money.
 
 1. Commit everything with the given message, on a fresh branch when the checkout is on
-   the default one. No local hook gates it (`git_policy`'s framework is skipped).
+   the default one. No local hook gates it: `git_policy` runs no framework at all.
 2. Push, and open the branch's PR, or reuse the one already open -- unless a changed file
    is one nothing could read (`land_check.py`), which is said and nothing is pushed.
 3. **Money.** A change to a path `[delivery] guarded` names (`.devkit.toml`) is labelled
@@ -48,7 +48,8 @@ POLL_EVERY = 5.0
 # The branch a commit made on the default branch moves to.
 BRANCH_PREFIX = "land/"
 
-# What reads as off to `git_policy`; anything else set skips the commit and push gates.
+# Read by no current `git_policy`, which runs no framework; set for a machine whose hooks
+# were installed from a tag that still ran it at the commit and the push.
 SKIP_ENV = {"DEVKIT_SKIP_PRE_COMMIT_FRAMEWORK": "1"}
 
 LANDED = "landed"

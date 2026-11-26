@@ -143,6 +143,87 @@ def test_pull_moves_both_consumer_pins(tmp_path, monkeypatch):
     assert "ref: v0.5.3" in (repo / sh.PR_GATE_FILE).read_text()
 
 
+PR_GATE = """\
+name: PR Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Re-runnable by hand.
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo lint
+        if: always()
+
+  e2e:
+    name: E2E
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+"""
+
+
+LINT_GATED = f"  lint:\n    if: {sh.PR_GATE_RUNS_IF}\n    name: Lint\n"
+
+
+def test_a_gate_runs_on_a_pr_only_when_the_pr_waits_for_one():
+    """A direct project's PR merges as it opens; its gate ran anyway, and was cancelled at
+    the merge, holding the account's runners from the default branch's verdict."""
+    updated, notes = sh.gate_pr_runs(PR_GATE)
+    assert f"  pull_request:\n    {sh.PR_GATE_EVENT_TYPES}\n  # Re-runnable" in updated
+    assert LINT_GATED in updated
+    assert "    name: E2E\n    if: github.event_name == 'push'\n" in updated
+    assert "      - run: echo lint\n        if: always()\n" in updated, "a step's if is not a job's"
+    assert notes == ["job `e2e` keeps its own `if:`, so it still runs on every PR"]
+
+
+def test_the_rewrite_is_idempotent():
+    once, _ = sh.gate_pr_runs(PR_GATE)
+    twice, _ = sh.gate_pr_runs(once)
+    assert twice == once
+
+
+def test_a_pull_request_trigger_with_settings_of_its_own_is_left_alone():
+    """Its events may not include `labeled`, and a job gated on a label whose event never
+    arrives leaves a money PR with no gate at all."""
+    text = PR_GATE.replace("  pull_request:\n", "  pull_request:\n    branches: [main]\n")
+    updated, notes = sh.gate_pr_runs(text)
+    assert updated == text
+    assert notes == ["its `pull_request:` trigger has settings of its own: left as it is"]
+
+
+@pytest.mark.parametrize(
+    "text", ["on: [push, pull_request]\njobs:\n  a:\n    runs-on: x\n", "on:\n  push:\n"]
+)
+def test_a_gate_with_no_bare_pull_request_trigger_is_left_alone(text):
+    updated, notes = sh.gate_pr_runs(text)
+    assert updated == text
+    assert notes == ["no bare `pull_request:` trigger under `on:`: left as it is"]
+
+
+def test_a_last_line_with_no_newline_still_gets_its_if():
+    updated, _ = sh.gate_pr_runs("on:\n  pull_request:\njobs:\n  a:")
+    assert updated.endswith(f"jobs:\n  a:\n    if: {sh.PR_GATE_RUNS_IF}\n")
+
+
+def test_pull_wires_the_gate_to_run_on_a_pr_only_when_it_waits(tmp_path, monkeypatch, capsys):
+    src = _repo(tmp_path / "src", tag="v0.5.3", files={"scripts/hooks/x.py": "upstream"})
+    repo = tmp_path / "proj"
+    _seed(repo, sh.PRECOMMIT_FILE, CONFIG)
+    _seed(repo, sh.PR_GATE_FILE, PR_GATE)
+    monkeypatch.setattr(sh, "REPO_ROOT", repo)
+    monkeypatch.setattr(sh, "MANIFEST", ("scripts/hooks/x.py",))
+
+    assert sh.main(["--pull", "--src", str(src)]) == 0
+    assert LINT_GATED in (repo / sh.PR_GATE_FILE).read_text(encoding="utf-8")
+    assert "keeps its own `if:`" in capsys.readouterr().out
+
+
 def test_a_project_with_no_pr_gate_still_pulls(tmp_path, monkeypatch):
     # Not every consumer has a PR gate; its absence is not a failure.
     src = _repo(tmp_path / "src", tag="v0.5.3", files={"scripts/hooks/x.py": "upstream"})

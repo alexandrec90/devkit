@@ -82,6 +82,27 @@ DEVKIT_REPO = "https://github.com/alexandrec90/devkit"
 PR_GATE_FILE = ".github/workflows/pr-gate.yml"
 DEVKIT_SLUG = "alexandrec90/devkit"
 
+# Which `pull_request` events a PR gate's job runs on: the PRs that wait for a gate before
+# they merge, and every run that is not a PR's. A direct project's other PRs merge as they
+# open (`merge-dependabot-prs.ships_unlabelled`), and the run on the default branch after
+# the merge is their check, so a run on the PR is the same work twice, cancelled when the
+# PR merges (`cancel_gate`). Waiting for a gate: a bot's PR, a fork's, a `release/` branch,
+# one labelled `automerge` or `hold`, and one whose body says `Hold: yes`. `contains` is
+# case-blind, and a substring: a sentence quoting the line gates a PR, the safe side.
+# `gate_pr_runs` writes it onto a consumer's gate, which is a template and never refreshed.
+PR_GATE_RUNS_IF = (
+    "${{ github.event_name != 'pull_request'"
+    " || github.event.pull_request.user.type == 'Bot'"
+    " || github.event.pull_request.head.repo.full_name != github.repository"
+    " || startsWith(github.head_ref, 'release/')"
+    " || contains(github.event.pull_request.labels.*.name, 'automerge')"
+    " || contains(github.event.pull_request.labels.*.name, 'hold')"
+    " || contains(github.event.pull_request.body, 'hold: yes') }}"
+)
+# `labeled`, because `automerge` arrives after opening: `land.py` applies it to a money PR,
+# and to every PR in the gated flow.
+PR_GATE_EVENT_TYPES = "types: [opened, synchronize, reopened, labeled]"
+
 # Windows only, and load-bearing whenever this script runs unattended.
 #
 # A process with no console of its own -- `pythonw.exe`, which is how every scheduled
@@ -439,6 +460,123 @@ def bump_gate_ref(text: str, tag: str, slug: str = DEVKIT_SLUG) -> tuple[str, st
         lines[index] = f"{head}{sep} {tag}{comment.rstrip()}{newline}"
         break
     return "".join(lines), previous
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _is_content(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
+def _children(lines: list[str], index: int) -> list[str]:
+    """The content lines nested under `lines[index]`."""
+    parent = _indent(lines[index])
+    found = []
+    for line in lines[index + 1 :]:
+        if not _is_content(line):
+            continue
+        if _indent(line) <= parent:
+            break
+        found.append(line)
+    return found
+
+
+TRIGGER_HAS_SETTINGS = "its `pull_request:` trigger has settings of its own: left as it is"
+NO_BARE_TRIGGER = "no bare `pull_request:` trigger under `on:`: left as it is"
+
+
+def gate_pr_runs(text: str) -> tuple[str, list[str]]:
+    """A PR gate whose jobs run on a PR only when the PR waits for a gate, and what was
+    left as the project wrote it.
+
+    Two edits, line-level for `bump_pin`'s reason, and each idempotent. A bare
+    `pull_request:` under `on:` gains `PR_GATE_EVENT_TYPES`; one carrying settings of its
+    own leaves the whole file alone, because a job gated on a label whose event never
+    arrives would leave a money PR with no gate at all. Every job with no `if:` gains
+    `PR_GATE_RUNS_IF` as its first key; a job with one keeps it, its condition being the
+    project's, and is named in the notes.
+    """
+    lines = text.splitlines(keepends=True)
+    section = ""
+    trigger = False
+    inserts: dict[int, str] = {}
+    notes: list[str] = []
+    for index, line in enumerate(lines):
+        if not _is_content(line):
+            continue
+        key = line.strip().split(":", 1)[0].strip().strip("'\"")
+        if _indent(line) == 0:
+            section = key
+            continue
+        if _indent(line) != 2 or section not in ("on", "jobs"):
+            continue
+        children = _children(lines, index)
+        if section == "jobs":
+            added, note = _job_insert(key, children)
+            notes += [note] if note else []
+        elif key == "pull_request":
+            types_line = _trigger_insert(line, children)
+            if types_line is None:
+                return text, [TRIGGER_HAS_SETTINGS]
+            added, trigger = types_line, True
+        else:
+            continue
+        if added:
+            inserts[index] = added
+    if not trigger:
+        return text, [NO_BARE_TRIGGER]
+    return _with_inserts(lines, inserts), notes
+
+
+def _trigger_insert(line: str, children: list[str]) -> str | None:
+    """What a `pull_request:` trigger gains: nothing when it has the types already, None
+    when it carries settings of its own."""
+    if any(child.strip() == PR_GATE_EVENT_TYPES for child in children):
+        return ""
+    if line.strip() == "pull_request:" and not children:
+        return f"    {PR_GATE_EVENT_TYPES}\n"
+    return None
+
+
+def _job_insert(key: str, children: list[str]) -> tuple[str, str]:
+    """`(the line job `key` gains, a note)`: the condition as its first key when it has
+    no `if:`, else nothing, with a note when its `if:` is the project's own."""
+    depth = _indent(children[0]) if children else 4
+    owned = [c.strip() for c in children if _indent(c) == depth and c.strip().startswith("if:")]
+    if not owned:
+        return f"{' ' * depth}if: {PR_GATE_RUNS_IF}\n", ""
+    if owned[0] == f"if: {PR_GATE_RUNS_IF}":
+        return "", ""
+    return "", f"job `{key}` keeps its own `if:`, so it still runs on every PR"
+
+
+def _with_inserts(lines: list[str], inserts: dict[int, str]) -> str:
+    """`lines` with `inserts[i]` added after line `i`."""
+    out: list[str] = []
+    for index, line in enumerate(lines):
+        if index not in inserts:
+            out.append(line)
+            continue
+        out += [line if line.endswith("\n") else f"{line}\n", inserts[index]]
+    return "".join(out)
+
+
+def _wire_gate_runs(root: Path) -> None:
+    """Apply `gate_pr_runs` to the project's PR gate, saying what it did. No gate is fine."""
+    path = root / PR_GATE_FILE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    updated, notes = gate_pr_runs(text)
+    for note in notes:
+        print(f"  {PR_GATE_FILE}: {note}")
+    if updated != text:
+        path.write_text(updated, encoding="utf-8", newline="\n")
+        print(f"  {PR_GATE_FILE}: runs on a PR only when the PR waits for a gate")
 
 
 def _retarget(root: Path, rel: str, tag: str, bump) -> None:
@@ -1624,6 +1762,7 @@ def finalise_pull(src: Path, manifest: tuple[str, ...]) -> None:
     if tag:
         _retarget(REPO_ROOT, PRECOMMIT_FILE, tag, bump_pin)
         _retarget(REPO_ROOT, PR_GATE_FILE, tag, bump_gate_ref)
+    _wire_gate_runs(REPO_ROOT)
 
 
 def report_sync(outcome: SyncOutcome) -> None:

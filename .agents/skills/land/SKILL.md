@@ -13,9 +13,11 @@ Arguments: `$ARGUMENTS`
 
 One command does all of it: `scripts/land.py` commits, pushes, opens the PR (or reuses
 the branch's open one), and gets it merged. Nothing waits on a person, and nothing runs
-a gate in front of the merge, with one exception the script decides for you: a change to
-a path the project's `.devkit.toml` lists under `[delivery] guarded` -- the code that
-transacts money -- waits for its CI gate, then merges itself.
+a gate in front of the merge -- no hook at the commit or the push, and no CI on the PR --
+with one exception the script decides for you: a change to a path the project's
+`.devkit.toml` lists under `[delivery] guarded` -- the code that transacts money -- waits
+for its CI gate, then merges itself. Every other check runs on the default branch after
+the merge.
 
 1. Read the change: `git status --short`, then the diff of each file with the Read
    tool. Run no tests or linter for this: every check runs after the merge, and a red

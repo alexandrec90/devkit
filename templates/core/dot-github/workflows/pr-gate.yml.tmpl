@@ -1,9 +1,19 @@
 name: PR Gate
 
+# A PR runs it only when the PR waits for a gate before it merges: every job carries the
+# same `if:` (devkit's `sync-devkit.PR_GATE_RUNS_IF`, which `--pull` writes onto a job that
+# has no `if:` of its own). On `pull_request` it is true for a bot's PR, a fork's, a
+# `release/` branch, one labelled `automerge` or `hold`, or one whose body says
+# `Hold: yes`. Every other PR merges as it opens, and the run on {{ default_branch }} after
+# the merge is its check. `labeled` is how a label applied after opening turns it on: a
+# money PR (`[delivery] guarded`) is labelled `automerge` by `land.py`, and in the gated
+# flow so is every PR `land.py` opens. A run whose jobs all skip concludes `skipped`, and
+# nothing reads that as a pass.
 on:
   push:
     branches: [{{ default_branch }}]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   # Re-runnable by hand. Cheap to have, and the only way to re-gate a commit whose
   # run was cancelled by the concurrency rule below.
   workflow_dispatch:
@@ -33,10 +43,11 @@ concurrency:
 
 jobs:
   pre-commit:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
     name: Pre-commit gate
     runs-on: ubuntu-latest
-    # The same hooks `.pre-commit-config.yaml` runs locally, so a contributor who has not
-    # run `pre-commit install` cannot land what the gate would have caught. Its own job
+    # The hooks `.pre-commit-config.yaml` holds, which nothing runs at a commit: this job
+    # is where they are checked, and the tidy job applies the fixers after a merge. Its own job
     # because it clones pinned hook repos and builds their isolated environments — a
     # different failure mode and cache from the lint job.
     steps:
@@ -56,6 +67,7 @@ jobs:
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
   lint:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
     name: Lint
     runs-on: ubuntu-latest
     steps:
@@ -87,6 +99,7 @@ jobs:
           path: logs/lint-errors.log
 
   test:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
     name: Tests
     runs-on: ubuntu-latest
 {{#postgres}}
@@ -164,6 +177,7 @@ jobs:
 {{#desktop}}
 
   desktop:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
     name: Desktop build and tests
     # Windows, because WPF runs only there. The Linux jobs above skip the desktop tier
     # with a note, whatever `dotnet` their image carries; this job is where it is gated.
@@ -206,6 +220,7 @@ jobs:
 {{#electron}}
 
   electron:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
     name: Electron build and UI tests
     # Windows, because that is what `release.yml` ships, and a hosted Windows runner has
     # the desktop session Electron needs with nothing to set up. `test:e2e:packaged`
@@ -248,6 +263,7 @@ jobs:
 {{/electron}}
 
   devkit-drift:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
     name: Vendored harness drift
     runs-on: ubuntu-latest
     steps:

@@ -44,7 +44,7 @@ def venv_module_command(launcher: Path) -> list[str]:
     path` -- devkit's `claude --worktree` trees share the checkout's `.venv` through a
     link, and the tree that last synced into it is gone the day it merges. The
     interpreter reads `pyvenv.cfg` and survives that. The launcher still says pre-commit
-    is installed here. Mirrored in `git_policy.framework._pre_commit_command`.
+    is installed here.
     """
     python = launcher.with_name("python.exe" if launcher.suffix == ".exe" else "python")
     return [str(python), "-m", "pre_commit"] if python.is_file() else [str(launcher)]
@@ -312,13 +312,9 @@ def pre_commit_command(
     which=shutil.which,
     find_spec=importlib.util.find_spec,
 ) -> list[str] | None:
-    """Where this project's `pre-commit` is, looked for the way the global dispatcher
-    looks (`git_policy.framework._pre_commit_command`): `.venv` of this tree, then of
-    the checkout it was cut from, then `PATH`, then this interpreter.
-
-    Mirrored rather than imported because `ship.py` is vendored into projects that do
-    not carry the policy package -- and the two have to agree on *which* pre-commit
-    runs, so that the fixers this step applies are the fixers the commit will meet.
+    """Where this project's `pre-commit` is: `.venv` of this tree, then of the checkout
+    it was cut from, then `PATH`, then this interpreter. The global dispatcher looked the
+    same way while it ran the framework at commit time (until 2026-11-26).
     """
     bases = [root] if checkout is None or checkout == root else [root, checkout]
     for base in bases:

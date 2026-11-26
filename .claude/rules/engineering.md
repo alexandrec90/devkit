@@ -146,9 +146,9 @@ to Python is the shape this clause exists to refuse.
 ## Lint policy
 
 Lint catches **correctness and security** problems — the ones a human reviewer reads past.
-Style is not a judgement call worth an agent's turn: `ruff format` runs at commit time from
-`.pre-commit-config.yaml` and again in CI, so line length, quote style and import order never reach a
-review. **On** for correctness, security and resource-handling; **off**
+Style is not a judgement call worth an agent's turn: `ruff format` runs from
+`.pre-commit-config.yaml` in CI and in the tidy job after a merge, never at a commit, so
+line length, quote style and import order never reach a review. **On** for correctness, security and resource-handling; **off**
 for anything a formatter can decide. A rule that fires on something a formatter would fix
 is misconfigured — turn it off rather than teaching everyone to ignore it.
 

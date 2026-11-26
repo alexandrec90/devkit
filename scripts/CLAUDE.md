@@ -12,7 +12,7 @@ conventions every project shares.
 | Delivered by | `sync-devkit.py --pull` copies files in | pre-commit clones devkit at a pinned `rev` |
 | Lives in | `scripts/hooks/`, listed in `MANIFEST` | `scripts/precommit/`, listed in `.pre-commit-hooks.yaml` |
 | Versioned by | `DEVKIT_VERSION` + a CI drift job | the `rev` in the consumer's config |
-| Use it when | the code must run with no network and no install | the check runs at commit time and a pinned version is better than a copy |
+| Use it when | the code must run with no network and no install | the check runs in a project's CI `pre-commit` job and a pinned version is better than a copy |
 
 Pre-commit specifics: **`language: script`, stdlib only, executable bit set** — there is
 nothing to install from a virtual project, so pre-commit execs the file directly. The
@@ -21,14 +21,23 @@ clone, so resolve devkit files through `Path(__file__)` and read layout from
 `.devkit.toml`, never from the cwd. devkit wires its own as `repo: local` rather than by
 rev, or a hook fix could never be validated by the hook it fixes. A new hook needs an id
 in both `.pre-commit-hooks.yaml` and `.pre-commit-config.yaml`; a test asserts the sets
-match, with `devkit-drift` as the one documented exception. The channel has two stages:
-commit-time hooks stay sub-second, and `devkit-push-gate` is the PR gate's own commands at
-the pre-push stage — a check that takes minutes belongs there, never on a commit. Its
-steps are `run_push_gate.STEPS`; each is skipped out loud in a project that does not ship
-the file it needs, which is how a devkit-only step (`scripts/posix-rehearsal.py`) rides in
-the published hook without breaking a consumer. What CI runs and the hook does not, and
-what the hook runs and CI does not, are both held to a written reason by
-[`tests/test_gate_parity.py`](../tests/test_gate_parity.py).
+match, with `devkit-drift` and `devkit-push-gate` as the documented exceptions.
+
+**Nothing gates a commit or a push** (2026-11-26). `scripts/git_policy/` keeps the branch
+policy alone and runs no pre-commit stage, in any repository on the machine; the hooks run
+in CI's `pre-commit` job (`--all-files`, on the default branch), and the tidy job
+(`tidy-main.py`) applies the fixers to what merged. `devkit-push-gate` stays published
+only because projects generated while it was wired name it, and pre-commit refuses a
+config naming an id its rev lacks; it is push-stage only, so no CI run reaches it.
+
+**Nor does a PR that merges with no gate run CI.** Each job of a PR gate carries
+`sync-devkit.PR_GATE_RUNS_IF`: true off `pull_request`, and on it only for the PRs that
+wait for a gate before they merge. A consumer's gate is a template, so `--pull` writes the
+condition onto each job with no `if:` of its own (`gate_pr_runs`); a job that has one keeps
+it and runs on every PR. The condition cannot read `[delivery] guarded`, so the queue
+labels an unlabelled money PR `automerge` and dispatches its gate (`request_gate`), which
+`gate_passed` accepts on the PR's own branch. A run whose jobs all skip concludes
+`skipped`, and no merge reads that as a pass.
 
 ## Vendoring rules
 
@@ -262,7 +271,7 @@ runs after the last, and none stands between a change and `main`.
 
 | Tier | Runs | Where | When | Job |
 | --- | --- | --- | --- | --- |
-| fast | the `PR Gate` workflow | CI | every commit | `.github/workflows/pr-gate.yml` |
+| fast | the `PR Gate` workflow | CI | every commit of the default branch, and a PR that waits for a gate | `.github/workflows/pr-gate.yml` |
 | medium | each project's `scripts/run-tests.py`, whole suite | a PC whose `devkit.fixPass` is `dispatch`, one project at a time | every 15 minutes, whatever the person is doing; never takes focus | `devkit-medium-tier` |
 | heavy | each project's `scripts/e2e.py`, may take focus | the PC `devkit.localE2e` assigns | every half hour, what moved, only while the PC is idle | `devkit-local-e2e` |
 | full | the `Nightly` workflow | CI | nightly | `.github/workflows/nightly.yml` |

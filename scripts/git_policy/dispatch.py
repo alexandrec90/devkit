@@ -32,7 +32,6 @@ from ._core import (
 )
 
 from .branch import evaluate_pre_commit, evaluate_pre_push, policy_skipped
-from .framework import _run_pre_commit_framework, flows_directly, framework_skipped
 
 
 def _project_hook_command(path: Path, args: Sequence[str]) -> list[str] | None:
@@ -132,12 +131,10 @@ def run_hook(
     if root is None:
         emit("[devkit branch policy] cannot locate repository root", stream=sys.stderr)
         return 1
-    # A direct project runs every check after the merge, so neither stage gates its
-    # commit or its push; the branch policy above still does.
-    if not (framework_skipped(environ) or flows_directly(root)):
-        framework_result = _run_pre_commit_framework(root, runner, hook_name, input_text)
-        if framework_result:
-            return framework_result
+    # No pre-commit framework, at either stage and in any repository (2026-11-26): every
+    # check runs after the change, in CI on the default branch, whose red the fix pass
+    # sends a fixer at, and the tidy job formats what merged. A commit or a push is held
+    # to the branch policy above and nothing slower.
     return _run_project_hook(hook_name, args, input_text, root, runner)
 
 
@@ -157,7 +154,7 @@ def _decide(
         # A warning rather than a bare print, so it reaches the failure artifact as
         # well as stderr: an exported variable disables the gate on every commit
         # thereafter, and the artifact is what explains a protected-branch commit
-        # to whoever reads it later. The downstream hooks still run.
+        # to whoever reads it later. The project's own hook still runs.
         return Decision(warnings=(f"branch checks skipped by {SKIP_ENV_VAR}",))
     if hook_name == "pre-commit":
         return evaluate_pre_commit(runner)

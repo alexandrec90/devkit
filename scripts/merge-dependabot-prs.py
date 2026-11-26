@@ -49,7 +49,9 @@ there: `automerge` waits for its gate here as everywhere.
 
 **Money never skips its gate.** `[delivery] guarded` lists the paths of a project that
 transact money -- order placement, a bet slip. A PR touching one waits for a green gate
-however it is labelled, and still merges itself once it has one (`guarded_paths`).
+however it is labelled, and still merges itself once it has one (`guarded_paths`). The
+PR gate cannot read those paths, so it skips a money PR nothing labelled, and the queue
+labels it and starts its gate instead (`request_gate`).
 
 **Everything it merges it also gets checked.** A merge made with `GITHUB_TOKEN` raises no
 `push`, so without `dispatch_gate` the only run a bot merge ever got was the fix pass's
@@ -318,6 +320,29 @@ def dispatch_gate(repo: str, branch: str, run) -> None:
         print(f"Could not start {GATE_WORKFLOW} on {branch}: {refused}")
 
 
+def request_gate(repo: str, pr: dict, run) -> str:
+    """Label a money PR `automerge` and start its gate on its branch; what was done.
+
+    The PR gate runs on a PR only when the PR waits for one (`sync-devkit.PR_GATE_RUNS_IF`),
+    and it cannot read `[delivery] guarded`, so a money PR opened with no label -- by
+    Claude Code's built-in `/ship` -- got a run whose jobs all skipped, and would wait for a
+    gate nothing starts. The label is what this asks once by: a PR carrying it is not asked
+    again, and its next push gates itself. `gate_passed` takes the dispatched run, which
+    ran on the PR's own head branch. Each failure is said and costs a later drain's retry.
+    """
+    number = int(pr.get("number") or 0)
+    branch = str((pr.get("head") or {}).get("ref") or "")
+    path = f"repos/{repo}/issues/{number}/labels"
+    try:
+        gh(["api", "--method", "POST", path, "-f", f"labels[]={AUTOMERGE_LABEL}"], run)
+    except GhError as refused:
+        return f"could not label it {AUTOMERGE_LABEL}: {refused}"
+    if not branch:
+        return f"labelled {AUTOMERGE_LABEL}, with no head branch to start its gate on"
+    dispatch_gate(repo, branch, run)
+    return f"labelled {AUTOMERGE_LABEL} and its gate started on {branch}"
+
+
 def project_settings(root: Path = REPO_ROOT) -> dict:
     """`.devkit.toml`, or nothing: unreadable reads as the gated flow, which waits."""
     try:
@@ -465,6 +490,8 @@ def verdict(
     touched = guarded_paths(pr_files(repo, number, run), guarded) if guarded else []
     if touched:
         should_merge, why = gate_verdict(repo, pr, run, env_sha)
+        if not should_merge and AUTOMERGE_LABEL not in labels:
+            why += f"; {request_gate(repo, pr, run)}"
         return should_merge, f"it touches guarded {touched[0]}, so it waits for its gate: {why}"
     if MERGE_NOW_LABEL in labels:
         return True, f"labelled {MERGE_NOW_LABEL}: its checks run after it lands"

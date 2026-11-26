@@ -45,6 +45,9 @@ RUNTIME_FILES = {
     "scripts/git_policy/_core.py": "devkit_git_policy/_core.py",
     "scripts/git_policy/branch.py": "devkit_git_policy/branch.py",
     "scripts/git_policy/dispatch.py": "devkit_git_policy/dispatch.py",
+    # Gone from the package since 2026-11-26, and listed for the tags that still have it:
+    # their `dispatch` imports it, so an install from one without it would break every
+    # commit on the machine. `install_files` skips it for a ref that does not hold it.
     "scripts/git_policy/framework.py": "devkit_git_policy/framework.py",
     "scripts/worktree_env.py": "devkit_worktree_env.py",
     # Loaded by path by `devkit_worktree_env` (`SIBLING_PINS`) to lease a shared sibling.

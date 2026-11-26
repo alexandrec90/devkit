@@ -2,8 +2,6 @@
 
 import io
 import json
-import os
-import pathlib
 import subprocess
 import sys
 
@@ -18,13 +16,7 @@ class FakeRunner:
     def __init__(self, responses=None):
         self.responses = responses or {}
         self.calls: list[tuple[str, ...]] = []
-        # `env` is recorded rather than ignored because it is load-bearing for one
-        # caller: the pre-commit framework's `language: system` hooks are resolved
-        # from it. See `test_the_framework_runs_with_its_own_directory_first_on_path`.
         self.envs: list[dict[str, str] | None] = []
-        # Recorded for the same reason as `env`: the push stage asks for a passthrough
-        # run so its output is not held until the gate finishes, and a call that stops
-        # asking is invisible in every other assertion here.
         self.streamed: list[bool] = []
 
     def __call__(self, argv, *, input_text=None, cwd=None, env=None, stream=False):
@@ -447,40 +439,9 @@ def test_the_release_tag_pattern_matches_the_release_scripts():
         assert not git_policy.RELEASE_TAG_RE.fullmatch(other)
 
 
-def test_policy_runs_pre_commit_framework_then_project_hook(tmp_path, monkeypatch):
-    responses = git_responses()
-    responses.update(merged_response("claude/fresh", []))
-    responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
-        ["git"], returncode=1
-    )
-    responses[("git", "rev-parse", "--show-toplevel")] = completed(["git"], stdout=f"{tmp_path}\n")
-    responses[("git", "config", "--get", "devkit.branchPolicy.projectHooksPath")] = completed(
-        ["git"], returncode=1
-    )
-    responses[("pre-commit-test", "run", "--hook-stage", "pre-commit")] = completed(
-        ["pre-commit-test"]
-    )
-    responses[("project-hook-test",)] = completed(["project-hook-test"])
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    project_hook = tmp_path / ".githooks" / "pre-commit"
-    project_hook.parent.mkdir()
-    project_hook.write_text("# project hook\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
-    )
-    monkeypatch.setattr(
-        git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
-    )
-    runner = FakeRunner(responses)
-    assert git_policy.run_hook("pre-commit", [], runner=runner) == 0
-    assert runner.calls.index(("pre-commit-test", "run", "--hook-stage", "pre-commit")) < (
-        runner.calls.index(("project-hook-test",))
-    )
-
-
 def _commit_responses(tmp_path):
-    """A commit the policy lets through in a project with a framework and a project hook."""
+    """A commit the policy lets through in a project with a pre-commit config and a
+    project hook."""
     responses = git_responses()
     responses.update(merged_response("claude/fresh", []))
     responses[("git", "rev-parse", "--git-path", "devkit-branch-policy.json")] = completed(
@@ -498,101 +459,52 @@ def _commit_responses(tmp_path):
     return responses
 
 
-def test_the_framework_skip_waives_the_framework_and_nothing_else(tmp_path, monkeypatch):
-    """The direct flow's commit: no formatter, and the rest of the hook as it was."""
-    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
+FLOWS = ["", '[delivery]\nflow = "gated"\n', '[delivery]\nflow = "direct"\n']
+
+
+@pytest.mark.parametrize("flow", FLOWS)
+def test_a_commit_runs_the_policy_and_project_hook_only(tmp_path, monkeypatch, flow):
+    """Nothing gates a commit, in any project on the machine (2026-11-26): every check
+    runs after the change, in CI on the default branch, and the tidy job formats what
+    merged. A config there and a gated flow change nothing; the project's own
+    `.githooks/pre-commit` still runs."""
+    (tmp_path / ".devkit.toml").write_text(flow, encoding="utf-8")
     monkeypatch.setattr(
         git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
     )
     runner = FakeRunner(_commit_responses(tmp_path))
-    env = {git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
-    # `_pre_commit_command` answering None is a refusal unless the framework is not reached.
-    assert git_policy.run_hook("pre-commit", [], runner=runner, env=env) == 0
+    assert git_policy.run_hook("pre-commit", [], runner=runner, env={}) == 0
     assert ("git", "branch", "--show-current") in runner.calls
     assert ("project-hook-test",) in runner.calls
+    assert [call for call in runner.calls if "--hook-stage" in call] == []
 
 
-def test_the_framework_skip_keeps_the_retired_branch_refusal(tmp_path, capsys):
-    """`ship_intent._commit_carrying` moves a commit off a retired name only because this
-    refusal reaches it. `--no-verify` would lose it along with the framework."""
-    responses = _commit_responses(tmp_path)
-    responses.update(merged_response("claude/fresh", [{"url": "https://github.com/acme/w/pull/1"}]))
-    env = {git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
-    assert git_policy.run_hook("pre-commit", [], runner=FakeRunner(responses), env=env) == 1
-    assert "is permanently retired because its PR merged" in capsys.readouterr().err
-
-
-def test_the_framework_skip_covers_the_push_stage_too(tmp_path, monkeypatch):
-    """`pre-commit` refusing a push, or absent from a tree nobody provisioned, stands
-    between a direct-flow session and its PR as much as at the commit."""
-    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
-    responses = _push_responses(tmp_path)
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    raw = "refs/heads/claude/fresh aaa refs/heads/claude/fresh 0000\n"
-    env = {git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
-    code = git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=FakeRunner(responses))
-    assert code == 1, "unset, the missing framework still refuses"
-    runner = FakeRunner(responses)
-    assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner, env=env) == 0
-
-
-def _direct(root):
-    (root / ".devkit.toml").write_text('[delivery]\nflow = "direct"\n', encoding="utf-8")
-
-
-def test_a_direct_project_commits_with_no_framework_and_no_variable(tmp_path, monkeypatch):
-    """**Claude Code's built-in `/ship`.** It runs a plain `git commit`, with nothing set,
-    and in a direct project nothing may stand between that commit and its PR."""
-    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
-    monkeypatch.setattr(
-        git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
-    )
-    responses = _commit_responses(tmp_path)
-    assert git_policy.run_hook("pre-commit", [], runner=FakeRunner(responses), env={}) == 1, (
-        "gated, the missing framework still refuses"
-    )
-    _direct(tmp_path)
-    runner = FakeRunner(responses)
-    assert git_policy.run_hook("pre-commit", [], runner=runner, env={}) == 0
-    assert ("project-hook-test",) in runner.calls
-
-
-def test_a_direct_project_pushes_with_no_push_gate(tmp_path, monkeypatch):
-    """The push stage is the PR gate's own lint and tests: minutes a session would sit
-    through on every `/ship`, in a flow where CI runs them after the merge anyway."""
-    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
-    responses = _push_responses(tmp_path)
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    _direct(tmp_path)
-    raw = "refs/heads/claude/fresh aaa refs/heads/claude/fresh 0000\n"
-    runner = FakeRunner(responses)
+@pytest.mark.parametrize("flow", FLOWS)
+def test_a_push_runs_no_framework_in_any_project(tmp_path, flow):
+    """The push stage was the PR gate's lint and tests, minutes before every push."""
+    (tmp_path / ".devkit.toml").write_text(flow, encoding="utf-8")
+    runner = FakeRunner(_push_responses(tmp_path))
+    raw = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
     assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner, env={}) == 0
+    assert [call for call in runner.calls if "--hook-stage" in call] == []
 
 
-def test_a_direct_project_keeps_the_branch_policy(tmp_path, capsys):
+def test_the_retired_branch_refusal_still_stands(tmp_path, capsys):
+    """`ship_intent._commit_carrying` moves a commit off a retired name only because this
+    refusal reaches it. `--no-verify` would lose it."""
     responses = _commit_responses(tmp_path)
     responses.update(merged_response("claude/fresh", [{"url": "https://github.com/acme/w/pull/1"}]))
-    _direct(tmp_path)
     assert git_policy.run_hook("pre-commit", [], runner=FakeRunner(responses), env={}) == 1
     assert "is permanently retired because its PR merged" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    "text",
-    ["", "[delivery]\n", '[delivery]\nflow = "gated"\n', 'delivery = "direct"\n', "[delivery\n"],
-)
-def test_only_a_clear_direct_flow_skips_the_framework(tmp_path, text):
-    (tmp_path / ".devkit.toml").write_text(text, encoding="utf-8")
-    assert not git_policy.framework.flows_directly(tmp_path)
-    assert not git_policy.framework.flows_directly(tmp_path / "absent")
-
-
-def test_the_framework_skip_reads_off_values_as_off(tmp_path):
-    for value in ("", "0", "false", "no", "off", " Off "):
-        assert not git_policy.framework_skipped({git_policy.FRAMEWORK_SKIP_ENV_VAR: value}), value
-    for value in ("1", "true", "yes"):
-        assert git_policy.framework_skipped({git_policy.FRAMEWORK_SKIP_ENV_VAR: value}), value
-    assert not git_policy.framework_skipped({})
+def test_the_package_carries_no_framework_tier():
+    """An install from a tag that predates this still ships `framework.py`; this tree's
+    dispatcher must not reach for it."""
+    package = support.REPO_ROOT / "scripts" / "git_policy"
+    assert not (package / "framework.py").exists()
+    for name in ("dispatch.py", "__init__.py"):
+        assert "from .framework" not in (package / name).read_text(encoding="utf-8"), name
 
 
 def _push_responses(tmp_path):
@@ -605,53 +517,25 @@ def _push_responses(tmp_path):
     responses[("git", "config", "--get", "devkit.branchPolicy.projectHooksPath")] = completed(
         ["git"], returncode=1
     )
-    responses[("pre-commit-test", "run", "--hook-stage", "pre-push", "--all-files")] = completed(
-        ["pre-commit-test"]
-    )
     (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
     return responses
 
 
-PUSH_STAGE = ("pre-commit-test", "run", "--hook-stage", "pre-push", "--all-files")
-
-
-def test_a_push_that_publishes_a_branch_runs_the_pre_push_stage(tmp_path, monkeypatch):
-    """The dispatcher owns `core.hooksPath`, so `pre-commit install` never wires the
-    framework's own pre-push hook here; the PR gate at push time exists only if this
-    runs it. `--all-files`, because the stage's hooks are `always_run` gates over the
-    tree and the staged-diff default would stash unstaged work to run them."""
-    monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
-    )
-    runner = FakeRunner(_push_responses(tmp_path))
-    raw = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
-    assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner) == 0
-    assert PUSH_STAGE in runner.calls
-
-
-def test_the_pre_push_stage_failing_refuses_the_push(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
-    )
-    responses = _push_responses(tmp_path)
-    responses[PUSH_STAGE] = completed(["pre-commit-test"], stdout="tests failed\n", returncode=1)
-    runner = FakeRunner(responses)
-    raw = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
-    assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner) == 1
-
-
-def test_a_gate_failure_survives_a_cp1252_console(tmp_path, monkeypatch):
+def test_a_project_hook_failure_survives_a_cp1252_console(tmp_path, monkeypatch):
     """The hook's stdout is a pipe under git, so on Windows Python picks the locale
-    codec for it -- cp1252 -- while the gate's output is UTF-8 and, after
+    codec for it -- cp1252 -- while a relayed hook's output is UTF-8 and, after
     `run_command`'s `errors="replace"`, can carry U+FFFD, which no codepage encodes.
-    Before this guard the relay itself raised, so a red gate presented as a CPython
+    Before this guard the relay itself raised, so a red hook presented as a CPython
     traceback with the failure it was relaying nowhere in it."""
     monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
     )
     responses = _push_responses(tmp_path)
-    responses[PUSH_STAGE] = completed(
-        ["pre-commit-test"],
+    hook = tmp_path / ".githooks" / "pre-push"
+    hook.parent.mkdir()
+    hook.write_text("# project hook\n", encoding="utf-8")
+    responses[("project-hook-test",)] = completed(
+        ["project-hook-test"],
         stdout="run-tests.py — 1 failed �\n",
         stderr="lint-all.py → E999 ✓\n",
         returncode=1,
@@ -677,210 +561,30 @@ def test_the_console_guard_tolerates_a_stream_that_cannot_be_reconfigured(monkey
     git_policy.dispatch._utf8_console()
 
 
-def test_a_deletion_or_tag_only_push_skips_the_pre_push_stage(tmp_path, monkeypatch):
-    """The stage is minutes of tests, and nothing a deletion could break is in it."""
-    monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
-    )
+def test_a_deletion_or_a_tag_only_push_passes_the_policy(tmp_path):
     for raw in (
         f"(delete) {'0' * 40} refs/heads/claude/old {'1' * 40}\n",
         tag_push("nightly-2026-09-07"),
     ):
         runner = FakeRunner(_push_responses(tmp_path))
         assert git_policy.run_hook("pre-push", ["origin"], input_text=raw, runner=runner) == 0
-        assert PUSH_STAGE not in runner.calls
 
 
-def test_an_unreadable_push_payload_runs_the_gate_rather_than_standing_down(tmp_path, monkeypatch):
-    """An empty payload is not a tag-only push, and used to be treated as one.
-
-    The skip was `all(u.deletion for u in parse_push_updates(raw))`, and `all([])` is
-    vacuously true -- so *any* payload with no branch lines skipped the stage. A
-    tag-only push has `refs/tags/` lines and no branch ones and is meant to skip; a
-    payload that is empty because `dispatch.main` could not read git's stdin
-    (`input_text=""` on `OSError`/`ValueError`) is the opposite case, and it turned the
-    whole PR gate off for that push with nothing printed.
-
-    Reversion check: restore the bare `all(...)` and this is the test that fails.
-    """
+def test_the_project_hook_relays_both_streams(tmp_path, monkeypatch, capsys):
+    """A stream the dispatcher forgets to relay is the hook's verdict arriving with
+    nothing to act on. What keeps the non-ASCII in these two from killing the hook is
+    `_utf8_console`, covered end to end above."""
     monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
     )
-    runner = FakeRunner(_push_responses(tmp_path))
-    assert git_policy.run_hook("pre-push", ["origin"], input_text="", runner=runner) == 0
-    assert PUSH_STAGE in runner.calls, "an unreadable payload must not disable the gate"
-
-
-def test_the_commit_stage_argv_is_unchanged_by_the_push_stage(tmp_path, monkeypatch):
-    """The commit stage keeps pre-commit's staged-diff default: the fixers there act
-    on the files being committed, and `--all-files` would rewrite the whole tree."""
-    monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
-    )
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    runner = FakeRunner(
-        {("pre-commit-test", "run", "--hook-stage", "pre-commit"): completed(["pre-commit-test"])}
-    )
-    assert git_policy.framework._run_pre_commit_framework(tmp_path, runner) == 0
-    assert runner.calls == [("pre-commit-test", "run", "--hook-stage", "pre-commit")]
-
-
-def test_the_framework_runs_with_its_own_directory_first_on_path(tmp_path, monkeypatch):
-    """The reported dead end: committing from a plain worktree with no `.venv`.
-
-    `_pre_commit_command` found `pre-commit.exe` in the parent checkout's venv and the
-    commit then failed with `Executable detect-secrets-hook not found` -- pre-commit
-    resolves a `language: system` hook from the subprocess `PATH`, which did not hold
-    the venv it had itself been found in. First, not appended: looking past `PATH` is
-    the whole point of `_venv_roots`, so a different copy already on it must not win.
-    """
-    venv_bin = tmp_path / "checkout" / ".venv" / "Scripts"
-    monkeypatch.setattr(
-        git_policy.framework,
-        "_pre_commit_command",
-        lambda _root, _runner: [str(venv_bin / "pre-commit")],
-    )
-    monkeypatch.setenv("PATH", "/usr/bin")
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    runner = FakeRunner(
-        {
-            (str(venv_bin / "pre-commit"), "run", "--hook-stage", "pre-commit"): completed(
-                ["pre-commit"]
-            )
-        }
-    )
-
-    assert git_policy.framework._run_pre_commit_framework(tmp_path, runner) == 0
-    assert runner.envs[0]["PATH"] == f"{venv_bin}{os.pathsep}/usr/bin"
-
-
-def test_framework_env_keeps_the_rest_of_the_environment(tmp_path):
-    """Only `PATH` moves. The framework needs everything else the session had --
-    `GIT_*` scoping from the hook included, since the hooks act on that repository."""
-    env = git_policy.framework_env(
-        [str(tmp_path / "bin" / "pre-commit")], {"PATH": "/usr/bin", "HOME": "/h"}
-    )
-    assert env["HOME"] == "/h"
-    assert env["PATH"].startswith(str(tmp_path / "bin"))
-
-
-def test_framework_env_survives_an_environment_with_no_path(tmp_path):
-    """No `PATH` at all is not a reason to raise, and an empty first entry would put
-    the working directory on it -- which is how a repo file becomes an executable."""
-    env = git_policy.framework_env([str(tmp_path / "bin" / "pre-commit")], {})
-    assert env["PATH"] == str(tmp_path / "bin")
-
-
-def test_a_missing_framework_names_every_remedy_not_just_the_refusal(tmp_path, monkeypatch, capsys):
-    """Two agents reported this message in one week; both said it names no remedy, so it
-    reads as policy declining the commit rather than as a tool being missing."""
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    monkeypatch.setattr(git_policy.framework, "_pre_commit_command", lambda _root, _runner: None)
-
-    assert git_policy.framework._run_pre_commit_framework(tmp_path, FakeRunner()) == 1
-    err = capsys.readouterr().err
-    assert "is not installed" in err
-    assert "pip install pre-commit" in err
-    assert "worktree.py provision" in err
-    # The copy at ~/.devkit/git-hooks is what the hooks run, so the fix for this can be
-    # committed here and still be missing where it fires. Nothing else answers that.
-    assert "install-git-policy.py --check" in err
-
-
-def test_a_project_with_no_pre_commit_config_says_nothing_at_all(tmp_path, capsys):
-    """The framework tier is opt-in: no config file, no message and no refusal."""
-    assert git_policy.framework._run_pre_commit_framework(tmp_path, FakeRunner()) == 0
-    assert capsys.readouterr().err == ""
-
-
-def test_the_framework_relays_both_streams(tmp_path, monkeypatch, capsys):
-    """The wiring, not just the guard: a stream the framework forgets to relay is the
-    gate's verdict arriving with nothing to act on. What keeps the non-ASCII in these
-    two from killing the hook is `_utf8_console`, covered end to end above."""
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
-    )
-    result = completed(["pre-commit-test"])
+    responses = _commit_responses(tmp_path)
+    result = completed(["project-hook-test"])
     result.stdout, result.stderr = "out→\n", "err�\n"
-    runner = FakeRunner({("pre-commit-test", "run", "--hook-stage", "pre-commit"): result})
-
-    assert git_policy.framework._run_pre_commit_framework(tmp_path, runner) == 0
+    responses[("project-hook-test",)] = result
+    assert git_policy.run_hook("pre-commit", [], runner=FakeRunner(responses), env={}) == 0
     captured = capsys.readouterr()
     assert "out" in captured.out
     assert "err" in captured.err
-
-
-def test_the_framework_run_is_streamed_not_held_until_it_finishes(tmp_path, monkeypatch):
-    """The push stage is minutes of lint and tests, and captured it printed nothing at
-    all until the gate was over -- which reads as a hung `git push`, and the answer to a
-    hung push is another push, each starting its own full gate on the same machine.
-
-    Reversion check: drop `stream=True` at the call site and this is the test that fails.
-    """
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
-    monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
-    )
-    publishing = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
-    for stage, args, raw in (
-        ("pre-commit", ("run", "--hook-stage", "pre-commit"), ""),
-        ("pre-push", ("run", "--hook-stage", "pre-push", "--all-files"), publishing),
-    ):
-        runner = FakeRunner({("pre-commit-test", *args): completed(["pre-commit-test"])})
-        verdict = git_policy.framework._run_pre_commit_framework(
-            tmp_path, runner, stage=stage, raw_updates=raw
-        )
-        assert verdict == 0, stage
-        assert runner.streamed == [True], stage
-
-
-def test_the_push_stage_says_it_will_be_quiet_before_it_goes_quiet(tmp_path, monkeypatch, capsys):
-    """Streaming gets pre-commit's banner out at once, but pre-commit still buffers each
-    hook's own output until that hook exits -- so the minutes in between are silent, and
-    that silence is what was read as a hang. The notice has to precede the wait, and the
-    commit stage must not get it: those hooks are sub-second."""
-    (tmp_path / ".pre-commit-config.yaml").write_text(
-        "repos:\n  - repo: local\n    hooks:\n      - id: devkit-push-gate\n", encoding="utf-8"
-    )
-    monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
-    )
-    publishing = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
-    args = ("run", "--hook-stage", "pre-push", "--all-files")
-    runner = FakeRunner({("pre-commit-test", *args): completed(["pre-commit-test"])})
-
-    git_policy.framework._run_pre_commit_framework(
-        tmp_path, runner, stage="pre-push", raw_updates=publishing
-    )
-    out = capsys.readouterr().out
-    assert "takes minutes" in out
-    assert "SKIP=devkit-push-gate" in out
-
-    commit_args = ("run", "--hook-stage", "pre-commit")
-    quiet = FakeRunner({("pre-commit-test", *commit_args): completed(["pre-commit-test"])})
-    git_policy.framework._run_pre_commit_framework(tmp_path, quiet)
-    assert capsys.readouterr().out == ""
-
-
-def test_a_push_stage_without_the_gate_does_not_claim_lint_and_tests(tmp_path, monkeypatch, capsys):
-    """carameli's push stage ran five fast hooks while the notice promised the PR gate's
-    lint and tests, so a green push read as a green gate."""
-    (tmp_path / ".pre-commit-config.yaml").write_text(
-        "repos:\n  - repo: local\n    hooks:\n      - id: detect-secrets\n", encoding="utf-8"
-    )
-    monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
-    )
-    publishing = f"refs/heads/claude/fresh {'1' * 40} refs/heads/claude/fresh {'0' * 40}\n"
-    args = ("run", "--hook-stage", "pre-push", "--all-files")
-    runner = FakeRunner({("pre-commit-test", *args): completed(["pre-commit-test"])})
-    git_policy.framework._run_pre_commit_framework(
-        tmp_path, runner, stage="pre-push", raw_updates=publishing
-    )
-    out = capsys.readouterr().out
-    assert "wires no devkit-push-gate" in out
-    assert "(lint, tests)" not in out and "SKIP=devkit-push-gate" not in out
 
 
 def test_a_streamed_run_leaves_the_childs_output_on_the_inherited_handles(tmp_path, capfd):
@@ -928,90 +632,6 @@ def test_inheritable_streams_rejects_a_stream_with_no_descriptor(monkeypatch):
     assert git_policy.inheritable_streams() is False
 
 
-def _common_dir(main_git: pathlib.Path | None):
-    """A runner answering `rev-parse --git-common-dir`, or failing like a non-repository."""
-
-    def runner(argv, *, input_text=None, cwd=None, env=None, stream=False):
-        if main_git is None:
-            return completed(argv, returncode=1)
-        return completed(argv, stdout=f"{main_git}\n")
-
-    return runner
-
-
-def test_a_worktree_finds_the_venv_of_the_checkout_it_belongs_to(tmp_path):
-    """A worktree checks out tracked files only and `.venv` is gitignored, so a worktree
-    nobody provisioned has none of its own.
-
-    Regression: this made committing from a `.claude/worktrees/` worktree impossible.
-    Every commit was refused with "project has .pre-commit-config.yaml but pre-commit is
-    not installed", in a repo whose checkout had `pre-commit` in `.venv` two directories
-    up -- and refusing is the correct half of that behaviour, so the failure looked like
-    policy rather than like a lookup that stopped one directory short.
-    """
-    checkout = tmp_path / "devkit"
-    tool = checkout / ".venv" / "Scripts" / "pre-commit.exe"
-    tool.parent.mkdir(parents=True)
-    tool.write_text("", encoding="utf-8")
-    worktree = checkout / ".claude" / "worktrees" / "topic"
-    worktree.mkdir(parents=True)
-    assert git_policy.framework._pre_commit_command(worktree, _common_dir(checkout / ".git")) == [
-        str(tool)
-    ]
-
-
-def test_a_worktree_with_its_own_venv_keeps_using_it(tmp_path):
-    """The ordering, asserted rather than assumed: a provisioned box has a virtualenv of
-    its own with the project's own pinned tools in it, and reaching past that to the
-    source checkout's would run a different `pre-commit` than the box installed."""
-    checkout = tmp_path / "devkit"
-    outer = checkout / ".venv" / "Scripts" / "pre-commit.exe"
-    outer.parent.mkdir(parents=True)
-    outer.write_text("", encoding="utf-8")
-    box = tmp_path / ".worktrees" / "devkit--topic-0905"
-    inner = box / ".venv" / "Scripts" / "pre-commit.exe"
-    inner.parent.mkdir(parents=True)
-    inner.write_text("", encoding="utf-8")
-    assert git_policy.framework._pre_commit_command(box, _common_dir(checkout / ".git")) == [
-        str(inner)
-    ]
-
-
-@pytest.mark.parametrize(
-    ("launcher", "python"),
-    [("Scripts/pre-commit.exe", "Scripts/python.exe"), ("bin/pre-commit", "bin/python")],
-)
-def test_a_venv_with_its_interpreter_runs_pre_commit_as_a_module(tmp_path, launcher, python):
-    """Not the console script: uv writes the interpreter's absolute path into each
-    launcher, so one written from a tree that has since been deleted dies with `uv
-    trampoline failed to canonicalize script path`. A `claude --worktree` tree syncs
-    through the checkout's linked `.venv`, and every devkit commit was refused that way
-    once the tree that last synced was removed. The venv's interpreter reads
-    `pyvenv.cfg` and survives it."""
-    venv = tmp_path / ".venv"
-    for name in (launcher, python):
-        (venv / name).parent.mkdir(parents=True, exist_ok=True)
-        (venv / name).write_text("", encoding="utf-8")
-    assert git_policy.framework._pre_commit_command(tmp_path, _common_dir(tmp_path / ".git")) == [
-        str(venv / python),
-        "-m",
-        "pre_commit",
-    ]
-
-
-def test_a_directory_git_cannot_answer_for_falls_back_to_itself(tmp_path):
-    """`_pre_commit_command` is called with the repo root, so this should not happen --
-    and it runs inside a commit hook, where a raise is a commit refused with a traceback
-    instead of a reason."""
-    assert git_policy.framework._venv_roots(tmp_path, _common_dir(None)) == (tmp_path,)
-
-
-def test_a_plain_checkout_looks_in_exactly_one_place(tmp_path):
-    """`--git-common-dir` in a non-worktree names that checkout's own `.git`, so the
-    fallback must collapse rather than listing the same directory twice."""
-    assert git_policy.framework._venv_roots(tmp_path, _common_dir(tmp_path / ".git")) == (tmp_path,)
-
-
 def test_skip_env_var_reads_only_explicit_off_values_as_off():
     """The opt-out is opt-in: unset means enforce, and `0`/`false`/`no`/`off` mean enforce.
 
@@ -1027,11 +647,11 @@ def test_skip_env_var_reads_only_explicit_off_values_as_off():
 
 
 def test_skip_env_var_bypasses_branch_checks_but_still_runs_downstream_hooks(tmp_path, monkeypatch):
-    """Opting out skips the *branch policy*, not the project's own commit gate.
+    """Opting out skips the *branch policy*, not the project's own `.githooks/` hook.
 
     If it skipped everything, the escape hatch for "let me commit on main" would also
-    silently disable the consumer's pre-commit config -- a far bigger hammer than the
-    one asked for, and invisible at the moment it matters.
+    silently disable the project's own hook -- a far bigger hammer than the one asked
+    for, and invisible at the moment it matters.
     """
     responses = git_responses(branch="main")  # would be blocked without the opt-out
     artifact = tmp_path / "policy.json"
@@ -1042,19 +662,19 @@ def test_skip_env_var_bypasses_branch_checks_but_still_runs_downstream_hooks(tmp
     responses[("git", "config", "--get", "devkit.branchPolicy.projectHooksPath")] = completed(
         ["git"], returncode=1
     )
-    responses[("pre-commit-test", "run", "--hook-stage", "pre-commit")] = completed(
-        ["pre-commit-test"]
-    )
-    (tmp_path / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    responses[("project-hook-test",)] = completed(["project-hook-test"])
+    hook = tmp_path / ".githooks" / "pre-commit"
+    hook.parent.mkdir()
+    hook.write_text("# project hook\n", encoding="utf-8")
     monkeypatch.setattr(
-        git_policy.framework, "_pre_commit_command", lambda _root, _runner: ["pre-commit-test"]
+        git_policy.dispatch, "_project_hook_command", lambda _path, _args: ["project-hook-test"]
     )
 
     runner = FakeRunner(responses)
     code = git_policy.run_hook("pre-commit", [], runner=runner, env={git_policy.SKIP_ENV_VAR: "1"})
 
     assert code == 0, "the opt-out must let a commit on a protected branch through"
-    assert ("pre-commit-test", "run", "--hook-stage", "pre-commit") in runner.calls
+    assert ("project-hook-test",) in runner.calls
     # The branch check never ran, so no PR lookup was attempted.
     assert not any(call and call[0] == "gh" for call in runner.calls)
 
@@ -1348,19 +968,8 @@ def test_the_dispatcher_relays_hook_output_through_emit():
     source = (support.REPO_ROOT / "scripts" / "git_policy" / "dispatch.py").read_text(
         encoding="utf-8"
     )
-    framework = (support.REPO_ROOT / "scripts" / "git_policy" / "framework.py").read_text(
-        encoding="utf-8"
+    assert "print(" not in source, (
+        "dispatch.py calls print(); this package relays strings decoded with "
+        'errors="replace" and must go through emit() so a narrow console cannot '
+        "turn a hook's output into a failed hook"
     )
-    for name, text in (("dispatch.py", source), ("framework.py", framework)):
-        assert "print(" not in text, (
-            f"{name} calls print(); this package relays strings decoded with "
-            'errors="replace" and must go through emit() so a narrow console cannot '
-            "turn a hook's output into a failed hook"
-        )
-
-
-def test_push_stage_notice_reads_the_config_and_an_absent_one_claims_no_gate(tmp_path):
-    notice = git_policy.framework.push_stage_notice
-    assert notice(tmp_path) == git_policy.framework.PUSH_STAGE_NOTICE_NO_GATE
-    (tmp_path / ".pre-commit-config.yaml").write_text("- id: devkit-push-gate\n", "utf-8")
-    assert notice(tmp_path) == git_policy.framework.PUSH_STAGE_NOTICE

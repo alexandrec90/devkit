@@ -2,7 +2,7 @@
 
 The tier every other module here imports and which imports none of them. It is the
 floor of the package rather than a junk drawer: a name belongs here when the branch
-policy, the framework tier and the dispatcher would each otherwise need their own copy.
+policy and the dispatcher would each otherwise need their own copy.
 """
 
 from __future__ import annotations
@@ -78,14 +78,14 @@ RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 #
 # It costs nothing in enforcement: this is a client-side hook, so `git commit
 # --no-verify` already bypasses it entirely. What it buys is a bypass that is
-# *scriptable* without also disabling the project's own pre-commit gate, which is what
+# *scriptable* without also skipping the project's own `.githooks/<hook>`, which is what
 # `--no-verify` does.
 SKIP_ENV_VAR = "DEVKIT_SKIP_BRANCH_POLICY"
-# The other half of that bargain: the project's pre-commit framework waived, the policy
-# kept. The ship task's direct flow commits with no formatter, and still needs the
-# refusal of a retired branch name, which is what moves its commit off one
-# (`ship_intent._commit_carrying`). `--no-verify` would drop both. It says nothing about
-# `.githooks/<hook>`, which still runs.
+# What waived the project's pre-commit framework while this dispatcher ran it. Nothing
+# here reads it now: the dispatcher runs no framework at either stage (2026-11-26), so
+# every commit and push on the machine is held to the branch policy alone. `land.py` and
+# the ship task still set it, for a machine whose hooks were installed from a tag that
+# ran the framework, until `installers.py` reinstalls them.
 FRAMEWORK_SKIP_ENV_VAR = "DEVKIT_SKIP_PRE_COMMIT_FRAMEWORK"
 # Values that read as "off" to a human must not switch the policy off. Anything else
 # that is set turns it off. The asymmetry is deliberate: `DEVKIT_SKIP_BRANCH_POLICY=0`
@@ -205,8 +205,9 @@ def run_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run a command without ever raising into Git's sparse hook error reporting.
 
-    `stream=True` is for the one command here that is not a question with an answer but
-    a **gate that takes minutes**: the pre-commit framework at the push stage. Captured,
+    `stream=True` is for a command that is not a question with an answer but a **gate
+    that takes minutes**, which the pre-commit framework at the push stage was until the
+    dispatcher stopped running it (2026-11-26); nothing here asks for it now. Captured,
     its output arrives in one block after it finishes, so `git push` prints nothing for
     the whole run -- which is indistinguishable from a hang, and was read as one. The
     reaction to a hung push is another push, and each one starts its own full gate on the
@@ -300,6 +301,6 @@ def _config_bool(runner: Runner, key: str, default: bool) -> bool:
 
 
 def _repo_root(runner: Runner) -> Path | None:
-    """Here rather than beside its first caller: both `framework` and `dispatch` ask."""
+    """The checkout `dispatch` runs `.githooks/<hook>` from."""
     raw = _stdout(_git(runner, "rev-parse", "--show-toplevel"))
     return Path(raw).resolve() if raw else None

@@ -219,8 +219,8 @@ That last command is the acceptance test. It must not print "hook not found", an
 (`_warn_if_pre_commit_channel_is_unpublished`).
 
 > The **executable bit** only fails here. The published hooks are `language: script`,
-> so pre-commit execs them directly; a missing `chmod +x` fails on a consumer's
-> machine, at commit time, after the tag is cut. A test guards it, but this run is the
+> so pre-commit execs them directly; a missing `chmod +x` fails in a consumer's CI
+> `pre-commit` job, after the tag is cut. A test guards it, but this run is the
 > end-to-end confirmation.
 
 ## Tell adopters what changed

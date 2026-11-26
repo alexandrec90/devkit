@@ -348,14 +348,13 @@ def test_published_hooks_point_at_scripts_that_exist_and_are_executable():
         )
 
 
-def test_only_the_push_gate_runs_at_the_push_stage():
-    """The push stage is the PR gate and nothing else.
+def test_no_hook_runs_at_the_push_stage():
+    """Nothing gates a push (the owner's decision, 2026-11-26): every check runs after
+    the change, in CI and the scheduled jobs. So neither devkit's config nor the one a
+    project is generated with wires the push stage, or asks `pre-commit install` to.
 
-    A hook that names no stage runs at every installed one, so before `default_stages`
-    was pinned the first push-stage run also ran `ruff --fix` and the whitespace fixers
-    over `--all-files` -- rewriting the tree during a push. `default_install_hook_types`
-    is the other half: without it `pre-commit install` wires the commit stage only and
-    the gate never runs.
+    `default_stages` stays pinned: a hook that names no stage runs at every one, and the
+    three upstream fixers whose own manifest claims every stage keep `[pre-commit]`.
     """
     yaml = pytest.importorskip("yaml")
     for rel in (".pre-commit-config.yaml", "templates/core/dot-pre-commit-config.yaml.tmpl"):
@@ -364,47 +363,26 @@ def test_only_the_push_gate_runs_at_the_push_stage():
         # the real thing, and this test is about the stage wiring around them.
         text = text.replace("{{ github_owner }}", "acme").replace("{{ devkit_ref }}", "v0.0.0")
         config = yaml.safe_load(text)
-        assert config["default_install_hook_types"] == ["pre-commit", "pre-push"], rel
+        assert "default_install_hook_types" not in config, rel
         assert config["default_stages"] == ["pre-commit"], rel
         staged = {h["id"]: h.get("stages") for repo in config["repos"] for h in repo["hooks"]}
-        # devkit's local wiring names the stage itself; a consumer's inherits it from the
-        # published manifest, asserted below. Every other hook that names a stage may
-        # only name the commit one -- that is how the three upstream fixers whose own
-        # manifest claims every stage are kept off the push.
-        assert "devkit-push-gate" in staged, rel
-        others = {k: v for k, v in staged.items() if v and k != "devkit-push-gate"}
+        assert "devkit-push-gate" not in staged, rel
+        others = {k: v for k, v in staged.items() if v}
         assert all(v == ["pre-commit"] for v in others.values()), (rel, others)
         for fixer in ("trailing-whitespace", "end-of-file-fixer", "check-added-large-files"):
-            assert others.get(fixer) == ["pre-commit"], f"{rel}: {fixer} would run on push"
+            assert others.get(fixer) == ["pre-commit"], f"{rel}: {fixer} names another stage"
+
+
+def test_the_published_push_gate_never_runs_in_a_commit_stage_run():
+    """`devkit-push-gate` stays published: a project generated while it was wired names
+    it, and pre-commit refuses a config naming an id its rev lacks. It stays push-stage
+    only, so CI's `pre-commit run --all-files` -- the commit stage -- never runs it."""
+    yaml = pytest.importorskip("yaml")
     published = {
         h["id"]: h
         for h in yaml.safe_load((REPO_ROOT / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"))
     }
     assert published["devkit-push-gate"]["stages"] == ["pre-push"]
-    assert published["devkit-push-gate"]["always_run"] is True
-    assert published["devkit-push-gate"]["pass_filenames"] is False
-
-
-def test_the_push_gate_runs_what_the_pr_gates_test_job_runs():
-    """Local and CI have to be the same commands, or a green push is not a prediction of
-    a green gate -- which is the whole reason the stage exists.
-
-    The deliberate differences are `tests/test_gate_parity.py`'s `LOCAL_ONLY`, imported
-    rather than restated: two ledgers of the same exemptions would disagree the first
-    time either was edited, and a reader has no way to tell which one is current.
-    """
-    from test_gate_parity import LOCAL_ONLY
-
-    gate_hook = load_script("scripts/precommit/run_push_gate.py")
-    workflow = (REPO_ROOT / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
-    runs = [line.split("run:", 1)[1].strip() for line in workflow.splitlines() if "run:" in line]
-    for step in gate_hook.STEPS:
-        if step.name in LOCAL_ONLY:
-            continue
-        needle = (
-            step.argv[0] if step.argv[0].startswith("scripts/") else "pytest scripts/hooks/tests/"
-        )
-        assert any(needle in run for run in runs), f"{step.name} ({needle}) is not in the PR gate"
 
 
 def test_published_hook_ids_match_devkits_own_local_config():
@@ -421,7 +399,9 @@ def test_published_hook_ids_match_devkits_own_local_config():
     }
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     local = {h["id"] for repo in config["repos"] if repo["repo"] == "local" for h in repo["hooks"]}
-    # devkit-drift is the documented exception: in devkit it compares against itself.
-    assert published - local == {"devkit-drift"}, (
-        f"published but not run here: {sorted(published - local - {'devkit-drift'})}"
+    # devkit-drift is a documented exception: in devkit it compares against itself. And
+    # devkit-push-gate is published for older consumer configs and wired nowhere here.
+    exceptions = {"devkit-drift", "devkit-push-gate"}
+    assert published - local == exceptions, (
+        f"published but not run here: {sorted(published - local - exceptions)}"
     )
