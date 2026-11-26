@@ -68,9 +68,22 @@ def test_every_job_parses_to_the_condition(workflow):
     text = CONTROL.sub("", workflow.read_text(encoding="utf-8"))
     text = re.sub(r"\{\{ *\w+ *\}\}", "x", text)  # the template's own placeholders
     jobs = _yaml().safe_load(text)["jobs"]
-    assert {name: job.get("if") for name, job in jobs.items()} == {
-        name: sync.PR_GATE_RUNS_IF for name in jobs
+    # A job no PR's run can satisfy -- the template's default-branch-only `E2E` -- is
+    # stricter than the condition, and kept whole.
+    gated = {name: job for name, job in jobs.items() if not sync.never_on_pr(job.get("if", ""))}
+    assert gated, "no job carries the condition"
+    assert {name: job.get("if") for name, job in gated.items()} == {
+        name: sync.PR_GATE_RUNS_IF for name in gated
     }
+
+
+def test_never_on_pr_reads_only_a_conjunction_that_excludes_every_pr():
+    assert sync.never_on_pr("${{ !cancelled() && github.event_name != 'pull_request' }}")
+    assert sync.never_on_pr("github.event_name != 'pull_request'")
+    assert not sync.never_on_pr(sync.PR_GATE_RUNS_IF), "lets the PRs that wait through"
+    assert not sync.never_on_pr("${{ github.event_name != 'pull_request' || always() }}")
+    assert not sync.never_on_pr("${{ github.event_name == 'pull_request' }}")
+    assert not sync.never_on_pr("")
 
 
 def _run_steps() -> list[tuple[str, str, str]]:

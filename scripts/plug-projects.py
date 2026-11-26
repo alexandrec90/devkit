@@ -621,16 +621,24 @@ def with_local_halves(
 
     out = [replace(s, local=True) if local(s) else s for s in steps]
     acted = {s.name for s in steps}
-    by_name = {c.name: c for c in candidates}
-    for name in dict.fromkeys(unplug):
-        found = by_name.get(name)
-        if found and name not in acted and found.on_disk and not found.plugged:
-            out.append(Step(RETIRE_HERE, name, local=True))
+    idle = [c for c in candidates if c.name not in acted and c.on_disk]
+    return out + local_only_halves(idle, plug=plug, unplug=unplug, retired=retired)
+
+
+def local_only_halves(
+    idle: list[Candidate], *, plug: list[str], unplug: list[str], retired: frozenset[str]
+) -> list[Step]:
+    """The retire or restore this PC owes a named project on disk whose registry half
+    is already true, so no step in the plan acts on it (`with_local_halves`)."""
+    by_name = {c.name: c for c in idle}
+    out = [
+        Step(RETIRE_HERE, name, local=True)
+        for name in dict.fromkeys(unplug)
+        if name in by_name and not by_name[name].plugged
+    ]
     for name in dict.fromkeys(plug):
         found = by_name.get(name)
-        if found is None or name in acted or not (found.on_disk and found.plugged):
-            continue
-        if found.archived or name in retired:
+        if found and found.plugged and (found.archived or name in retired):
             out.append(Step(RESTORE_HERE, name, unarchive=found.archived, local=True))
     return out
 

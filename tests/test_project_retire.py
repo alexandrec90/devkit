@@ -356,3 +356,16 @@ def test_a_failed_restore_keeps_its_record_for_the_next_try(tmp_path, monkeypatc
     )
     assert failed == "start what was running: exit 1"
     assert "geo" in retire.load_records(tmp_path / retire.RECORD)
+
+
+def test_archive_argv_answers_no_prompt_either_way():
+    assert retire.archive_argv("acme/geo") == ("gh", "repo", "archive", "acme/geo", "--yes")
+    undo = retire.archive_argv("acme/geo", undo=True)
+    assert undo == ("gh", "repo", "unarchive", "acme/geo", "--yes")
+
+
+def test_a_plan_starts_empty_and_shares_nothing_with_another():
+    first, second = retire.Plan(), retire.Plan()
+    first.steps.append(Step("x", ("x",)))
+    first.notes.append("n")
+    assert (second.steps, second.notes) == ([], [])

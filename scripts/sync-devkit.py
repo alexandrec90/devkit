@@ -552,9 +552,20 @@ def _job_insert(key: str, children: list[str]) -> tuple[str, str]:
     owned = [c.strip() for c in children if _indent(c) == depth and c.strip().startswith("if:")]
     if not owned:
         return f"{' ' * depth}if: {PR_GATE_RUNS_IF}\n", ""
-    if owned[0] == f"if: {PR_GATE_RUNS_IF}":
+    condition = owned[0].removeprefix("if:").strip()
+    if condition == PR_GATE_RUNS_IF or never_on_pr(condition):
         return "", ""
     return "", f"job `{key}` keeps its own `if:`, so it still runs on every PR"
+
+
+def never_on_pr(condition: str) -> bool:
+    """A job `if:` that no PR's run can satisfy: a plain conjunction, no `||` anywhere,
+    one of whose terms is `github.event_name != 'pull_request'`. The generated gate's
+    `E2E` job is one (the default branch only), and it is stricter than
+    `PR_GATE_RUNS_IF`, so it is left as written and needs no note."""
+    expression = condition.removeprefix("${{").removesuffix("}}").strip()
+    terms = [term.strip() for term in expression.split("&&")]
+    return "||" not in expression and "github.event_name != 'pull_request'" in terms
 
 
 def _with_inserts(lines: list[str], inserts: dict[int, str]) -> str:

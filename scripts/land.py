@@ -35,6 +35,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 HERE = Path(__file__).resolve().parent
 MERGER_PATH = HERE / "merge-dependabot-prs.py"
@@ -44,6 +45,10 @@ CHECK_PATH = HERE / "land_check.py"
 # starts in tens of seconds, and merges one PR at a time per repository.
 QUEUE_WAIT = 180.0
 POLL_EVERY = 5.0
+# What git says when another fetch holds the ref this one would move, and how many
+# fetches `fetch` makes before that refusal is the run's.
+REF_LOCKED = "cannot lock ref"
+FETCH_TRIES = 3
 
 # The branch a commit made on the default branch moves to.
 BRANCH_PREFIX = "land/"
@@ -128,10 +133,25 @@ def branch_name(title: str, now: float) -> str:
     return f"{BRANCH_PREFIX}{words or 'change'}-{time.strftime('%m%d-%H%M%S', time.localtime(now))}"
 
 
-def commit(repo: Repo, title: str, body: str, run, now: float) -> str:
-    """Commit every change in the tree; the branch the commit is on."""
+def merged_before(repo: Repo, branch: str, merger, run) -> bool:
+    """Whether a PR from `branch` has already merged. `git_policy` refuses every push to
+    that name for good, and a fresh `claude --worktree` tree can be handed one an earlier
+    PR used (c15b7baa), so the work moves to a new name instead. A question GitHub does
+    not answer reads as no: the push then says what is wrong itself."""
+    owner = repo.slug.split("/", 1)[0]
+    head = quote(f"{owner}:{branch}", safe=":")
+    try:
+        pulls = merger.gh_json(f"repos/{repo.slug}/pulls?state=closed&head={head}", run)
+    except (merger.GhError, ValueError):
+        return False
+    return any(isinstance(pr, dict) and pr.get("merged_at") for pr in pulls or [])
+
+
+def commit(repo: Repo, title: str, body: str, run, now: float, retired=None) -> str:
+    """Commit every change in the tree; the branch the commit is on. `retired(branch)`
+    says the current branch's name may not take a push (`merged_before`)."""
     branch = git(["branch", "--show-current"], run, repo.root, check=False)
-    if not branch or branch == repo.default:
+    if not branch or branch == repo.default or (retired and retired(branch)):
         branch = branch_name(title, now)
         git(["switch", "-c", branch], run, repo.root)
     git(["add", "-A"], run, repo.root)
@@ -142,8 +162,24 @@ def commit(repo: Repo, title: str, body: str, run, now: float) -> str:
     return branch
 
 
+def fetch(repo: Repo, run, sleep=time.sleep) -> None:
+    """`git fetch origin <default>`, waited out while another fetch holds the ref.
+
+    Every worktree shares the checkout's refs, so a scheduled sync or a second session
+    fetching at the same moment makes git refuse with `REF_LOCKED`, which is gone a
+    moment later (81293b9c). Any other failure is raised at once."""
+    for attempt in range(1, FETCH_TRIES + 1):
+        try:
+            git(["fetch", "--quiet", "origin", repo.default], run, repo.root)
+            return
+        except LandError as failed:
+            if REF_LOCKED not in str(failed) or attempt == FETCH_TRIES:
+                raise
+            sleep(POLL_EVERY)
+
+
 def changed_files(repo: Repo, run) -> list[str]:
-    git(["fetch", "--quiet", "origin", repo.default], run, repo.root)
+    fetch(repo, run)
     # No rename detection, which lists only the new path; `-z`, or git quotes non-ASCII.
     # Either would hide a guarded path from `needs_gate`.
     span = f"origin/{repo.default}...HEAD"
@@ -231,9 +267,15 @@ def main_checkout(repo: Repo, run) -> Path:
 
 
 def sync_checkout(repo: Repo, run) -> str:
-    """Fast-forward the main checkout to the merge; a sentence saying what happened."""
+    """Fast-forward the main checkout to the merge; a sentence saying what happened.
+
+    Never raises on the fetch: the PR has merged by now, and a failure here reported as
+    the run's failure hid the merge and sent a retry into a retired branch (81293b9c)."""
     target = main_checkout(repo, run)
-    git(["fetch", "--quiet", "origin", repo.default], run, repo.root)
+    try:
+        fetch(repo, run)
+    except LandError as failed:
+        return f"{target} left for the scheduled sync: {failed}"
     on = git(["branch", "--show-current"], run, target, check=False)
     if on != repo.default:
         return f"{target} is on {on or 'a detached HEAD'}, not {repo.default}: left as it is"
@@ -276,7 +318,11 @@ def land(args, run=utf8_run, sleep=time.sleep, clock=time.monotonic, merger=None
     """Every step; the outcome: `LANDED`, `GATED`, `CONFLICT`, `QUEUED` or `HELD`."""
     merger = merger or load_merger()
     repo = read_repo(Path(args.cwd), run)
-    branch = commit(repo, args.title, args.body, run, time.time())
+
+    def retired(name: str) -> bool:
+        return merged_before(repo, name, merger, run)
+
+    branch = commit(repo, args.title, args.body, run, time.time(), retired)
     files = changed_files(repo, run)
     if not files:
         raise LandError(f"nothing differs from origin/{repo.default}: there is nothing to land")

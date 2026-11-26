@@ -312,7 +312,10 @@ def test_the_generated_e2e_script_keeps_the_local_e2e_contract(tmp_path, monkeyp
     assert e2e.split_args(["--ci", "tests/test_b.py"]) == ("ci_e2e", ["tests/test_b.py"])
     assert e2e.split_args(["tests/test_b.py", "--ci"]) == ("ci_e2e", ["tests/test_b.py"])
     ci_argv = e2e.pytest_argv(tmp_path / "r.xml", ["tests/test_b.py"], "ci_e2e")
-    assert ci_argv[ci_argv.index("-m") + 1] == "ci_e2e" and "tests/test_b.py" in ci_argv
+    # After `pytest`: the argv's first `-m` is `python -m pytest`'s, not the marker's.
+    ci_to_pytest = ci_argv[ci_argv.index("pytest") + 1 :]
+    assert ci_to_pytest[ci_to_pytest.index("-m") + 1] == "ci_e2e"
+    assert "tests/test_b.py" in ci_to_pytest
     code, lines = e2e.verdict(0, [], strict=True, marker="ci_e2e")
     assert code != 0 and "no ci_e2e test executed" in lines[-1]
     # 51e8b20b, the other half: a devkit session's `UV_NO_SYNC` reached a run in a tree

@@ -420,6 +420,73 @@ def test_sync_checkout_fast_forwards_and_says_so(world):
     assert said.endswith("is at origin/main") and (world.checkout / "s.txt").exists()
 
 
+def test_a_branch_whose_pr_already_merged_lands_from_a_fresh_one(world):
+    """c15b7baa: a new worktree handed a name an earlier PR used, whose push the branch
+    policy refuses for good."""
+    (world.tree / "late.txt").write_text("late\n", encoding="utf-8")
+    github = FakeGitHub(world)
+    github.prs[7] = {"number": 7, "head_ref": "worktree-s1", "merged_at": "2026-11-26"}
+    assert run_land(world, github) == land.LANDED
+    [made] = [pr for number, pr in github.prs.items() if number != 7]
+    assert made["head_ref"].startswith(land.BRANCH_PREFIX)
+
+
+def test_merged_before_reads_a_closed_unmerged_pr_or_no_answer_as_no(world):
+    github, repo = FakeGitHub(world), repo_of(world)
+    github.prs[7] = {"number": 7, "head_ref": "worktree-s1"}
+    assert not land.merged_before(repo, "worktree-s1", merger, github)
+    github.prs[7]["merged_at"] = "2026-11-26"
+    assert land.merged_before(repo, "worktree-s1", merger, github)
+
+    def down(argv, **_kw):
+        return SimpleNamespace(stdout="", stderr="HTTP 503", returncode=1)
+
+    assert not land.merged_before(repo, "worktree-s1", merger, down)
+
+
+def fetch_failing(times: int, said: str):
+    """A runner whose first `times` fetches fail saying `said`; every call recorded."""
+    calls: list[list[str]] = []
+
+    def run(argv, **_kw):
+        calls.append(list(argv))
+        failed = "fetch" in argv and calls.count(list(argv)) <= times
+        return SimpleNamespace(stdout="", stderr=said if failed else "", returncode=int(failed))
+
+    return run, calls
+
+
+def test_fetch_waits_out_a_ref_another_fetch_holds(world):
+    """81293b9c: two fetches in the checkout's shared refs at once."""
+    locked = "error: cannot lock ref 'refs/remotes/origin/main': is at a but expected b"
+    run, calls = fetch_failing(2, locked)
+    slept: list[float] = []
+    land.fetch(repo_of(world), run, slept.append)
+    assert len(calls) == 3 and slept == [land.POLL_EVERY] * 2
+    run, _ = fetch_failing(land.FETCH_TRIES, locked)
+    with pytest.raises(land.LandError, match="cannot lock ref"):
+        land.fetch(repo_of(world), run, lambda _s: None)
+
+
+def test_fetch_raises_any_other_failure_at_once(world):
+    run, calls = fetch_failing(1, "fatal: could not read from remote repository")
+    with pytest.raises(land.LandError, match="could not read"):
+        land.fetch(repo_of(world), run, lambda _s: pytest.fail("slept on a real failure"))
+    assert len(calls) == 1
+
+
+def test_a_fetch_that_fails_after_the_merge_is_said_not_raised(world, monkeypatch):
+    """The PR merged already: the sync is a courtesy, and its failure must not read as
+    the run's (81293b9c)."""
+
+    def refused(*_a, **_kw):
+        raise land.LandError("git fetch --quiet origin main: error: cannot lock ref")
+
+    monkeypatch.setattr(land, "fetch", refused)
+    said = land.sync_checkout(repo_of(world), subprocess.run)
+    assert "left for the scheduled sync" in said and "cannot lock ref" in said
+
+
 def test_sync_checkout_leaves_a_checkout_on_another_branch(world):
     sh(["git", "switch", "--quiet", "-c", "mine"], world.checkout)
     assert "left as it is" in land.sync_checkout(repo_of(world), subprocess.run)
