@@ -142,7 +142,9 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_USAGE
         edited = with_role(text, wanted)
         if edited is None:
-            print(f"machine_role: no `settings` object to write into in {workspace}", file=sys.stderr)
+            print(
+                f"machine_role: no `settings` object to write into in {workspace}", file=sys.stderr
+            )
             return EXIT_USAGE
         if edited != text:
             workspace.write_text(edited, encoding="utf-8", newline="")

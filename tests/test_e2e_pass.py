@@ -541,9 +541,7 @@ def test_no_run_starts_below_the_disk_floor_whatever_the_role(tmp_path, capsys):
 def test_not_ours_names_the_holder_and_a_worker_wins_an_open_claim(tmp_path, monkeypatch):
     seams = e2e_pass.Seams(root=tmp_path / "devkit", host="pc-b", git_for=lambda _p: None)
     claims = e2e_pass.job_claims
-    answers = iter(
-        [claims.Attempt(claims.LOST, holder="pc-a"), claims.Attempt(claims.WON)]
-    )
+    answers = iter([claims.Attempt(claims.LOST, holder="pc-a"), claims.Attempt(claims.WON)])
     monkeypatch.setattr(claims, "claim", lambda *a: next(answers))
     job = "e2e-carameli-abc"
     assert e2e_pass.not_ours("carameli", tmp_path, job, "worker", seams) == "claimed by pc-a"
@@ -560,7 +558,9 @@ def test_a_run_s_claim_is_marked_finished_on_the_machine_that_holds_it(tmp_path)
         checkout = tmp_path / name
         checkout.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
-        subprocess.run(["git", "remote", "add", "origin", remote.as_posix()], cwd=checkout, check=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", remote.as_posix()], cwd=checkout, check=True
+        )
         checkouts.append(checkout)
     a, b = checkouts
     claims = e2e_pass.job_claims

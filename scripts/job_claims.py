@@ -554,7 +554,9 @@ HELD_FOR_WORKER = "held for a worker"
 SIGHTINGS_DIR = Path("logs") / "claims"
 
 
-def worker_first(role: str, first_seen: float, now: float, window: _dt.timedelta = WORKER_FIRST) -> str:
+def worker_first(
+    role: str, first_seen: float, now: float, window: _dt.timedelta = WORKER_FIRST
+) -> str:
     """Why a machine with `role` leaves a heavy job first seen at `first_seen` to a
     worker for now, or "" when it may claim. Only a workstation waits."""
     if role != machine_role.WORKSTATION:
@@ -616,5 +618,7 @@ class Sightings:
         # Unrecorded, the window starts again next fire: the job is later, never lost.
         with contextlib.suppress(OSError):
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(seen, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+            self.path.write_text(
+                json.dumps(seen, indent=1, sort_keys=True) + "\n", encoding="utf-8"
+            )
         return worker_first(role, first, now)

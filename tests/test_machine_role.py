@@ -59,7 +59,7 @@ def test_setting_a_role_adds_it_keeping_every_comment():
     edited = mr.with_role(LIVE, mr.WORKER)
     assert edited is not None
     assert mr.role_of(edited) == mr.WORKER
-    assert "// \"devkit.machineRole\": \"worker\" in a comment" in edited
+    assert '// "devkit.machineRole": "worker" in a comment' in edited
     assert devkit_jsonc.loads(edited)["settings"]["devkit.fixPass"] == "dispatch"
 
 
@@ -109,7 +109,5 @@ def test_the_cli_refuses_a_file_it_cannot_read_or_write_into(tmp_path, capsys):
 
 def test_the_role_is_a_machine_setting_a_render_carries_and_an_adopt_never_records():
     assert mr.SETTING in devkit_project.MACHINE_SETTINGS
-    declared = devkit_project.machine_settings(
-        devkit_jsonc.loads(devkit_project.canonical_text())
-    )
+    declared = devkit_project.machine_settings(devkit_jsonc.loads(devkit_project.canonical_text()))
     assert declared[mr.SETTING] == mr.UNSET, "a fresh machine starts with no role"

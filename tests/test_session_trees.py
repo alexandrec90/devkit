@@ -211,7 +211,9 @@ def test_a_pass_reaps_a_fixer_tree_whose_pr_was_closed_and_says_why(tmp_path):
     checkout, run, gh, asked = _abandoned_checkout(tmp_path)
     said: list[str] = []
     assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
-    assert said == ["session tree carameli:fix-nightly-0919: its PR closed unmerged at this HEAD -- reaped"]
+    assert said == [
+        "session tree carameli:fix-nightly-0919: its PR closed unmerged at this HEAD -- reaped"
+    ]
     assert any("closed" in args for args in asked)
 
 
