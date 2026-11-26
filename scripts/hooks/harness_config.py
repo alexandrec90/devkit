@@ -282,10 +282,16 @@ class DeliveryConfig:
     change to one waits for its gate and then merges itself; nothing else does. A glob
     where `*` crosses `/`, or a directory with a trailing `/`. Read by
     `merge-dependabot-prs.guarded_paths`, which `land.py` shares.
+
+    `e2e` is `ci` when no test of the end-to-end tier needs this PC: the `PR Gate`'s `E2E`
+    job runs `scripts/e2e.py --ci`, and devkit's local job records the project as run in
+    CI rather than run it (`e2e-pass.runs_in_ci`, which reads the file itself). Anything
+    else is "", the tier on the PC.
     """
 
     flow: str = "gated"
     guarded: tuple[str, ...] = ()
+    e2e: str = ""
 
 
 @dataclass(frozen=True)
@@ -514,7 +520,9 @@ def _delivery_from(raw: dict[str, Any], default: DeliveryConfig) -> DeliveryConf
     flow = raw.get("flow")
     chosen = replace(default, flow=flow) if flow in ("gated", "direct") else default
     guarded = _as_str_tuple(raw.get("guarded"), default.guarded)
-    return replace(chosen, guarded=tuple(g.strip() for g in guarded if g.strip()))
+    # The same exactness as `flow`: only its one word moves the tier off the PC.
+    e2e = "ci" if raw.get("e2e") == "ci" else default.e2e
+    return replace(chosen, guarded=tuple(g.strip() for g in guarded if g.strip()), e2e=e2e)
 
 
 def _schedule_from(raw: dict[str, Any], default: ScheduleConfig) -> ScheduleConfig:
