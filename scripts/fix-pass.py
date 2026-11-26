@@ -27,7 +27,11 @@ which survives this file crashing). Two rules hold it together:
    runs Actions (`fix_visibility.py`), and a request waiting on a PC with no elevated
    worker (`fix_elevated.py`), are each filed as its owner's step.
 5. **Harness first**: while anything harness-shaped is red, one devkit session gets
-   all of it and project fixers are held, out loud. Only one at a time.
+   all of it, and only one at a time. A project fixer is held behind it, out loud and
+   with the reason, only where the harness could explain that project's red
+   (`fix_cycle.harness_explains`): an adoption, a vendored-tier or drift failure, an
+   entry the harness is red on too, or nothing to read. The rest go, since a project's
+   gate pins a devkit tag and a red devkit main cannot by itself break it.
 6. **Then projects**, conflicts first, each under `fix_budget.budget`: the ledger, the
    escalation ladder.
 7. **Installers current** (`installers.py maintain`), on a dispatching pass, so a

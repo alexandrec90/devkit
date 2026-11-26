@@ -631,8 +631,11 @@ each, run here.
    devkit session gets them the same pass. Nothing ends as "needs a human".
 5. **Harness first.** While anything harness-shaped is red — a vendored test, a
    signature shared across consumers, devkit's own default branch, a release still
-   being adopted — one devkit session gets the whole set and every project fixer is
-   held, and the record says so. The harness-defect
+   being adopted — one devkit session gets the whole set. A project fixer is held
+   behind it only where the harness could explain that project's red — an adoption, a
+   vendored-tier or drift failure, an entry the harness is red on too, or nothing to
+   read — and the record says why; the rest go, since a project's gate pins a devkit
+   tag and a red devkit main cannot by itself break it. The harness-defect
    ledger's open backlog (`scripts/harness_triage.py`, the `/triage-harness` sweep's
    reader) rides in that session, and gets one of its own when nothing else is red,
    but holds nobody. A harness PR that is merely behind its base or conflicted is the

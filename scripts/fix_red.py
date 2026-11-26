@@ -54,7 +54,7 @@ def collect_red(
     checkouts whose default-branch verdict could not be read.
 
     devkit's verdict is its gate's alone: a red local run is a failure to fix, not a
-    reason to hold every project behind devkit's main the way a red gate is.
+    reason to hold projects behind devkit's main the way a red gate is.
 
     Each default branch's own gate is read beside the PRs: a red one is a failure to
     send a session at (devkit's is the harness itself), not only a reason to hold. The
@@ -241,7 +241,8 @@ def regate(project_dir: Path) -> tuple[bool, str]:
 def regate_unread(root: Path, unread: list[str], mode: str) -> tuple[list[str], set[str]]:
     """Re-run the gate wherever the default branch had no verdict: `(lines, re-run)`.
 
-    An unreadable devkit main holds every project fixer, and nothing else ever makes it
+    An unreadable devkit main holds every project fixer the harness could explain
+    (`fix_cycle.harness_explains`), and nothing else ever makes it
     readable. A checkout re-run here is `RUNNING` for this pass, as after any merge.
     Outside `dispatch` mode it only says what it would do, and counts the checkout as
     re-run all the same: a rehearsal is read for what dispatch would hold, and it held
