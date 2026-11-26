@@ -3168,12 +3168,13 @@
 		// the same time. Use `worktree.py new` for those; this is fine for everything
 		// else. Gitignored in each repo so the checkout does not read as dirty.
 		// `hosts`: this file is the same on every PC, and the phone needs one server per
-		// project, not one per project per machine -- so only desktop-b9fc8vp serves.
+		// project, not one per project per machine -- so only desktop-900mt6f, the laptop
+		// kept on for background work, serves.
 		"devkit.remoteControl": {
 			"projects": "all",
 			"spawn": "worktree",
 			"permissionMode": "bypassPermissions",
-			"hosts": "desktop-b9fc8vp"
+			"hosts": "desktop-900mt6f"
 		},
 		// Which machine runs each project's nightly local end-to-end tests
 		// (`devkit-local-e2e`, `scripts/e2e-pass.py`). Every PC registers the job; at fire
@@ -3186,7 +3187,8 @@
 		"devkit.localE2e": {
 			// tvshell's tier checks the TV's own logs and crash events, so it runs on the
 			// PC the TV is plugged into.
-			"hosts": {"*": "desktop-b9fc8vp", "tvshell": "desktop-ml5f3pj"}
+			// Every other project's runs on the always-on background PC.
+			"hosts": {"*": "desktop-900mt6f", "tvshell": "desktop-ml5f3pj"}
 		},
 		// Ingestion that runs with nobody connected, kept going by `devkit-collectors` --
 		// see README, "Ingestion collectors". Declared here for every machine; RUN on none
