@@ -3262,6 +3262,10 @@
 		// `plan` writes what it would do, `dispatch` does it. The scheduled job reads it
 		// every half hour; the VS Code task passes `dispatch` by hand. Off until a week of
 		// manual passes has read right -- the wiring is complete either way.
-		"devkit.fixPass": "off"
+		"devkit.fixPass": "off",
+		// Which kind of PC this is (`machine_role.py`): `worker` takes heavy jobs at once,
+		// `workstation` only once no worker has claimed one, "" orders PCs by free memory
+		// alone. Each machine's own answer: `python scripts/machine_role.py --set worker`.
+		"devkit.machineRole": ""
 	}
 }

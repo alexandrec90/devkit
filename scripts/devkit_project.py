@@ -50,6 +50,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
 import fix_cycle
+import machine_role
 import sweep
 import task_input
 
@@ -1307,14 +1308,15 @@ HISTORY_DEPTH = 40
 
 # The operator's switches: settings a machine sets for itself, in its live file, and
 # that devkit's copy only gives a default for. `devkit.fixPass` turns this machine's
-# scheduled fix pass on; `devkit.onHold` pauses projects for the passes run here. Each is
+# scheduled fix pass on; `devkit.onHold` pauses projects for the passes run here;
+# `devkit.machineRole` says whether heavy jobs come here first (`machine_role.py`). Each is
 # a live edit by design, so as ordinary settings they armed the refusal on every machine
 # that used them -- and one live `dispatch` kept `devkit.collectors`, merged in #463,
 # from ever reaching this machine (6d71fa28). So a render carries their live values over
 # the canonical ones, an adopt keeps the canonical defaults, and neither is drift.
 # Spelled through the modules that read them, so a renamed switch cannot leave this
 # tuple naming a key nothing sets.
-MACHINE_SETTINGS = (fix_cycle.SETTING, sweep.ON_HOLD_SETTING)
+MACHINE_SETTINGS = (fix_cycle.SETTING, sweep.ON_HOLD_SETTING, machine_role.SETTING)
 
 
 def live_only(problems: list[str]) -> list[str]:

@@ -314,6 +314,25 @@ it solves.** What stays per machine, and is not papered over:
 - **The pass's other writes.** `merge_green_adoptions`, `cut_release` and `tend` take no
   claim.
 
+**Which PC takes a heavy job is a per-machine role, not a race** (`machine_role.py`,
+`devkit.machineRole` in the live workspace file, one of `devkit_project.MACHINE_SETTINGS`).
+Free memory alone handed heavy work to the desk a person works at whenever it had a
+moment free. A `workstation` waits `job_claims.WORKER_FIRST` from its first sight of a job
+(`job_claims.Sightings`, under `logs/claims/`) before claiming; a `worker` claims at once;
+unset is the memory order. Keep three things when touching it:
+
+- **The window is the only fallback, so it must close.** Nothing asks whether the worker
+  is alive. A worker that never claims is the workstation's job at the window's end, and
+  the window stays shorter than every heavy kind's TTL, or a claim a worker won and
+  finished would expire first and be broken rather than lost to.
+- **Heavy is said by the caller, and is short.** The medium tier, the local e2e with no
+  `hosts`, a fix-pass send that opens a session, a queue `run` or `agent`. A cheap job --
+  the trigger, ship, an elevated request, an update or rerun send -- asks neither the
+  role nor `job_claims.DISK_FLOOR_MB`, which every heavy job does ask.
+- **A job judged at a commit marks its claim finished** (`job_claims.finish`). The medium
+  tier and the local e2e record a result only where they ran, so the other PC reads the
+  commit as unjudged, and without the mark it broke the claim at the TTL and ran it again.
+
 ## The events ledger: append-only, and that is why resolution is an event
 
 `harness_events.py` is the write half and `harness_triage.py` the read half.

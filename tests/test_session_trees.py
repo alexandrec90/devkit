@@ -150,6 +150,90 @@ def test_a_stillborn_tree_needs_no_merged_pr_and_no_transcript(tmp_path):
     assert "locked" in st.verdict(locked, checkout, False, {}, None, stillborn=True)
 
 
+def test_closed_heads_keeps_only_prs_closed_without_merging():
+    payload = json.dumps(
+        [
+            {"headRefName": "a", "headRefOid": "1", "state": "CLOSED"},
+            {"headRefName": "b", "headRefOid": "2", "state": "MERGED"},
+            {"headRefName": "c", "state": "CLOSED"},
+            "x",
+        ]
+    )
+    assert st.closed_heads(payload) == {"a": "1"}
+    assert st.closed_heads("not json") == {}
+
+
+def test_only_a_tree_the_pass_stamped_is_dispatched(tmp_path):
+    assert not st.dispatched(tree(tmp_path, name="mine"))
+    assert st.dispatched(stamped(tmp_path, st.fix_reports.NO_OUTCOME, name="sent"))
+
+
+def test_a_dispatched_tree_whose_pr_closed_at_its_head_may_go(tmp_path):
+    one = tree(tmp_path)
+    checkout = tmp_path / "carameli"
+    assert st.verdict(one, checkout, False, {}, QUIET, abandoned={one.branch: "abc"}) == ""
+    kept = {
+        "commits after the close": st.verdict(
+            one, checkout, False, {}, QUIET, abandoned={one.branch: "def"}
+        ),
+        "not dispatched": st.verdict(one, checkout, False, {}, QUIET, abandoned=None),
+        "dirty": st.verdict(one, checkout, True, {}, QUIET, abandoned={one.branch: "abc"}),
+        "recently used": st.verdict(one, checkout, False, {}, 60, abandoned={one.branch: "abc"}),
+    }
+    assert all(kept.values()), [name for name, why in kept.items() if not why]
+
+
+def _abandoned_checkout(tmp_path, closed_code: int = 0):
+    checkout = tmp_path / "carameli"
+    one = stamped(tmp_path, st.fix_reports.NO_OUTCOME)
+    listing = porcelain(
+        (str(checkout), "master", "000", False), (str(one.path), one.branch, one.head, False)
+    )
+
+    def run(argv):
+        if argv[-2:] == ["list", "--porcelain"]:
+            return done(out=listing)
+        return done(out="1\n" if "rev-list" in argv else "")
+
+    asked: list[tuple] = []
+
+    def gh(*args):
+        asked.append(args)
+        if "closed" in args:
+            row = {"headRefName": one.branch, "headRefOid": one.head, "state": "CLOSED"}
+            return done(closed_code, out=json.dumps([row]))
+        return done(out="[]")
+
+    return checkout, run, (lambda path: gh), asked
+
+
+def test_a_pass_reaps_a_fixer_tree_whose_pr_was_closed_and_says_why(tmp_path):
+    checkout, run, gh, asked = _abandoned_checkout(tmp_path)
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert said == ["session tree carameli:fix-nightly-0919: its PR closed unmerged at this HEAD -- reaped"]
+    assert any("closed" in args for args in asked)
+
+
+def test_closed_prs_that_cannot_be_read_keep_the_tree_and_say_so(tmp_path):
+    checkout, run, gh, _asked = _abandoned_checkout(tmp_path, closed_code=1)
+    said: list[str] = []
+    assert st.sweep_checkout(checkout, True, said.append, run, gh, lambda p: QUIET) == 0
+    assert said == ["session trees in carameli: closed PRs could not be read -- those kept"]
+
+
+def test_a_checkout_with_no_dispatched_tree_asks_for_no_closed_prs(tmp_path):
+    checkout, run, gh, calls = _checkout(tmp_path, head="newer")
+    asked: list[tuple] = []
+
+    def counting(path):
+        inner = gh(path)
+        return lambda *args: asked.append(args) or inner(*args)
+
+    st.sweep_checkout(checkout, False, [].append, run, counting, lambda p: QUIET)
+    assert not any("closed" in args for args in asked)
+
+
 def _stillborn_checkout(tmp_path, count: int):
     """A checkout with `count` stillborn trees, and the `run` that stands for its git."""
     checkout = tmp_path / "carameli"

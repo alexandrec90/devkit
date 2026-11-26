@@ -40,15 +40,29 @@ ref outside `refs/devkit/`, so `--no-verify` cannot reach a branch or a tag thro
 with more free memory waiting less (`delay_seconds`) means work drifts to the emptiest
 one, and one under `host_memory`'s hold does not claim at all (`refusal`).
 
+**A role orders them before memory does** (`machine_role.py`). Memory alone is a race a
+person's busy desk wins whenever it has a moment of memory free, so a `workstation`
+leaves a heavy job alone for `WORKER_FIRST` from when it first saw it (`Sightings`,
+`worker_first`) and a `worker` claims at once. Nothing has to know the worker is alive:
+a worker that never claims -- off, offline, or under its own floors -- is a job the
+workstation takes when the window closes, late rather than lost.
+
+**A disk floor stands beside the memory one** (`DISK_FLOOR_MB`, `disk_refusal`): every
+heavy job cuts or fills a tree, so a machine short of disk on the drive holding its
+checkouts takes none, and the other PC, or the next fire, does.
+
 Tested in `tests/test_job_claims.py`, against real bare repositories wherever git's own
 behaviour is the claim being made.
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
+import json
 import os
 import re
+import shutil
 import sys
 import time
 import uuid
@@ -58,6 +72,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import host_memory
+import machine_role
 import sweep
 
 Git = sweep.Git
@@ -81,6 +96,7 @@ FIX = "fix"  # one fixer at one problem at one commit
 HARNESS = "harness"  # the single devkit session
 COLLECTOR = "collector"  # one `failover` collector, renewed every pass (`collector_lease`)
 TIER = "tier"  # one medium-tier run of one project at one commit (`tier-pass.py`)
+E2E = "e2e"  # one local end-to-end run of one project at one commit (`e2e-pass.py`)
 TTL: dict[str, _dt.timedelta] = {
     # Past `after-merge-pass.RUN_TIMEOUT` and its fast-forward, or a live run is broken.
     RUN: _dt.timedelta(hours=2),
@@ -96,6 +112,8 @@ TTL: dict[str, _dt.timedelta] = {
     # Past `tier-pass.DEFAULT_TIMEOUT_MINUTES` plus its tree's cut and provision, held by
     # a test, or a run still going is broken and the same commit tested twice.
     TIER: _dt.timedelta(hours=1, minutes=15),
+    # Past `e2e-pass.DEFAULT_TIMEOUT_MINUTES` and its fast-forward, held by a test.
+    E2E: _dt.timedelta(hours=1, minutes=30),
 }
 DEFAULT_TTL = _dt.timedelta(hours=1)
 
@@ -131,6 +149,8 @@ NO_IDENTITY_SET = {
     "GIT_COMMITTER_EMAIL": "devkit@users.noreply.github.com",
 }
 SUBJECT_HOST = re.compile(r"\bby (\S+)")
+# How a claim `finish` restamped starts: its job ran, and the claim is never broken.
+FINISHED_SUBJECT = "finished "
 REF_FORMAT = "%(refname)%00%(objectname)%00%(committerdate:unix)%00%(subject)"
 
 
@@ -264,7 +284,7 @@ def claim(git: Git, claim_id: str, kind: str, host: str, now: float | None = Non
         # is a win, and the next cycle finds out which.
         return Attempt(FAILED, said=f"held, then unreadable: {said}")
     mine = held.host == host
-    if not mine and not expired(held, kind, now):
+    if not mine and (finished(held) or not expired(held, kind, now)):
         return Attempt(LOST, holder=held.host)
     outcome, said = _push(git, commit, ref, held.sha)
     if outcome == LOST:
@@ -272,6 +292,29 @@ def claim(git: Git, claim_id: str, kind: str, host: str, now: float | None = Non
     if outcome == FAILED:
         return Attempt(FAILED, said=said)
     return Attempt(WON, broke="" if mine else held.host)
+
+
+def finished(held: Ref) -> bool:
+    """`held` was restamped by `finish`: its job ran, so no TTL makes it another's."""
+    return held.subject.startswith(FINISHED_SUBJECT)
+
+
+def finish(git: Git, claim_id: str, kind: str, host: str, now: float | None = None) -> bool:
+    """Mark `host`'s claim of `claim_id` as a job that ran; whether the server took it.
+
+    For a job keyed by what it judges (a project at a commit) and recorded only on the
+    machine that ran it, so another PC would otherwise read "not judged here" and break
+    the claim at its TTL to run the same commit again: the medium tier, the local e2e.
+    Kept on the claim ref itself rather than a done ref, so it goes with `prune`.
+    """
+    now = time.time() if now is None else now
+    ref = claim_ref(claim_id)
+    held = holder(git, ref)
+    if held is None or held.host != host:
+        return False
+    moment = _dt.datetime.fromtimestamp(now, _dt.UTC).isoformat(timespec="seconds")
+    subject = f"{FINISHED_SUBJECT}{kind} by {host} at {moment}"
+    return stamp(git, ref, subject, held.sha, now)
 
 
 def holder(git: Git, ref: str) -> Ref | None:
@@ -405,6 +448,8 @@ class Machine:
     docker: bool = False
     checkouts: frozenset[str] = frozenset()
     idle_seconds: float = float("inf")  # since the last keyboard or mouse input
+    free_disk_mb: int | None = None  # `free_disk_mb`; None is a probe that failed
+    role: str = machine_role.UNSET
 
 
 @dataclass(frozen=True)
@@ -414,13 +459,17 @@ class Needs:
     docker: bool = False
     checkout: str = ""  # a project that must be checked out here
     idle_seconds: float = 0.0  # stillness a job that opens windows must wait for
-    memory: bool = True  # False for a job that starts no session and no heavy process
+    # False for a job that starts no session and no heavy process: it is then asked for
+    # neither memory nor disk.
+    memory: bool = True
 
 
 def refusal(needs: Needs, machine: Machine) -> str:
     """Why this machine must not claim a job with `needs`, or "" when it may."""
     if needs.memory and not host_memory.room_for_session(machine.free_mb):
         return f"held for memory: {machine.free_mb} MB free"
+    if needs.memory and (why := disk_refusal(machine.free_disk_mb)):
+        return why
     if needs.docker and not machine.docker:
         return "needs a working docker"
     if needs.checkout and needs.checkout not in machine.checkouts:
@@ -453,3 +502,119 @@ def wait_turn(
     if pause > 0:
         sleep(pause)
     return pause
+
+
+# --- disk ------------------------------------------------------------------------------------
+
+# Below this much free on the drive holding the checkouts, a machine claims no heavy job.
+# Each one cuts or fills a tree: a fixer's provisioned worktree with its `.venv` and
+# `node_modules` is one to two gigabytes, a medium-tier tree the same until it is
+# destroyed, and Windows itself wants several free for updates and its page file. Eight
+# leaves a laptop with 30 GB free room for a dozen trees before it stops, and stops it
+# while there is still room to clean up rather than at a full disk nothing can write to.
+DISK_FLOOR_MB = 8 * 1024
+HELD_FOR_DISK = "held for disk"
+
+
+def free_disk_mb(path: Path) -> int | None:
+    """Free megabytes on the drive holding `path`; None when it cannot be read."""
+    try:
+        return int(shutil.disk_usage(path).free // (1024 * 1024))
+    except (OSError, ValueError):
+        return None
+
+
+def disk_here() -> int | None:
+    """`free_disk_mb` of the drive devkit's checkout is on, which is the one every
+    registered checkout sits beside, and so where every tree a heavy job cuts goes."""
+    return free_disk_mb(Path(__file__).resolve().parents[1])
+
+
+def disk_refusal(free_mb: int | None, floor: int = DISK_FLOOR_MB) -> str:
+    """Why a heavy job may not start on `free_mb` of disk, or "". A probe that failed is
+    read as no guard, as `host_memory` reads a failed memory probe."""
+    if free_mb is None or free_mb >= floor:
+        return ""
+    return f"{HELD_FOR_DISK}: {free_mb} MB free on the checkouts' drive, a heavy job needs {floor}"
+
+
+# --- the role --------------------------------------------------------------------------------
+
+# How long a workstation leaves a heavy job to a worker, from when it first saw it. Long
+# enough for a worker to see it on its own schedule: six `devkit-after-merge` fires, two
+# of `devkit-medium-tier` and one of `devkit-local-e2e`, with the laptop's slower reads
+# before its claim. Short enough that a worker that is off costs a job half an hour, not a
+# night. And shorter than every heavy kind's TTL (a test holds it), so a claim a worker
+# won and finished is still standing when the window closes, and is lost to, not broken.
+WORKER_FIRST = _dt.timedelta(minutes=30)
+# A job not seen for this long is seen afresh: the key came back after going (a red that
+# went green and red again), and the window starts again rather than reading as long past.
+FORGET_SIGHTING = _dt.timedelta(hours=6)
+HELD_FOR_WORKER = "held for a worker"
+SIGHTINGS_DIR = Path("logs") / "claims"
+
+
+def worker_first(role: str, first_seen: float, now: float, window: _dt.timedelta = WORKER_FIRST) -> str:
+    """Why a machine with `role` leaves a heavy job first seen at `first_seen` to a
+    worker for now, or "" when it may claim. Only a workstation waits."""
+    if role != machine_role.WORKSTATION:
+        return ""
+    left = window.total_seconds() - (now - first_seen)
+    if left <= 0:
+        return ""
+    return (
+        f"{HELD_FOR_WORKER}: this PC is a workstation, so it takes this in "
+        f"{left / 60:.0f} min if no worker has claimed it"
+    )
+
+
+def _span(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and all(isinstance(t, int | float) and not isinstance(t, bool) for t in value)
+    )
+
+
+def sighted(
+    seen: dict, key: str, now: float, forget: _dt.timedelta = FORGET_SIGHTING
+) -> tuple[dict, float]:
+    """`(seen with key's sighting at now, when key was first seen)`.
+
+    `seen` maps a key to `[first, last]`. A key last seen longer than `forget` ago starts
+    again, and every other such entry is dropped, so the file stays the size of what is
+    open. A malformed entry reads as never seen.
+    """
+    horizon = now - forget.total_seconds()
+    kept = {name: span for name, span in seen.items() if _span(span) and span[1] >= horizon}
+    first = kept[key][0] if key in kept else now
+    kept[key] = [first, now]
+    return kept, first
+
+
+class Sightings:
+    """When this machine first saw each heavy job, kept between fires in one file per
+    job (`SIGHTINGS_DIR`), so a workstation's window spans the fires it takes."""
+
+    def __init__(self, root: Path, job: str) -> None:
+        self.path = root / SIGHTINGS_DIR / f"{job}.json"
+
+    def _read(self) -> dict:
+        try:
+            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def hold(self, role: str, key: str, now: float | None = None) -> str:
+        """`worker_first` for `key`, recording the sighting. A machine that is not a
+        workstation reads and writes nothing: the file is the workstation's alone."""
+        if role != machine_role.WORKSTATION:
+            return ""
+        now = time.time() if now is None else now
+        seen, first = sighted(self._read(), key, now)
+        # Unrecorded, the window starts again next fire: the job is later, never lost.
+        with contextlib.suppress(OSError):
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(seen, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        return worker_first(role, first, now)

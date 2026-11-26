@@ -46,6 +46,13 @@ name for every project, or `{"*": "pc-a", "carameli": "pc-b"}` to spread them. M
 the job is editing that value; each PC reads it at fire time, so nothing is re-registered.
 Absent, every machine tests its own checkouts, which is right while there is one.
 
+**With no `hosts` and a role, the machines claim each run instead** (`machine_role.py`):
+`e2e-<project>-<sha12>` through `job_claims`, which a `worker` takes as soon as it is
+idle and a `workstation` only once `job_claims.WORKER_FIRST` has passed with nobody
+claiming it, so a worker that is off still leaves the tier running. A run that happened
+marks its claim finished (`finished`), so the other PC never re-tests the commit at the
+TTL. Either way, no run starts below the disk floor (`job_claims.disk_refusal`).
+
 Exits 0 whenever every project reached a verdict, red included; non-zero only when the
 pass itself broke, which `log-wrap.py` files on the ledger as a harness defect.
 
@@ -67,7 +74,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_project
 import e2e_results
+import job_claims
 import low_priority
+import machine_role
 import rc_config
 import sweep
 import task_branch as tb
@@ -203,6 +212,8 @@ class Seams:
     runner: Callable[..., object] = sweep.run_bounded
     # This machine, spelled as `hosts` is matched against.
     host: str = field(default_factory=rc_config.harness_events.host_name)
+    # Free disk on the checkouts' drive (`job_claims.disk_refusal`).
+    disk: Callable[[], int | None] = job_claims.disk_here
 
 
 def run_project(
@@ -404,10 +415,13 @@ def run_due(
         print("e2e-pass: the PC is in use; the next fire looks again")
         return 0
     names = tested_here(workspace, registered(workspace), seams.host)
+    role = shared(workspace, seams)
     due = []
+    tips: dict[str, str] = {}
     for name in names:
         last = e2e_results.read(name, seams.root)
-        if is_due(name, last, tip_of(workspace.parent / name, seams), seams.now()):
+        tips[name] = tip_of(workspace.parent / name, seams)
+        if is_due(name, last, tips[name], seams.now()):
             due.append(name)
     having, lacking = opted_in(workspace, due)
     having += to_run_after_all(workspace, lacking, seams)
@@ -415,10 +429,63 @@ def run_due(
         if seams.idle() < idle_minutes_for(name, args.idle_minutes) * 60.0:
             print(f"{name}: not idle long enough; the next fire looks again", flush=True)
             continue
+        if why := job_claims.disk_refusal(seams.disk()):
+            print(f"{name}: {why}; the next fire looks again", flush=True)
+            continue
+        job = job_id(name, tips.get(name, ""))
+        if role and (why := not_ours(name, workspace.parent / name, job, role, seams)):
+            print(f"{name}: {why}", flush=True)
+            continue
         print(f"{name}: running {e2e_results.CONTRACT}", flush=True)
         result = run_one(name, workspace.parent / name, args.timeout_minutes * 60.0, seams)
         print(line_for(result), flush=True)
+        if role:
+            finished(workspace.parent / name, job, seams.git_for, seams.host)
     return 0
+
+
+# --- across machines, with no `hosts` ---------------------------------------------------------
+
+# The file a workstation keeps its first sight of each run in (`job_claims.Sightings`).
+SIGHTINGS = "e2e"
+
+
+def job_id(project: str, tip: str) -> str:
+    return f"e2e-{project}-{tip[:12]}"
+
+
+def shared(workspace: Path, seams: Seams) -> str:
+    """This machine's role when it claims each run, else "": it has one
+    (`machine_role.py`) and `SETTING` names no `hosts`. Named hosts are a person's
+    assignment and stand; no role is today's behaviour, every machine testing its own."""
+    try:
+        text = workspace.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return "" if assignment(text).hosts else machine_role.role_of(text)
+
+
+def not_ours(name: str, project_dir: Path, job: str, role: str, seams: Seams) -> str:
+    """Why another machine runs `job`, or "" with it claimed here: a workstation's window
+    for a worker, then the claim. A claim that could not be made fails open, as the medium
+    tier's does: a commit tested twice costs a run, one tested nowhere hides a red."""
+    if why := job_claims.Sightings(seams.root, SIGHTINGS).hold(role, job):
+        return why
+    attempt = job_claims.claim(seams.git_for(project_dir), job, job_claims.E2E, seams.host)
+    if attempt.outcome == job_claims.LOST:
+        return f"claimed by {attempt.holder or 'another machine'}"
+    if attempt.outcome == job_claims.FAILED:
+        print(f"{name}: claim failed open -- {attempt.said[:120]}", flush=True)
+    return ""
+
+
+def finished(project_dir: Path, job: str, git_for=sweep.git_for, host: str = "") -> None:
+    """Mark `job`'s claim as a run that happened, so no PC breaks it at the TTL to test
+    the same commit again (`job_claims.finish`). A failure is said, not raised: it costs
+    the other PC a duplicate run, never a lost one."""
+    host = host or rc_config.harness_events.host_name()
+    if not job_claims.finish(git_for(project_dir), job, job_claims.E2E, host):
+        print(f"{job}: could not mark the claim finished", flush=True)
 
 
 def status(workspace: Path) -> int:

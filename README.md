@@ -995,6 +995,26 @@ or an elevated verb. `devkit-after-merge` reads every project's queue off
 `scripts/after-merge-pass.py status` says what is due and what this machine would do.
 The format is `.claude/ship-intent.md`'s last section; the decisions are `scripts/after_merge.py`.
 
+#### Which PC takes the heavy work: `workstation` or `worker`
+
+With two PCs on the same jobs, each says what it is, in its own live workspace file
+(`devkit.machineRole`, beside `devkit.fixPass`):
+
+```bash
+python scripts/machine_role.py                       # this PC's role, and what it means
+python scripts/machine_role.py --set worker          # the PC nobody sits at
+python scripts/machine_role.py --set workstation     # the PC you work at
+python scripts/machine_role.py --set unset           # order by free memory alone, as before
+```
+
+A `worker` claims a heavy job the moment it sees one. A `workstation` leaves it alone for
+`job_claims.WORKER_FIRST` from when it first saw it, then takes it only if nobody has, so a
+worker that is off is a job half an hour late, never lost. Heavy is the medium tier, the
+local e2e (when `devkit.localE2e` names no `hosts`), a fixer session and a queue `run` or
+`agent` task; the fix trigger, ship, an elevated request and the reconcile ignore the role.
+Every heavy job also waits on a PC with less than `job_claims.DISK_FLOOR_MB` free on the
+drive holding its checkouts. A worker sends fixers only with `devkit.fixPass: dispatch`.
+
 #### A project's own scheduled tasks
 
 A task that is neither devkit's nor a collector's is claimed by the project whose code it
@@ -1437,7 +1457,9 @@ The same pass reaps a session worktree (`.claude/worktrees/<name>`, and Codex's)
 merged at the tree's `HEAD`, once it is clean and no transcript has moved in it for
 twelve hours, taking down the compose project it named in its `.env` with it
 (`scripts/session_trees.py`). `worktree.py reconcile` covers only the box tier, and a fixer's
-stack otherwise outlived its PR by days. Any other stack running from the tree keeps it,
+stack otherwise outlived its PR by days. A tree the fix pass or the queue sent a session at
+goes the same way once its PR was closed unmerged at its `HEAD`, `.venv` and
+`node_modules` with it, so abandoned fixers do not fill a small disk. Any other stack running from the tree keeps it,
 and `logs/reap-stale.log` names that tree until the stack moves to the checkout. A tree holding something only an administrator
 may open -- pytest run elevated leaves such a `.pytest_cache` -- is not counted as a
 failure: its line in `logs/reap-stale.log` gives the command to run from an elevated

@@ -12,6 +12,7 @@ import time
 import elevated_request
 import pytest
 from after_merge_world import (
+    DAY,
     TOUCH,
     after_merge_pass,
     am,
@@ -377,6 +378,47 @@ def test_a_pc_under_the_memory_hold_claims_nothing(world):
     task = world.queue(TOUCH)
     world.run()
     assert not world.claimed(task) and not world.done(task)
+
+
+def test_a_pc_short_of_disk_claims_nothing_heavy(world):
+    task = world.queue(TOUCH)
+    world.run(disk=lambda: jc.DISK_FLOOR_MB - 1)
+    assert not world.claimed(task) and not world.done(task)
+    world.run(disk=lambda: jc.DISK_FLOOR_MB)
+    assert world.done(task)
+
+
+def test_a_workstation_leaves_a_command_to_a_worker_then_takes_it_when_none_did(world):
+    """A worker that is off never claims, so the window closing is the fallback: the
+    task is late on the workstation, never lost."""
+    task = world.queue(TOUCH)
+    world.run(role=lambda _root: "workstation")
+    assert not world.claimed(task) and not world.done(task)
+    world.advance(jc.WORKER_FIRST.total_seconds() / DAY / 2)
+    world.run(role=lambda _root: "workstation")
+    assert not world.claimed(task), "the window is still open"
+    world.advance(jc.WORKER_FIRST.total_seconds() / DAY)
+    world.run(role=lambda _root: "workstation")
+    assert world.done(task)
+
+
+def test_a_worker_takes_a_command_at_once(world):
+    task = world.queue(TOUCH)
+    world.run(role=lambda _root: "worker")
+    assert world.done(task)
+
+
+def test_only_a_heavy_task_that_another_machine_could_take_waits_for_a_worker(world):
+    cycle = after_merge_pass.Cycle(
+        world.seams(), after_merge_pass.fix_findings.Journal(world.devkit), role="workstation"
+    )
+    every = am.parse(
+        "carameli", f"{am.QUEUE_DIR}/e.toml", "a" * 12, f'run = "x"\non = "{am.EVERY_MACHINE}"'
+    )
+    assert after_merge_pass._left_to_a_worker(every, cycle) == ""
+    run = am.parse("carameli", f"{am.QUEUE_DIR}/r.toml", "b" * 12, 'run = "x"')
+    assert after_merge_pass._left_to_a_worker(run, cycle).startswith(jc.HELD_FOR_WORKER)
+    assert after_merge_pass.HEAVY == {am.RUN, am.AGENT}
 
 
 def test_a_pc_waits_its_turn_once_a_pass_by_how_full_it_is(world):

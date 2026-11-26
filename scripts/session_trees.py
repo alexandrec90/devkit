@@ -32,6 +32,15 @@ went past its budget. `stillborn` asks for the pass's own stamp saying so, `QUIE
 old, and for every commit of its `HEAD` to be on origin. The rest of the verdict still
 holds, and `STILLBORN_PER_PASS` bounds what one pass spends on a backlog.
 
+**So may a dispatched tree whose PR was closed unmerged.** A fixer whose work was given
+up -- its PR closed by a person, or by the pass superseding it -- left a provisioned tree,
+`.venv` and `node_modules` included, that no merged PR will ever name, and on a PC with a
+small disk those add up to the floor `job_claims.DISK_FLOOR_MB` stops work at. The tree
+must carry the pass's stamp (`dispatched`), so a person's tree never qualifies, and its
+PR's head must be its `HEAD`, so every commit is still on GitHub under that PR. The rest
+of the verdict holds; `closed_heads` is a second `gh` call, made only for a checkout with
+such a tree.
+
 Anything else keeps the tree, with the reason. The compose project goes first, scoped
 with `-p` to the tree's own name; a name equal to the checkout's would be the static
 checkout's stack and is refused. The worktree is removed without `--force`, so git's
@@ -116,6 +125,7 @@ STILLBORN = (fix_reports.NEVER_STARTED, fix_reports.LOGGED_OUT, fix_reports.UNTR
 STILLBORN_PER_PASS = 10
 MERGED_SAID = "its PR merged"
 STILLBORN_SAID = "its session never started"
+ABANDONED_SAID = "its PR closed unmerged"
 
 # `reap`'s answer when `compose down` could not reach Docker's engine. The tree is kept
 # whole rather than removed: its stack's containers and volumes would outlive it with
@@ -267,6 +277,30 @@ def stillborn(tree: Tree, run: Run, now: _dt.datetime | None = None) -> bool:
     return only_here.returncode == 0 and only_here.stdout.strip() == "0"
 
 
+def closed_heads(payload: str) -> dict[str, str]:
+    """`{head branch: head sha}` of the PRs closed without merging, from
+    `gh pr list --state closed --json headRefName,headRefOid,state` -- which lists the
+    merged ones too, so a row is kept only when its state says `CLOSED`."""
+    try:
+        rows = json.loads(payload or "[]")
+    except json.JSONDecodeError:
+        return {}
+    return {
+        row["headRefName"]: row["headRefOid"]
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("state") == "CLOSED"
+        and row.get("headRefName")
+        and row.get("headRefOid")
+    }
+
+
+def dispatched(tree: Tree) -> bool:
+    """Whether the fix pass or the queue cut `tree` and sent a session at it: it carries
+    their stamp (`fix_reports.STAMP_FILE`), which a tree a person made never does."""
+    return bool(fix_reports.read_stamp(tree.path))
+
+
 def verdict(
     tree: Tree,
     checkout: Path,
@@ -274,11 +308,16 @@ def verdict(
     merged: dict[str, str],
     idle: float | None,
     stillborn: bool = False,
+    abandoned: dict[str, str] | None = None,
 ) -> str:
     """`""` when the tree may be reaped, else why it is kept. None for `dirty` or `idle`
     means the question could not be answered, and an unanswered question keeps the tree --
     except `idle` on a `stillborn` tree, where no transcript is what never starting looks
-    like, and which needs no merged PR because no commit of it is anywhere but on origin."""
+    like, and which needs no merged PR because no commit of it is anywhere but on origin.
+
+    `abandoned` is the closed-unmerged heads, handed in only for a `dispatched` tree: a
+    fixer's PR closed at the tree's `HEAD` is work given up, and every commit of it is
+    still on GitHub under the PR, so the tree holds nothing but its `.venv`."""
     if wt.same_dir(tree.path, checkout) or wt.tier_of(tree.path) is None:
         return "not a session worktree"
     if tree.locked:
@@ -294,6 +333,8 @@ def verdict(
     if stillborn:
         return ""
     if tree.branch not in merged:
+        if abandoned and abandoned.get(tree.branch) == tree.head:
+            return ""
         return f"no merged PR for {tree.branch}"
     if merged[tree.branch] != tree.head:
         return "HEAD is not the head its PR merged"
@@ -501,17 +542,25 @@ def sweep_checkout(
         say(f"session trees in {checkout.name}: merged PRs could not be read -- all kept")
         return failures
     merged = merged_heads(prs.stdout)
+    sent = {t.path for t in trees if t.branch and t.branch not in merged and dispatched(t)}
+    closed = _closed(checkout, gh_for, say) if sent else {}
     allowance = STILLBORN_PER_PASS
     for tree in trees:
         found = changes(tree.path, run)
         work, noise = found if found is not None else ([], [])
         dirty = None if found is None else bool(work)
         unborn = allowance > 0 and stillborn(tree, run)
-        why = verdict(tree, checkout, dirty, merged, idle(tree.path), stillborn=unborn)
+        given_up = closed if tree.path in sent else None
+        why = verdict(
+            tree, checkout, dirty, merged, idle(tree.path), stillborn=unborn, abandoned=given_up
+        )
         label = f"session tree {checkout.name}:{wt.label(tree.path)}"
         if why:
             continue  # kept trees are the ordinary case; the artifact names only reaps
-        reason = STILLBORN_SAID if unborn else MERGED_SAID
+        if unborn:
+            reason = STILLBORN_SAID
+        else:
+            reason = MERGED_SAID if tree.branch in merged else ABANDONED_SAID
         if stacks := running_stacks(tree, checkout, run):
             say(f"{label}: {reason}, but {', '.join(stacks)} runs from it -- kept")
             continue
@@ -523,6 +572,19 @@ def sweep_checkout(
         failures += failed
         say(f"{label}: {line}")
     return failures
+
+
+def _closed(checkout: Path, gh_for: Callable[[Path], Run], say: Callable[[str], None]) -> dict:
+    """`closed_heads` of `checkout`'s repository; nothing, said, when they cannot be read,
+    which keeps every tree that only a closed PR would let go."""
+    fields = "headRefName,headRefOid,state"
+    prs = gh_for(checkout)(
+        "pr", "list", "--state", "closed", "--limit", str(MERGED_LOOKBACK), "--json", fields
+    )
+    if prs.returncode != 0:
+        say(f"session trees in {checkout.name}: closed PRs could not be read -- those kept")
+        return {}
+    return closed_heads(prs.stdout)
 
 
 def reap_outcome(path: Path, error: str, reason: str = MERGED_SAID) -> tuple[str, bool]:

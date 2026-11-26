@@ -57,6 +57,9 @@ TRACKED = (
     # Another PC's claim, which frees itself at its TTL (`fix_claims.CLAIMED_BY`). The one
     # hold a claim makes: one that could not be made sends anyway.
     "claimed by",
+    # A workstation leaving a send to a worker (`job_claims.HELD_FOR_WORKER`), which ends
+    # on its own at `job_claims.WORKER_FIRST`. Spelled out for the line above's reason.
+    "held for a worker",
     fix_budget.DAILY_CAPPED,
 )
 
