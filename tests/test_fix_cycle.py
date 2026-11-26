@@ -379,7 +379,9 @@ def test_a_project_red_on_an_entry_the_harness_is_red_on_is_held():
         [project]
     )
     harness = fix_cycle.harness_state(classes, True, [])
-    go, held = fix_cycle.phase([harness_one, decision(fix_plan.DISPATCH, project)], classes, harness)
+    go, held = fix_cycle.phase(
+        [harness_one, decision(fix_plan.DISPATCH, project)], classes, harness
+    )
     assert go == [harness_one]
     assert held[0][1].startswith(
         f"{fix_cycle.HELD_FOR_HARNESS}: c is red on tests/test_x.py::t, as the harness is"
