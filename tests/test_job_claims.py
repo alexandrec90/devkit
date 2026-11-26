@@ -482,13 +482,97 @@ def test_free_disk_is_read_off_the_drive_and_an_unreadable_one_is_none(tmp_path)
 # --- the role -----------------------------------------------------------------------------------
 
 
+LAPTOP = {"laptop": NOW - 180}
+
+
 def test_only_a_workstation_waits_and_only_until_the_window_closes():
     window = jc.WORKER_FIRST.total_seconds()
-    assert jc.worker_first("workstation", NOW, NOW).startswith(jc.HELD_FOR_WORKER)
-    assert jc.worker_first("workstation", NOW, NOW + window - 1)
-    assert jc.worker_first("workstation", NOW, NOW + window) == ""
+    assert jc.worker_first("workstation", NOW, NOW, LAPTOP).startswith(jc.HELD_FOR_WORKER)
+    assert jc.worker_first("workstation", NOW, NOW + window - 1, LAPTOP)
+    assert jc.worker_first("workstation", NOW, NOW + window, LAPTOP) == ""
     for role in ("worker", ""):
-        assert jc.worker_first(role, NOW, NOW) == "", role
+        assert jc.worker_first(role, NOW, NOW, LAPTOP) == "", role
+
+
+def test_a_workstation_waits_for_no_worker_it_cannot_see_alive():
+    """The regression: the only worker offline for two weeks, and every heavy job on the
+    workstation held half an hour for it all the same."""
+    assert jc.worker_first("workstation", NOW, NOW, {}) == "", "no worker alive"
+    assert jc.worker_first("workstation", NOW, NOW, None) == "", "no heartbeat readable"
+
+
+def test_the_hold_names_the_worker_it_waits_for_and_how_fresh_its_beat_is():
+    held = jc.worker_first("workstation", NOW, NOW, LAPTOP)
+    assert "laptop" in held and "seen 3 min ago" in held and "30 min" in held
+
+
+def test_why_a_workstation_did_not_wait_is_said_for_each_cause():
+    assert "could not be read" in jc.no_worker_note(None)
+    assert "15 min" in jc.no_worker_note({})
+    assert jc.no_worker_note(LAPTOP) == ""
+    assert not jc.no_worker_note(None).startswith(jc.HELD_FOR_WORKER), "not a tracked hold"
+
+
+def test_a_live_worker_is_one_whose_beat_is_fresh_and_is_not_this_machine():
+    alive = jc.WORKER_ALIVE.total_seconds()
+    refs = [
+        jc.Ref(jc.worker_ref("laptop"), "1", NOW - 60),
+        jc.Ref(jc.worker_ref("old"), "2", NOW - alive),
+        jc.Ref(jc.worker_ref("desk"), "3", NOW),
+        jc.Ref(jc.host_ref("other"), "4", NOW),
+    ]
+    assert jc.live_workers(refs, NOW, "desk") == {"laptop": NOW - 60}
+    assert jc.live_workers([], NOW, "desk") == {}
+
+
+def test_a_worker_beat_is_pushed_at_most_every_few_minutes(pcs):
+    a, _, remote = pcs
+    ref = jc.worker_ref("pc-a")
+    assert jc.worker_beat(a, [], "pc-a", NOW)
+    first = on_remote(remote, ref)
+    assert first
+    fresh = [jc.Ref(ref, first, NOW, "worker pc-a alive")]
+    soon = NOW + jc.WORKER_BEAT_EVERY.total_seconds() - 1
+    assert not jc.worker_beat(a, fresh, "pc-a", soon)
+    assert on_remote(remote, ref) == first
+    assert jc.worker_beat(a, fresh, "pc-a", NOW + jc.WORKER_BEAT_EVERY.total_seconds())
+    assert on_remote(remote, ref) != first
+
+
+def test_the_beat_cadence_fits_the_after_merge_fires_it_rides_on():
+    """Every 5-minute fire beats, and a worker that missed two still counts."""
+    fire = _dt.timedelta(minutes=5)
+    assert jc.WORKER_BEAT_EVERY < fire
+    assert jc.WORKER_ALIVE >= 3 * fire
+    assert jc.WORKER_ALIVE < jc.WORKER_FIRST
+
+
+def test_another_machine_reads_the_beat_off_origin_and_none_from_nowhere(pcs, tmp_path):
+    a, b, _ = pcs
+    jc.mark_done(a, jc.done_ref("abc"), "done p/x by pc-a: passed", NOW)
+    assert jc.read_worker_refs(b) == [], "read, and nobody beating"
+    jc.worker_beat(a, [], "pc-a", NOW)
+    seen = jc.read_worker_refs(b)
+    assert seen is not None and [ref.name for ref in seen] == [jc.worker_ref("pc-a")]
+    assert seen[0].at == NOW
+    lost = clone(tmp_path, "pc-c", tmp_path / "nowhere.git")
+    assert jc.read_worker_refs(lost) is None
+
+
+def test_the_heartbeat_read_is_one_fetch_per_process_minute(tmp_path, monkeypatch):
+    reads: list[object] = []
+
+    def read(git):
+        reads.append(git)
+        return [jc.Ref(jc.worker_ref("laptop"), "1", NOW - 60)]
+
+    monkeypatch.setattr(jc, "read_worker_refs", read)
+    monkeypatch.setattr(jc, "_WORKER_READS", {})
+    assert jc.workers_alive(tmp_path, NOW, "desk") == {"laptop": NOW - 60}
+    assert jc.workers_alive(tmp_path, NOW, "laptop") == {}, "itself is never waited for"
+    assert len(reads) == 1
+    monkeypatch.setattr(jc, "read_worker_refs", lambda _git: None)
+    assert jc.workers_alive(tmp_path / "other", NOW, "desk") is None
 
 
 def test_the_window_closes_before_any_heavy_claim_can_expire():
@@ -516,21 +600,59 @@ def test_a_sighting_drops_what_went_quiet_and_what_is_malformed():
     assert set(kept) == {"live", "new"}
 
 
+def alive(now: float) -> dict[str, float]:
+    """A `Sightings.workers` with a worker that beat just now."""
+    return {"laptop": now}
+
+
 def test_sightings_span_fires_and_belong_to_the_workstation_alone(tmp_path):
-    sightings = jc.Sightings(tmp_path, "tier")
+    sightings = jc.Sightings(tmp_path, "tier", "desk", alive)
     assert sightings.hold("workstation", "job", NOW).startswith(jc.HELD_FOR_WORKER)
     assert sightings.path.is_file()
     window = jc.WORKER_FIRST.total_seconds()
-    again = jc.Sightings(tmp_path, "tier")
+    again = jc.Sightings(tmp_path, "tier", "desk", alive)
     assert again.hold("workstation", "job", NOW + window / 2), "the next fire, still waiting"
     assert again.hold("workstation", "job", NOW + window) == ""
-    other = jc.Sightings(tmp_path / "w", "tier")
+    other = jc.Sightings(tmp_path / "w", "tier", "laptop", alive)
     assert other.hold("worker", "job", NOW) == ""
     assert not other.path.exists(), "a worker keeps no file"
 
 
 def test_an_unreadable_sightings_file_is_a_fresh_start(tmp_path):
-    sightings = jc.Sightings(tmp_path, "fix")
+    sightings = jc.Sightings(tmp_path, "fix", "desk", alive)
     sightings.path.parent.mkdir(parents=True)
     sightings.path.write_text("not json", encoding="utf-8")
     assert sightings.hold("workstation", "job", NOW).startswith(jc.HELD_FOR_WORKER)
+
+
+@pytest.mark.parametrize(("seen", "word"), [(None, "could not be read"), ({}, "15 min")])
+def test_a_workstation_with_no_worker_alive_runs_it_now_and_says_why(
+    tmp_path, capsys, seen, word
+):
+    sightings = jc.Sightings(tmp_path, "tier", "desk", lambda _now: seen)
+    assert sightings.hold("workstation", "job", NOW) == ""
+    assert word in sightings.notes["job"]
+    assert f"job: {sightings.notes['job']}" in capsys.readouterr().out
+    assert sightings.path.is_file(), "still seen, so a worker coming back finds the window"
+
+
+def test_the_heartbeats_are_read_only_while_the_window_is_open(tmp_path):
+    asked: list[float] = []
+
+    def workers(now: float) -> dict[str, float]:
+        asked.append(now)
+        return {"laptop": now}
+
+    sightings = jc.Sightings(tmp_path, "tier", "desk", workers)
+    sightings.hold("worker", "job", NOW)
+    assert asked == [], "a worker never asks"
+    sightings.hold("workstation", "job", NOW)
+    sightings.hold("workstation", "job", NOW + jc.WORKER_FIRST.total_seconds())
+    assert asked == [NOW]
+
+
+def test_by_default_the_heartbeats_are_read_off_the_devkit_checkout(tmp_path, monkeypatch):
+    asked: list[tuple] = []
+    monkeypatch.setattr(jc, "workers_alive", lambda *a: asked.append(a) or {"laptop": NOW})
+    assert jc.Sightings(tmp_path, "tier", "desk").hold("workstation", "job", NOW)
+    assert asked == [(tmp_path, NOW, "desk")]

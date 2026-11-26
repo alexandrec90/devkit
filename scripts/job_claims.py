@@ -43,9 +43,14 @@ one, and one under `host_memory`'s hold does not claim at all (`refusal`).
 **A role orders them before memory does** (`machine_role.py`). Memory alone is a race a
 person's busy desk wins whenever it has a moment of memory free, so a `workstation`
 leaves a heavy job alone for `WORKER_FIRST` from when it first saw it (`Sightings`,
-`worker_first`) and a `worker` claims at once. Nothing has to know the worker is alive:
-a worker that never claims -- off, offline, or under its own floors -- is a job the
-workstation takes when the window closes, late rather than lost.
+`worker_first`) and a `worker` claims at once. **A workstation waits only for a worker
+that has said it is alive**: each worker's `devkit-after-merge` pass refreshes
+`refs/devkit/worker/<host>` (`worker_beat`, at most every `WORKER_BEAT_EVERY`), and a
+workstation defers only while some other host's is younger than `WORKER_ALIVE`
+(`live_workers`). No heartbeat, or none readable, is a job run here now, said in the log
+(`no_worker_note`): a worker offline for a fortnight once cost every heavy job half an
+hour. A worker that beats and still never claims -- under its own floors, say -- is the
+job the workstation takes when the window closes, late rather than lost.
 
 **A disk floor stands beside the memory one** (`DISK_FLOOR_MB`, `disk_refusal`): every
 heavy job cuts or fills a tree, so a machine short of disk on the drive holding its
@@ -71,6 +76,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent / "hooks"))
+import harness_events
 import host_memory
 import machine_role
 import sweep
@@ -84,6 +91,7 @@ HANDED = f"{REFS}handed/"  # with a session or the worker, attempts counted in t
 FAILED_REFS = f"{REFS}failed/"  # out of attempts, and filed
 REROUTED = f"{REFS}rerouted/"  # when an agent was last sent at a late condition
 HOST = f"{REFS}host/"  # a machine's heartbeat, in devkit's repository alone
+WORKER_REFS = f"{REFS}worker/"  # a worker's heartbeat, likewise, and far more often
 # git's empty tree, which it knows without the object existing: a claim carries no files.
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # pragma: allowlist secret
 
@@ -257,6 +265,10 @@ def rerouted_ref(key: str) -> str:
 
 def host_ref(host: str) -> str:
     return f"{HOST}{host}"
+
+
+def worker_ref(host: str) -> str:
+    return f"{WORKER_REFS}{host}"
 
 
 def ttl_of(kind: str) -> _dt.timedelta:
@@ -553,20 +565,100 @@ FORGET_SIGHTING = _dt.timedelta(hours=6)
 HELD_FOR_WORKER = "held for a worker"
 SIGHTINGS_DIR = Path("logs") / "claims"
 
+# A worker says it is alive from `devkit-after-merge`, which fires every 5 minutes on every
+# PC and already fetches devkit's refs. Refreshed at most this often: under the cadence,
+# so every fire's beat goes (a 5-minute floor skips each fire that came a second early,
+# halving the rate), and one push per worker per fire is all it costs.
+WORKER_BEAT_EVERY = _dt.timedelta(minutes=4)
+# A worker whose beat is older than this is not waited for: three fires, so a worker
+# that missed two still counts, and one that is off, asleep or offline stops costing the
+# workstation anything within a quarter of an hour. A worker deep in a pass longer than
+# this reads as gone too; the claims still keep the job to one PC, so that costs only
+# which PC ran it.
+WORKER_ALIVE = _dt.timedelta(minutes=15)
+# How long one process reuses a read of the worker heartbeats: one fetch per pass, not
+# one per job, and still fresh across a pass that runs for many minutes.
+WORKERS_CACHED_SECONDS = 60.0
+
+# Each worker host and when it last beat, or None when no heartbeat could be read.
+Workers = dict[str, float] | None
+
+
+def worker_beat(git: Git, refs: Iterable[Ref], host: str, now: float) -> bool:
+    """Say `host` is a worker and alive, at most `WORKER_BEAT_EVERY`; whether it pushed.
+    `refs` is the last fetch of devkit's refs, whose copy of the beat is the lease."""
+    held = keys_under(refs, WORKER_REFS).get(host)
+    if held is not None and now - held.at < WORKER_BEAT_EVERY.total_seconds():
+        return False
+    return stamp(git, worker_ref(host), f"worker {host} alive", held.sha if held else "", now)
+
+
+def live_workers(
+    refs: Iterable[Ref], now: float, myself: str = "", alive: _dt.timedelta = WORKER_ALIVE
+) -> dict[str, float]:
+    """Each worker host but `myself` whose beat is younger than `alive`, with its moment."""
+    seconds = alive.total_seconds()
+    return {
+        host: ref.at
+        for host, ref in keys_under(refs, WORKER_REFS).items()
+        if host != myself and now - ref.at < seconds
+    }
+
+
+def read_worker_refs(git: Git) -> list[Ref] | None:
+    """The worker heartbeats as origin has them now; None when origin cannot be read."""
+    spec = f"+{WORKER_REFS}*:{WORKER_REFS}*"
+    with sweep.until(time.monotonic() + PUSH_SECONDS):
+        fetched = git("fetch", "--quiet", "--prune", "origin", spec)
+    return read_refs(git, WORKER_REFS) if fetched.returncode == 0 else None
+
+
+_WORKER_READS: dict[str, tuple[float, list[Ref] | None]] = {}
+
+
+def workers_alive(root: Path, now: float, myself: str) -> Workers:
+    """`live_workers` off the devkit checkout at `root`, read at most once a
+    `WORKERS_CACHED_SECONDS`; None when its origin could not be read."""
+    key = str(root)
+    cached = _WORKER_READS.get(key)
+    if cached is None or time.monotonic() - cached[0] >= WORKERS_CACHED_SECONDS:
+        cached = (time.monotonic(), read_worker_refs(sweep.git_for(root)))
+        _WORKER_READS[key] = cached
+    refs = cached[1]
+    return None if refs is None else live_workers(refs, now, myself)
+
+
+def no_worker_note(workers: Workers) -> str:
+    """What a workstation says when it runs a heavy job at once because no worker is
+    there to wait for; "" when one is."""
+    if workers is None:
+        return "no worker to wait for: no worker heartbeat could be read, so it runs here now"
+    if not workers:
+        minutes = WORKER_ALIVE.total_seconds() / 60
+        return f"no worker to wait for: none has beaten in {minutes:.0f} min, so it runs here now"
+    return ""
+
 
 def worker_first(
-    role: str, first_seen: float, now: float, window: _dt.timedelta = WORKER_FIRST
+    role: str,
+    first_seen: float,
+    now: float,
+    workers: Workers,
+    window: _dt.timedelta = WORKER_FIRST,
 ) -> str:
     """Why a machine with `role` leaves a heavy job first seen at `first_seen` to a
-    worker for now, or "" when it may claim. Only a workstation waits."""
-    if role != machine_role.WORKSTATION:
+    worker for now, or "" when it may claim. Only a workstation waits, and only for a
+    worker in `workers` (`live_workers`): with none alive, or none readable, it claims."""
+    if role != machine_role.WORKSTATION or not workers:
         return ""
     left = window.total_seconds() - (now - first_seen)
     if left <= 0:
         return ""
+    names = ", ".join(sorted(workers))
+    ago = (now - max(workers.values())) / 60
     return (
-        f"{HELD_FOR_WORKER}: this PC is a workstation, so it takes this in "
-        f"{left / 60:.0f} min if no worker has claimed it"
+        f"{HELD_FOR_WORKER} ({names}, seen {max(ago, 0):.0f} min ago): this PC is a "
+        f"workstation, so it takes this in {left / 60:.0f} min if {names} has not claimed it"
     )
 
 
@@ -596,10 +688,30 @@ def sighted(
 
 class Sightings:
     """When this machine first saw each heavy job, kept between fires in one file per
-    job (`SIGHTINGS_DIR`), so a workstation's window spans the fires it takes."""
+    job (`SIGHTINGS_DIR`), so a workstation's window spans the fires it takes.
 
-    def __init__(self, root: Path, job: str) -> None:
+    `root` is the devkit checkout, whose origin holds the worker heartbeats; `workers`
+    replaces that read (`workers_alive`) with one of the caller's, given the moment.
+    `notes` keeps, per key, why a workstation did not wait (`no_worker_note`), printed
+    when it is said and kept for a caller's record line."""
+
+    def __init__(
+        self,
+        root: Path,
+        job: str,
+        host: str = "",
+        workers: Callable[[float], Workers] | None = None,
+    ) -> None:
+        self.root = root
         self.path = root / SIGHTINGS_DIR / f"{job}.json"
+        self.host = host or harness_events.host_name()
+        self.workers = workers
+        self.notes: dict[str, str] = {}
+
+    def _workers(self, now: float) -> Workers:
+        if self.workers is not None:
+            return self.workers(now)
+        return workers_alive(self.root, now, self.host)
 
     def _read(self) -> dict:
         try:
@@ -610,7 +722,9 @@ class Sightings:
 
     def hold(self, role: str, key: str, now: float | None = None) -> str:
         """`worker_first` for `key`, recording the sighting. A machine that is not a
-        workstation reads and writes nothing: the file is the workstation's alone."""
+        workstation reads and writes nothing: the file is the workstation's alone. The
+        heartbeats are read only while the window is open, which is the only time they
+        can change the answer."""
         if role != machine_role.WORKSTATION:
             return ""
         now = time.time() if now is None else now
@@ -621,4 +735,10 @@ class Sightings:
             self.path.write_text(
                 json.dumps(seen, indent=1, sort_keys=True) + "\n", encoding="utf-8"
             )
-        return worker_first(role, first, now)
+        if now - first >= WORKER_FIRST.total_seconds():
+            return ""
+        workers = self._workers(now)
+        if note := no_worker_note(workers):
+            self.notes[key] = note
+            print(f"{key}: {note}", flush=True)
+        return worker_first(role, first, now, workers)

@@ -514,14 +514,32 @@ def test_a_role_with_no_hosts_claims_each_run_and_a_named_host_stands(tmp_path):
     assert e2e_pass.job_id("carameli", "b31b60cbbbbbcccc") == "e2e-carameli-b31b60cbbbbb"
 
 
+def _worker_alive(monkeypatch, alive: bool = True) -> None:
+    """Stand in for the heartbeat read off devkit's origin: a worker beating, or none."""
+    def workers(_root: Path, now: float, _me: str) -> dict[str, float]:
+        return {"laptop": now} if alive else {}
+
+    monkeypatch.setattr(e2e_pass.job_claims, "workers_alive", workers)
+
+
 def test_a_workstation_leaves_a_due_run_to_a_worker_and_records_when_it_first_saw_it(
-    tmp_path, capsys
+    tmp_path, capsys, monkeypatch
 ):
+    _worker_alive(monkeypatch)
     code, ran, seams = _role_run(tmp_path, "workstation")
     assert (code, ran) == (0, [])
-    assert "held for a worker" in capsys.readouterr().out
+    assert "held for a worker (laptop" in capsys.readouterr().out
     seen = (seams.root / e2e_pass.job_claims.SIGHTINGS_DIR / "e2e.json").read_text("utf-8")
     assert "e2e-carameli-b31b60cbbbbb" in seen
+
+
+def test_a_workstation_with_no_worker_beating_runs_a_due_project_at_once(
+    tmp_path, capsys, monkeypatch
+):
+    _worker_alive(monkeypatch, alive=False)
+    code, ran, _seams = _role_run(tmp_path, "workstation")
+    assert (code, ran) == (0, ["carameli"])
+    assert "no worker to wait for" in capsys.readouterr().out
 
 
 def test_a_worker_runs_a_due_project_at_once(tmp_path):
@@ -539,6 +557,7 @@ def test_no_run_starts_below_the_disk_floor_whatever_the_role(tmp_path, capsys):
 
 
 def test_not_ours_names_the_holder_and_a_worker_wins_an_open_claim(tmp_path, monkeypatch):
+    _worker_alive(monkeypatch)
     seams = e2e_pass.Seams(root=tmp_path / "devkit", host="pc-b", git_for=lambda _p: None)
     claims = e2e_pass.job_claims
     answers = iter([claims.Attempt(claims.LOST, holder="pc-a"), claims.Attempt(claims.WON)])
