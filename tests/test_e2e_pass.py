@@ -226,7 +226,9 @@ def test_a_tier_handed_to_ci_is_still_read_from_a_clean_checkout_only(tmp_path, 
     # A checkout someone works in is not this pass's to move, CI tier or not.
     monkeypatch.setattr(e2e_pass.tb, "detect_default_branch", lambda _g, fallback: "main")
     (tmp_path / "carameli").mkdir()
-    (tmp_path / "carameli" / ".devkit.toml").write_text('[delivery]\ne2e = "ci"\n', encoding="utf-8")
+    (tmp_path / "carameli" / ".devkit.toml").write_text(
+        '[delivery]\ne2e = "ci"\n', encoding="utf-8"
+    )
     result, _ = _project(tmp_path, git=fake_git(branch="agent/x"))
     assert result.reason == "checkout is on agent/x, not main"
 
