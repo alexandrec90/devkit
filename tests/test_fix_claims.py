@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -203,19 +204,47 @@ def test_a_wait_on_another_pcs_claim_is_no_stale_wait():
     assert fix_stall.tracked(f"{fix_claims.CLAIMED_BY} pc-a, which sent it")
 
 
-def test_a_workstation_leaves_a_fixer_to_a_worker_and_pushes_nothing_meanwhile(pcs):
+def test_a_workstation_leaves_a_fixer_to_a_live_worker_and_pushes_nothing_meanwhile(
+    pcs, monkeypatch
+):
     """The worker on `dispatch` sends it first; the workstation's window closing is the
-    fallback for a worker that is off."""
+    fallback for a worker that beats and never claims."""
     a, b, remotes = pcs
+    monkeypatch.setattr(jc, "_WORKER_READS", {})
+    beat = jc.sweep.git_for(b / fix_cycle.DEVKIT)
+    assert jc.worker_beat(beat, [], "pc-b", time.time())
     os.environ[HOST_ENV] = "pc-a"
     desk = fix_claims.Turn(a, True, None, "tree", role="workstation")
-    assert desk.held(session()).startswith(jc.HELD_FOR_WORKER)
+    held = desk.held(session())
+    assert held.startswith(jc.HELD_FOR_WORKER) and "pc-b" in held, "it names the worker"
     found = run_git(remotes / "carameli.git", "for-each-ref", jc.CLAIM).stdout
     assert found == "", "a held send claims nothing"
     assert (a / fix_cycle.DEVKIT / jc.SIGHTINGS_DIR / f"{fix_claims.SIGHTINGS}.json").is_file()
     laptop = turn(b, "pc-b")
     laptop.role = "worker"
     assert laptop.held(session()) == ""
+
+
+def test_a_workstation_with_no_worker_beating_sends_at_once_and_says_why(pcs, monkeypatch):
+    """The regression: the only worker offline for two weeks, and the devkit session at
+    a red main held half an hour on the workstation all the same."""
+    a, _, remotes = pcs
+    monkeypatch.setattr(jc, "_WORKER_READS", {})
+    os.environ[HOST_ENV] = "pc-a"
+    desk = fix_claims.Turn(a, True, None, "tree", role="workstation")
+    decision = session()
+    assert desk.held(decision) == ""
+    assert "no worker to wait for" in desk.note(decision)
+    assert run_git(remotes / "carameli.git", "for-each-ref", jc.CLAIM).stdout, "claimed"
+
+
+def test_a_workstation_does_not_wait_for_its_own_old_worker_beat(pcs, monkeypatch):
+    """A PC switched from worker to workstation keeps its ref until it ages out."""
+    a, _, _ = pcs
+    monkeypatch.setattr(jc, "_WORKER_READS", {})
+    jc.worker_beat(jc.sweep.git_for(a / fix_cycle.DEVKIT), [], "pc-a", time.time())
+    os.environ[HOST_ENV] = "pc-a"
+    assert fix_claims.Turn(a, True, None, "tree", role="workstation").held(session()) == ""
 
 
 def test_an_update_or_a_rerun_is_never_held_for_a_worker_or_for_disk(pcs):
@@ -235,7 +264,7 @@ def test_a_machine_short_of_disk_sends_no_session(pcs):
 
 def test_a_wait_for_a_worker_is_no_stale_wait():
     """It ends on its own when `job_claims.WORKER_FIRST` closes."""
-    assert fix_stall.tracked(jc.worker_first("workstation", 0.0, 0.0))
+    assert fix_stall.tracked(jc.worker_first("workstation", 0.0, 0.0, {"pc-b": 0.0}))
 
 
 def test_the_wait_for_a_turn_is_taken_once_a_pass_and_stops_at_the_deadline(pcs, monkeypatch):

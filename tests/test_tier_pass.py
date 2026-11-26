@@ -557,7 +557,14 @@ def test_a_finished_claim_is_not_broken_at_its_ttl(tmp_path):
     assert attempt.outcome == tier_pass.job_claims.LOST and attempt.holder == "pc-a"
 
 
-def test_held_for_worker_reads_the_role_beside_the_devkit_checkout(tmp_path):
+def test_held_for_worker_reads_the_role_beside_the_devkit_checkout(tmp_path, monkeypatch):
+    asked: list[Path] = []
+    claims = tier_pass.job_claims
+    def alive(root: Path, now: float, _me: str) -> dict[str, float]:
+        asked.append(root)
+        return {"pc": now}
+
+    monkeypatch.setattr(claims, "workers_alive", alive)
     root = tmp_path / "devkit"
     workspace = tier_pass.sweep.default_workspace(root)
     workspace.parent.mkdir(parents=True, exist_ok=True)
@@ -565,6 +572,10 @@ def test_held_for_worker_reads_the_role_beside_the_devkit_checkout(tmp_path):
     assert tier_pass.held_for_worker("tier-a-1", root).startswith("held for a worker")
     workspace.write_text('{"settings": {"devkit.machineRole": "worker"}}', encoding="utf-8")
     assert tier_pass.held_for_worker("tier-a-2", root) == ""
+    assert asked == [root], "the heartbeats are read off the devkit checkout, by a workstation"
+    monkeypatch.setattr(claims, "workers_alive", lambda *_a: None)
+    workspace.write_text('{"settings": {"devkit.machineRole": "workstation"}}', encoding="utf-8")
+    assert tier_pass.held_for_worker("tier-a-3", root) == "", "no worker seen, so it runs here"
 
 
 def test_not_applicable_is_not_asked_again_until_the_tip_moves(tmp_path):

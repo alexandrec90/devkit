@@ -55,7 +55,8 @@ Absent, every machine tests its own checkouts, which is right while there is one
 **With no `hosts` and a role, the machines claim each run instead** (`machine_role.py`):
 `e2e-<project>-<sha12>` through `job_claims`, which a `worker` takes as soon as it is
 idle and a `workstation` only once `job_claims.WORKER_FIRST` has passed with nobody
-claiming it, so a worker that is off still leaves the tier running. A run that happened
+claiming it -- or at once when no worker's heartbeat is fresh (`job_claims.live_workers`),
+so a worker that is off leaves the tier running on time. A run that happened
 marks its claim finished (`finished`), so the other PC never re-tests the commit at the
 TTL. Either way, no run starts below the disk floor (`job_claims.disk_refusal`).
 
@@ -504,7 +505,7 @@ def not_ours(name: str, project_dir: Path, job: str, role: str, seams: Seams) ->
     """Why another machine runs `job`, or "" with it claimed here: a workstation's window
     for a worker, then the claim. A claim that could not be made fails open, as the medium
     tier's does: a commit tested twice costs a run, one tested nowhere hides a red."""
-    if why := job_claims.Sightings(seams.root, SIGHTINGS).hold(role, job):
+    if why := job_claims.Sightings(seams.root, SIGHTINGS, seams.host).hold(role, job):
         return why
     attempt = job_claims.claim(seams.git_for(project_dir), job, job_claims.E2E, seams.host)
     if attempt.outcome == job_claims.LOST:

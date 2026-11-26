@@ -276,6 +276,9 @@ class Cycle:
     hosts: frozenset[str] = frozenset()
     free_disk_mb: int | None = None
     role: str = machine_role.UNSET
+    # devkit's refs as this cycle fetched them, the worker heartbeats among them; None
+    # when devkit's board could not be read, which leaves a workstation no worker to wait for.
+    devkit_refs: tuple[job_claims.Ref, ...] | None = None
 
     def say(self, line: str) -> None:
         self.lines.append(line)
@@ -373,7 +376,12 @@ def _left_to_a_worker(task: Task, cycle: Cycle) -> str:
     """
     if task.kind not in HEAVY or task.on == after_merge.EVERY_MACHINE:
         return ""
-    return job_claims.Sightings(cycle.seams.root, SIGHTINGS).hold(
+    host, refs = cycle.seams.host, cycle.devkit_refs
+
+    def workers(now: float) -> job_claims.Workers:
+        return None if refs is None else job_claims.live_workers(refs, now, host)
+
+    return job_claims.Sightings(cycle.seams.root, SIGHTINGS, host, workers).hold(
         cycle.role, task.id, cycle.seams.now()
     )
 
@@ -874,12 +882,16 @@ def _begin(boards: dict[str, Board], seams: Seams) -> Cycle:
 def _heartbeat(boards: dict[str, Board], cycle: Cycle) -> None:
     """This machine on devkit's list of hosts, and that list for the tidy; a machine back
     from long enough away that the tidy stopped counting it is told what it missed, which
-    happens once, since this refresh is what ends the absence."""
+    happens once, since this refresh is what ends the absence. A `worker` says here too
+    that it is alive (`job_claims.worker_beat`), which is what a workstation waits on."""
     devkit = boards.get(DEVKIT)
     if devkit is None:
         return  # no list to read: `removable` keeps what every machine owes
     seams = cycle.seams
     now, host = seams.now(), seams.host
+    cycle.devkit_refs = tuple(devkit.refs)
+    if cycle.role == machine_role.WORKER:
+        job_claims.worker_beat(cycle.git(devkit), devkit.refs, host, now)
     last_seen = job_claims.heartbeat(cycle.git(devkit), devkit.refs, host, now)
     cycle.hosts = job_claims.live_hosts(devkit.refs, now) | {host}
     unseen = job_claims.HOST_UNSEEN_AFTER.total_seconds()
