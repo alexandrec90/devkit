@@ -410,6 +410,16 @@ def test_a_scratch_repository_named_by_a_variable_or_a_step_inside_it_is_still_s
     assert sf.scratch_only("cd ${S:-x}; cd /tmp/x; git push --no-verify")
     scratch = "C:/Users/a/AppData/Local/Temp/x"
     assert sf.entered(scratch, "a") == f"{scratch}/a"
+    # 6c15f5c6: PowerShell's spelling of the step in is the same step.
+    probe = (
+        "Set-Location C:\\Users\\a\\.claude\\jobs\\6ea705ad\\tmp\\probe; "
+        'git commit -q --no-verify -am "probe"; git push -q -u origin probe/x'
+    )
+    assert classes([call(probe, "1")]) == []
+    assert sf.scratch_only("Set-Location -LiteralPath /tmp/x; git commit --no-verify -m x")
+    assert sf.scratch_only("sl /tmp/x; git commit --no-verify -m x")
+    assert not sf.scratch_only("Set-Location /ws/devkit; git commit --no-verify -m x")
+    assert not sf.scratch_only("Set-Location /tmp/x; Set-Location /ws; git commit --no-verify")
     # Out of the scratch tree, by whatever spelling, is the tree the session was in.
     assert sf.entered(scratch, "/ws/devkit") == "/ws/devkit"
     assert sf.entered(scratch, "../../ws") == "../../ws"
@@ -2070,6 +2080,11 @@ NOT_TO_DOS = (
     "Did the job the row named (once this merges, run scripts/x.py) myself.",
     "Nothing else. The ledger row said: until you run install-foo.py nothing works.",
     "The old doc said you need to run X by hand; I removed that sentence.",
+    # c1292059: the cost of a plan not yet built, laid out for the person to choose, is a
+    # hypothetical, not a job: the conditional says it would only become one.
+    "**Logins:** `social-scraper` would need you to sign in once on each PC.",
+    "Moving it would mean you'd need to sign in to X again.",
+    "That route would also have you run the migration on the laptop by hand.",
 )
 
 
