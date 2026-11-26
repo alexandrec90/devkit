@@ -41,6 +41,15 @@ the machine is missing what it needs, fail and name what is missing (`pytest.fai
 the tier is a failure: the checkout is the one the tests were written for, so nothing
 has a reason left to skip.
 
+**What a hosted runner can run goes to CI, not to this tier.** A service container, Docker
+on `ubuntu-latest`, a headless browser or a `windows-latest` desktop is not this
+workstation; its signed-in accounts, credentials, hardware and live data are. Mark the
+first kind `ci_e2e`, deselected by `addopts` beside `local`, and select it with
+`scripts/e2e.py --ci` from an `E2E` job that runs on the default branch only, inside the
+`PR Gate` workflow: the fix pass reads a red from no other. When no
+`local` test is left, `e2e = "ci"` under `[delivery]` in `.devkit.toml` tells the PC's
+job to record the project as run in CI rather than run it.
+
 **Every project owes the script.** One whose default branch on origin has none is red
 at the next run, as a missing tier, and the fix pass sends its fixer to write one. It is
 never a skip: a skip reads as green, which is the state this tier exists to end.

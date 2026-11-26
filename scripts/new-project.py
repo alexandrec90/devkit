@@ -109,7 +109,12 @@ PRESETS: dict[str, tuple[str, ...]] = {
 # Python smoke test -- which imports a package those shapes do not have -- stays behind,
 # and so does the Python local tier (`scripts/e2e.py` and its first test): a shape with
 # no Python tests would run it into "no local test executed" every night.
-PYTHON_ONLY = ("tests/test_smoke.py.tmpl", "tests/test_local_tier.py", "scripts/e2e.py")
+PYTHON_ONLY = (
+    "tests/test_smoke.py.tmpl",
+    "tests/test_local_tier.py",
+    "tests/test_ci_tier.py",
+    "scripts/e2e.py",
+)
 REPLACED_BY: dict[str, tuple[str, ...]] = {
     "desktop": PYTHON_ONLY,
     "electron": PYTHON_ONLY,

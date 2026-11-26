@@ -38,6 +38,12 @@ person is working in may lag, and the tier a fixer just merged must stop the red
 next night, whatever branch the static checkout is on. No idle wait comes first, since
 nothing runs.
 
+**A tier that needs nothing of this PC runs in CI, not here.** A project whose
+`.devkit.toml` says `e2e = "ci"` under `[delivery]` runs `scripts/e2e.py` in its `PR Gate`
+on the default branch, so its checkout is still brought to the tip and the run is
+recorded as a skip naming that (`runs_in_ci`), never run and never red here. The script is
+still owed: CI runs it.
+
 **One machine tests each project** (`SETTING`'s `hosts`). The workspace file is the same
 on every PC and every PC registers the job, so with several of them each would test
 every project, write its own result and send its own fixer at the same red. `hosts`
@@ -60,6 +66,7 @@ import datetime as _dt
 import os
 import sys
 import time
+import tomllib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -83,6 +90,13 @@ ENV_FLAG = "DEVKIT_E2E"
 # because a fixer's prompt has to tell it what to set to reproduce a red run
 # (`fix_prompts.LOCAL_ENV`, which a test holds to this).
 RUN_ENV = {ENV_FLAG: "1", "PYTHONUTF8": "1"}
+
+# What a project's `.devkit.toml` says, under `[delivery]`, when no test in its tier needs
+# this PC: its `PR Gate` runs `scripts/e2e.py` on the default branch instead
+# (`runs_in_ci`). Read off the file rather than `harness_config`, as `medium_tier` is.
+DEVKIT_TOML = ".devkit.toml"
+CI_TIER = ("e2e", "ci")
+IN_CI = "runs in CI: [delivery] e2e = 'ci', so the PR Gate's E2E job is this tier"
 
 # The workspace setting that assigns each project's nightly run to one machine.
 SETTING = rc_config.LOCAL_E2E_SETTING
@@ -182,6 +196,22 @@ def prepare(git: Git, base: str) -> tuple[str, str]:
     return out(git("rev-parse", "HEAD")), ""
 
 
+def runs_in_ci(project_dir: Path) -> bool:
+    """Whether the checkout's `.devkit.toml` hands its whole tier to CI (`CI_TIER`).
+
+    A project whose end-to-end tests need nothing of this PC runs `scripts/e2e.py` in its
+    `PR Gate` on the default branch, where a red reaches the fix pass the way any gate red
+    does. Running it here as well would spend the PC on a second verdict for the same
+    commit, and the red would be filed twice. Unreadable or absent is "no": the PC runs it.
+    """
+    try:
+        manifest = tomllib.loads((project_dir / DEVKIT_TOML).read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    delivery = manifest.get("delivery")
+    return isinstance(delivery, dict) and delivery.get(CI_TIER[0]) == CI_TIER[1]
+
+
 def run_contract(project_dir: Path, timeout: float, runner=sweep.run_bounded) -> object:
     """`scripts/e2e.py` run in `project_dir` under the project's own interpreter."""
     python = e2e_results.venv_interpreter(project_dir, sweep.console_python())
@@ -228,6 +258,11 @@ def run_project(
         # not a pass, and this fires through the day they are working in it.
         if last is None or last.status != e2e_results.FAILED:
             e2e_results.write(result, seams.root)
+        return result
+    if runs_in_ci(project_dir):
+        # Recorded at the tip, so a red this PC wrote before the move is not left standing.
+        result = replace(result, sha=sha, reason=IN_CI, finished=stamp())
+        e2e_results.write(result, seams.root)
         return result
     done = run_contract(project_dir, timeout, seams.runner)
     output = f"{getattr(done, 'stdout', '') or ''}\n{getattr(done, 'stderr', '') or ''}"

@@ -196,6 +196,41 @@ def test_a_skipped_checkout_is_recorded_and_its_contract_never_runs(tmp_path, mo
     assert results.read("carameli", tmp_path / "devkit") == result
 
 
+def test_a_tier_handed_to_ci_is_recorded_at_the_tip_and_never_run_here(tmp_path, monkeypatch):
+    monkeypatch.setattr(e2e_pass.tb, "detect_default_branch", lambda _g, fallback: "main")
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / ".devkit.toml").write_text(
+        '[delivery]\nflow = "direct"\ne2e = "ci"\n', encoding="utf-8"
+    )
+    result, seen = _project(tmp_path)
+    assert seen == {}, "the contract ran on the PC although CI owns it"
+    assert (result.status, result.sha, result.reason) == (
+        results.SKIPPED,
+        "b31b60cbbbbb",
+        e2e_pass.IN_CI,
+    )
+    assert results.read("carameli", tmp_path / "devkit") == result
+
+
+@pytest.mark.parametrize(
+    "text",
+    [None, "", "[delivery]\n", '[delivery]\ne2e = "local"\n', "e2e = 'ci'\n", "[delivery\n"],
+)
+def test_anything_but_delivery_e2e_ci_leaves_the_tier_on_this_pc(tmp_path, text):
+    if text is not None:
+        (tmp_path / ".devkit.toml").write_text(text, encoding="utf-8")
+    assert e2e_pass.runs_in_ci(tmp_path) is False
+
+
+def test_a_tier_handed_to_ci_is_still_read_from_a_clean_checkout_only(tmp_path, monkeypatch):
+    # A checkout someone works in is not this pass's to move, CI tier or not.
+    monkeypatch.setattr(e2e_pass.tb, "detect_default_branch", lambda _g, fallback: "main")
+    (tmp_path / "carameli").mkdir()
+    (tmp_path / "carameli" / ".devkit.toml").write_text('[delivery]\ne2e = "ci"\n', encoding="utf-8")
+    result, _ = _project(tmp_path, git=fake_git(branch="agent/x"))
+    assert result.reason == "checkout is on agent/x, not main"
+
+
 # --- the pass -----------------------------------------------------------------------------
 
 
