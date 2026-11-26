@@ -44,7 +44,11 @@ lost. There a pass says why in one line and exits 0, which registers no failure.
 
 **Across machines each such PC runs this**, so a run is claimed as `tier-<project>-<sha12>`
 through `job_claims.claim` (`claimed`, the one place that spells the call). A claim that
-could not be made fails open, and that PC tests for itself.
+could not be made fails open, and that PC tests for itself. A run that judged marks its
+claim finished (`finished`), so no PC breaks it at the TTL to test the commit again. A run
+is a heavy job (`machine_role.py`): none starts below the disk floor
+(`job_claims.disk_refusal`), and a `workstation` leaves one to a worker for
+`job_claims.WORKER_FIRST` before it claims (`held_for_worker`).
 
 **Every project owes the script** (`e2e_results.MEDIUM`). One whose tip has neither the
 script nor a command is recorded red as a missing tier, as `e2e-pass.py` records a missing
@@ -81,6 +85,7 @@ import harness_events
 import host_memory
 import job_claims
 import low_priority
+import machine_role
 import sweep
 import task_branch as tb
 import tier_command
@@ -126,6 +131,8 @@ DEFAULT_PASS_MINUTES = 120
 CLAIM_MARGIN_SECONDS = disposable_tree.CUT_TIMEOUT + disposable_tree.PROVISION_TIMEOUT
 
 LOCK_FILE = "pass.lock"
+# The file a workstation keeps its first sight of each run in (`job_claims.Sightings`).
+SIGHTINGS = "tier"
 
 # The last line of a pass that owes a filing: `log-wrap.py` reads the cause from it, so it
 # names the kind and nothing that differs between runs.
@@ -245,6 +252,25 @@ def claimed(
     return attempt.outcome != job_claims.LOST
 
 
+def finished(
+    checkout: Path,
+    job: str,
+    git_for: Callable[[Path], Git] = sweep.git_for,
+    host: Callable[[], str] = harness_events.host_name,
+) -> None:
+    """Say on `job`'s claim that it ran (`job_claims.finish`), so another PC never breaks
+    it at the TTL to test the same commit again. A failure is the next PC's duplicate
+    run, not a lost one, so it is only said."""
+    if not job_claims.finish(git_for(checkout), job, job_claims.TIER, host()):
+        print(f"{job}: could not mark the claim finished", flush=True)
+
+
+def held_for_worker(job: str, root: Path = REPO_ROOT) -> str:
+    """Why this machine leaves `job` to a worker for now (`job_claims.worker_first`),
+    by the role the workspace file beside the devkit checkout at `root` gives it."""
+    return job_claims.Sightings(root, SIGHTINGS).hold(machine_role.role_beside(root), job)
+
+
 def enough_memory(room: int | None) -> bool:
     """`None` is a probe that failed, which `host_memory` asks to be read as no guard."""
     return room is None or room >= RUN_MB + host_memory.FLOOR_MB
@@ -264,6 +290,9 @@ class Seams:
     room: Callable[[], int | None] = host_memory.available_mb
     claim: Callable[[Path, str], bool] = claimed
     provision: Callable[[Path], str] = disposable_tree.provision
+    disk: Callable[[], int | None] = job_claims.disk_here
+    hold: Callable[[str, Path], str] = held_for_worker
+    finish: Callable[[Path, str], None] = finished
 
 
 @dataclass(frozen=True)
@@ -362,11 +391,17 @@ def judge(target: Target, timeout: float, seams: Seams) -> e2e_results.Result | 
     why = "" if command else tier_command.not_applicable(toml, script or "")
     if why:
         return not_applicable(fresh, why, seams)
+    job = job_id(target.name, fresh.tip)
     if not fresh.forced:
         room = seams.room()
         if not enough_memory(room):
             raise NoRoom(f"{room} MB free, a run needs {RUN_MB + host_memory.FLOOR_MB}")
-        if not seams.claim(target.checkout, job_id(target.name, fresh.tip)):
+        if why := job_claims.disk_refusal(seams.disk()):
+            raise NoRoom(why)
+        if why := seams.hold(job, seams.root):
+            print(f"{target.name}: {why}", flush=True)
+            return None
+        if not seams.claim(target.checkout, job):
             print(f"{target.name}: claimed by another machine at {fresh.tip[:9]}", flush=True)
             return None
     if not command and script is None:
@@ -374,9 +409,12 @@ def judge(target: Target, timeout: float, seams: Seams) -> e2e_results.Result | 
         result = e2e_results.missing_result(target.name, fresh.base, fresh.tip, stamp, TIER)
         result = e2e_results.carried(result, e2e_results.read(target.name, seams.root, TIER))
         e2e_results.write(result, seams.root, TIER)
-        return result
-    print(f"{target.name}: running at {fresh.tip[:9]}", flush=True)
-    return run_at(fresh, command, timeout, seams)
+    else:
+        print(f"{target.name}: running at {fresh.tip[:9]}", flush=True)
+        result = run_at(fresh, command, timeout, seams)
+    if not fresh.forced:
+        seams.finish(target.checkout, job)
+    return result
 
 
 # --- the pass -----------------------------------------------------------------------------

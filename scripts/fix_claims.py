@@ -16,6 +16,12 @@ A machine holding its own claim goes ahead, restamping it: its ledger, not the c
 what says whether this machine should send again. A claim another PC holds is a wait,
 and it ends on its own at the TTL.
 
+**A send that opens a session is a heavy job** (`machine_role.py`): below the disk floor
+it waits (`job_claims.disk_refusal`), and on a `workstation` it waits out
+`job_claims.WORKER_FIRST` from its first sight before it is claimed at all, so a worker
+running `devkit.fixPass: dispatch` sends it first. Both waits come before the claim, so
+neither pushes anything.
+
 **A claim that could not be made fails open.** The send goes and its record line says so
 (`Turn.note`): every fixer on every project stopping for a push problem is far worse than
 the rare duplicate this lets through. Queue tasks are the other way round, since a task
@@ -53,6 +59,8 @@ CLAIMED_BY = "claimed by"  # how a held decision's reason starts, tracked by `fi
 HARNESS_CLAIM = "harness"
 # The fetch and push that give back a finished session's claim, on every pass with a send.
 RELEASE_SECONDS = 20
+# The file a workstation keeps its first sight of each send in (`job_claims.Sightings`).
+SIGHTINGS = "fix"
 
 host_name = fix_findings.harness_events.host_name
 
@@ -83,9 +91,13 @@ class Turn:
         free_mb: int | None,
         harness_busy: str = "",
         left: Callable[[], float] | None = None,
+        role: str = "",
+        free_disk_mb: int | None = None,
     ) -> None:
         self.root, self.writes, self.free_mb, self.left = root, writes, free_mb, left
         self.harness_busy = harness_busy
+        self.role, self.free_disk_mb = role, free_disk_mb
+        self.sightings = job_claims.Sightings(root / fix_cycle.DEVKIT, SIGHTINGS)
         self.host = host_name()
         self.started = False
         self.unclaimed: dict[str, str] = {}
@@ -112,8 +124,10 @@ class Turn:
         """Why `decision` is another PC's, or "": this machine sends it, claimed or not."""
         if not self.writes:
             return ""
-        self._first()
         claim_id, kind = claim_of(decision)
+        if why := self._heavy_hold(decision, claim_id):
+            return why
+        self._first()
         git = sweep.git_for(self.root / repo_of(decision))
         with self._within(job_claims.PUSH_SECONDS):
             attempt = job_claims.claim(git, claim_id, kind, self.host)
@@ -122,6 +136,16 @@ class Turn:
         if attempt.outcome == job_claims.FAILED:
             self.unclaimed[claim_id] = attempt.said
         return ""
+
+    def _heavy_hold(self, decision: fix_plan.Decision, claim_id: str) -> str:
+        """Why a send that opens a session waits on this machine, or "": the disk floor,
+        then a workstation's window for a worker (`job_claims.worker_first`). An update
+        or a rerun opens no session, is one call, and waits for neither."""
+        if decision.action in fix_plan.NO_SESSION:
+            return ""
+        return job_claims.disk_refusal(self.free_disk_mb) or self.sightings.hold(
+            self.role, claim_id
+        )
 
     def note(self, decision: fix_plan.Decision) -> str:
         """What `decision`'s record line owes: that it went unclaimed, when it did."""

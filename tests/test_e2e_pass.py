@@ -474,6 +474,104 @@ def test_a_missing_tier_is_recorded_only_by_the_machine_assigned_it(tmp_path):
     assert results.read("roguelike", tmp_path / "devkit") is None
 
 
+def _role(workspace: Path, role: str, hosts=None) -> None:
+    """Give a `_workspace` file `devkit.machineRole`, and `devkit.localE2e` hosts if any."""
+    text = workspace.read_text(encoding="utf-8").rstrip()[:-1]
+    settings = {"devkit.machineRole": role}
+    if hosts is not None:
+        settings[e2e_pass.SETTING] = {"hosts": hosts}
+    workspace.write_text(f'{text}, "settings": {json.dumps(settings)}}}', encoding="utf-8")
+
+
+def _role_run(tmp_path, role: str, disk=None, hosts=None):
+    tmp_path.mkdir(exist_ok=True)
+    workspace = _workspace(tmp_path, ["carameli"], opted=["carameli"])
+    _role(workspace, role, hosts)
+    ran, run_one = _recording()
+    git = fake_git()
+    seams = e2e_pass.Seams(
+        root=tmp_path / "devkit",
+        idle=lambda: 1e9,
+        now=lambda: NOON,
+        # `job_claims` hands git an environment, which the fake has no use for.
+        git_for=lambda _path: lambda *args, **_kw: git(*args),
+        host="pc-a",
+        disk=lambda: disk,
+    )
+    return e2e_pass.run_due(workspace, _args(due=True), seams, run_one), ran, seams
+
+
+def test_a_role_with_no_hosts_claims_each_run_and_a_named_host_stands(tmp_path):
+    workspace = _workspace(tmp_path, ["carameli"], opted=["carameli"])
+    seams = e2e_pass.Seams(root=tmp_path / "devkit")
+    assert e2e_pass.shared(workspace, seams) == "", "no role is today's behaviour"
+    _role(workspace, "worker")
+    assert e2e_pass.shared(workspace, seams) == "worker"
+    (tmp_path / "b").mkdir()
+    _role(_workspace(tmp_path / "b", ["carameli"], opted=[]), "worker", hosts="pc-a")
+    assert e2e_pass.shared(tmp_path / "b" / "w.code-workspace", seams) == ""
+    assert e2e_pass.shared(tmp_path / "missing.code-workspace", seams) == ""
+    assert e2e_pass.job_id("carameli", "b31b60cbbbbbcccc") == "e2e-carameli-b31b60cbbbbb"
+
+
+def test_a_workstation_leaves_a_due_run_to_a_worker_and_records_when_it_first_saw_it(
+    tmp_path, capsys
+):
+    code, ran, seams = _role_run(tmp_path, "workstation")
+    assert (code, ran) == (0, [])
+    assert "held for a worker" in capsys.readouterr().out
+    seen = (seams.root / e2e_pass.job_claims.SIGHTINGS_DIR / "e2e.json").read_text("utf-8")
+    assert "e2e-carameli-b31b60cbbbbb" in seen
+
+
+def test_a_worker_runs_a_due_project_at_once(tmp_path):
+    """The fake git makes no claim commit, which is a claim that failed open."""
+    code, ran, _seams = _role_run(tmp_path, "worker")
+    assert (code, ran) == (0, ["carameli"])
+
+
+def test_no_run_starts_below_the_disk_floor_whatever_the_role(tmp_path, capsys):
+    low = e2e_pass.job_claims.DISK_FLOOR_MB - 1
+    for role in ("worker", ""):
+        code, ran, _seams = _role_run(tmp_path / (role or "unset"), role, disk=low)
+        assert (code, ran) == (0, []), role
+    assert "held for disk" in capsys.readouterr().out
+
+
+def test_not_ours_names_the_holder_and_a_worker_wins_an_open_claim(tmp_path, monkeypatch):
+    seams = e2e_pass.Seams(root=tmp_path / "devkit", host="pc-b", git_for=lambda _p: None)
+    claims = e2e_pass.job_claims
+    answers = iter(
+        [claims.Attempt(claims.LOST, holder="pc-a"), claims.Attempt(claims.WON)]
+    )
+    monkeypatch.setattr(claims, "claim", lambda *a: next(answers))
+    job = "e2e-carameli-abc"
+    assert e2e_pass.not_ours("carameli", tmp_path, job, "worker", seams) == "claimed by pc-a"
+    assert e2e_pass.not_ours("carameli", tmp_path, job, "worker", seams) == ""
+    held = e2e_pass.not_ours("carameli", tmp_path, job, "workstation", seams)
+    assert held.startswith(claims.HELD_FOR_WORKER), "asked before any claim"
+
+
+def test_a_run_s_claim_is_marked_finished_on_the_machine_that_holds_it(tmp_path):
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    checkouts = []
+    for name in ("pc-a", "pc-b"):
+        checkout = tmp_path / name
+        checkout.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+        subprocess.run(["git", "remote", "add", "origin", remote.as_posix()], cwd=checkout, check=True)
+        checkouts.append(checkout)
+    a, b = checkouts
+    claims = e2e_pass.job_claims
+    job = e2e_pass.job_id("carameli", "b31b60cbbbbbcccc")
+    assert claims.claim(e2e_pass.sweep.git_for(a), job, claims.E2E, "pc-a").won
+    e2e_pass.finished(a, job, host="pc-a")
+    later = claims.time.time() + claims.ttl_of(claims.E2E).total_seconds() * 2
+    attempt = claims.claim(e2e_pass.sweep.git_for(b), job, claims.E2E, "pc-b", later)
+    assert attempt.outcome == claims.LOST
+
+
 @pytest.mark.parametrize(
     "text",
     ["{", "[]", '{"settings": []}', '{"settings": {"devkit.localE2e": "pc"}}', "{}"],

@@ -417,3 +417,120 @@ def test_the_wait_sleeps_once_up_to_its_limit():
     assert jc.wait_turn(None, slept.append, limit=-1.0) == 0.0
     assert jc.wait_turn(jc.PROMPT_MB, slept.append) == 0.0
     assert slept == [jc.MAX_DELAY_SECONDS / 2, 3.0]
+
+
+# --- a finished job's claim -------------------------------------------------------------------
+
+
+def test_a_finished_claim_is_never_broken_at_its_ttl_but_its_holder_may_take_it_again(pcs):
+    """The medium tier and the local e2e record a run only where it ran, so the other PC
+    reads the commit as unjudged: without the mark it broke the claim at the TTL and ran
+    the same commit a second time."""
+    a, b, _ = pcs
+    assert jc.claim(a, "tier-x-1", jc.TIER, "pc-a", NOW).won
+    assert jc.finish(a, "tier-x-1", jc.TIER, "pc-a", NOW + 60)
+    held = jc.holder(b, jc.claim_ref("tier-x-1"))
+    assert held is not None and jc.finished(held) and held.host == "pc-a"
+    late = NOW + jc.ttl_of(jc.TIER).total_seconds() * 4
+    lost = jc.claim(b, "tier-x-1", jc.TIER, "pc-b", late)
+    assert lost.outcome == jc.LOST and lost.holder == "pc-a"
+    assert jc.claim(a, "tier-x-1", jc.TIER, "pc-a", late).won, "a red's retest on its own PC"
+
+
+def test_only_the_holder_can_finish_a_claim(pcs):
+    a, b, _ = pcs
+    assert not jc.finish(a, "never", jc.TIER, "pc-a", NOW), "nothing to finish"
+    jc.claim(a, "tier-x-2", jc.TIER, "pc-a", NOW)
+    assert not jc.finish(b, "tier-x-2", jc.TIER, "pc-b", NOW)
+    assert not jc.finished(jc.holder(a, jc.claim_ref("tier-x-2")))
+
+
+def test_an_unfinished_claim_still_expires():
+    held = jc.Ref(jc.claim_ref("job"), "1", NOW, "claim tier by pc-a at x")
+    assert not jc.finished(held)
+    assert jc.finished(jc.Ref(jc.claim_ref("job"), "1", NOW, "finished tier by pc-a at x"))
+
+
+def test_an_e2e_claim_outlasts_a_run_at_the_default_timeout():
+    run = _dt.timedelta(minutes=60)  # `e2e-pass.DEFAULT_TIMEOUT_MINUTES`
+    assert jc.ttl_of(jc.E2E) > run
+
+
+# --- the disk floor -----------------------------------------------------------------------------
+
+
+def test_a_heavy_job_waits_below_the_disk_floor_and_a_failed_probe_holds_nothing():
+    assert jc.disk_refusal(jc.DISK_FLOOR_MB - 1).startswith(jc.HELD_FOR_DISK)
+    assert jc.disk_refusal(jc.DISK_FLOOR_MB) == ""
+    assert jc.disk_refusal(None) == ""
+    short = jc.Machine("pc", free_disk_mb=jc.DISK_FLOOR_MB - 1)
+    assert jc.refusal(jc.Needs(), short).startswith(jc.HELD_FOR_DISK)
+    assert jc.refusal(jc.Needs(memory=False), short) == "", "a cheap job asks for no disk"
+
+
+def test_the_disk_floor_leaves_a_thirty_gigabyte_laptop_room_to_work():
+    assert 4 * 1024 <= jc.DISK_FLOOR_MB <= 30 * 1024 / 2
+
+
+def test_free_disk_is_read_off_the_drive_and_an_unreadable_one_is_none(tmp_path):
+    free = jc.free_disk_mb(tmp_path)
+    assert isinstance(free, int) and free >= 0
+    assert jc.free_disk_mb(tmp_path / "missing" / "deeper") is None
+    assert jc.disk_here() is not None
+
+
+# --- the role -----------------------------------------------------------------------------------
+
+
+def test_only_a_workstation_waits_and_only_until_the_window_closes():
+    window = jc.WORKER_FIRST.total_seconds()
+    assert jc.worker_first("workstation", NOW, NOW).startswith(jc.HELD_FOR_WORKER)
+    assert jc.worker_first("workstation", NOW, NOW + window - 1)
+    assert jc.worker_first("workstation", NOW, NOW + window) == ""
+    for role in ("worker", ""):
+        assert jc.worker_first(role, NOW, NOW) == "", role
+
+
+def test_the_window_closes_before_any_heavy_claim_can_expire():
+    """A worker that ran a job and has not marked it still holds the claim when the
+    workstation's window closes, so the workstation loses to it rather than breaking it."""
+    for kind in (jc.RUN, jc.AGENT, jc.FIX, jc.HARNESS, jc.TIER, jc.E2E):
+        assert jc.WORKER_FIRST < jc.ttl_of(kind), kind
+    assert jc.WORKER_FIRST < jc.FORGET_SIGHTING
+
+
+def test_a_sighting_keeps_its_first_moment_until_the_key_goes_quiet():
+    seen, first = jc.sighted({}, "job", NOW)
+    assert first == NOW and seen == {"job": [NOW, NOW]}
+    seen, first = jc.sighted(seen, "job", NOW + 600)
+    assert first == NOW and seen["job"] == [NOW, NOW + 600]
+    quiet = NOW + 600 + jc.FORGET_SIGHTING.total_seconds() + 1
+    seen, first = jc.sighted(seen, "job", quiet)
+    assert first == quiet, "a key that went and came back is seen afresh"
+
+
+def test_a_sighting_drops_what_went_quiet_and_what_is_malformed():
+    old = NOW - jc.FORGET_SIGHTING.total_seconds() - 1
+    seen = {"gone": [old, old], "odd": "x", "flag": [True, True], "live": [NOW - 5, NOW - 5]}
+    kept, _ = jc.sighted(seen, "new", NOW)
+    assert set(kept) == {"live", "new"}
+
+
+def test_sightings_span_fires_and_belong_to_the_workstation_alone(tmp_path):
+    sightings = jc.Sightings(tmp_path, "tier")
+    assert sightings.hold("workstation", "job", NOW).startswith(jc.HELD_FOR_WORKER)
+    assert sightings.path.is_file()
+    window = jc.WORKER_FIRST.total_seconds()
+    again = jc.Sightings(tmp_path, "tier")
+    assert again.hold("workstation", "job", NOW + window / 2), "the next fire, still waiting"
+    assert again.hold("workstation", "job", NOW + window) == ""
+    other = jc.Sightings(tmp_path / "w", "tier")
+    assert other.hold("worker", "job", NOW) == ""
+    assert not other.path.exists(), "a worker keeps no file"
+
+
+def test_an_unreadable_sightings_file_is_a_fresh_start(tmp_path):
+    sightings = jc.Sightings(tmp_path, "fix")
+    sightings.path.parent.mkdir(parents=True)
+    sightings.path.write_text("not json", encoding="utf-8")
+    assert sightings.hold("workstation", "job", NOW).startswith(jc.HELD_FOR_WORKER)

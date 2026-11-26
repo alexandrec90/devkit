@@ -79,6 +79,7 @@ import fix_trees
 import git_trust
 import host_memory
 import job_claims
+import machine_role
 import ship_intent
 import sweep
 import task_branch as tb
@@ -120,6 +121,11 @@ FAILED = "failed"
 OFFERED = "offered"
 
 SESSION = agent_models.Launch("claude-bg")
+
+# The kinds a workstation leaves to a worker first (`machine_role.py`), and the file it
+# keeps its first sight of each in (`job_claims.Sightings`).
+HEAVY = frozenset({after_merge.RUN, after_merge.AGENT})
+SIGHTINGS = "after-merge"
 
 
 def docker_works(runner=sweep.run_bounded) -> bool:
@@ -193,6 +199,9 @@ class Seams:
     session_of: Callable[[Path, float], str] = session_state
     provision: Callable[[Path], list[str]] = fix_trees.provision_tree
     spool: Path = Path(after_merge.ELEVATED_SPOOL)
+    disk: Callable[[], int | None] = job_claims.disk_here
+    # Read off the workspace file beside `root`, so a test's root is never the live one.
+    role: Callable[[Path], str] = machine_role.role_beside
 
 
 # --- what is kept on this machine ---------------------------------------------------------------
@@ -265,6 +274,8 @@ class Cycle:
     lines: list[str] = field(default_factory=list)
     due: dict[str, float] = field(default_factory=dict)
     hosts: frozenset[str] = frozenset()
+    free_disk_mb: int | None = None
+    role: str = machine_role.UNSET
 
     def say(self, line: str) -> None:
         self.lines.append(line)
@@ -277,7 +288,14 @@ class Cycle:
             job_claims.wait_turn(self.free_mb, self.seams.sleep)
 
     def machine(self, project: str) -> job_claims.Machine:
-        return job_claims.Machine(self.seams.host, self.free_mb, self.docker, frozenset({project}))
+        return job_claims.Machine(
+            self.seams.host,
+            self.free_mb,
+            self.docker,
+            frozenset({project}),
+            free_disk_mb=self.free_disk_mb,
+            role=self.role,
+        )
 
     def spent_session(self) -> None:
         if self.free_mb is not None:
@@ -335,6 +353,8 @@ def _held_here(task: Task, board: Board, cycle: Cycle) -> str:
     )
     if why := job_claims.refusal(needs, cycle.machine(board.project)):
         return why
+    if why := _left_to_a_worker(task, cycle):
+        return why
     if task.kind == after_merge.ELEVATED and not cycle.seams.spool.is_dir():
         return _no_worker(task, cycle)
     if task.kind == after_merge.RUN and (why := _trust_refusal(board, cycle)):
@@ -342,6 +362,20 @@ def _held_here(task: Task, board: Board, cycle: Cycle) -> str:
         cycle.journal.add(Finding("after-merge-untrusted", task.project, detail))
         return why
     return ""
+
+
+def _left_to_a_worker(task: Task, cycle: Cycle) -> str:
+    """Why a workstation leaves `task` to a worker for now, or "" (`machine_role.py`).
+
+    Only the heavy kinds, a `run` and an `agent`, which start a process or a session; an
+    elevated request is a file written, and a task done once on every machine has no
+    other machine to leave it to.
+    """
+    if task.kind not in HEAVY or task.on == after_merge.EVERY_MACHINE:
+        return ""
+    return job_claims.Sightings(cycle.seams.root, SIGHTINGS).hold(
+        cycle.role, task.id, cycle.seams.now()
+    )
 
 
 def _untrusted(task: Task, board: Board, cycle: Cycle) -> str:
@@ -832,6 +866,8 @@ def _begin(boards: dict[str, Board], seams: Seams) -> Cycle:
         free_mb=seams.free_mb(),
         docker=_needs_docker(boards) and seams.docker(),
         deadline=time.monotonic() + BUDGET_SECONDS,
+        free_disk_mb=seams.disk(),
+        role=seams.role(seams.root),
     )
 
 

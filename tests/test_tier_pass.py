@@ -91,6 +91,9 @@ def _seams(tmp_path: Path, runs=None, **fields):
         "room": lambda: 64000,
         "claim": lambda _c, _j: True,
         "provision": lambda _tree: "",
+        "disk": lambda: None,
+        "hold": lambda _j, _r: "",
+        "finish": lambda _c, _j: None,
     }
     return tier_pass.Seams(**(base | fields))
 
@@ -504,6 +507,64 @@ def test_a_run_that_will_not_fit_is_refused_before_anyone_claims_it(tmp_path):
     with pytest.raises(tier_pass.NoRoom, match="100 MB free"):
         tier_pass.judge(_target(tmp_path), 60.0, seams)
     assert claims == []
+
+
+def test_a_machine_short_of_disk_claims_no_run(tmp_path):
+    """Every run cuts and provisions a tree: a laptop with its disk nearly full stops
+    taking them before the tree fills it."""
+    claims = []
+    low = tier_pass.job_claims.DISK_FLOOR_MB - 1
+    seams = _seams(tmp_path, disk=lambda: low, claim=lambda *a: claims.append(a) or True)
+    with pytest.raises(tier_pass.NoRoom, match="held for disk"):
+        tier_pass.judge(_target(tmp_path), 60.0, seams)
+    assert claims == []
+
+
+def test_a_workstation_leaves_a_run_to_a_worker_and_claims_nothing(tmp_path, capsys):
+    claims = []
+    seams = _seams(
+        tmp_path,
+        hold=lambda _j, _r: "held for a worker: later",
+        claim=lambda *a: claims.append(a) or True,
+    )
+    assert tier_pass.judge(_target(tmp_path), 60.0, seams) is None
+    assert claims == []
+    assert "held for a worker" in capsys.readouterr().out
+
+
+def test_a_run_that_judged_marks_its_claim_finished_and_a_forced_one_does_not(tmp_path):
+    finished = []
+    seams = _seams(tmp_path, finish=lambda checkout, job: finished.append(job))
+    assert tier_pass.judge(_target(tmp_path), 60.0, seams) is not None
+    assert finished == [f"tier-carameli-{TIP[:12]}"]
+    finished.clear()
+    assert tier_pass.judge(_target(tmp_path, forced=True), 60.0, seams) is not None
+    assert finished == [], "a run by hand claimed nothing"
+
+
+def test_a_finished_claim_is_not_broken_at_its_ttl(tmp_path):
+    """The other PC has no result at this commit, so without the mark it would break the
+    claim once the TTL passed and test the same commit again."""
+    a, b = _machines(tmp_path)
+    job = tier_pass.job_id("carameli", TIP)
+    assert tier_pass.claimed(a, job, host=lambda: "pc-a")
+    tier_pass.finished(a, job, host=lambda: "pc-a")
+    later = tier_pass.job_claims.ttl_of(tier_pass.job_claims.TIER).total_seconds() * 2
+    git = tier_pass.sweep.git_for(b)
+    attempt = tier_pass.job_claims.claim(
+        git, job, tier_pass.job_claims.TIER, "pc-b", tier_pass.job_claims.time.time() + later
+    )
+    assert attempt.outcome == tier_pass.job_claims.LOST and attempt.holder == "pc-a"
+
+
+def test_held_for_worker_reads_the_role_beside_the_devkit_checkout(tmp_path):
+    root = tmp_path / "devkit"
+    workspace = tier_pass.sweep.default_workspace(root)
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    workspace.write_text('{"settings": {"devkit.machineRole": "workstation"}}', encoding="utf-8")
+    assert tier_pass.held_for_worker("tier-a-1", root).startswith("held for a worker")
+    workspace.write_text('{"settings": {"devkit.machineRole": "worker"}}', encoding="utf-8")
+    assert tier_pass.held_for_worker("tier-a-2", root) == ""
 
 
 def test_not_applicable_is_not_asked_again_until_the_tip_moves(tmp_path):

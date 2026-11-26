@@ -115,7 +115,7 @@ class NoOtherPC:
 
     held_for = ""
 
-    def __init__(self, *args) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         self.given_back: list = []
 
     def held(self, decision) -> str:
@@ -1551,7 +1551,7 @@ def test_saying_keeps_what_was_printed_and_returns_the_code(capsys):
 def test_a_send_that_failed_gives_its_claim_back(world, tmp_path, monkeypatch):
     turns: list[NoOtherPC] = []
 
-    def record(*args):
+    def record(*args, **kwargs):
         turns.append(NoOtherPC())
         return turns[-1]
 

@@ -33,6 +33,8 @@ import fix_loop
 import fix_plan
 import fix_reports
 import host_memory
+import job_claims
+import machine_role
 import release
 import ship_intent
 import sweep
@@ -321,7 +323,15 @@ def send_all(
     capped: list[tuple[fix_plan.Decision, str]] = []
     worst = EXIT_OK
     room = host_memory.available_mb()
-    turn = fix_claims.Turn(ctx.root, ctx.writes, room, closed.harness_busy, left)
+    turn = fix_claims.Turn(
+        ctx.root,
+        ctx.writes,
+        room,
+        closed.harness_busy,
+        left,
+        role=machine_role.role_here(ctx.root / sweep.WORKSPACE_FILE_NAME),
+        free_disk_mb=job_claims.free_disk_mb(ctx.root) if ctx.writes else None,
+    )
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
         if why := _held(decision, ctx, closed, items or []):

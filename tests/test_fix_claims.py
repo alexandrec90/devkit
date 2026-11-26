@@ -203,6 +203,41 @@ def test_a_wait_on_another_pcs_claim_is_no_stale_wait():
     assert fix_stall.tracked(f"{fix_claims.CLAIMED_BY} pc-a, which sent it")
 
 
+def test_a_workstation_leaves_a_fixer_to_a_worker_and_pushes_nothing_meanwhile(pcs):
+    """The worker on `dispatch` sends it first; the workstation's window closing is the
+    fallback for a worker that is off."""
+    a, b, remotes = pcs
+    os.environ[HOST_ENV] = "pc-a"
+    desk = fix_claims.Turn(a, True, None, "tree", role="workstation")
+    assert desk.held(session()).startswith(jc.HELD_FOR_WORKER)
+    found = run_git(remotes / "carameli.git", "for-each-ref", jc.CLAIM).stdout
+    assert found == "", "a held send claims nothing"
+    assert (a / fix_cycle.DEVKIT / jc.SIGHTINGS_DIR / f"{fix_claims.SIGHTINGS}.json").is_file()
+    laptop = turn(b, "pc-b")
+    laptop.role = "worker"
+    assert laptop.held(session()) == ""
+
+
+def test_an_update_or_a_rerun_is_never_held_for_a_worker_or_for_disk(pcs):
+    a, _, _ = pcs
+    os.environ[HOST_ENV] = "pc-a"
+    desk = fix_claims.Turn(a, True, None, "tree", role="workstation", free_disk_mb=1)
+    for action in fix_plan.NO_SESSION:
+        assert desk.held(fix_plan.Decision(action, "n", (red(action),))) == ""
+
+
+def test_a_machine_short_of_disk_sends_no_session(pcs):
+    a, _, _ = pcs
+    os.environ[HOST_ENV] = "pc-a"
+    short = fix_claims.Turn(a, True, None, "tree", free_disk_mb=jc.DISK_FLOOR_MB - 1)
+    assert short.held(session()).startswith(jc.HELD_FOR_DISK)
+
+
+def test_a_wait_for_a_worker_is_no_stale_wait():
+    """It ends on its own when `job_claims.WORKER_FIRST` closes."""
+    assert fix_stall.tracked(jc.worker_first("workstation", 0.0, 0.0))
+
+
 def test_the_wait_for_a_turn_is_taken_once_a_pass_and_stops_at_the_deadline(pcs, monkeypatch):
     a, _, _ = pcs
     waits: list[tuple] = []
