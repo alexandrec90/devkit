@@ -524,6 +524,13 @@ def test_ports_and_the_workspace_file_name_the_test_that_gates_them():
         assert gate in tests and not unnamed, path
 
 
+def test_the_project_registry_and_the_workspace_file_name_the_test_holding_them_together():
+    gate = "tests/test_project_registry.py"
+    for path in ("projects.toml", "workspace.jsonc"):
+        tests, unnamed = run_tests.tests_for([path], REPO_ROOT)
+        assert gate in tests and not unnamed, path
+
+
 def test_every_read_by_entry_names_a_tracked_file_and_existing_tests():
     for path, readers in run_tests.READ_BY.items():
         assert (REPO_ROOT / path).is_file(), f"READ_BY lists {path}, which is gone"

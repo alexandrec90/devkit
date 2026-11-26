@@ -1,0 +1,33 @@
+# The project registry: every checkout devkit manages, in the order tools list them.
+#
+# `scripts/project_registry.py` reads this file, and owns why it is TOML and why the
+# settings one PC alone decides live elsewhere (`<projects-root>/.devkit-machine.json`).
+# It replaces the `folders` of the VS Code workspace file. Until every caller has moved
+# to the module, that file is still what they read, and `tests/test_project_registry.py`
+# fails this list the moment it disagrees with `workspace.jsonc`'s `folders`: register
+# or retire a project in both.
+#
+# A project counts on a PC when its checkout sits beside devkit's there; one registered
+# here and absent from a machine is simply not that machine's.
+
+projects = [
+    "ibkr_trader",
+    "devkit",
+    "data-lake",
+    "sports_betting",
+    "roguelike",
+    "social-scraper",
+    "productivity-tracker",
+    "skinamp",
+    "photolab",
+    "homelab",
+    "agent-terminal",
+    "d2-trader",
+    "tvshell",
+    "radio",
+    "host-scripts",
+]
+
+# Settings every PC shares, keyed by their full name ("devkit.collectors"). Empty until
+# they move out of the workspace file; a key absent here is read from that file.
+[settings]
