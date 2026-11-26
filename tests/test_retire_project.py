@@ -244,3 +244,137 @@ def test_a_dry_run_and_an_unconfirmed_run_change_nothing(capsys):
 
     assert not retire.confirmed(plan, retire.parse_args(["retire", "geo"]), ask=eof)
     assert "retire geo will:" in capsys.readouterr().out
+
+
+# --- gathering and the command line -------------------------------------------------
+
+
+def test_present_tasks_keeps_only_what_the_scheduler_holds(monkeypatch):
+    monkeypatch.setattr(retire, "WINDOWS", True)
+    held = {"Geo nightly": '<?xml version="1.0"?><Task/>'}
+
+    def run(argv, timeout, cwd=None):
+        name = next((n for n in held if n in argv), None)
+        return done(held[name]) if name else done(code=1)
+
+    monkeypatch.setattr(retire.devkit_schtasks, "query_xml_argv", lambda n: ("schtasks", n))
+    monkeypatch.setattr(retire.devkit_schtasks, "parse_task", lambda text: text or None)
+    assert retire.present_tasks(["Geo nightly", "Geo gone"], run) == ("Geo nightly",)
+
+
+def test_present_tasks_is_empty_off_windows(monkeypatch):
+    monkeypatch.setattr(retire, "WINDOWS", False)
+
+    def run(*_a, **_k):
+        raise AssertionError("no scheduler to ask off Windows")
+
+    assert retire.present_tasks(["Geo nightly"], run) == ()
+
+
+def _stub_registry(monkeypatch, tmp_path, *, known=("geo",)):
+    monkeypatch.setattr(retire.sweep, "default_workspace", lambda base: tmp_path / "ws.code")
+    monkeypatch.setattr(retire.devkit_project, "canonical_text", lambda: "")
+    monkeypatch.setattr(retire.config, "parse_setting", lambda text: ([container()], []))
+    monkeypatch.setattr(retire.devkit_project, "known_projects", lambda text: set(known))
+    monkeypatch.setattr(retire.config, "load_assignment", lambda path: {"geo": config.RUN})
+
+
+def test_gather_reads_the_registry_the_assignment_and_the_record(tmp_path, monkeypatch):
+    _stub_registry(monkeypatch, tmp_path)
+    (tmp_path / "geo").mkdir()
+    monkeypatch.setattr(retire.collector_build, "compose_files", lambda checkout: ["c.yml"])
+    retire.save_records(tmp_path / retire.RECORD, {"geo": {"collector": "run"}})
+    found = retire.gather("geo", tmp_path, lambda argv, timeout, cwd=None: done("db\n"))
+    assert found.checkout == tmp_path / "geo"
+    assert found.registered and found.on_disk and found.has_compose
+    assert found.collector == container() and found.assigned == config.RUN
+    assert found.running == ("db",)
+    assert found.record == {"collector": "run"}
+
+
+def test_gather_for_a_restore_asks_docker_nothing(tmp_path, monkeypatch):
+    _stub_registry(monkeypatch, tmp_path, known=())
+
+    def run(*_a, **_k):
+        raise AssertionError("a restore reads only the record")
+
+    found = retire.gather("geo", tmp_path, run, local=False)
+    assert not found.registered and not found.on_disk
+    assert found.running == () and found.tasks == () and found.record is None
+
+
+def test_save_xml_creates_its_folder_and_normalises_line_endings(tmp_path):
+    target = tmp_path / "deep" / "t.xml"
+    retire.save_xml("<a/>\r\r\n<b/>\r\n", target)
+    assert target.read_text(encoding="utf-16") == "<a/>\n<b/>\n"
+
+
+def test_write_artifact_keeps_failures_and_a_clean_run_empties_it(tmp_path, monkeypatch):
+    artifact = tmp_path / "logs" / "retire-project.log"
+    monkeypatch.setattr(retire, "ARTIFACT", artifact)
+    retire.write_artifact(["one", "two"])
+    assert artifact.read_text(encoding="utf-8") == "one\ntwo\n"
+    retire.write_artifact([])
+    assert artifact.read_text(encoding="utf-8") == ""
+
+
+def test_list_records_names_each_retired_project(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
+    assert retire.list_records(tmp_path) == 0
+    assert "nothing is retired" in capsys.readouterr().out
+    retire.save_records(
+        tmp_path / retire.RECORD,
+        {"geo": {"collector": None, "services": ["db"], "tasks": [], "retired_at": "then"}},
+    )
+    assert retire.list_records(tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "geo: retired then; collector was hands-off; running: db; tasks: none" in out
+
+
+def test_act_refuses_a_project_it_knows_nothing_about(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
+    monkeypatch.setattr(retire, "gather", lambda *a, **k: facts(registered=False, on_disk=False))
+    args = retire.parse_args(["retire", "geo", "--yes"])
+    assert retire.act(args, tmp_path, run=lambda *a, **k: done()) == 2
+    assert "not retired here" in capsys.readouterr().err
+    assert "not retired here" in (tmp_path / "a.log").read_text(encoding="utf-8")
+
+
+def test_act_records_a_retire_before_it_runs_and_reports_a_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
+    monkeypatch.setattr(retire, "gather", lambda *a, **k: facts(assigned=config.RUN))
+    seen = []
+
+    def run(argv, timeout, cwd=None):
+        seen.append(set(retire.load_records(tmp_path / retire.RECORD)))
+        return done(code=1, stderr="refused")
+
+    args = retire.parse_args(["retire", "geo", "--yes"])
+    assert retire.act(args, tmp_path, run) == 1
+    assert seen == [{"geo"}]
+    assert "exit 1 -- refused" in (tmp_path / "a.log").read_text(encoding="utf-8")
+
+
+def test_act_dry_run_changes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
+    monkeypatch.setattr(retire, "gather", lambda *a, **k: facts())
+
+    def run(*_a, **_k):
+        raise AssertionError("a dry run runs nothing")
+
+    args = retire.parse_args(["retire", "geo", "--dry-run"])
+    assert retire.act(args, tmp_path, run) == 0
+    assert retire.load_records(tmp_path / retire.RECORD) == {}
+
+
+def test_main_lists_from_the_machines_home_and_reports_an_os_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
+    monkeypatch.setattr(retire.config, "home", lambda root: tmp_path)
+    assert retire.main(["list"]) == 0
+
+    def broken(*_a, **_k):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(retire, "gather", broken)
+    assert retire.main(["retire", "geo", "--yes"]) == 1
+    assert "disk gone" in (tmp_path / "a.log").read_text(encoding="utf-8")
