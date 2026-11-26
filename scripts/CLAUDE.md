@@ -291,7 +291,10 @@ at all is a backoff and a count, not a ledger row (`tier_state.py`).
 `after-merge-pass.py` acts, and neither is vendored. **A claim is a ref only one PC can
 create** (`job_claims.py`, which says why each detail of the push is the way it is): keep
 its commit unique per call, keep `FAILED` distinct from `LOST`, and keep `--no-verify`
-inside `_push`, which refuses anything outside `refs/devkit/`.
+inside `_push`, which refuses anything outside `refs/devkit/`. The same push carries each
+PC's SSH record (`refs/devkit/fleet/<host>`, `fleet_ssh.py`), so adding a PC to the fleet
+is no hand-copied key: what a record may hold is refused rather than escaped, because it
+lands in `~/.ssh/config` and an authorized_keys file.
 
 **No task may be silently lost, so a change here keeps these:**
 

@@ -4,14 +4,21 @@
 `collectors.py` keeps a collector running on the machine assigned it, and `move` hands one
 to another machine, but it sees one machine and has to be typed on the one that runs it.
 This is the layer above that: it asks every PC on the tailnet what it has free and what it
-runs, so adding a PC means joining the tailnet and accepting this machine's SSH key, with
-no list of machines to maintain.
+runs, with no list of machines to maintain. Adding a PC means joining the tailnet and
+running OpenSSH Server: each PC publishes its login, key and address and configures itself
+from the others' (`fleet_ssh.py`, which `devkit-after-merge` runs every cycle), so the one
+step left to a person is an administrator login's `authorize`, which the pass names.
 
     fleet.py                            # every PC: memory, collectors, what is wrong
     fleet.py move PROJECT --to HOST     # from any PC, whichever one runs it
     fleet.py rebalance                  # which move would relieve the shortest PC
     fleet.py rebalance --apply          # make that one move
     fleet.py probe                      # this PC as JSON: what the others read over SSH
+    fleet.py join                       # publish this PC for SSH, configure the others
+    fleet.py authorize                  # from an administrator shell: authorize peers' keys
+
+A PC that does not answer says why in words (`fleet_ssh.diagnose`): no published login,
+no config entry here, its key not authorized there, sshd not listening, or offline.
 
 **Nothing here moves data or keeps state.** A move is `collectors.py move` run on the
 machine that owns the collector, over SSH when that is not this one, and the destination
@@ -48,7 +55,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collector_handoff as handoff
 import collectors_config as config
 import devkit_schtasks
+import fleet_ssh
 import host_memory
+import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -91,6 +100,8 @@ WINDOWS = sys.platform == "win32"
 # Said for a machine that answered SSH but whose devkit checkout predates this script:
 # reachable, with the remedy, rather than the bare interpreter error it printed.
 OUTDATED = "answers, but its devkit checkout has no scripts/fleet.py -- pull devkit there"
+# Said for a workstation Tailscale lists but not as online.
+OFFLINE = "offline on Tailscale: the PC is off, asleep or signed out of the tailnet"
 
 Runner = Callable[[Sequence[str], int], tuple[int, str]]
 Mover = Callable[[Sequence[str]], int]
@@ -227,37 +238,59 @@ def machine_from(payload: Mapping[str, Any]) -> Machine:
     )
 
 
-def remote_script(host: str, root: Path, script: str, *args: str) -> list[str]:
-    """Run a devkit script on `host`, from the checkout at the same place under its home."""
-    relative = (config.home(root) / "scripts" / script).relative_to(Path.home())
-    return [*SSH, host, "python", relative.as_posix(), *args]
+def remote_script(host: str, root: Path, script: str, *args: str, devkit: str = "") -> list[str]:
+    """Run a devkit script on `host`, from its checkout under its home: where its record
+    says (`devkit`), else the same place as here -- the logins differ, so the homes do."""
+    if devkit:
+        relative = f"{devkit}/scripts/{script}"
+    else:
+        relative = (config.home(root) / "scripts" / script).relative_to(Path.home()).as_posix()
+    return [*SSH, host, "python", relative, *args]
 
 
-def ask(host: str, here: str, root: Path, run: Runner) -> Machine:
-    """One machine's `probe`, or the machine with the reason it did not answer."""
+def ask(
+    host: str, here: str, root: Path, run: Runner, facts: fleet_ssh.Known | None = None
+) -> Machine:
+    """One machine's `probe`, or the machine with the reason it did not answer, in words
+    when ssh's refusal is one `fleet_ssh.diagnose` knows."""
     if host == here:
         return machine_from(probe(root, run))
-    code, out = run(remote_script(host, root, "fleet.py", "probe"), PROBE_TIMEOUT)
+    facts = facts or fleet_ssh.Known()
+    record = facts.records.get(host)
+    argv = remote_script(host, root, "fleet.py", "probe", devkit=record.devkit if record else "")
+    code, out = run(argv, PROBE_TIMEOUT)
     if code != 0:
         if "can't open file" in out and "fleet.py" in out:
             return Machine(host, error=OUTDATED)
-        lines = [line for line in out.splitlines() if line.strip()]
-        return Machine(host, error=(lines[-1] if lines else f"ssh exited {code}")[:120])
+        return Machine(host, error=fleet_ssh.diagnose(out, host, facts) or f"ssh exited {code}")
     try:
         return machine_from(json.loads(out))
     except (ValueError, KeyError, TypeError) as exc:
         return Machine(host, error=f"answered oddly: {exc}"[:120])
 
 
-def survey(root: Path = REPO_ROOT, run: Runner = spawn) -> list[Machine]:
+def known_here(root: Path) -> fleet_ssh.Known:
+    """What this PC knows of its peers' SSH, from devkit's refs and `~/.ssh/config`; none
+    of it when that cannot be read."""
+    try:
+        return fleet_ssh.known(sweep.git_for(config.home(root)))
+    except OSError:
+        return fleet_ssh.Known()
+
+
+def survey(
+    root: Path = REPO_ROOT, run: Runner = spawn, facts: fleet_ssh.Known | None = None
+) -> list[Machine]:
     """Every workstation on the tailnet. Without Tailscale, just this machine."""
     here = handoff.this_host()
     code, out = run(["tailscale", "status", "--json"], TAILSCALE_TIMEOUT)
     online, offline = tailnet_hosts(out) if code == 0 else ([here], [])
     if here not in online:
         online.append(here)
-    return [ask(host, here, root, run) for host in online] + [
-        Machine(host, error="offline") for host in offline
+    if facts is None and online != [here]:
+        facts = known_here(root)
+    return [ask(host, here, root, run, facts) for host in online] + [
+        Machine(host, error=OFFLINE) for host in offline
     ]
 
 
@@ -439,7 +472,18 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     moving.add_argument("--to", required=True)
     balancing = verbs.add_parser("rebalance", help="the move that relieves the shortest machine")
     balancing.add_argument("--apply", action="store_true", help="make the move")
+    verbs.add_parser("join", help="publish this PC for SSH and configure every peer here")
+    verbs.add_parser("authorize", help="add peers' keys to sshd's file (administrator shell)")
     return parser.parse_args(argv)
+
+
+def report(joined: fleet_ssh.Joined) -> int:
+    """Print what a `join` or `authorize` did; 1 while a step is left to a person."""
+    for line in joined.lines:
+        print(f"fleet: {line}")
+    for step in joined.steps.values():
+        print(f"fleet: {step}", file=sys.stderr)
+    return 1 if joined.steps else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -447,6 +491,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.verb == "probe":
         print(json.dumps(probe()))
         return 0
+    if args.verb in ("join", "authorize"):
+        devkit = config.home(REPO_ROOT)
+        git = sweep.git_for(devkit)
+        verb = fleet_ssh.join if args.verb == "join" else fleet_ssh.authorize
+        return report(verb(devkit, git))
     collectors, errors = config.declared(config.home(REPO_ROOT))
     for error in errors:
         print(f"fleet: {error}", file=sys.stderr)

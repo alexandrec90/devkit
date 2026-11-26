@@ -57,6 +57,9 @@ class World:
         self.session = fix_reports.WORKING
         self.clock: float | None = None
         self.projects: list[str] = []
+        # What the SSH join was handed and answers: the real one writes `~/.ssh`.
+        self.joins: list[Path] = []
+        self.joined = after_merge_pass.fleet_ssh.Joined()
         self.add_project("carameli")
 
     @property
@@ -154,6 +157,10 @@ class World:
 
         return gh
 
+    def join(self, devkit: Path, git) -> object:
+        self.joins.append(devkit)
+        return self.joined
+
     def now(self) -> float:
         return time.time() if self.clock is None else self.clock
 
@@ -173,6 +180,7 @@ class World:
             session_of=lambda tree, now: self.session,
             provision=lambda tree: [],
             spool=self.spool,
+            fleet=self.join,
         )
         return replace(base, **changes)
 

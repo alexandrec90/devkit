@@ -1308,9 +1308,27 @@ python scripts/fleet.py rebalance               # what would relieve the shortes
 python scripts/fleet.py rebalance --apply       # make that one move
 ```
 
-There is no list of machines. A PC joins by being on the tailnet with this checkout at the
-same place under its home and accepting the SSH key of the PC you run this from. One that
-does not answer costs a row saying why, and changes nothing else: `fleet.py` holds no state
+There is no list of machines. A PC joins by being on the tailnet with this checkout and
+OpenSSH Server running; the rest sets itself up. The PCs share no login, so each publishes
+who it is for SSH -- its login name, its ed25519 public key (made if it has none), its
+tailnet address and where its checkout sits under its home -- as
+`refs/devkit/fleet/<host>` in this repository, and `fleet.py join` on every PC reads the
+others' into a marked block of `~/.ssh/config` (`Host` / `HostName` / `User`, nothing
+outside the markers touched) and adds their keys to the file its own sshd reads. The
+`devkit-after-merge` job runs `join` every cycle, so by hand it is only for a PC you want
+set up now:
+
+```bash
+python scripts/fleet.py join        # publish this PC, configure and authorize the others
+python scripts/fleet.py authorize   # from an administrator shell: the administrators' file
+```
+
+For an administrator login that file is `C:\ProgramData\ssh\administrators_authorized_keys`,
+which only an elevated process may write, so the job files the `authorize` command as a
+person's step and the morning toast names it. Keys are only ever added. One that
+does not answer costs a row saying why in words -- no published login (wrong user), no
+config entry here, its key not authorized there, sshd not listening, offline -- and changes
+nothing else: `fleet.py` holds no state
 and a move is still `collectors.py move`, run over SSH on the machine that owns the
 collector and picked up by the destination's next pass. A PC that answers but whose
 checkout predates `fleet.py` says so rather than reading as unreachable: pull devkit there.
