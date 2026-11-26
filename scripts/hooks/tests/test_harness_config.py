@@ -50,6 +50,15 @@ def test_delivery_guarded_is_a_list_of_paths_and_nothing_else():
         assert cfg.from_dict({"delivery": {"guarded": bad}}).delivery.guarded == (), bad
 
 
+def test_delivery_e2e_moves_the_tier_to_ci_only_by_its_one_word():
+    """`ci` hands the end-to-end tier to the gate's `E2E` job; anything else, a typo
+    included, keeps it on the PC, where a red is still found."""
+    assert cfg.Config().delivery.e2e == ""
+    assert cfg.from_dict({"delivery": {"e2e": "ci"}}).delivery.e2e == "ci"
+    for bad in ("CI", "local", "", 1, ["ci"], None):
+        assert cfg.from_dict({"delivery": {"e2e": bad}}).delivery.e2e == "", bad
+
+
 def test_defaults_are_a_minimal_neutral_harness():
     c = cfg.Config()
     assert c.env_prefix == "DEVKIT"
