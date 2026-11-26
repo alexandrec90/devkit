@@ -440,6 +440,8 @@ def world(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(fix_pass, "REPO_ROOT", tmp_path / "devkit")
+    # `devkit.localE2e` from this world's files, never the committed `projects.toml`.
+    monkeypatch.setattr(fix_pass.fix_red, "REPO_ROOT", tmp_path / "devkit")
     return table
 
 

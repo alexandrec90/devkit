@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT, devkit_jsonc, load_script
+from support import REPO_ROOT, load_script
 
 config = load_script("scripts/collectors_config.py")
 
@@ -20,6 +20,13 @@ def workspace(settings: dict) -> str:
     return "// a comment, as the real file has\n" + json.dumps(
         {"folders": [], "settings": settings}
     )
+
+
+def committed() -> list:
+    """What devkit's own `projects.toml` declares, read the way the job reads it."""
+    found, notes = config.declared(REPO_ROOT)
+    assert notes == []
+    return found
 
 
 # --- the workspace setting -------------------------------------------------------
@@ -81,10 +88,7 @@ def test_a_container_collector_may_name_the_checkouts_its_image_copies():
 
 def test_the_workspace_declares_what_ibkr_trader_s_image_copies():
     """Its Dockerfile `COPY`s the sibling data-lake checkout (110defb0)."""
-    found, _notes = config.parse_setting(
-        (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
-    )
-    [ibkr] = [c for c in found if c.project == "ibkr_trader"]
+    [ibkr] = [c for c in committed() if c.project == "ibkr_trader"]
     assert ibkr.builds_from == ("data-lake",)
 
 
@@ -120,10 +124,7 @@ def test_a_scheduled_collector_may_declare_its_handoff():
 
 def test_the_workspace_declares_a_handoff_for_every_collector():
     """The user may keep neither PC, so each collector has to be movable, data and all."""
-    found, _notes = config.parse_setting(
-        (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
-    )
-    by_name = {c.project: c.handoff for c in found}
+    by_name = {c.project: c.handoff for c in committed()}
     plain = ("uv", "run", "python", "scripts/handoff.py")
     assert by_name["social-scraper"] == plain, "boto3 is a core dependency there"
     assert all(by_name.values()), [name for name, argv in by_name.items() if not argv]
@@ -133,10 +134,7 @@ def test_the_workspace_s_sports_betting_handoff_brings_the_sibling_data_lake():
     """7fb217a7: its pyproject declares data-lake in no form, so a hand install into the
     venv was the only thing holding the store's import up -- missing on the second PC,
     and removed by any `uv sync`, so `pending` exited 2 there on every pass."""
-    found, _notes = config.parse_setting(
-        (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
-    )
-    [sports] = [c for c in found if c.project == "sports_betting"]
+    [sports] = [c for c in committed() if c.project == "sports_betting"]
     assert sports.handoff == (
         "uv",
         "run",
@@ -148,10 +146,7 @@ def test_the_workspace_s_sports_betting_handoff_brings_the_sibling_data_lake():
 
 
 def test_the_workspace_declares_ibkr_trader_s_handoff_with_the_extra_boto3_needs():
-    found, _notes = config.parse_setting(
-        (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
-    )
-    [ibkr] = [c for c in found if c.project == "ibkr_trader"]
+    [ibkr] = [c for c in committed() if c.project == "ibkr_trader"]
     assert ibkr.handoff == ("uv", "run", "--extra", "archive", "python", "scripts/handoff.py")
 
 
@@ -238,16 +233,54 @@ def test_an_unparseable_workspace_file_is_reported_rather_than_raised():
     assert config.parse_setting("{ not json") == ([], ["the workspace file does not parse"])
 
 
-def test_a_missing_workspace_file_is_reported(tmp_path):
+def test_with_neither_file_the_missing_declaration_is_reported(tmp_path):
     found, notes = config.declared(tmp_path / "devkit")
-    assert found == [] and "no workspace file" in notes[0]
+    assert found == [] and "no projects.toml" in notes[0] and "no workspace file" in notes[0]
 
 
-def test_the_canonical_workspace_declares_the_collectors():
+def test_the_value_parser_reads_a_stored_setting_as_the_text_parser_does():
+    value = {"p": {"service": "s"}, "bad": "x"}
+    assert config.parse_value(value) == config.parse_setting(workspace({config.SETTING: value}))
+    assert config.parse_value(None) == ([], [])
+
+
+def _checkout(tmp_path: Path, registry: str | None, live: dict | None) -> Path:
+    devkit = tmp_path / "devkit"
+    devkit.mkdir()
+    if registry is not None:
+        (devkit / "projects.toml").write_text(registry, encoding="utf-8")
+    if live is not None:
+        (tmp_path / "alex-projects.code-workspace").write_text(workspace(live), encoding="utf-8")
+    return devkit
+
+
+def test_declared_reads_projects_toml_over_the_workspace_file(tmp_path):
+    devkit = _checkout(
+        tmp_path,
+        '[settings."devkit.collectors".a]\nservice = "app"\n',
+        {config.SETTING: {"b": {"service": "s"}}},
+    )
+    assert config.declared(devkit) == ([config.Collector("a", "app")], [])
+
+
+def test_declared_falls_back_to_the_workspace_file(tmp_path):
+    devkit = _checkout(tmp_path, "projects = []\n", {config.SETTING: {"b": {"service": "s"}}})
+    assert config.declared(devkit) == ([config.Collector("b", "s")], [])
+
+
+def test_a_malformed_projects_toml_is_a_note_not_a_crash(tmp_path):
+    devkit = _checkout(tmp_path, "[settings\n", {config.SETTING: {"b": {"service": "s"}}})
+    found, notes = config.declared(devkit)
+    assert found == [] and "projects.toml" in notes[0]
+
+
+def test_a_present_file_without_the_setting_declares_nothing_and_says_nothing(tmp_path):
+    assert config.declared(_checkout(tmp_path, "projects = []\n", None)) == ([], [])
+
+
+def test_the_committed_registry_declares_the_collectors():
     """The declarations, read the way the job reads them."""
-    text = (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
-    found, notes = config.parse_setting(text)
-    assert notes == []
+    found = committed()
     containers = [c for c in found if not c.scheduled]
     assert {c.project: c.service for c in containers} == {
         "ibkr_trader": "app",
@@ -257,7 +290,6 @@ def test_the_canonical_workspace_declares_the_collectors():
     scheduled = {c.project: c for c in found if c.scheduled}
     assert set(scheduled) == {"social-scraper"}
     assert scheduled["social-scraper"].needs == ("db",)
-    devkit_jsonc.loads(text)  # and the file as a whole still parses
 
 
 # --- this machine's assignment ---------------------------------------------------

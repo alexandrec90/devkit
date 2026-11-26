@@ -654,7 +654,13 @@ def on_hold(text: str) -> frozenset[str]:
     settings = payload.get("settings")
     if not isinstance(settings, dict):
         return frozenset()
-    names = settings.get(ON_HOLD_SETTING)
+    return held(settings.get(ON_HOLD_SETTING))
+
+
+def held(names: object) -> frozenset[str]:
+    """`ON_HOLD_SETTING`'s value, as stored, as checkout names; nothing for any other
+    shape. Read off this PC's machine file by `worktree.on_hold_projects`, which cannot
+    live here: `project_registry` imports this module."""
     if not isinstance(names, list):
         return frozenset()
     return frozenset(name for name in names if isinstance(name, str) and name)

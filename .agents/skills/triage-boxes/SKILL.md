@@ -18,8 +18,8 @@ does not ship by hand and had set the schedule up precisely so they would never 
 The 2026-08-30 audit found thirteen of them, the oldest ten days old.
 
 The tier now calls that state **stranded** (`worktree.stranded`: a `HOLD` older than
-`STRANDED_AGE_DAYS` with no PR, or any `HOLD` for a project in `workspace.jsonc`'s
-`devkit.onHold` list) and names this skill as the remedy. The judgement the scheduled
+`STRANDED_AGE_DAYS` with no PR, or any `HOLD` for a project in this PC's
+`devkit.onHold` list, `worktree.on_hold_projects`) and names this skill as the remedy. The judgement the scheduled
 pass cannot make -- *is this work or is it debris* -- is one an agent can, from the diff.
 That is the whole job here: read each stranded box, decide, act, and end with none left.
 

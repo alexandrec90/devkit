@@ -134,7 +134,7 @@ def run(workspace: Path) -> int:
     """One fire. Exits quietly when another fire holds the lock or there is nothing to do."""
     root = workspace.parent
     text = workspace.read_text(encoding="utf-8")
-    mode = fix_cycle.mode_from_workspace(text)
+    mode = fix_cycle.mode_here(workspace)
     projects = devkit_project.known_projects(text)
     lock = ship_step.SHIP_LOCK_NAME
     with worktree.named_lock(root, lock, 0.0, ship_step.SHIP_LOCK_STALE) as held:

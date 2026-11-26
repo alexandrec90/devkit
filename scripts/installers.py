@@ -26,8 +26,8 @@ worktree, this spawns the static checkout's installers, not the worktree's.
 the installer builds *today*, which is how a gained flag is applied and a moved checkout
 is followed. It is also why an option chosen at install time -- `--merge` on the
 reconcile pass -- is remembered by nothing but the registered task, and a re-register
-from defaults would silently drop it. `devkit.installers` in the workspace file's
-`settings` is where such options live: `{"install-reconcile-task.py": ["--merge"]}` is
+from defaults would silently drop it. `devkit.installers` in devkit's `projects.toml`
+`[settings]` is where such options live: `"install-reconcile-task.py" = ["--merge"]` is
 passed to that installer's `--check` and its `--yes` alike, so what is compared is what
 is registered.
 
@@ -73,6 +73,7 @@ import devkit_jsonc
 import devkit_schtasks
 import installer_cli
 import harness_state
+import project_registry
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -81,7 +82,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # `schedule_health`, and `tests/test_scheduled_jobs.py` checks the two agree.
 ARTIFACT = Path("logs/installers.log")
 
-# The workspace-file setting holding per-installer options, keyed by installer file name.
+# The `projects.toml` setting holding per-installer options, keyed by installer file name.
 SETTING = "devkit.installers"
 
 # Found, never listed: a new installer is in scope the moment the file exists, which is
@@ -184,7 +185,11 @@ def parse_options(text: str) -> dict[str, list[str]]:
     except (json.JSONDecodeError, TypeError):
         return {}
     settings = payload.get("settings") if isinstance(payload, dict) else None
-    raw = settings.get(SETTING) if isinstance(settings, dict) else None
+    return options_of(settings.get(SETTING) if isinstance(settings, dict) else None)
+
+
+def options_of(raw: object) -> dict[str, list[str]]:
+    """`SETTING`'s value, as stored, as installer file name -> extra arguments."""
     if not isinstance(raw, dict):
         return {}
     return {
@@ -194,12 +199,19 @@ def parse_options(text: str) -> dict[str, list[str]]:
     }
 
 
-def read_options(workspace: Path | None) -> dict[str, list[str]]:
-    """The options file on disk, or nothing: a machine with no workspace file has no
-    options, which is the state every installer's defaults are for."""
-    if workspace is None or not workspace.is_file():
+def read_options(workspace: Path | None, root: Path) -> dict[str, list[str]]:
+    """`SETTING` as `project_registry.setting` reads it for the checkout at `root` -- its
+    `projects.toml`, else `workspace` (else the live file `root` resolves to).
+
+    Nothing where neither file sets it -- the state every installer's defaults are for
+    -- and nothing for a malformed `projects.toml`, as `parse_options` gives nothing for
+    a broken workspace file.
+    """
+    try:
+        raw = project_registry.setting(SETTING, repo_root=root, workspace=workspace)
+    except (project_registry.RegistryError, OSError):
         return {}
-    return parse_options(workspace.read_text(encoding="utf-8"))
+    return options_of(raw)
 
 
 def installer_argv(python: str, script: Path, mode: str, options: Sequence[str]) -> list[str]:
@@ -458,7 +470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     devkit = args.devkit.expanduser().resolve()
     root = sweep.source_checkout(devkit)
     workspace = args.workspace or sweep.default_workspace(root)
-    options = read_options(Path(workspace) if workspace else None)
+    options = read_options(Path(workspace) if workspace else None, root)
     only = parse_only(args.only)
     if args.mode == "uninstall":
         # `--dry-run` wins over `--yes`, which only matters if a picker ever sends both:

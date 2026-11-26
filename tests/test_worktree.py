@@ -7119,6 +7119,19 @@ def test_on_hold_projects_reads_the_workspace_file_or_answers_nothing(tmp_path):
     assert worktree.on_hold_projects(path) == frozenset({"ibkr_trader"})
 
 
+def test_on_hold_projects_prefers_the_machine_file_and_a_broken_one_holds_nothing(tmp_path):
+    path = tmp_path / "ws.code-workspace"
+    path.write_text(
+        json.dumps({"folders": [], "settings": {sweep.ON_HOLD_SETTING: ["ibkr_trader"]}}),
+        encoding="utf-8",
+    )
+    machine = tmp_path / ".devkit-machine.json"
+    machine.write_text(json.dumps({sweep.ON_HOLD_SETTING: ["radio"]}), encoding="utf-8")
+    assert worktree.on_hold_projects(path) == frozenset({"radio"})
+    machine.write_text("{", encoding="utf-8")
+    assert worktree.on_hold_projects(path) == frozenset()
+
+
 def test_reconcile_flags_a_stranded_hold_and_still_holds_it(workspace, monkeypatch):
     """Stranded is a heading, not an action: the box is held exactly as before."""
     root = _reconcilable(workspace, monkeypatch, "demo--old-0806", sweep.READY, "2 uncommitted", "")

@@ -1570,7 +1570,7 @@ def status(
     """Read-only: what is declared, what this machine was told (`chosen`, the targets
     `targets` drew from the assignment), and what is running."""
     if not collectors:
-        report.say(f"no collectors declared -- add `{config.SETTING}` to the workspace file")
+        report.say(f"no collectors declared -- add `{config.SETTING}` to devkit's projects.toml")
     in_containers = any(not t.collector.scheduled for t in chosen)
     containers: list[Container] | None = docker.ps() if in_containers else []
     python = collector_tasks.interpreter() if any(t.collector.scheduled for t in chosen) else ""

@@ -590,8 +590,8 @@ and the body after a blank one, and stops (`.claude/ship-intent.md`). It may com
 push itself too; the intent is what tells the pass it is done, and the only thing it
 knows that nothing else can recover is *why* the change was made.
 
-`scripts/fix-pass.py` is what does the rest, every half hour and whenever `scripts/fix_trigger.py` sees something newly red (asked every two minutes), once `devkit.fixPass` in the
-workspace file is switched on (`scripts/install-fix-pass-task.py` registers it, wired and
+`scripts/fix-pass.py` is what does the rest, every half hour and whenever `scripts/fix_trigger.py` sees something newly red (asked every two minutes), once `devkit.fixPass` in this
+PC's `<projects-root>/.devkit-machine.json` is switched on (`scripts/install-fix-pass-task.py` registers it, wired and
 off, and `off` means this PC sends no fixers: the ship task below still ships), or by hand through the *Agent: Fix What Is Red* task, which passes `dispatch`
 explicitly and asks only which agent. One pass, in order:
 
@@ -1009,14 +1009,18 @@ The format is `.claude/ship-intent.md`'s last section; the decisions are `script
 
 #### Which PC takes the heavy work: `workstation` or `worker`
 
-With two PCs on the same jobs, each says what it is, in its own live workspace file
-(`devkit.machineRole`, beside `devkit.fixPass`):
+With two PCs on the same jobs, each says what it is, in its own
+`<projects-root>/.devkit-machine.json` (`devkit.machineRole`, beside `devkit.fixPass` and
+`devkit.onHold`). Where that file does not set one, the live workspace file still answers;
+the daily `devkit-workspace-status` pass copies all three out of it once, and `--migrate`
+does the same by hand:
 
 ```bash
 python scripts/machine_role.py                       # this PC's role, and what it means
 python scripts/machine_role.py --set worker          # the PC nobody sits at
 python scripts/machine_role.py --set workstation     # the PC you work at
 python scripts/machine_role.py --set unset           # order by free memory alone, as before
+python scripts/machine_role.py --migrate             # copy this PC's settings out of the workspace file
 ```
 
 A `worker` claims a heavy job the moment it sees one, and its after-merge pass refreshes a
@@ -1099,11 +1103,12 @@ decision, not maintenance.
 
 An option an installer should keep — `--merge` on the reconcile pass — is remembered by
 nothing but the registered task, so a re-register from defaults would silently drop it.
-Put it in the workspace file's `settings` as `devkit.installers`, keyed by installer file
+Put it in devkit's `projects.toml` as `devkit.installers`, keyed by installer file
 name; the pass passes it to that installer's `--check` and `--yes` alike:
 
-```jsonc
-"devkit.installers": { "install-reconcile-task.py": ["--merge"] }
+```toml
+[settings."devkit.installers"]
+"install-reconcile-task.py" = ["--merge"]
 ```
 
 `tests/test_installer_contract.py` holds every installer to the contract the pass relies
@@ -1197,8 +1202,9 @@ container, so what needs an owner is the container: up where it should run, down
 should not, and visibly healthy. `restart: unless-stopped` gives none of that. It revives a
 container on whichever machine last started one, and does nothing where nobody did.
 
-Which collectors exist is declared once, in `workspace.jsonc`, beside
-`devkit.remoteControl`: the service, and the project's own health command, run inside the
+Which collectors exist is declared once, in devkit's `projects.toml`, beside
+`devkit.remoteControl` (`[settings."devkit.collectors".<project>]`, one table each; the
+shape below is the same value as JSON): the service, and the project's own health command, run inside the
 container and trusted for its exit code.
 
 ```jsonc
@@ -1357,9 +1363,9 @@ CLI in the gap, and starts them again. Restarting inside four hours brings each 
 back, so the cycle costs the conversations nothing.
 
 Nothing is served until you opt a project in, because a standing server costs real
-memory. The setting lives beside `devkit.onHold` in devkit's `workspace.jsonc` --
-canonical-then-publish like every other workspace edit, because a hand edit of the live
-file has to be merged back by hand before anything can publish again:
+memory. The setting lives in devkit's `projects.toml`, `[settings."devkit.remoteControl"]`,
+changed on a task branch like any committed file; the examples below are its value as
+JSON:
 
 ```jsonc
 "devkit.remoteControl": ["devkit", "carameli"]
@@ -1479,10 +1485,13 @@ and `logs/reap-stale.log` names that tree until the stack moves to the checkout.
 may open -- pytest run elevated leaves such a `.pytest_cache` -- is not counted as a
 failure: its line in `logs/reap-stale.log` gives the command to run from an elevated
 shell. The settings sit beside
-`devkit.remoteControl`:
+`devkit.remoteControl` in `projects.toml`, unset there so the defaults hold:
 
-```jsonc
-"devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true, "dockerClis": true}
+```toml
+[settings."devkit.reapStale"]
+sessionIdleMinutes = 120
+devServers = true
+dockerClis = true
 ```
 
 ```bash
@@ -1884,7 +1893,7 @@ ten minutes (an hour, for a tier that opens windows), and a red one reaches the 
 | `scripts/e2e-pass.py run --due` | Ends at once on a PC in use; else, for each project whose tip moved, fast-forwards each static checkout to `origin/<default>` (skipping, with the reason, one a person is working in), runs its `scripts/e2e.py`, writes `logs/e2e/<project>/result.json` and `output.log` in devkit. Exits 0 on a red result. |
 | `scripts/e2e_results.py` | Turns a red result into a `fix_plan.LOCAL` failure, read by `fix_red.collect_red`. A result older than the tip is held until the next run re-tests it. A finished red starts a fix pass within two minutes (`scripts/fix_trigger.py`). |
 | `scripts/e2e-pass.py status` | Each project's last result. |
-| `devkit.localE2e` in `workspace.jsonc` | **Which PC tests which project.** `hosts` takes `devkit.remoteControl`'s shape: one machine name, or `{"*": "pc-a", "carameli": "pc-b"}`. Every PC registers the job and tests only what this assigns it, so moving the job is editing this value. |
+| `devkit.localE2e` in `projects.toml` | **Which PC tests which project.** `hosts` takes `devkit.remoteControl`'s shape: one machine name, or `{"*": "pc-a", "carameli": "pc-b"}`. Every PC registers the job and tests only what this assigns it, so moving the job is editing this value. |
 
 devkit's own `scripts/e2e.py` runs every test marked `local`, and `needs_live_workspace` and
 `needs_the_static_checkout` in `tests/support.py` apply that mark themselves. Under the

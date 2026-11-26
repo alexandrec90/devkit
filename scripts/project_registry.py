@@ -37,6 +37,7 @@ the `folders` of `workspace.jsonc` while both exist.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -188,7 +189,13 @@ def projects(root: Path | None = None, *, repo_root: Path = REPO_ROOT) -> list[s
 # --- settings --------------------------------------------------------------------------
 
 
-def setting(key: str, default: object = None, *, repo_root: Path = REPO_ROOT) -> object:
+def setting(
+    key: str,
+    default: object = None,
+    *,
+    repo_root: Path = REPO_ROOT,
+    workspace: Path | None = None,
+) -> object:
     """A devkit setting's value, or `default` where no file sets it.
 
     A key in `MACHINE_KEYS` is read from the machine file, any other from
@@ -196,16 +203,80 @@ def setting(key: str, default: object = None, *, repo_root: Path = REPO_ROOT) ->
     not there -- falls back to the live workspace file's `settings`, so settings can
     move one key at a time. The value is returned as stored; validating it stays with
     the setting's owner.
+
+    `workspace` is the live file a caller was handed (`--workspace`, a test's), when it
+    is not the one `repo_root` resolves to: it is then both the fallback and the
+    directory the machine file is looked for in, since that file sits beside it.
     """
+    live_path = live_workspace(repo_root) if workspace is None else workspace
     if key in MACHINE_KEYS:
-        text = _read(machine_path(repo_root))
+        text = _read(live_path.parent / MACHINE_FILE_NAME)
         found = parse_machine(text).get(key, _MISSING) if text is not None else _MISSING
     else:
         text = _read(registry_path(repo_root))
         found = parse_shared_settings(text).get(key, _MISSING) if text is not None else _MISSING
     if found is not _MISSING:
         return found
-    live = _read(live_workspace(repo_root))
+    live = _read(live_path)
     if live is None:
         return default
     return workspace_settings(live).get(key, default)
+
+
+# --- writing the machine file -----------------------------------------------------------
+
+
+def write_machine(path: Path, values: dict[str, object]) -> None:
+    """Replace the machine file at `path` with `values`, atomically.
+
+    Written beside the target and renamed over it, so a reader -- `fix_switch`'s
+    pattern on a scheduled fire -- sees the old file or the new one, never half of one.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(values, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def set_machine_setting(
+    key: str, value: object, *, repo_root: Path = REPO_ROOT, workspace: Path | None = None
+) -> Path:
+    """Set one `MACHINE_KEYS` setting in the machine file, keeping the others; the path.
+
+    Raises `ValueError` for a key that is not this PC's alone -- a shared one written
+    here would be read by nothing -- and `RegistryError` for a machine file that is
+    there and malformed, which is left as found rather than overwritten.
+    """
+    if key not in MACHINE_KEYS:
+        raise ValueError(f"{key} is not a machine setting ({', '.join(sorted(MACHINE_KEYS))})")
+    live_path = live_workspace(repo_root) if workspace is None else workspace
+    path = live_path.parent / MACHINE_FILE_NAME
+    text = _read(path)
+    values = parse_machine(text) if text is not None else {}
+    values[key] = value
+    write_machine(path, values)
+    return path
+
+
+def migrate_machine_settings(
+    *, repo_root: Path = REPO_ROOT, workspace: Path | None = None
+) -> list[str]:
+    """Copy each `MACHINE_KEYS` setting the live workspace file holds and the machine
+    file lacks into the machine file; the keys copied, sorted.
+
+    One-shot by construction: a key already in the machine file is never overwritten,
+    so a second run copies nothing and a value set since with `machine_role.py --set`
+    survives. Nothing to copy writes nothing. Raises `RegistryError` for a malformed
+    machine file, which is left as found.
+    """
+    live_path = live_workspace(repo_root) if workspace is None else workspace
+    live = _read(live_path)
+    if live is None:
+        return []
+    found = workspace_settings(live)
+    path = live_path.parent / MACHINE_FILE_NAME
+    text = _read(path)
+    values = parse_machine(text) if text is not None else {}
+    copied = sorted(key for key in MACHINE_KEYS if key in found and key not in values)
+    if copied:
+        write_machine(path, {**values, **{key: found[key] for key in copied}})
+    return copied

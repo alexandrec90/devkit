@@ -12,7 +12,7 @@ system's scheduler, the one thing here that outlives a session, a reboot and a c
 editor.
 
 **Registered wired, and off.** The task runs every half hour and reads the switch --
-`"devkit.fixPass"` in the workspace file, `off` by default -- on every fire. Off, it
+`"devkit.fixPass"` in this PC's `.devkit-machine.json`, `off` by default -- on every fire. Off, it
 writes one line to its artifact and exits; `plan` writes what it would do; `dispatch`
 does it. So the wiring is complete from the day it is installed, and turning it on is
 one setting rather than a change to any file here. That is deliberate: the first week is
@@ -188,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f'Would run: "{python}" {arguments}\n\n'
             f"  every     {args.minutes} minutes\n"
-            f"  switch    devkit.fixPass in the workspace file (off, plan, dispatch); off sends no fixers, and devkit-ship still ships\n"
+            f"  switch    devkit.fixPass in this PC's .devkit-machine.json (off, plan, dispatch); off sends no fixers, and devkit-ship still ships\n"
             f"  on battery runs anyway, and catches up a fire it slept through\n\n"
             f"Dry run -- re-run with --yes."
         )

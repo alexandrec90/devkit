@@ -11,11 +11,13 @@ took this task and that desktop-900mt6f never did, and file that with
 On desktop-900mt6f: bring the devkit checkout to origin/green if it is behind and clean,
 run `python scripts/installers.py maintain`, and confirm `devkit-local-e2e`,
 `devkit-fix-trigger` and `devkit-fix-pass` are registered and enabled (`schtasks /Query`).
-Then `python scripts/e2e-pass.py status`: every project the workspace file's
+Then `python scripts/e2e-pass.py status`: every project `projects.toml`'s
 `devkit.localE2e` assigns this PC should have a result from the last few days. For one that
 has none, or only an old one, find out why in logs/scheduled-local-e2e.log and fix the cause
-if it is devkit's. Check too that the workspace file here says `"devkit.fixPass":
-"dispatch"`: a red on a PC that does not dispatch reaches no fixer. The assignment moved
+if it is devkit's. Check too that this PC's switch says `"devkit.fixPass": "dispatch"` --
+`.devkit-machine.json` beside the checkouts, or the workspace file where that file does not
+set it (`python scripts/machine_role.py --migrate` moves it): a red on a PC that does not
+dispatch reaches no fixer. The assignment moved
 here recently, so a project with no result yet may simply not have had a night: say which.
 
 Finished means the intent says, per assigned project, when it last ran and what it said.

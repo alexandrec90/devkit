@@ -161,6 +161,11 @@ def test_on_hold_is_empty_for_every_workspace_that_predates_it():
     assert sweep.on_hold(json.dumps({"settings": {"devkit.onHold": ["", 3, "x"]}})) == {"x"}
 
 
+def test_held_reads_a_stored_value_as_the_text_reader_does():
+    assert sweep.held(["a", "", 3]) == frozenset({"a"})
+    assert sweep.held("a") == sweep.held(None) == frozenset()
+
+
 def test_only_restricts_the_sweep_to_the_named_checkouts():
     names = ["carameli", "carameli-b", "devkit"]
     assert sweep.select(names, ["devkit"]) == (["devkit"], [])

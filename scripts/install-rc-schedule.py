@@ -201,9 +201,7 @@ def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
         "every served project has been quiet long enough, it stops the servers, updates",
         "the Claude CLI, and starts them again.",
         "",
-        f"Projects are opted in by `devkit.remoteControl` in {Path(schedule.workspace).name}"
-        if schedule.workspace
-        else "Projects are opted in by `devkit.remoteControl` in the workspace file.",
+        "Projects are opted in by `devkit.remoteControl` in devkit's projects.toml.",
         "Nothing is served until that setting names one.",
         "",
     ]

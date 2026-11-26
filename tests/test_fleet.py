@@ -582,7 +582,6 @@ def test_inherit_returns_the_exit_code(monkeypatch: pytest.MonkeyPatch):
 # --- the declaration ---------------------------------------------------------------
 
 
-def test_the_workspace_lets_a_rebalance_pick_only_the_collector_whose_move_is_cheap():
-    text = (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
-    declared, _notes = config.parse_setting(text)
+def test_the_registry_lets_a_rebalance_pick_only_the_collector_whose_move_is_cheap():
+    declared, _notes = config.declared(REPO_ROOT)
     assert [c.project for c in declared if c.rebalance] == ["sports_betting"]

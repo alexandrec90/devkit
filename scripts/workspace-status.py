@@ -65,6 +65,7 @@ import devkit_jsonc
 import devkit_project
 import harness_triage as _triage
 import machine_clock
+import machine_role
 import notify as _notify
 import schedule_health
 import sweep
@@ -1299,6 +1300,7 @@ def main(argv: list[str] | None = None) -> int:
     # the report -- and raises, failing the job, since `harness_events.record` itself
     # never does and anything else here is a defect worth a traceback.
     record_failures(failures(tools, report), SOURCE_ROOT)
+    machine_role.migrate_and_say(workspace, "[workspace] ")  # this PC's own settings, once
     return 0
 
 

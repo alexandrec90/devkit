@@ -103,6 +103,7 @@ import git_policy
 # seam the hooks use, so a box provisions the way its project says to rather than the way
 # this file guesses.
 import harness_config
+import project_registry
 import reconcile_journal
 import sweep
 import task_branch as tb
@@ -506,10 +507,11 @@ def stranded(
 
 
 def on_hold_projects(workspace: Path) -> frozenset[str]:
-    """`sweep.on_hold` over the workspace file, or nothing when it cannot be read."""
+    """`devkit.onHold` for the machine whose live workspace file is `workspace` -- the
+    machine file beside it, else that file -- or nothing when neither can be read."""
     try:
-        return sweep.on_hold(workspace.read_text(encoding="utf-8"))
-    except OSError:
+        return sweep.held(project_registry.setting(sweep.ON_HOLD_SETTING, workspace=workspace))
+    except (project_registry.RegistryError, OSError):
         return frozenset()
 
 

@@ -61,6 +61,40 @@ def test_the_switch_is_off_unless_the_workspace_file_says_plan_or_dispatch(text,
     assert fix_cycle.mode_from_workspace(text) == expected
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("plan", fix_cycle.PLAN), ("on", fix_cycle.OFF), (["plan"], fix_cycle.OFF)],
+)
+def test_mode_value_reads_a_stored_switch(value, expected):
+    assert fix_cycle.mode_value(value) == expected
+
+
+def _live(tmp_path: Path, mode: str) -> Path:
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text(json.dumps({"settings": {fix_cycle.SETTING: mode}}), encoding="utf-8")
+    return workspace
+
+
+def test_the_switch_is_read_from_the_machine_file_beside_the_workspace_file(tmp_path):
+    workspace = _live(tmp_path, fix_cycle.OFF)
+    (tmp_path / ".devkit-machine.json").write_text(
+        json.dumps({fix_cycle.SETTING: fix_cycle.DISPATCH}), encoding="utf-8"
+    )
+    assert fix_cycle.mode_here(workspace) == fix_cycle.DISPATCH
+
+
+def test_without_a_machine_file_the_workspace_file_still_answers(tmp_path):
+    assert fix_cycle.mode_here(_live(tmp_path, fix_cycle.PLAN)) == fix_cycle.PLAN
+    assert fix_cycle.mode_here(tmp_path / "absent.code-workspace") == fix_cycle.OFF
+
+
+@pytest.mark.parametrize("body", ["{", "[]", '{"devkit.fixPass": "on"}', '{"devkit.fixPass": 1}'])
+def test_a_malformed_or_misspelt_machine_file_is_off(tmp_path, body):
+    workspace = _live(tmp_path, fix_cycle.DISPATCH)
+    (tmp_path / ".devkit-machine.json").write_text(body, encoding="utf-8")
+    assert fix_cycle.mode_here(workspace) == fix_cycle.OFF
+
+
 # --- classification -------------------------------------------------------------------
 
 

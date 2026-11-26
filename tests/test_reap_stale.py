@@ -118,6 +118,26 @@ def test_only_a_bare_false_switches_dev_servers_off():
     assert not reap.parse_settings(workspace_text({"devServers": False})).dev_servers
 
 
+def test_settings_of_reads_a_stored_value_as_the_text_reader_does():
+    value = {"sessionIdleMinutes": 45, "dockerClis": False}
+    assert reap.settings_of(value) == reap.parse_settings(workspace_text(value))
+    assert reap.settings_of(None) == reap.Settings()
+
+
+def test_read_settings_prefers_projects_toml_and_defaults_for_a_malformed_one(tmp_path):
+    root = tmp_path / "devkit"
+    root.mkdir()
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text(workspace_text({"sessionIdleMinutes": 45}), encoding="utf-8")
+    assert reap.read_settings(workspace, root).session_idle_minutes == 45
+    (root / "projects.toml").write_text(
+        '[settings."devkit.reapStale"]\nsessionIdleMinutes = 30\n', encoding="utf-8"
+    )
+    assert reap.read_settings(workspace, root).session_idle_minutes == 30
+    (root / "projects.toml").write_text("[settings\n", encoding="utf-8")
+    assert reap.read_settings(workspace, root) == reap.Settings()
+
+
 def test_the_default_window_is_longer_than_the_restart_window():
     """A stop that does not resume must wait longer than a restart that does."""
     assert reap.DEFAULT_SESSION_IDLE_MINUTES > rc_config.DEFAULT_IDLE_MINUTES

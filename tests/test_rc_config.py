@@ -252,6 +252,67 @@ def test_setting_hosts_of_a_broken_or_absent_setting_assigns_nobody(text):
     assert rc_config.setting_hosts(text, "s").hosts == ()
 
 
+# --- read off projects.toml, with the workspace file as fallback -------------------
+
+
+def _checkout(tmp_path, registry: str | None, setting: object = None):
+    """`(workspace, root)`: a devkit checkout at `root` and a live file beside it."""
+    root = tmp_path / "devkit"
+    root.mkdir()
+    if registry is not None:
+        (root / "projects.toml").write_text(registry, encoding="utf-8")
+    workspace = tmp_path / "alex-projects.code-workspace"
+    workspace.write_text(workspace_text(setting, ("devkit", "radio")), encoding="utf-8")
+    return workspace, root
+
+
+def test_read_config_prefers_projects_toml_and_expands_all_from_the_live_folders(tmp_path):
+    registry = '[settings."devkit.remoteControl"]\nprojects = "all"\nspawn = "worktree"\n'
+    workspace, root = _checkout(tmp_path, registry, ["devkit"])
+    config = rc_config.read_config(workspace, root)
+    assert config.projects == ("devkit", "radio")
+    assert config.spawn == "worktree"
+
+
+def test_read_config_falls_back_to_the_workspace_file(tmp_path):
+    workspace, root = _checkout(tmp_path, None, {"projects": ["radio"], "capacity": 3})
+    assert rc_config.read_config(workspace, root) == rc_config.parse_config(
+        workspace.read_text(encoding="utf-8")
+    )
+
+
+def test_read_config_serves_nothing_for_a_malformed_registry_or_a_missing_file(tmp_path):
+    workspace, root = _checkout(tmp_path, "[settings\n", ["devkit"])
+    assert rc_config.read_config(workspace, root) == rc_config.Config()
+    assert rc_config.read_config(tmp_path / "absent", root) == rc_config.Config()
+
+
+def test_config_of_reads_a_stored_value_with_all_meaning_the_folders():
+    assert rc_config.config_of("all", ["a", "b"]).projects == ("a", "b")
+    assert rc_config.config_of(["a"], ["b"]).projects == ("a",)
+    assert rc_config.config_of(3, ["b"]) == rc_config.Config()
+
+
+def test_read_hosts_prefers_projects_toml_and_a_malformed_one_assigns_nobody(tmp_path):
+    registry = '[settings."devkit.localE2e"]\nhosts = "pc-b"\n'
+    workspace, root = _checkout(tmp_path, registry)
+    setting = rc_config.LOCAL_E2E_SETTING
+    assert rc_config.read_hosts(setting, workspace, root).hosts == (("*", "pc-b"),)
+    (root / "projects.toml").write_text("[settings\n", encoding="utf-8")
+    assert rc_config.read_hosts(setting, workspace, root).hosts == ()
+
+
+def test_hosts_of_reads_only_a_stored_values_hosts():
+    assert rc_config.hosts_of({"hosts": "PC-A", "projects": "all"}).hosts == (("*", "pc-a"),)
+    assert rc_config.hosts_of("pc-a") == rc_config.Config()
+
+
+def test_the_committed_registry_serves_every_project_from_one_machine(tmp_path):
+    """The phone needs one server per project, not one per PC."""
+    config = rc_config.read_config(_checkout(tmp_path, None)[0], REPO_ROOT)
+    assert config.projects == ("devkit", "radio") and config.hosts
+
+
 def test_a_project_named_in_hosts_overrides_the_default_machine():
     config = rc_config.parse_config(
         workspace_text({"projects": "all", "hosts": {"*": "desktop-a", "carameli": "desktop-b"}})

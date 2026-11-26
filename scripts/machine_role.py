@@ -5,6 +5,7 @@
     machine_role.py --set worker       # the PC nobody uses: heavy work comes here first
     machine_role.py --set workstation  # the PC a person works at: heavy work only as fallback
     machine_role.py --set unset        # back to ordering by free memory alone
+    machine_role.py --migrate          # copy this PC's settings out of its workspace file
 
 Every PC fires the same scheduled jobs at the same minute, and `job_claims` used to order
 them by free memory alone (`job_claims.delay_seconds`). That is a race a busy desk wins
@@ -18,17 +19,19 @@ fixers, test runs and queue sessions while an idle laptop watched. A role says i
   says it is alive from its after-merge pass, so one that is off, asleep or offline
   costs nothing once its beat ages out. One alive but short of memory or disk never
   claims, so the job falls back to the workstation and is late rather than lost.
-- **unset** (`""`, the default in devkit's `workspace.jsonc`) is today's behaviour.
+- **unset** (`""`, the default) is today's behaviour.
 
 What is heavy is the caller's to say, and listed in `scripts/CLAUDE.md`: the medium tier,
 the local end-to-end tier, a fixer session, and a queue `run` or `agent` task. Everything
 cheap -- the fix trigger, ship, an elevated request, the reconcile -- ignores the role.
 
-**The setting is this machine's, in its live workspace file**, beside `devkit.fixPass`:
-`"devkit.machineRole"` under `settings`. It is one of `devkit_project.MACHINE_SETTINGS`,
-so a render carries the live value over and an adopt never records it. `--set` edits the
-live file in place, every comment kept; that is a machine switch, not the hand edit of
-the task block `.claude/rules/vscode-tasks.md` forbids.
+**The setting is this machine's, in `<projects-root>/.devkit-machine.json`**, beside
+`devkit.fixPass` (`project_registry.MACHINE_KEYS`): `"devkit.machineRole"`. Read through
+`project_registry.setting`, which falls back to the live workspace file's `settings`
+where the machine file does not set it, so a PC that has not migrated keeps its role.
+`--set` writes the machine file; `--migrate` copies all three machine settings the live
+file holds and the machine file lacks (`project_registry.migrate_machine_settings`),
+which the daily `devkit-workspace-status` pass also does on every PC.
 
 Tested in `tests/test_machine_role.py`.
 """
@@ -37,12 +40,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
+import project_registry
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -55,10 +58,6 @@ ROLES = (WORKSTATION, WORKER)
 # What `--set` takes for "no role": an empty string is not a word a person can type.
 UNSET_WORD = "unset"
 
-# The member as written, so `with_role` can replace its value in place.
-_MEMBER = re.compile(r'("devkit\.machineRole"\s*:\s*)"[^"\n]*"')
-_SETTINGS = re.compile(r'"settings"\s*:\s*\{')
-
 EXIT_OK = 0
 EXIT_USAGE = 2
 
@@ -69,59 +68,62 @@ MEANING = {
 }
 
 
+def role_value(value: object) -> str:
+    """The role a stored value names; `UNSET` for anything absent or misspelt, which is
+    today's behaviour rather than a guess at either."""
+    return value if isinstance(value, str) and value in ROLES else UNSET
+
+
 def role_of(text: str) -> str:
     """The role a workspace file's text gives this machine; `UNSET` for anything absent,
-    unparsable or misspelt, which is today's behaviour rather than a guess at either."""
+    unparsable or misspelt."""
     try:
         payload = devkit_jsonc.loads(text)
     except (json.JSONDecodeError, TypeError):
         return UNSET
     settings = payload.get("settings") if isinstance(payload, dict) else None
-    value = settings.get(SETTING) if isinstance(settings, dict) else None
-    return value if value in ROLES else UNSET
+    return role_value(settings.get(SETTING) if isinstance(settings, dict) else None)
 
 
 def role_here(workspace: Path | None = None) -> str:
-    """This machine's role, off its live workspace file; `UNSET` when it cannot be read."""
+    """This machine's role: the machine file beside `workspace` (default: the live
+    workspace file), else that file's `settings`. `UNSET` when neither can be read,
+    a malformed machine file included."""
     path = workspace or sweep.default_workspace(REPO_ROOT)
     try:
-        return role_of(path.read_text(encoding="utf-8"))
-    except OSError:
+        return role_value(project_registry.setting(SETTING, workspace=path))
+    except (project_registry.RegistryError, OSError):
         return UNSET
 
 
 def role_beside(devkit_root: Path) -> str:
-    """The role the workspace file beside the devkit checkout at `devkit_root` gives, so
-    a pass handed a root in a test reads that root's file and never the live one."""
+    """The role the machine beside the devkit checkout at `devkit_root` has, so a pass
+    handed a root in a test reads that root's files and never the live ones."""
     return role_here(sweep.default_workspace(devkit_root))
 
 
-def with_role(text: str, role: str) -> str | None:
-    """`text` with `SETTING` set to `role` (`UNSET` writes `""`), every comment kept: the
-    member's value replaced where it stands, or the member added at the top of
-    `settings`. None when the text has no `settings` object to put it in, or the edit
-    would not read back as `role`."""
-    if role not in (*ROLES, UNSET):
-        return None
-    value = json.dumps(role)
-    # Searched with the comments blanked, which keeps every offset, so a comment that
-    # quotes the setting is never the place edited.
-    scan = devkit_jsonc.blank_comments(text)
-    if member := _MEMBER.search(scan):
-        edited = f"{text[: member.end(1)]}{value}{text[member.end() :]}"
-    else:
-        opened = _SETTINGS.search(scan)
-        if opened is None:
-            return None
-        at = opened.end()
-        edited = f'{text[:at]}\n\t\t"{SETTING}": {value},{text[at:]}'
-    return edited if role_of(edited) == role else None
+def migrate_line(workspace: Path) -> str:
+    """Run the one-shot migration for the machine whose live file is `workspace`, as a
+    daily pass's line: "" when there was nothing to copy, and never raises -- a pass
+    that reports on the machine must not die on the machine file."""
+    machine = workspace.parent / project_registry.MACHINE_FILE_NAME
+    try:
+        copied = project_registry.migrate_machine_settings(workspace=workspace)
+    except (project_registry.RegistryError, OSError) as exc:
+        return f"machine settings not migrated -- {exc}"
+    return f"moved {', '.join(copied)} into {machine}" if copied else ""
 
 
-def describe(role: str, workspace: Path) -> str:
+def migrate_and_say(workspace: Path, prefix: str = "") -> None:
+    """`migrate_line`, printed when it has something to say: one call for a daily pass."""
+    if line := migrate_line(workspace):
+        print(f"{prefix}{line}")
+
+
+def describe(role: str, where: Path) -> str:
     """The line `machine_role.py` prints for `role`."""
     shown = role or UNSET_WORD
-    return f"machine role: {shown} -- {MEANING[role]}\n  ({SETTING} in {workspace})"
+    return f"machine role: {shown} -- {MEANING[role]}\n  ({SETTING} in {where})"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -130,27 +132,33 @@ def main(argv: list[str] | None = None) -> int:
         "--set",
         dest="role",
         choices=(*ROLES, UNSET_WORD),
-        help="write this machine's role into its live workspace file",
+        help=f"write this machine's role into {project_registry.MACHINE_FILE_NAME}",
     )
-    parser.add_argument("--workspace", type=Path, default=None)
+    parser.add_argument(
+        "--migrate",
+        action="store_true",
+        help="copy the machine settings the live workspace file holds into the machine file",
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="the live workspace file; the machine file is the one beside it",
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     workspace = args.workspace or sweep.default_workspace(REPO_ROOT)
-    if args.role is not None:
-        wanted = UNSET if args.role == UNSET_WORD else args.role
-        try:
-            text = workspace.read_text(encoding="utf-8")
-        except OSError as exc:
-            print(f"machine_role: cannot read {workspace}: {exc}", file=sys.stderr)
-            return EXIT_USAGE
-        edited = with_role(text, wanted)
-        if edited is None:
-            print(
-                f"machine_role: no `settings` object to write into in {workspace}", file=sys.stderr
-            )
-            return EXIT_USAGE
-        if edited != text:
-            workspace.write_text(edited, encoding="utf-8", newline="")
-    print(describe(role_here(workspace), workspace))
+    machine = workspace.parent / project_registry.MACHINE_FILE_NAME
+    try:
+        if args.migrate:
+            copied = project_registry.migrate_machine_settings(workspace=workspace)
+            print(f"machine_role: copied {', '.join(copied) or 'nothing'} into {machine}")
+        if args.role is not None:
+            wanted = UNSET if args.role == UNSET_WORD else args.role
+            project_registry.set_machine_setting(SETTING, wanted, workspace=workspace)
+    except (project_registry.RegistryError, OSError) as exc:
+        print(f"machine_role: cannot write {machine}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    print(describe(role_here(workspace), machine))
     return EXIT_OK
 
 
