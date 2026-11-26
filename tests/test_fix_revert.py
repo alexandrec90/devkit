@@ -182,9 +182,15 @@ def test_an_entry_from_before_a_cleared_commit_does_not_reach_back():
 
 
 def test_a_range_is_not_overdue_before_the_grace_runs_out():
-    assert fix_revert.RED_GRACE == _dt.timedelta(hours=2)
-    assert not fix_revert.overdue(NOW, NOW + _dt.timedelta(hours=1, minutes=59))
-    assert fix_revert.overdue(NOW, NOW + _dt.timedelta(hours=2))
+    assert fix_revert.RED_GRACE == _dt.timedelta(minutes=20)
+    assert not fix_revert.overdue(NOW, NOW + _dt.timedelta(minutes=19))
+    assert fix_revert.overdue(NOW, NOW + _dt.timedelta(minutes=20))
+
+
+def test_a_fixer_at_the_red_holds_it_to_the_ceiling_and_no_further():
+    assert fix_revert.RED_CEILING == _dt.timedelta(minutes=45)
+    assert not fix_revert.overdue(NOW, NOW + _dt.timedelta(minutes=44), fixing=True)
+    assert fix_revert.overdue(NOW, NOW + _dt.timedelta(minutes=45), fixing=True)
 
 
 def test_only_tidys_own_commit_is_exempt_not_its_prefix():
@@ -250,9 +256,23 @@ def test_the_reland_task_is_toml_and_says_what_to_do():
 
 
 def test_a_long_signature_is_cut_in_the_prompt():
-    sig = tuple(f"tests/test_{n}.py::t" for n in range(9))
+    sig = tuple(f"tests/test_{n}.py::t" for n in range(fix_revert.RELAND_SHOWN + 3))
     task = tomllib.loads(fix_revert.reland_task(commit("a"), red(signature=sig)))
     assert "(+3 more)" in task["agent"]
+
+
+def test_the_reland_task_carries_every_failure_and_the_run_so_it_is_not_landed_red():
+    """The re-landing session sees nothing else of the red: an id it was not told of, or a
+    run it cannot find, lands the same work red again."""
+    sig = tuple(f"tests/test_{n}.py::t" for n in range(9))
+    failure = red(signature=sig, url="https://github.com/o/r/actions/runs/9")
+    prompt = tomllib.loads(fix_revert.reland_task(commit("a"), failure))["agent"]
+    assert all(ident in prompt for ident in sig) and "more)" not in prompt
+    assert failure.url in prompt and "gh run view 9 --log-failed" in prompt
+    assert "git show a" in prompt and "Do not land it unchanged" in prompt
+    waited = fix_revert.reland_task(commit("a"), failure, _dt.timedelta(minutes=45))
+    assert "45 minutes" in tomllib.loads(waited)["agent"]
+    assert "20 minutes" in fix_revert.revert_intent(commit("a"), failure)
 
 
 def test_the_revert_is_staged_and_a_merge_commit_names_its_mainline():
@@ -568,8 +588,25 @@ def test_a_first_pass_after_a_sleep_gives_the_fixer_its_chance(world):
     bad = world.write("a.txt", "two\n", "Break a thing (#1)")
     world.fail(bad)
     assert world.a_pass(5.0) == []
-    assert world.a_pass(6.5) == [], "the grace runs from that first pass"
-    assert world.a_pass(7.0) != []
+    assert world.a_pass(5.25) == [], "the grace runs from that first pass"
+    assert world.a_pass(5.5) != []
+
+
+def test_a_fixer_still_at_the_red_holds_the_revert_until_the_ceiling(world):
+    """Reverting under a fixer about to land queues the same work twice. It holds out
+    loud, and only to the ceiling: a fixer that has not landed by then is not landing."""
+    bad = world.write("a.txt", "two\n", "Break a thing (#1)")
+    world.fail(bad)
+    assert world.a_pass() == []
+    sent = (world.started + _dt.timedelta(minutes=2)).isoformat(timespec="seconds")
+    key = f"{fix_plan.BRANCH}:roguelike:0:{bad}:0123456789ab:{fix_plan.DISPATCH}"
+    world.root.mkdir(parents=True, exist_ok=True)
+    (world.root / "ledger").write_text(json.dumps({key: {"when": sent, "sent": 1}}), "utf-8")
+    [held] = world.a_pass(0.5)
+    assert "holds the revert" in held and sent in held and world.no_tree_was_cut()
+    assert "FAILED" not in held, "a hold is not filed"
+    [line] = world.a_pass(0.75)
+    assert f"agent/revert-{bad[:7]}" in line
 
 
 def test_unreadable_state_starts_the_grace_again(world):
