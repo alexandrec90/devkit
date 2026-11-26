@@ -342,17 +342,31 @@ def phase(
     named = tuple(prefixes)
     reds = harness_entries(harness_ones)
     for d in project_ones:
-        adopting = sorted({f.project for f in d.failures} & set(harness.adopting))
-        explained = "" if harness.clean else harness_explains(d, classes, reds, named)
-        if is_devkit_pr(d):
-            sent.append(d)
-        elif explained:
-            held.append((d, f"{HELD_FOR_HARNESS}: {explained}, and {'; '.join(harness.reasons)}"))
-        elif adopting and not fix_plan.is_adoption(d, named):
-            held.append((d, f"{HELD_FOR_ADOPTION} {', '.join(adopting)}"))
+        reason = project_hold(d, classes, harness, reds, named)
+        if reason:
+            held.append((d, reason))
         else:
             sent.append(d)
     return go + sorted(sent, key=lambda d: RANK.get(d.action, 2)), held + planned_holds
+
+
+def project_hold(
+    d: fix_plan.Decision,
+    classes: dict[str, str],
+    harness: Harness,
+    reds: frozenset[str],
+    named: tuple[str, ...],
+) -> str:
+    """Why `phase` holds project decision `d`, or "" when it goes."""
+    if is_devkit_pr(d):
+        return ""
+    explained = "" if harness.clean else harness_explains(d, classes, reds, named)
+    if explained:
+        return f"{HELD_FOR_HARNESS}: {explained}, and {'; '.join(harness.reasons)}"
+    adopting = sorted({f.project for f in d.failures} & set(harness.adopting))
+    if adopting and not fix_plan.is_adoption(d, named):
+        return f"{HELD_FOR_ADOPTION} {', '.join(adopting)}"
+    return ""
 
 
 def harness_entries(harness_ones: Iterable[fix_plan.Decision]) -> frozenset[str]:

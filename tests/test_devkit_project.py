@@ -1833,7 +1833,10 @@ def test_live_drift_against_a_named_copy_ignores_the_unmerged_edit_on_disk(works
     canonical, live = workspace_pair
     merged = canonical.read_text(encoding="utf-8")
     assert devkit_project.live_drift(live) == []
-    canonical.write_text(devkit_project.unregister(merged, ["carameli"]), encoding="utf-8")
+    # Whichever project is registered now: a hard-coded name went stale, and the edit a
+    # no-op, the day that project was unplugged (#841).
+    dropped = next(name for name in known_projects(merged) if name != "devkit")
+    canonical.write_text(devkit_project.unregister(merged, [dropped]), encoding="utf-8")
     assert devkit_project.live_drift(live), "the branch's edit reads as drift on disk"
     assert devkit_project.live_drift(live, merged) == []
     behind = devkit_project.register(merged, [UNREGISTERED])

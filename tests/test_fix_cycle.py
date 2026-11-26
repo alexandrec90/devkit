@@ -857,3 +857,16 @@ def test_a_devkit_commit_the_commit_stage_refused_is_fixed_in_its_own_tree():
     red = fix_cycle.harness_state({"k": fix_cycle.HARNESS}, True, [])
     go, held = fix_cycle.phase([decision(fix_plan.DISPATCH, refused)], {}, red)
     assert [d.action for d in go] == [fix_plan.DISPATCH] and held == []
+
+
+def test_project_hold_names_the_adoption_a_project_waits_on_and_never_holds_devkit():
+    """`phase`'s per-decision verdict: "" sends, anything else is the hold's reason."""
+    adopting = fix_cycle.harness_state({}, True, ["carameli"])
+    own = decision(fix_plan.DISPATCH, failure())
+    reason = fix_cycle.project_hold(own, {}, adopting, frozenset(), PREFIXES)
+    assert reason == f"{fix_cycle.HELD_FOR_ADOPTION} carameli"
+    clean = fix_cycle.harness_state({}, True, [])
+    assert fix_cycle.project_hold(own, {}, clean, frozenset(), PREFIXES) == ""
+    devkit = decision(fix_plan.DISPATCH, failure(project=fix_cycle.DEVKIT))
+    red = fix_cycle.harness_state({"k": fix_cycle.HARNESS}, True, [fix_cycle.DEVKIT])
+    assert fix_cycle.project_hold(devkit, {}, red, frozenset(), PREFIXES) == ""
