@@ -652,7 +652,11 @@ def describe(step: Step) -> str:
         return _describe_registered(step)
     if step.action == UNPLUG:
         tail = f"  ({'; '.join(step.hazards)})" if step.hazards else ""
-        what = f"registry, then {RETIRING}" if step.local else "registry only, nothing on disk is touched"
+        what = (
+            f"registry, then {RETIRING}"
+            if step.local
+            else "registry only, nothing on disk is touched"
+        )
         return f"  unplug  {step.name}   {what}{tail}"
     extra = []
     if step.unarchive:
@@ -681,7 +685,9 @@ def _describe_registered(step: Step) -> str:
     if step.action == RESTORE_HERE:
         return f"  restore {step.name}   already registered; {undo}{RESTORING}"
     back = f", {RESTORING}" if step.local else ""
-    return f"  clone   {step.name}   registered elsewhere, {undo}clone from GitHub onto this PC{back}"
+    return (
+        f"  clone   {step.name}   registered elsewhere, {undo}clone from GitHub onto this PC{back}"
+    )
 
 
 def in_ephemeral_box(root: Path) -> bool:

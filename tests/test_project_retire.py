@@ -342,9 +342,7 @@ def test_retire_and_restore_refuse_devkit(tmp_path):
 
 def test_a_restore_that_finished_drops_its_record(tmp_path, monkeypatch):
     retire.save_records(tmp_path / retire.RECORD, {"geo": {"collector": "stop"}})
-    monkeypatch.setattr(
-        retire, "gather", lambda *a, **k: facts(record={"collector": "stop"})
-    )
+    monkeypatch.setattr(retire, "gather", lambda *a, **k: facts(record={"collector": "stop"}))
     assert retire.restore("geo", Path("/ws/geo"), lambda *a, **k: done(), print, tmp_path) == ""
     assert retire.load_records(tmp_path / retire.RECORD) == {}
 
