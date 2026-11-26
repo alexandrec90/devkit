@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,6 +70,47 @@ def test_a_registered_project_missing_from_disk_claims_nothing(tmp_path):
 def test_a_malformed_claim_is_the_neutral_default(tmp_path):
     _project(tmp_path, "x", '[schedule]\ntasks = "Pool"\n')
     assert project_tasks.declared(tmp_path, ["x"]) == {}
+
+
+def test_a_merged_claim_the_checkout_has_not_pulled_still_claims(tmp_path):
+    # 002f2388: host-scripts' claim merged, its checkout stayed behind, and the next pass
+    # filed "Dell Idle Blank" as unowned again.
+    _project(tmp_path, "host-scripts", '[schedule]\ntasks = ["D2R Net Logger"]\n')
+    merged = '[schedule]\ntasks = ["D2R Net Logger", "Dell Idle Blank"]\n'
+    owners = project_tasks.declared(tmp_path, ["host-scripts"], committed=lambda _: merged)
+    assert owners == {"D2R Net Logger": "host-scripts", "Dell Idle Blank": "host-scripts"}
+
+
+def test_a_claim_only_the_working_tree_has_still_claims(tmp_path):
+    _project(tmp_path, "x", '[schedule]\ntasks = ["Local"]\n')
+    owners = project_tasks.declared(tmp_path, ["x"], committed=lambda _: "[python]\n")
+    assert owners == {"Local": "x"}
+
+
+def test_an_unparseable_committed_manifest_claims_nothing(tmp_path):
+    _project(tmp_path, "x", None)
+    assert project_tasks.declared(tmp_path, ["x"], committed=lambda _: "[schedule\n") == {}
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def test_committed_manifest_reads_the_default_branch_not_the_working_tree(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / ".devkit.toml").write_text('[schedule]\ntasks = ["Merged"]\n', encoding="utf-8")
+    _git(repo, "add", ".devkit.toml")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "claim")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    (repo / ".devkit.toml").write_text("[python]\n", encoding="utf-8")
+    assert project_tasks.committed_manifest(repo) == '[schedule]\ntasks = ["Merged"]\n'
+
+
+def test_committed_manifest_is_none_with_no_remote_branch(tmp_path):
+    _git(tmp_path, "init", "-q")
+    assert project_tasks.committed_manifest(tmp_path) is None
 
 
 def test_hand_made_is_the_root_tasks_with_no_author():

@@ -341,6 +341,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/tray.py": "devkit-tray runs it from logon until logoff",
     "scripts/tray_state.py": "the tray asks it what to draw, on every poll",
     "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and the status pass",
+    "scripts/project_tasks.py": "the fix pass reads each project's merged claim with git show",
     "scripts/workspace-status.py": "devkit-workspace-status runs it daily, and it spawns git",
     "scripts/installers.py": "devkit-installers runs it daily and at logon; it spawns every installer",
     "scripts/fix-pass-watchdog.py": "devkit-fix-pass runs it every half hour; it spawns the pass",

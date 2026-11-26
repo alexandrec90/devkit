@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import csv
 import io
+import subprocess
 import sys
-from collections.abc import Iterable
+import tomllib
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,17 +46,63 @@ import harness_config
 import schedule_health
 
 
-def declared(root: Path, projects: Iterable[str]) -> dict[str, str]:
+def committed_manifest(checkout: Path) -> str | None:
+    """The `.devkit.toml` on `checkout`'s `origin/HEAD`, as text; None when unreadable.
+
+    The working tree is the person's checkout, and it lags its default branch whenever
+    the after-merge sync leaves it alone: host-scripts' claim of "Dell Idle Blank" merged
+    at 16:08 on 2026-11-26, the checkout stayed behind on three uncommitted files, and the
+    16:11 pass refiled the task as unowned (002f2388). A claim counts once it is merged."""
+    for ref in ("origin/HEAD", "origin/main", "origin/master"):
+        try:
+            done = subprocess.run(
+                ["git", "show", f"{ref}:{harness_config.MANIFEST_NAME}"],
+                cwd=checkout,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+                check=False,
+                creationflags=schedule_health.NO_WINDOW,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if done.returncode == 0:
+            return done.stdout
+    return None
+
+
+def _tasks_in(text: str) -> tuple[str, ...]:
+    """The `[schedule] tasks` in manifest `text`; none when it does not parse."""
+    try:
+        return harness_config.from_dict(tomllib.loads(text)).schedule.tasks
+    except tomllib.TOMLDecodeError:  # `from_dict` itself never raises
+        return ()
+
+
+def declared(
+    root: Path,
+    projects: Iterable[str],
+    committed: Callable[[Path], str | None] = committed_manifest,
+) -> dict[str, str]:
     """`{task: project}` for each task a registered project's `.devkit.toml` claims.
 
+    A claim in either the working tree or the committed default branch counts, so a
+    checkout behind its merged claim does not file the task as unowned.
     A task two projects claim stays with the first in `projects` -- the workspace's
     order -- so a duplicate never moves a finding between fixers from pass to pass."""
     owners: dict[str, str] = {}
     for project in projects:
         checkout = root / project
-        if not (checkout / harness_config.MANIFEST_NAME).is_file():
+        if not checkout.is_dir():
             continue
-        for task in harness_config.load(checkout).schedule.tasks:
+        tasks: list[str] = []
+        if (checkout / harness_config.MANIFEST_NAME).is_file():
+            tasks.extend(harness_config.load(checkout).schedule.tasks)
+        merged = committed(checkout)
+        if merged is not None:
+            tasks.extend(_tasks_in(merged))
+        for task in tasks:
             owners.setdefault(task, project)
     return owners
 
