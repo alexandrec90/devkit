@@ -374,6 +374,21 @@ def test_signals_gathers_every_source(tmp_path):
     assert {key.split(":")[0] for key in found} == {"red", "conflict", "tree", "local", "event"}
 
 
+def test_a_red_whose_revert_clock_reached_each_mark_starts_a_pass_once_per_mark(tmp_path):
+    """A red nothing lands on raises no other signal: without this, the half-hourly
+    backstop would stretch the revert grace by up to thirty minutes."""
+    devkit = tmp_path / "devkit"
+    seen = trigger.red_seen.first_seen(devkit, "roguelike", "revert", "a" * 40, NOW)
+    grace, ceiling = trigger.red_seen.REVERT_GRACE, trigger.red_seen.REVERT_CEILING
+    assert trigger.revert_signals(devkit, seen + grace - _dt.timedelta(seconds=1)) == set()
+    at = f"revert-due:roguelike@{'a' * 12}"
+    assert trigger.revert_signals(devkit, seen + grace) == {f"{at}:grace"}
+    assert trigger.revert_signals(devkit, seen + ceiling) == {f"{at}:grace", f"{at}:ceiling"}
+    repos: dict[str, dict] = {}
+    assert "revert-due" not in str(trigger.signals(tmp_path, ["roguelike"], repos)), "no clock"
+    assert trigger.revert_signals(tmp_path / "nowhere", NOW + ceiling) == set()
+
+
 def test_what_still_stands_is_remembered_and_the_rest_forgotten(tmp_path):
     long_ago = (NOW - trigger.REMEMBER - _dt.timedelta(days=1)).isoformat()
     kept = trigger.remember({"gone": long_ago, "standing": long_ago}, ["standing"], NOW)
