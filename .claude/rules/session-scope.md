@@ -18,7 +18,10 @@ A session does **not**:
   few tests it holds — or wait on a CI gate;
 - run any tests at all, or the linter by hand — not a single file;
 - provision the tree to run them: no `uv sync`, no `.venv`, no `node_modules`, no
-  `worktree.py provision`. A `claude --worktree` tree arrives bare and stays bare.
+  `worktree.py provision`. A `claude --worktree` tree arrives bare and stays bare;
+- exercise the change by hand: no scratch script importing it, no other checkout's
+  `.venv` to run it. Running something *outside* the change to learn how it behaves is
+  research, and allowed.
 
 Write the tests the change needs, and stop there. Every check runs after you stop, in CI
 and the scheduled jobs; a red one comes back to a fresh session with the failures named.

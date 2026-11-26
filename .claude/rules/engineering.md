@@ -96,30 +96,6 @@ git calls an `ambiguous argument`, a container's `/tmp/x` into `C:/…/Temp/x`.
 `upstream/` or `refs/`; spell another `feature/x:./.devkit.toml`, and prefix
 `docker exec` with `MSYS_NO_PATHCONV=1`.
 
-## Waiting: one backgrounded call, not a poll loop
-
-```bash
-gh pr checks <N> --watch --fail-fast      # with run_in_background: true
-```
-
-`--watch` returns once every check has settled: one call and its notice. **Backgrounding
-is the half that is easy to drop**, here and for an `until` loop on a file a job will
-write (or put that loop in `Monitor`): a foreground wait holds the turn. **A subagent's
-notice arrives only between its calls**: left with only the wait, it runs the job in the
-foreground, then one `until` loop on the file named when Claude Code moves that call out
-at 180 s or it backgrounded it, ending `|| [ $SECONDS -gt 900 ]`; never `sleep`.
-
-Diagnosing a failure and asking once are not polling; the waste begins at the *second*
-identical poll.
-
-**"No checks reported" has causes needing opposite responses.** Ask once, after a push —
-`gh pr view <N> --json mergeStateStatus,statusCheckRollup` — and read the answer against
-the table in the evidence file: `CONFLICTING` is a gate that will never run, and
-`UNSTABLE` with an empty rollup is one that ran, as a `workflow_dispatch` the PR cannot show.
-
-When the gate will outlast anything useful you could do, stop: report the branch pushed and
-the gate running.
-
 ## Scripts
 
 All scripts under `scripts/` are Python — a local desktop and a CI runner are rarely the

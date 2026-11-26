@@ -635,8 +635,12 @@ def test_the_rule_prescribes_every_wait_the_poll_detector_excuses():
     """e1043d81 came back after five resolutions, each excusing one more shape of wait,
     because only a CI gate's wait was written down: a rescue session waited on its own
     probe's file with a foreground `until` loop, the shape Claude Code's sleep guard
-    names. The rule has to say what the detector accepts -- backgrounded, or `Monitor`."""
-    rule = (REPO_ROOT / ".claude" / "rules" / "engineering.md").read_text(encoding="utf-8")
+    names. The rule has to say what the detector accepts -- backgrounded, or `Monitor`.
+    It lives in `fixer.md`: a project session waits on no gate, so it is not hot prose."""
+    rule = (REPO_ROOT / sf.FIXER_RULE).read_text(encoding="utf-8")
+    assert sf.WAITING_RULE in rule
+    engineering = (REPO_ROOT / sf.ENGINEERING_RULE).read_text(encoding="utf-8")
+    assert "## Waiting" not in engineering, "moved out of the always-loaded tier"
     section = rule.split("## Waiting", 1)[1].split("\n## ", 1)[0]
     assert "run_in_background" in section and "`until` loop" in section
     assert all(f"`{tool}`" in section for tool in sf.WAIT_TOOLS)
@@ -919,11 +923,24 @@ def test_the_rules_every_session_reads_answer_the_two_frictions_they_file():
     assert "`python -` patch script" in engineering
     scope = " ".join((rules / "session-scope.md").read_text(encoding="utf-8").split())
     assert "run any tests at all, or the linter by hand" in scope
-    assert "A `claude --worktree` tree arrives bare and stays bare." in scope
+    assert "A `claude --worktree` tree arrives bare and stays bare;" in scope
     for told_to_provision in ("run it bare", 'worktree.py" provision', "is part of the fix"):
         assert told_to_provision not in scope, f"session-scope.md still says {told_to_provision!r}"
     fixer = " ".join((rules.parent / "fixer.md").read_text(encoding="utf-8").split())
     assert "## An environment that cannot run the checks is part of the fix" in fixer
+
+
+def test_the_scope_rule_bans_exercising_the_change_by_hand_but_not_research():
+    """polished-petting-possum (agent-terminal, 2026-11-25) ran no test, yet wrote scratch
+    scripts importing its own new module and ran them through the main checkout's `.venv`:
+    a test run in all but name, which "no tests" did not reach. jaunty-swinging-chipmunk,
+    the same night, ran the real `claude` CLI to see what its trust prompt prints -- the
+    research the change needed -- so the ban names its exception too."""
+    rules = Path(__file__).resolve().parents[1] / ".claude" / "rules"
+    scope = " ".join((rules / "session-scope.md").read_text(encoding="utf-8").split())
+    assert "exercise the change by hand: no scratch script importing it" in scope
+    assert "no other checkout's `.venv` to run it" in scope
+    assert "Running something *outside* the change to learn how it behaves is research" in scope
 
 
 def test_the_scope_rule_names_the_whole_run_sessions_type():
@@ -1695,6 +1712,21 @@ def test_a_poll_is_friction_only_where_the_rules_say_how_to_wait(tmp_path):
     assert sf.asks_for_backgrounded_waits(str(REPO_ROOT), tmp_path, "devkit"), (
         "devkit's own rule carries the section in the spelling the detector reads"
     )
+
+
+def test_a_poll_is_judged_by_the_waiting_section_in_fixer_md_too(tmp_path):
+    """The section moved from `engineering.md` to `fixer.md`. A tree on the new copy is
+    still told how to wait, so its poll is friction; one carrying neither file's section
+    was told nothing; one on an old copy still counts by `engineering.md`."""
+    (tmp_path / ".claude" / "rules").mkdir(parents=True)
+    (tmp_path / sf.ENGINEERING_RULE).write_text("no section here\n", encoding="utf-8")
+    assert not sf.asks_for_backgrounded_waits(str(tmp_path), tmp_path, "x")
+    (tmp_path / sf.FIXER_RULE).write_text(f"{sf.WAITING_RULE}\n", encoding="utf-8")
+    assert sf.asks_for_backgrounded_waits(str(tmp_path), tmp_path, "x")
+    old = tmp_path / "old"
+    (old / ".claude" / "rules").mkdir(parents=True)
+    (old / sf.ENGINEERING_RULE).write_text(f"{sf.WAITING_RULE}\n", encoding="utf-8")
+    assert sf.asks_for_backgrounded_waits(str(old), tmp_path, "x"), "no fixer.md: old copy"
 
 
 def test_a_bare_run_tests_is_whole_only_where_the_runner_defaults_to_the_suite(tmp_path):
