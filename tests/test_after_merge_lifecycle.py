@@ -595,6 +595,21 @@ def test_a_pass_records_its_host_in_devkits_repo_at_most_daily(world):
     assert out(world.remote("devkit"), "rev-parse", ref) != first
 
 
+def test_a_pass_joins_the_fleet_from_devkits_checkout_and_files_no_person_s_step(world, capsys):
+    """A key only an administrator may add is the elevated worker's, so nothing here is."""
+    devkit_world(world)
+    world.joined = after_merge_pass.fleet_ssh.Joined(["pc-b not yet in the file: requested"])
+    world.run()
+    assert world.joins == [world.ws / "devkit"]
+    assert "fleet: pc-b not yet in the file: requested" in capsys.readouterr().out
+    assert not [line for line in world.findings() if triage.PERSON_STEP in line]
+
+
+def test_a_pass_with_no_devkit_checkout_joins_nothing(world):
+    world.run()
+    assert world.joins == []
+
+
 def test_an_every_machine_task_stays_until_each_counted_host_ran_it(world):
     devkit_world(world)
     task = world.queue('when = "merged"\non = "every-machine"\nrun = "echo x"\n')
