@@ -397,9 +397,7 @@ def test_a_worker_says_it_is_alive_on_devkit_and_a_workstation_does_not(world):
     assert world.on_remote(jc.worker_ref("pc-b"), "devkit")
 
 
-def test_a_workstation_leaves_a_command_to_a_live_worker_until_its_beat_goes_quiet(
-    world, capsys
-):
+def test_a_workstation_leaves_a_command_to_a_live_worker_until_its_beat_goes_quiet(world, capsys):
     """A worker that went quiet -- off, asleep, offline -- stops costing the workstation
     anything once its beat is older than `WORKER_ALIVE`, window or no window."""
     world.add_project("devkit")

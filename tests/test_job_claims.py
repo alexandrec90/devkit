@@ -626,9 +626,7 @@ def test_an_unreadable_sightings_file_is_a_fresh_start(tmp_path):
 
 
 @pytest.mark.parametrize(("seen", "word"), [(None, "could not be read"), ({}, "15 min")])
-def test_a_workstation_with_no_worker_alive_runs_it_now_and_says_why(
-    tmp_path, capsys, seen, word
-):
+def test_a_workstation_with_no_worker_alive_runs_it_now_and_says_why(tmp_path, capsys, seen, word):
     sightings = jc.Sightings(tmp_path, "tier", "desk", lambda _now: seen)
     assert sightings.hold("workstation", "job", NOW) == ""
     assert word in sightings.notes["job"]

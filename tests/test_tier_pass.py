@@ -560,6 +560,7 @@ def test_a_finished_claim_is_not_broken_at_its_ttl(tmp_path):
 def test_held_for_worker_reads_the_role_beside_the_devkit_checkout(tmp_path, monkeypatch):
     asked: list[Path] = []
     claims = tier_pass.job_claims
+
     def alive(root: Path, now: float, _me: str) -> dict[str, float]:
         asked.append(root)
         return {"pc": now}

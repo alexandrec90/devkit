@@ -516,6 +516,7 @@ def test_a_role_with_no_hosts_claims_each_run_and_a_named_host_stands(tmp_path):
 
 def _worker_alive(monkeypatch, alive: bool = True) -> None:
     """Stand in for the heartbeat read off devkit's origin: a worker beating, or none."""
+
     def workers(_root: Path, now: float, _me: str) -> dict[str, float]:
         return {"laptop": now} if alive else {}
 
