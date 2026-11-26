@@ -233,8 +233,43 @@ def test_a_python_project_is_generated_with_its_local_tier(tmp_path):
     pytest_options = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
         "pytest"
     ]["ini_options"]
-    assert '-m "not local"' in pytest_options["addopts"]
+    assert '-m "not local and not ci_e2e"' in pytest_options["addopts"]
     assert any(m.startswith("local:") for m in pytest_options["markers"])
+    assert any(m.startswith("ci_e2e:") for m in pytest_options["markers"])
+    ci = (root / "tests" / "test_ci_tier.py").read_text(encoding="utf-8")
+    assert "@pytest.mark.ci_e2e" in ci, "the gate's E2E job would start with nothing to run"
+
+
+def _gate_jobs(root: Path) -> dict[str, str]:
+    """Each job of the rendered gate, by id, as its block of text."""
+    text = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
+    body = text[text.index("\njobs:\n") :]
+    blocks = re.split(r"\n(?=  [a-z][a-z0-9-]*:\n)", body)
+    return {block.split(":", 1)[0].strip(): block for block in blocks[1:]}
+
+
+@pytest.mark.parametrize("features", [{}, {"postgres": True, "alembic": True, "redis": True}])
+def test_the_gate_runs_the_ci_tier_on_the_default_branch_only(tmp_path, features):
+    """The tier a runner can run, in the `PR Gate` because the fix pass reads a red from no
+    other workflow, and never on a pull request: those merge without waiting."""
+    jobs = _gate_jobs(generate(tmp_path / "a", features))
+    e2e = jobs["e2e"]
+    assert "name: E2E" in e2e
+    assert "if: ${{ !cancelled() && github.event_name != 'pull_request' }}" in e2e
+    assert "needs: devkit-drift" in e2e, "it would take one more runner at the start of a run"
+    assert "cancel-in-progress: true" in e2e, "a burst of merges would queue a run each"
+    assert "run: uv run python scripts/e2e.py --ci" in e2e
+    assert 'DEVKIT_E2E: "1"' in e2e
+    if features:
+        assert "mirror.gcr.io/library/postgres" in e2e and "DATABASE_URL:" in e2e
+        assert "alembic upgrade head" in e2e and "REDIS_URL:" in e2e
+    else:
+        assert "services:" not in e2e and "DATABASE_URL" not in e2e
+
+
+@pytest.mark.parametrize("shape", ["desktop", "electron"])
+def test_a_shipped_app_gets_no_ci_tier_job(tmp_path, shape):
+    assert "e2e" not in _gate_jobs(generate(tmp_path / "a", {shape: True}))
 
 
 @pytest.mark.parametrize("shape", ["desktop", "electron"])
@@ -243,6 +278,7 @@ def test_a_shipped_app_gets_no_python_local_tier(tmp_path, shape):
     root = generate(tmp_path / "a", {shape: True})
     assert not (root / "scripts" / "e2e.py").exists()
     assert not (root / "tests" / "test_local_tier.py").exists()
+    assert not (root / "tests" / "test_ci_tier.py").exists()
 
 
 def test_the_generated_e2e_script_keeps_the_local_e2e_contract(tmp_path, monkeypatch):
@@ -271,6 +307,14 @@ def test_the_generated_e2e_script_keeps_the_local_e2e_contract(tmp_path, monkeyp
     assert argv[:3] == ["uv", "run", "--frozen"]
     to_pytest = argv[argv.index("pytest") + 1 :]
     assert to_pytest[to_pytest.index("-m") + 1] == "local"
+    # `--ci` is the half the gate's E2E job runs; the rest of the contract is shared.
+    assert e2e.split_args([]) == ("local", [])
+    assert e2e.split_args(["--ci", "tests/test_b.py"]) == ("ci_e2e", ["tests/test_b.py"])
+    assert e2e.split_args(["tests/test_b.py", "--ci"]) == ("ci_e2e", ["tests/test_b.py"])
+    ci_argv = e2e.pytest_argv(tmp_path / "r.xml", ["tests/test_b.py"], "ci_e2e")
+    assert ci_argv[ci_argv.index("-m") + 1] == "ci_e2e" and "tests/test_b.py" in ci_argv
+    code, lines = e2e.verdict(0, [], strict=True, marker="ci_e2e")
+    assert code != 0 and "no ci_e2e test executed" in lines[-1]
     # 51e8b20b, the other half: a devkit session's `UV_NO_SYNC` reached a run in a tree
     # with no `.venv`, where `uv run` then made an empty one and installed nothing.
     session = {e2e.NO_SYNC: "1", "KEPT": "x"}

@@ -68,11 +68,14 @@ testpaths = ["{{ tests_dir }}"]
 # `-p devkit_temproot` is the vendored plugin giving each run a temp root of its own, so a
 # run elsewhere on the machine cannot fail this one at exit; `pythonpath` is where it lives.
 # `local` is deselected here and selected by `scripts/e2e.py`, nightly, on this PC: those
-# tests need the workstation, not a runner (`.claude/rules/local-e2e.md`).
-addopts = '-m "not local" -p devkit_temproot'
+# tests need the workstation, not a runner (`.claude/rules/local-e2e.md`). `ci_e2e` is
+# deselected too and selected by `scripts/e2e.py --ci`, which the PR Gate's `E2E` job runs
+# on the default branch: end-to-end tests a hosted runner can run, kept out of the fast suite.
+addopts = '-m "not local and not ci_e2e" -p devkit_temproot'
 pythonpath = ["scripts/pytest-plugins"]
 markers = [
   "local: needs this workstation, not a runner; deselected by addopts, run nightly by scripts/e2e.py",
+  "ci_e2e: end-to-end, but a hosted runner can run it; deselected by addopts, run by scripts/e2e.py --ci in the PR Gate's E2E job",
 ]
 
 [tool.mypy]

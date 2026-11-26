@@ -264,7 +264,8 @@ runs after the last, and none stands between a change and `main`.
 | --- | --- | --- | --- | --- |
 | fast | the `PR Gate` workflow | CI | every commit | `.github/workflows/pr-gate.yml` |
 | medium | each project's `scripts/run-tests.py`, whole suite | a PC whose `devkit.fixPass` is `dispatch`, one project at a time | every 15 minutes, whatever the person is doing; never takes focus | `devkit-medium-tier` |
-| heavy | each project's `scripts/e2e.py`, may take focus | the PC `devkit.localE2e` assigns | every half hour, what moved, only while the PC is idle | `devkit-local-e2e` |
+| end-to-end, CI half | each project's `scripts/e2e.py --ci` | CI | each default-branch commit, the newest of a burst | the gate's `E2E` job |
+| heavy | each project's `scripts/e2e.py`, may take focus | the PC `devkit.localE2e` assigns | every half hour, what moved, only while the PC is idle; never a project whose `[delivery] e2e` is `ci` | `devkit-local-e2e` |
 | full | the `Nightly` workflow | CI | nightly | `.github/workflows/nightly.yml` |
 
 The medium tier is `e2e_results.MEDIUM`: the same result file in its own folder, and the

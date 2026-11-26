@@ -213,3 +213,5 @@ enabled = false
 
 # In a `[delivery]` table, `medium_tier` names the command the medium test tier runs at a
 # commit in place of `scripts/run-tests.py --all`; it is how a project with a database opts in.
+# `e2e = "ci"` there says no test of the end-to-end tier needs this PC: the gate's `E2E`
+# job runs it, and devkit's local job records the project as run in CI rather than run it.

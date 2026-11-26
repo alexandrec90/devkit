@@ -278,3 +278,81 @@ jobs:
         env:
           DEVKIT_DIR: ${{ github.workspace }}/.devkit-src
         run: python scripts/sync-devkit.py --check
+{{^shipped}}
+
+  e2e:
+    name: E2E
+    # The end-to-end tests a hosted runner can run (`ci_e2e`), through the same
+    # `scripts/e2e.py` the PC runs for `local` (`.claude/rules/local-e2e.md`). In this
+    # workflow, not one of its own: devkit's fix pass reads a red default branch from the
+    # `PR Gate` alone.
+    #
+    # The default branch only: a PR merges without waiting for a gate, so a PR run of this
+    # would decide nothing. After the drift job, whatever it said, so a push run takes one
+    # runner fewer at once: the account runs a fixed number of jobs across every repository.
+    # A burst of merges collapses to the newest commit; the run it cancels concludes
+    # `cancelled`, which the fix pass reads as no verdict, never as a red.
+    needs: devkit-drift
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-e2e-${{ github.ref }}
+      cancel-in-progress: true
+{{#postgres}}
+    # The same service containers as the Tests job, for the same reasons.
+    services:
+      db:
+        image: mirror.gcr.io/library/postgres:18
+        env:
+          POSTGRES_USER: {{ db_user }}
+          POSTGRES_PASSWORD: {{ db_password }} # pragma: allowlist secret
+          POSTGRES_DB: {{ db_name }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+{{#redis}}
+      redis:
+        image: mirror.gcr.io/library/redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+{{/redis}}
+{{/postgres}}
+    env:
+      # What devkit's scheduler sets for the tier: a skip in it is a failure.
+      DEVKIT_E2E: "1"
+{{#postgres}}
+      DATABASE_URL: {{ db_url_scheme }}://{{ db_user }}:{{ db_password }}@127.0.0.1:5432/{{ db_name }} # pragma: allowlist secret
+{{#redis}}
+      REDIS_URL: redis://127.0.0.1:6379/0
+{{/redis}}
+{{/postgres}}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-python-env
+        with:
+          # Explicit at every call site: the action is copied from devkit verbatim
+          # rather than rendered, so its own default cannot know this project's version.
+          python-version: "{{ python_version }}"
+{{#alembic}}
+      - name: Apply migrations
+        run: uv run python -m alembic upgrade head
+{{/alembic}}
+      - name: End-to-end tests a runner can run
+        run: uv run python scripts/e2e.py --ci
+      - name: Upload e2e artifact
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-failures
+          path: logs/e2e-junit.xml
+          if-no-files-found: ignore
+{{/shipped}}
