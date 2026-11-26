@@ -42,9 +42,6 @@
 	// draws such a project as "registered, not on this PC" and its tick clones it.
 	"folders": [
 		{
-			"path": "carameli"
-		},
-		{
 			"path": "ibkr_trader"
 		},
 		{
@@ -1825,7 +1822,6 @@
 							"label": "Select one or more checkouts",
 							"minCount": 1,
 							"options": [
-								"carameli",
 								"ibkr_trader",
 								"devkit",
 								"data-lake",
@@ -1874,7 +1870,6 @@
 							"label": "Select one or more consumers",
 							"minCount": 1,
 							"options": [
-								"carameli",
 								"ibkr_trader",
 								"data-lake",
 								"sports_betting",
@@ -2022,7 +2017,6 @@
 				"type": "pickString",
 				"description": "Which checkout should supply the Docker override?",
 				"options": [
-					"carameli",
 					"ibkr_trader",
 					"devkit",
 					"data-lake",
@@ -2039,7 +2033,7 @@
 					"radio",
 					"host-scripts"
 				],
-				"default": "carameli"
+				"default": "ibkr_trader"
 			},
 			{
 				// The second question "Test: Run Suite" asks, and a checkbox list for the
@@ -2729,7 +2723,6 @@
 				"type": "pickString",
 				"description": "Which checkout should take origin's default branch?",
 				"options": [
-					"carameli",
 					"ibkr_trader",
 					"devkit",
 					"data-lake",
@@ -2746,7 +2739,7 @@
 					"radio",
 					"host-scripts"
 				],
-				"default": "carameli"
+				"default": "ibkr_trader"
 			},
 			{
 				// Every branch supplies one real token — `auto` rather than "" — for the
