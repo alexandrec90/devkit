@@ -54,10 +54,23 @@ def test_the_condition_lets_through_every_pr_the_queue_waits_on():
         "startsWith(github.head_ref, 'release/')",  # release-pipeline.py reads its red
         "labels.*.name, 'automerge'",  # waits for its gate, money PRs included
         "labels.*.name, 'hold'",  # waits for a person, who reads the gate
-        "body, 'hold: yes'",  # merger.HOLD_LINE, the held ship intent's trailer
+        "body, format('hold:{0}yes', ' ')",  # merger.HOLD_LINE, a held intent's trailer
     ):
         assert needle in condition, needle
     assert sync.PR_GATE_EVENT_TYPES.endswith("labeled]")
+
+
+@pytest.mark.parametrize("workflow", [PR_GATE, TEMPLATE], ids=["devkit", "template"])
+def test_every_job_parses_to_the_condition(workflow):
+    """#849 shipped `'hold: yes'` in the unquoted value; YAML ended it at the `: `, GitHub
+    rejected the whole file, and `main`'s gate ran with no jobs at all. Parsed back, each
+    job's `if:` must be the whole condition."""
+    text = CONTROL.sub("", workflow.read_text(encoding="utf-8"))
+    text = re.sub(r"\{\{ *\w+ *\}\}", "x", text)  # the template's own placeholders
+    jobs = _yaml().safe_load(text)["jobs"]
+    assert {name: job.get("if") for name, job in jobs.items()} == {
+        name: sync.PR_GATE_RUNS_IF for name in jobs
+    }
 
 
 def _run_steps() -> list[tuple[str, str, str]]:

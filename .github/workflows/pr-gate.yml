@@ -60,7 +60,7 @@ concurrency:
 
 jobs:
   test:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, format('hold:{0}yes', ' ')) }}
     name: Lint + hook-script tests
     runs-on: ubuntu-latest
     steps:
@@ -158,7 +158,7 @@ jobs:
           if-no-files-found: ignore
 
   suite:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, format('hold:{0}yes', ' ')) }}
     name: devkit tests (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     strategy:
@@ -190,7 +190,7 @@ jobs:
           if-no-files-found: ignore
 
   hook-tests:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, format('hold:{0}yes', ' ')) }}
     name: Hook-script tests
     runs-on: ubuntu-latest
     steps:
@@ -213,7 +213,7 @@ jobs:
           path: logs/junit-hooks.xml
 
   pre-commit:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, format('hold:{0}yes', ' ')) }}
     name: Pre-commit gate (the channel devkit publishes)
     runs-on: ubuntu-latest
     # Its own job: it clones pinned third-party hook repos and builds their isolated
@@ -241,7 +241,7 @@ jobs:
         run: uv run pre-commit run --all-files --show-diff-on-failure
 
   generated-project:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, format('hold:{0}yes', ' ')) }}
     name: A generated project is green on arrival (${{ matrix.presets }})
     runs-on: ubuntu-latest
     strategy:
@@ -306,7 +306,7 @@ jobs:
           done
 
   upgrade-rehearsal:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, 'hold: yes') }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.user.type == 'Bot' || github.event.pull_request.head.repo.full_name != github.repository || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'automerge') || contains(github.event.pull_request.labels.*.name, 'hold') || contains(github.event.pull_request.body, format('hold:{0}yes', ' ')) }}
     name: A project on the previous release survives adopting this one
     runs-on: ubuntu-latest
     # The regression this exists for: v0.11.21 widened a vendored gate
