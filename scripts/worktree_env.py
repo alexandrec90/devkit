@@ -50,7 +50,8 @@ goes in the tree's `logs/friction.md` as well as the hook's output, which `claud
 **`post-checkout` alone misses a tree cut `--no-checkout`** and filled with
 `git reset --hard`, since git skips `post-checkout` for a no-checkout add. So the same
 set-up also answers `post-index-change` (`index_change_main`), gated on a working-tree
-update in a tree not yet provisioned.
+update in a tree not yet provisioned -- never in a `.claude/worktrees` tree, where that
+update is a session's own rebase or reset (`claude_session_tree`).
 
 **Neither hook reaches `claude --worktree` any more.** Claude Code runs its own git with
 `-c core.hooksPath=/dev/null` (verified 2026-09-29: a plain `git worktree add` fired
@@ -1077,9 +1078,22 @@ def index_change_main(
     """
     args = sys.argv[1:] if argv is None else argv
     here = Path.cwd() if root is None else root
-    if not is_unprovisioned_tree_update(args, here):
+    if not is_unprovisioned_tree_update(args, here) or claude_session_tree(here):
         return 0
     return _set_up(here, runner, environ)
+
+
+def claude_session_tree(here: Path) -> bool:
+    """Whether `here` is a `claude --worktree` tree, `<checkout>/.claude/worktrees/<name>`.
+
+    d39af68f: Claude Code cuts and fills these with hooks off, so `post-index-change`
+    fires in one only for a git command its session issues later -- a `git rebase`
+    provisioned a d2-trader session's tree unasked (`uv sync`, a seeded `.env`), where
+    `.claude/rules/session-scope.md` keeps it bare. A fixer's tree there is provisioned
+    by `fix_trees.provision_tree`, not by this hook.
+    """
+    parents = Path(os.path.abspath(here)).parents
+    return len(parents) > 1 and parents[0].name == "worktrees" and parents[1].name == ".claude"
 
 
 def _set_up(here: Path, runner, environ: Mapping[str, str] | None) -> int:

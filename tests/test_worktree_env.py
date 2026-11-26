@@ -1241,7 +1241,7 @@ def test_a_no_checkout_worktree_filled_by_a_reset_is_provisioned(tmp_path, monke
         f'#!/bin/sh\necho "post-checkout" >> "{fired.as_posix()}"\n', encoding="utf-8"
     )
     (hooks / "post-checkout").chmod(0o755)
-    tree = checkout / ".claude" / "worktrees" / "wt"
+    tree = tmp_path / ".worktrees" / "wt"
     hooked = ("-c", f"core.hooksPath={hooks.as_posix()}")
     subprocess.run(
         ["git", "-C", str(checkout), *hooked, "worktree", "add", "--no-checkout", "-q", str(tree)],
@@ -1258,6 +1258,26 @@ def test_a_no_checkout_worktree_filled_by_a_reset_is_provisioned(tmp_path, monke
     assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
     assert ".venv provisioned" in capsys.readouterr().out
     assert [argv[:2] for argv, _ in run.calls] == [["uv", "sync"]]
+
+
+def test_a_rebase_in_a_claude_session_tree_provisions_nothing(tmp_path, monkeypatch, capsys):
+    """d39af68f: Claude Code's own git runs with hooks off, so `post-index-change 1` in a
+    `.claude/worktrees` tree is a session's later rebase or reset, and that tree stays
+    bare: no `uv sync`, no seeded `.env`."""
+    checkout = _repo(tmp_path / "d2-trader")
+    (checkout / ".venv").mkdir()
+    (checkout / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    tree = _worktree(checkout, checkout / ".claude" / "worktrees" / "goofy")
+    (tree / "uv.lock").write_text("", encoding="utf-8")
+    monkeypatch.setattr(wt_env.shutil, "which", lambda name: "uv")
+    run = _Run()
+    assert wt_env.claude_session_tree(tree) is True
+    assert wt_env.index_change_main(["1", "0"], root=tree, runner=run, environ={}) == 0
+    assert run.calls == []
+    assert capsys.readouterr().out == ""
+    assert not (tree / ".env").exists()
+    assert wt_env.claude_session_tree(tmp_path / ".worktrees" / "goofy") is False
+    assert wt_env.claude_session_tree(checkout / ".claude" / "worktrees") is False
 
 
 def test_the_index_change_hook_leaves_a_provisioned_tree_and_the_checkout_alone(tmp_path):
