@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The fix pass's decisions: harness first, project fixers held, every dispatch capped.
+"""The fix pass's decisions: harness first, what it explains held, every dispatch capped.
 
 `fix_plan.py` decides what one red thing gets; this decides the *order* and the
 *budget* across all of them, which is what turns a click into something that can run
@@ -13,13 +13,16 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   file that one project owns (`checks_own_files`), and `UNKNOWN` when there is no evidence to point anywhere. Unknown goes to the project
   bucket, where the fixer will say "upstream" and stop; guessing the other way sends a
   devkit session at a project bug.
-- **Hold every project fixer while the harness is red.** Nearly every red PR of the last
-  month was a devkit fan-out, and a project fixer sent at one fixes a symptom eight
+- **Hold what the red harness could explain, and only that.** Nearly every red PR of
+  one month was a devkit fan-out, and a project fixer sent at one fixes a symptom eight
   times. So while any harness failure exists, or devkit's own default branch is red,
-  the pass sends **one** devkit session at the whole harness set and holds the rest,
-  saying so loudly -- a quiet pass has to read as "everything is blocked", never as
-  "nothing to do". devkit's own PRs are not held: one may be the fix. A release still
-  being adopted holds only that project's other PRs, behind its adoption.
+  the pass sends **one** devkit session at the whole harness set and holds each project
+  decision the harness could be the cause of (`harness_explains`): an adoption of a
+  release, a failure in the vendored tier or its drift check, one red on an entry the
+  harness is red on too, or one with nothing to read. The rest go: a project's gate
+  pins a devkit tag, so a red devkit main cannot by itself turn it red. Each hold says
+  why that project was held. devkit's own PRs are not held: one may be the fix. A
+  release still being adopted holds only that project's other PRs, behind its adoption.
 - **Escalate what makes no progress; never park it.** The ledger stops a second
   dispatch at the same commit. A failure `fix_ledger.ATTEMPTS` fixers left unchanged
   is filed on the harness-defect ledger (`fix_budget.py`), where the devkit session takes it
@@ -319,9 +322,11 @@ def phase(
 
     Skips are never in either list; a `HOLD` the plan made -- a PR behind a red base --
     is held with the plan's own note, clean or not. While the harness is red, every
-    *foldable* harness decision becomes one devkit session and every project one is
-    held -- except a devkit PR, which is red on its own diff and may be the harness
-    fix itself: held behind the harness, the fix is what never lands. A project with
+    *foldable* harness decision becomes one devkit session, and a project one is held
+    only when the harness could explain it (`harness_explains`), with that reason; an
+    unrelated project failure goes. A devkit PR is never held: it is red on its own
+    diff and may be the harness fix itself, and held behind the harness, the fix is
+    what never lands. A project with
     its adoption still open holds its other PRs behind that adoption, which goes.
     Updates go first (free, and they may turn the PR green by themselves), then
     conflicts: a conflicted PR's gate cannot run, so nothing else about it is knowable.
@@ -334,18 +339,79 @@ def phase(
     go = _harness_first(harness_ones)
     held: list[tuple[fix_plan.Decision, str]] = []
     sent: list[fix_plan.Decision] = []
-    red = f"{HELD_FOR_HARNESS}: " + "; ".join(harness.reasons)
+    named = tuple(prefixes)
+    reds = harness_entries(harness_ones)
     for d in project_ones:
         adopting = sorted({f.project for f in d.failures} & set(harness.adopting))
+        explained = "" if harness.clean else harness_explains(d, classes, reds, named)
         if is_devkit_pr(d):
             sent.append(d)
-        elif not harness.clean:
-            held.append((d, red))
-        elif adopting and not fix_plan.is_adoption(d, prefixes):
+        elif explained:
+            held.append((d, f"{HELD_FOR_HARNESS}: {explained}, and {'; '.join(harness.reasons)}"))
+        elif adopting and not fix_plan.is_adoption(d, named):
             held.append((d, f"{HELD_FOR_ADOPTION} {', '.join(adopting)}"))
         else:
             sent.append(d)
     return go + sorted(sent, key=lambda d: RANK.get(d.action, 2)), held + planned_holds
+
+
+def harness_entries(harness_ones: Iterable[fix_plan.Decision]) -> frozenset[str]:
+    """Every signature entry the harness decisions are red on, a conflict aside."""
+    return frozenset(
+        entry
+        for d in harness_ones
+        for f in d.failures
+        for entry in f.signature
+        if entry != fix_plan.CONFLICT
+    )
+
+
+def harness_explains(
+    decision: fix_plan.Decision,
+    classes: dict[str, str],
+    reds: frozenset[str],
+    prefixes: Iterable[str] = (),
+) -> str:
+    """Why a red harness could be what this project decision is red on; "" if it cannot.
+
+    A generated project's gate pins a devkit tag, never `main`, so a red devkit main
+    cannot by itself turn a project red: agent-terminal's own failure sat held for hours
+    behind an unrelated devkit red. What a red harness can explain is an adoption of a
+    release, a failure in the vendored tier or its drift check, and one red on an entry
+    a harness decision is red on too. A failure with nothing to read -- unknown, or a
+    conflict alone -- is held: that is the fail-safe answer this replaces.
+    """
+    named = tuple(prefixes)
+    if fix_plan.is_adoption(decision, named):
+        return f"{_projects(decision)} adopts a devkit release"
+    if not decision.failures:
+        return "it names no failure to tell apart from the harness"
+    for f in decision.failures:
+        ids = [entry for entry in f.signature if entry != fix_plan.CONFLICT]
+        if classes.get(fix_ledger.failure_key(f), UNKNOWN) == UNKNOWN or not ids:
+            return f"{f.project}'s failure names nothing to tell apart from the harness"
+        vendored = next((entry for entry in ids if is_harness_entry(entry)), "")
+        if vendored:
+            return f"{f.project} is red on the vendored {vendored}"
+        common = sorted(set(ids) & reds)
+        if common:
+            return f"{f.project} is red on {common[0]}, as the harness is"
+    return ""
+
+
+# What a gate's drift check names when it is the step that failed, rather than a test.
+DRIFT_MARKERS = ("sync-devkit", "devkit-drift", "devkit_version")
+
+
+def is_harness_entry(entry: str) -> bool:
+    """The entry names a file devkit ships, or the drift check that compares them."""
+    return fix_plan.in_vendored_tier(entry, HARNESS_PATHS) or any(
+        marker in entry.lower() for marker in DRIFT_MARKERS
+    )
+
+
+def _projects(decision: fix_plan.Decision) -> str:
+    return ", ".join(sorted({f.project for f in decision.failures}))
 
 
 def is_devkit_pr(decision: fix_plan.Decision) -> bool:

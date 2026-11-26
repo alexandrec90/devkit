@@ -1,4 +1,4 @@
-"""`scripts/fix_cycle.py`: harness first, project fixers held, every dispatch capped."""
+"""`scripts/fix_cycle.py`: harness first, what it explains held, every dispatch capped."""
 
 from __future__ import annotations
 
@@ -280,9 +280,9 @@ def test_a_missing_tier_goes_to_a_fixer_in_each_project_through_the_whole_cycle(
     assert held == []
 
 
-def test_a_missing_tier_waits_behind_a_red_harness_like_any_project_fixer():
-    """Being the project's own is what makes it holdable: the one devkit session goes
-    alone, and a harness failure beside these does not drag them into it."""
+def test_a_missing_tier_goes_beside_a_red_harness_it_has_nothing_to_do_with():
+    """Being the project's own keeps it out of the devkit session; naming nothing the
+    harness is red on, it goes beside that session rather than waiting behind it."""
     vendored = failure(
         project="devkit", kind=fix_plan.BRANCH, number=0, head="", signature=VENDORED
     )
@@ -293,8 +293,12 @@ def test_a_missing_tier_waits_behind_a_red_harness_like_any_project_fixer():
         classes,
         fix_cycle.harness_state(classes, True, []),
     )
-    assert [f.project for d in go for f in d.failures] == ["devkit"]
-    assert [d.failures[0].project for d, _ in held] == ["carameli", "roguelike"]
+    assert [[f.project for f in d.failures] for d in go] == [
+        ["devkit"],
+        ["carameli"],
+        ["roguelike"],
+    ]
+    assert go[0].action == fix_plan.UPSTREAM and held == []
 
 
 def test_classify_all_is_keyed_like_the_ledger():
@@ -318,20 +322,85 @@ def test_the_harness_is_clean_only_when_nothing_harness_shaped_is_red():
     assert adopting.clean and adopting.adopting == ("carameli", "roguelike")
 
 
-def test_while_the_harness_is_red_one_devkit_session_goes_and_every_project_fixer_is_held():
+def _red_harness_beside(project: fix_plan.Failure, prefixes=()):
+    """`phase` over two vendored reds folded upstream, and `project` beside them."""
     vendored = [
         failure(project="a", number=1, signature=VENDORED),
         failure(project="b", number=2, signature=VENDORED),
     ]
-    project = failure(project="c", number=3)
     decisions = [decision(fix_plan.UPSTREAM, *vendored), decision(fix_plan.DISPATCH, project)]
-    classes = fix_cycle.classify_all([*vendored, project])
+    classes = fix_cycle.classify_all([*vendored, project], prefixes)
     harness = fix_cycle.harness_state(classes, True, [])
-    go, held = fix_cycle.phase(decisions, classes, harness)
+    assert not harness.clean
+    return fix_cycle.phase(decisions, classes, harness, prefixes)
+
+
+def test_while_the_harness_is_red_an_unrelated_project_fixer_goes_beside_the_devkit_session():
+    """agent-terminal's own failure sat held for hours behind a red devkit main from an
+    unrelated devkit change. A project's gate pins a devkit tag, never `main`, so a red
+    harness cannot by itself turn a project red: only what it could explain waits."""
+    project = failure(project="c", number=3, signature=("tests/test_c.py::t",))
+    go, held = _red_harness_beside(project)
+    assert [d.action for d in go] == [fix_plan.UPSTREAM, fix_plan.DISPATCH]
+    assert go[1].failures == (project,) and held == []
+
+
+@pytest.mark.parametrize(
+    ("signature", "because"),
+    [
+        (("lint scripts/hooks/stop.py", "tests/t.py::a"), "c is red on the vendored lint scripts"),
+        ((*RATCHET,), "c is red on the vendored scripts/hooks/tests/test_structure_check"),
+        (("sync-devkit --check: drift", "tests/t.py::a"), "c is red on the vendored sync-devkit"),
+        ((VENDORED[0], "tests/t.py::a"), "c is red on the vendored scripts/hooks/tests/"),
+        ((), "c's failure names nothing to tell apart from the harness"),
+        ((fix_plan.CONFLICT,), "c's failure names nothing to tell apart from the harness"),
+    ],
+)
+def test_while_the_harness_is_red_a_harness_shaped_project_failure_is_held_and_says_why(
+    signature, because
+):
+    project = failure(project="c", number=3, signature=signature)
+    go, held = _red_harness_beside(project, PREFIXES)
     assert [d.action for d in go] == [fix_plan.UPSTREAM]
-    assert [(d.failures[0].project, why[:34]) for d, why in held] == [
-        ("c", "held until the harness is clean: 2")
-    ]
+    [(d, why)] = held
+    assert d.failures == (project,)
+    assert why.startswith(f"{fix_cycle.HELD_FOR_HARNESS}: {because}"), why
+    assert why.endswith("2 harness failure(s) open")
+
+
+def test_a_project_red_on_an_entry_the_harness_is_red_on_is_held():
+    """Not the same signature -- that would be shared, and the harness's own -- but one
+    entry in common, which the red harness could be the cause of."""
+    common = failure(project="a", number=1, signature=("tests/test_x.py::t", "tests/a.py::b"))
+    project = failure(project="c", number=3, signature=("tests/test_x.py::t", "tests/c.py::d"))
+    harness_one = decision(fix_plan.UPSTREAM, common)
+    assert fix_cycle.harness_entries([harness_one]) == {"tests/test_x.py::t", "tests/a.py::b"}
+    classes = {fix_ledger.failure_key(common): fix_cycle.HARNESS} | fix_cycle.classify_all(
+        [project]
+    )
+    harness = fix_cycle.harness_state(classes, True, [])
+    go, held = fix_cycle.phase([harness_one, decision(fix_plan.DISPATCH, project)], classes, harness)
+    assert go == [harness_one]
+    assert held[0][1].startswith(
+        f"{fix_cycle.HELD_FOR_HARNESS}: c is red on tests/test_x.py::t, as the harness is"
+    )
+
+
+def test_harness_explains_nothing_on_a_projects_own_red():
+    project = decision(fix_plan.DISPATCH, failure(project="c", signature=("tests/c.py::t",)))
+    classes = fix_cycle.classify_all(project.failures)
+    assert fix_cycle.harness_explains(project, classes, frozenset({"tests/a.py::t"})) == ""
+    assert fix_cycle.harness_explains(decision(fix_plan.DISPATCH), {}, frozenset()) != ""
+
+
+def test_a_harness_entry_is_a_shipped_file_or_the_drift_check():
+    assert fix_cycle.is_harness_entry("lint scripts/hooks/stop.py")
+    assert fix_cycle.is_harness_entry(VENDORED[0])
+    assert fix_cycle.is_harness_entry("DEVKIT_VERSION is behind upstream")
+    assert not fix_cycle.is_harness_entry("tests/test_x.py::t")
+    assert not fix_cycle.is_harness_entry(
+        "scripts/hooks/tests/test_codex_hooks_contract.py::test_drop"
+    ), "a project's own test beside the vendored ones is not shipped"
 
 
 def test_several_harness_decisions_fold_into_one_session():
@@ -558,6 +627,21 @@ def test_an_adoption_pr_is_classified_by_what_fails_and_its_own_release_never_ho
     go, held = fix_cycle.phase([own, vendored, other], classes, red_too, prefixes)
     assert [d.action for d in go] == [fix_plan.UPSTREAM]
     assert [d for d, _why in held] == [own, other]
+    # The adoption waits on the red harness, which a release it adopts may be the cause
+    # of; the other PR waits on that adoption, as it would with the harness clean.
+    assert held[0][1].startswith(f"{fix_cycle.HELD_FOR_HARNESS}: carameli adopts a devkit release")
+    assert held[1][1] == "held until the newest release is adopted in carameli"
+
+
+def test_an_adoption_pr_is_held_behind_a_red_harness_whatever_it_is_red_on():
+    """A project-shaped red on an adoption is still a release the harness shipped."""
+    head = "agent/auto/devkit-upgrade-v0-11-21-0917"
+    own = failure(project="c", number=3, head=head, signature=("lint src/a.py",))
+    go, held = _red_harness_beside(own, PREFIXES)
+    assert [d.action for d in go] == [fix_plan.UPSTREAM]
+    assert [(d.failures, why.split(",")[0]) for d, why in held] == [
+        ((own,), f"{fix_cycle.HELD_FOR_HARNESS}: c adopts a devkit release")
+    ]
 
 
 def test_an_open_adoption_holds_only_its_own_projects_prs():
@@ -582,11 +666,15 @@ def test_an_open_adoption_holds_only_its_own_projects_prs():
 
 def test_a_devkit_pr_is_never_held_behind_the_harness():
     """A devkit PR is red on its own diff, and is often the harness fix in flight: held
-    until the harness is clean, it is the one thing that could make it clean."""
+    until the harness is clean, it is the one thing that could make it clean. The
+    project beside it is red on a vendored file, so it is held."""
     own_pr = decision(
         fix_plan.DISPATCH, failure(project="devkit", number=394, signature=("tests/test_d.py::t",))
     )
-    project = decision(fix_plan.DISPATCH, failure(number=3))
+    project = decision(
+        fix_plan.DISPATCH,
+        failure(number=3, signature=("lint scripts/hooks/stop.py", "tests/test_x.py::t")),
+    )
     classes = fix_cycle.classify_all([*own_pr.failures, *project.failures])
     red = fix_cycle.harness_state({"k": fix_cycle.HARNESS}, True, [])
     go, held = fix_cycle.phase([own_pr, project], classes, red)

@@ -937,9 +937,12 @@ def test_a_second_pass_sends_nothing_at_the_same_failure(world):
 
 
 def test_while_the_harness_is_red_only_one_devkit_session_goes(world):
+    """carameli #2 is red beside a vendored lint finding, which the red harness explains."""
     world["failures"] = [
         failure(project="carameli", number=1, signature=VENDORED),
-        failure(project="carameli", number=2),
+        failure(
+            project="carameli", number=2, signature=("lint scripts/hooks/stop.py", "tests/t.py::a")
+        ),
     ]
     world["branches"]["devkit"] = (False, red_main())
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
@@ -968,32 +971,49 @@ def red_main(**fields) -> fix_plan.Failure:
     return failure(**base)
 
 
-def test_a_red_devkit_main_alone_sends_one_devkit_session_and_holds_the_projects(world):
-    """What the first manual pass did not do: it held four carameli PRs behind a red
-    devkit main and sent nobody at the main, because the red was a reason and not a
-    failure. Now it is both."""
+def test_a_red_devkit_main_sends_one_devkit_session_and_the_unrelated_project_fixer(world):
+    """The first manual pass held four carameli PRs behind a red devkit main and sent
+    nobody at the main, because the red was a reason and not a failure. Then, made a
+    failure, it held every project behind it: agent-terminal's own red sat for hours
+    behind an unrelated devkit red, though a project's gate pins a devkit tag and a red
+    main cannot reach it. A project red on nothing the harness is red on goes too."""
     world["failures"] = [failure(number=2)]
     world["branches"]["devkit"] = (False, red_main())
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
-    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude")]
+    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude"), (fix_plan.DISPATCH, "claude")]
     text = artifact(world)
     assert "harness  RED -- 1 harness failure(s) open; devkit's default-branch gate is red" in text
     assert "upstream devkit origin/main" in text
-    assert "held     carameli #2" in text and "sent     devkit origin/main -- upstream" in text
+    assert "sent     carameli #2 -- dispatch" in text
+    assert "sent     devkit origin/main -- upstream" in text
 
 
-def test_an_untagged_release_commits_red_main_holds_everything_and_sends_nobody(world):
-    """Between the release merge and its tag, main is red by construction: the pass says
-    which red it is holding behind, and sends no session at a test the tag will fix."""
+def test_a_red_devkit_main_holds_the_project_red_on_what_main_is_red_on(world):
+    """Not the same signature, which would be shared and so the harness's own: one entry
+    in common is enough for the red harness to be a cause."""
+    both = ("tests/test_devkit.py::t", "tests/test_x.py::t")
+    world["failures"] = [failure(number=2, signature=both)]
+    world["branches"]["devkit"] = (False, red_main())
+    assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
+    assert world["dispatched"] == [(fix_plan.UPSTREAM, "claude")]
+    assert (
+        "held     carameli #2 -- held until the harness is clean: carameli is red on "
+        "tests/test_devkit.py::t, as the harness is"
+    ) in artifact(world)
+
+
+def test_an_untagged_release_commits_red_main_sends_no_session_at_it(world):
+    """Between the release merge and its tag, main is red by construction: the pass sends
+    no session at a test the tag will fix, and holds no unrelated project behind it."""
     world["failures"] = [failure(number=2)]
     world["branches"]["devkit"] = (
         False,
         red_main(signature=("tests/test_new_project.py::" + fix_plan.RELEASE_TEST,)),
     )
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
-    assert world["dispatched"] == []
+    assert world["dispatched"] == [(fix_plan.DISPATCH, "claude")]
     text = artifact(world)
-    assert "harness  RED" in text and "held     carameli #2" in text
+    assert "harness  RED" in text and "sent     carameli #2" in text
     assert "skip     devkit origin/main -- red by construction" in text
 
 
@@ -1057,7 +1077,7 @@ def test_a_regate_that_failed_leaves_the_harness_unreadable(world, monkeypatch):
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude", NOW) == 0
     text = artifact(world)
     assert "regate   devkit main -- FAILED" in text and "could not be read" in text
-    assert "held     carameli #2" in text
+    assert "sent     carameli #2" in text, "an unreadable main explains no project's own red"
 
 
 def test_plan_mode_only_says_it_would_re_gate(world, monkeypatch):
