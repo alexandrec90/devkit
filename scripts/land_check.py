@@ -15,17 +15,27 @@ than the interpreter running this, JSON that may carry comments.
 `land.py` runs it for a session and `ship_intent.py` for an intent, so both roads into
 the default branch hold the same thing. Vendored from devkit (`sync-devkit.py`'s
 MANIFEST), stdlib only. Tested in `scripts/hooks/tests/test_land_check.py`.
+
+**Version skew** is the other half, and it holds rather than refuses: a project pins a
+devkit release, so a `.devkit.toml` key that only devkit's `main` knows reddens the
+project's vendored `test_manifest_has_no_unknown_keys` the moment it merges, and stays
+red until a release carrying it is adopted (2026-11-26: `[delivery] e2e`, five projects).
+`skew` names the keys a change adds that the project's own vendored `harness_config.py`
+does not know; `land.py` opens such a PR held, and the fix pass releases it once an
+adopted release knows them (`fix_release.release_skew_holds`). Any doubt reads as no skew.
 """
 
 from __future__ import annotations
 
 import ast
+import dataclasses
 import json
 import re
 import sys
 import tomllib
+import types
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 # A bigger file is data, not something a person resolved a conflict in or wrote by hand.
@@ -131,3 +141,128 @@ def problems(root: Path, paths: Iterable[str], base_text: BaseText = _nothing) -
             continue
         found.append(f"{path}: {why}")
     return found
+
+
+# --- version skew ---------------------------------------------------------------------
+
+HARNESS_CONFIG = "scripts/hooks/harness_config.py"
+# The label a skew hold carries beside `hold`, so the fix pass releases its own holds and
+# never a person's.
+SKEW_LABEL = "devkit-skew"
+SKEW_LINE = "Devkit skew:"
+SKEW_TAIL = " -- waits for the devkit release that adds them."
+# The tables `harness_config.from_dict` reads by hand, renaming their keys; every other
+# table maps 1:1 onto its dataclass. The same split as `test_repo_contract._toml_schema`,
+# which a test holds this to.
+HAND_MAPPED = {
+    "project": frozenset({"env_prefix"}),
+    "paths": frozenset({"app", "tests", "unit_tests"}),
+}
+DATACLASS_TABLES = {
+    "db": "DbConfig",
+    "frontend": "FrontendConfig",
+    "desktop": "DesktopConfig",
+    "python": "PythonConfig",
+    "bash": "BashConfig",
+    "docker": "DockerConfig",
+    "worktree": "WorktreeConfig",
+    "test_contract": "TestContractConfig",
+    "structure": "StructureConfig",
+    "delivery": "DeliveryConfig",
+    "schedule": "ScheduleConfig",
+}
+
+Schema = Mapping[str, frozenset[str]]
+
+
+def schema_of(module: object) -> dict[str, frozenset[str]]:
+    """Legal keys per `.devkit.toml` table, as a loaded `harness_config` module has them.
+    A table whose dataclass the module lacks is a table that release does not know."""
+    schema = dict(HAND_MAPPED)
+    for table, name in DATACLASS_TABLES.items():
+        cls = getattr(module, name, None)
+        if cls is not None and dataclasses.is_dataclass(cls):
+            schema[table] = frozenset(f.name for f in dataclasses.fields(cls))
+    return schema
+
+
+def schema_from_source(source: str) -> dict[str, frozenset[str]]:
+    """`schema_of` a `harness_config.py` given as text: a project's own copy, from disk or
+    from a ref. Registered in `sys.modules` before it runs (scripts/CLAUDE.md), and
+    dropped after."""
+    name = "_land_check_harness_config"
+    module = types.ModuleType(name)
+    sys.modules[name] = module
+    try:
+        exec(compile(source, HARNESS_CONFIG, "exec"), module.__dict__)  # noqa: S102 - the project's own vendored file
+        return schema_of(module)
+    finally:
+        sys.modules.pop(name, None)
+
+
+def unknown_keys(settings: Mapping[str, object], schema: Schema) -> list[str]:
+    """`[table] key` for each key `schema` does not know, `[table]` for a whole table."""
+    found = []
+    for table, section in settings.items():
+        if table not in schema:
+            found.append(f"[{table}]")
+        elif isinstance(section, Mapping):
+            found.extend(f"[{table}] {key}" for key in section if key not in schema[table])
+    return sorted(found)
+
+
+def new_unknown_keys(
+    head: Mapping[str, object], base: Mapping[str, object], schema: Schema
+) -> list[str]:
+    """The unknown keys `head` adds over `base`. One the base already carries is that
+    branch's red, not this change's, and holding every change behind it would stop the
+    project landing anything."""
+    return sorted(set(unknown_keys(head, schema)) - set(unknown_keys(base, schema)))
+
+
+def skew(root: Path, base_settings: Mapping[str, object]) -> list[str]:
+    """The `.devkit.toml` keys this checkout adds that its own vendored `harness_config.py`
+    does not know. Fail-open: no copy, an unreadable one, or any error is no skew."""
+    try:
+        source = (root / HARNESS_CONFIG).read_text(encoding="utf-8")
+        head = tomllib.loads((root / ".devkit.toml").read_text(encoding="utf-8"))
+        return new_unknown_keys(head, base_settings, schema_from_source(source))
+    except Exception:  # fail-open by contract: a doubt never holds a change
+        return []
+
+
+def skew_line(keys: Iterable[str]) -> str:
+    return f"{SKEW_LINE} {', '.join(keys)}{SKEW_TAIL}"
+
+
+def with_skew_line(body: str, keys: list[str]) -> str:
+    """`body` ending in the skew line, once."""
+    if not keys or named_keys(body):
+        return body
+    return f"{body.rstrip()}\n\n{skew_line(keys)}\n".lstrip()
+
+
+def named_keys(body: str) -> list[str]:
+    """The keys a skew line in `body` names; nothing when it has none."""
+    for line in body.splitlines():
+        line = line.strip()
+        if line.startswith(SKEW_LINE):
+            named = line.removeprefix(SKEW_LINE).removesuffix(SKEW_TAIL.strip()).strip()
+            return [key.strip() for key in named.split(",") if key.strip()]
+    return []
+
+
+def known(key: str, schema: Schema) -> bool:
+    """Whether `schema` knows `[table] key`, or `[table]`."""
+    match = re.fullmatch(r"\[([^\]]+)\](?:\s+(\S+))?", key)
+    if not match:
+        return False
+    table, name = match.groups()
+    return table in schema and (name is None or name in schema[table])
+
+
+def releasable(body: str, schema: Schema) -> bool:
+    """Whether a skew-held PR's keys are all known to `schema` now. Pure. A body naming
+    none stays held: there is nothing to say the release arrived."""
+    keys = named_keys(body)
+    return bool(keys) and all(known(key, schema) for key in keys)
