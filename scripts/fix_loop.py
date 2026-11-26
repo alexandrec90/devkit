@@ -304,9 +304,7 @@ def went_out(tree: Path, runner=ship_intent.run_quiet) -> bool:
     return status.returncode == 0 and not (status.stdout or "").strip()
 
 
-def left_nothing(
-    rows: list[dict], tree: Path, branch: str, runner=ship_intent.run_quiet
-) -> bool:
+def left_nothing(rows: list[dict], tree: Path, branch: str, runner=ship_intent.run_quiet) -> bool:
     """Whether the sessions in `tree` hold nothing a fixer could race: each one listed
     there is idle, and the tree is clean at the very commit origin has for `branch`.
 
