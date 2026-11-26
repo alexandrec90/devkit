@@ -529,7 +529,9 @@ def authorize_peers(
     home = Path.home() if home is None else home
     programdata = program_data() if programdata is None else programdata
     admin = is_admin(run)
-    path = authorized_keys_path(admin, _read(programdata / "ssh" / "sshd_config"), home, programdata)
+    path = authorized_keys_path(
+        admin, _read(programdata / "ssh" / "sshd_config"), home, programdata
+    )
     text = _read(path)
     if path.name == ADMIN_KEYS:
         if owed := owed_to_worker(peers, text, seen()):

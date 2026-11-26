@@ -459,7 +459,10 @@ def fleet_plan(machine: Machine, layout: Layout) -> FleetPlan:
     if git is None:
         return FleetPlan(error="no git to fetch the fleet's records with")
     repo = layout.fleet_repo
-    if not os.path.isdir(repo) and git((GIT, "init", "--quiet", "--bare", repo), QUERY_TIMEOUT) is None:
+    if (
+        not os.path.isdir(repo)
+        and git((GIT, "init", "--quiet", "--bare", repo), QUERY_TIMEOUT) is None
+    ):
         return FleetPlan(error="its record store could not be made")
     spec = f"+{FLEET_REFS}*:{FLEET_REFS}*"
     fetch = (GIT, "--git-dir", repo, "fetch", "--quiet", "--prune", "--no-tags", FLEET_ORIGIN, spec)
@@ -532,7 +535,15 @@ def fleet_recover(machine: Machine, layout: Layout) -> tuple[bool, list[str]]:
     lines.append(f"added {', '.join(plan.missing)}")
     secured = True
     if not existed:
-        acl = (ICACLS, path, "/inheritance:r", "/grant", f"*{ADMINS_SID}:F", "/grant", f"*{SYSTEM_SID}:F")
+        acl = (
+            ICACLS,
+            path,
+            "/inheritance:r",
+            "/grant",
+            f"*{ADMINS_SID}:F",
+            "/grant",
+            f"*{SYSTEM_SID}:F",
+        )
         code = machine.run(acl, QUERY_TIMEOUT)
         secured = code == 0
         lines.append(f"icacls exited {code}")

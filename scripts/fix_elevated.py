@@ -103,7 +103,9 @@ def check(
     # `elevated_request.knows` noted apart from the no-worker ones, is a need.
     outdated = answer[0] == elevated_request.OUTDATED
     predating = (
-        elevated_request.read_waiting(ctx.devkit_dir, ctx.now.timestamp(), elevated_request.PREDATES)
+        elevated_request.read_waiting(
+            ctx.devkit_dir, ctx.now.timestamp(), elevated_request.PREDATES
+        )
         if outdated
         else []
     )

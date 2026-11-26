@@ -186,10 +186,17 @@ def test_is_admin_reads_the_administrators_sid_even_deny_only(monkeypatch):
     ("admin", "sshd", "expected"),
     [
         (True, None, "pd/ssh/administrators_authorized_keys"),
-        (True, "Match Group administrators\n  AuthorizedKeysFile __PROGRAMDATA__/ssh/"
-         "administrators_authorized_keys\n", "pd/ssh/administrators_authorized_keys"),
-        (True, "#Match Group administrators\n#  AuthorizedKeysFile x/administrators_"
-         "authorized_keys\n", "home/.ssh/authorized_keys"),
+        (
+            True,
+            "Match Group administrators\n  AuthorizedKeysFile __PROGRAMDATA__/ssh/"
+            "administrators_authorized_keys\n",
+            "pd/ssh/administrators_authorized_keys",
+        ),
+        (
+            True,
+            "#Match Group administrators\n#  AuthorizedKeysFile x/administrators_authorized_keys\n",
+            "home/.ssh/authorized_keys",
+        ),
         (False, None, "home/.ssh/authorized_keys"),
     ],
 )
@@ -219,9 +226,7 @@ def test_merge_appends_the_block_and_leaves_the_rest_alone():
 
 def test_merge_replaces_only_between_the_markers():
     text = (
-        "Host a\n    User x\n"
-        f"{fs.BEGIN}\nHost old\n    User gone\n{fs.END}\n"
-        "Host b\n    User y\n"
+        f"Host a\n    User x\n{fs.BEGIN}\nHost old\n    User gone\n{fs.END}\nHost b\n    User y\n"
     )
     merged = fs.merge_block(text, fs.render_block([record()], HERE))
     assert merged is not None
@@ -255,8 +260,7 @@ def test_a_hand_entry_naming_another_login_is_reported():
     text = (
         f"Host {FAR} far-alias\n    User alexa\n"
         f"Host {THIRD}\n    User administrator\n"
-        "Host *\n    User nobody\n"
-        + "\n".join(fs.render_block([record(FAR), record(THIRD)], HERE))
+        "Host *\n    User nobody\n" + "\n".join(fs.render_block([record(FAR), record(THIRD)], HERE))
     )
     said = fs.shadowed(text, [record(FAR), record(THIRD)])
     assert len(said) == 1 and FAR in said[0] and "User alexa" in said[0]
@@ -351,9 +355,7 @@ def test_an_unreadable_administrators_file_is_judged_by_the_worker_s_receipt(
     assert joined.lines == []
 
 
-def test_a_key_already_in_a_readable_administrators_file_asks_nothing(
-    tmp_path: Path, monkeypatch
-):
+def test_a_key_already_in_a_readable_administrators_file_asks_nothing(tmp_path: Path, monkeypatch):
     admin_here(monkeypatch)
     (tmp_path / "ssh").mkdir()
     (tmp_path / "ssh" / fs.ADMIN_KEYS).write_text(f"{KEY} x\n", encoding="utf-8")
