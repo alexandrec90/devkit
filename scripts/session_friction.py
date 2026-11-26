@@ -222,7 +222,7 @@ NO_VERIFY = re.compile(r"\bgit\b[^\n]*--no-verify")
 COMMAND_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("no-verify", NO_VERIFY),
     # In command position, so a heredoc's text is not a poll; and not `gh pr checks
-    # --watch`, which `.claude/rules/engineering.md` prescribes as the one blocking wait.
+    # --watch`, which `.claude/fixer.md` prescribes as the one blocking wait.
     # Nor one settle right before that same `--watch`, which returns at once when a push
     # has no checks yet: one call, not a loop (44a5ff19).
     (
@@ -1317,17 +1317,24 @@ ENGINEERING_RULE = ".claude/rules/engineering.md"
 FILE_WRITES_BAN = "**Write and edit files with the Write and Edit tools, never through Bash**"
 
 
-def _engineering_says(phrase: str, cwd: str, workspace_root: Path, project: str) -> bool:
-    """The session's tree carries `phrase` in `ENGINEERING_RULE`; its project's checkout
+def _engineering_says(
+    phrase: str, cwd: str, workspace_root: Path, project: str, files=(ENGINEERING_RULE,)
+) -> bool:
+    """The session's tree carries `phrase` in one of `files`; its project's checkout
     decides once the tree is gone. Neither there to read: it may well have, so the
     finding stands."""
     for root in (Path(cwd), workspace_root / project):
         if root.is_dir():
-            try:
-                return phrase in (root / ENGINEERING_RULE).read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                return False
+            return any(phrase in _text_of(root / name) for name in files)
     return True
+
+
+def _text_of(path: Path) -> str:
+    """The file's text, or "" when it cannot be read."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def bans_shell_writes(cwd: str, workspace_root: Path, project: str) -> bool:
@@ -1339,13 +1346,17 @@ def bans_shell_writes(cwd: str, workspace_root: Path, project: str) -> bool:
 # no project's rules, so nobody told it how to wait and no project can fix that it was
 # not: 507a7a04, a person's session at `C:\Users\alexa\vs-code` pacing a merge, was filed
 # against a project named `vs-code`. A poll's cost is an instruction unheeded, and it is
-# judged as a heredoc write is: where the instruction was.
+# judged as a heredoc write is: where the instruction was. The section moved from the
+# always-loaded rule to `FIXER_RULE`, since a project session waits on no gate, so a copy
+# from before the move still counts.
 WAITING_RULE = "## Waiting: one backgrounded call, not a poll loop"
+FIXER_RULE = ".claude/fixer.md"
 
 
 def asks_for_backgrounded_waits(cwd: str, workspace_root: Path, project: str) -> bool:
     """The session's rules carried `WAITING_RULE`, per `_engineering_says`."""
-    return _engineering_says(WAITING_RULE, cwd, workspace_root, project)
+    files = (FIXER_RULE, ENGINEERING_RULE)
+    return _engineering_says(WAITING_RULE, cwd, workspace_root, project, files)
 
 
 # "No module named 'x'" -- quoted, as Python names a module import failed on. Unquoted
