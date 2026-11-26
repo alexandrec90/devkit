@@ -375,6 +375,19 @@ def test_the_generated_instructions_say_how_a_task_runs_a_script(checkouts, tmp_
     assert "A task lives in the workspace file" in claude
 
 
+def test_the_generated_instructions_carry_no_vs_code_ui_conventions():
+    """A generated `CLAUDE.md` is loaded into every session in that project, and its
+    sessions drive scripts from a terminal, never VS Code's quick-pick. Task-UI settings
+    (`"type": "process"`, `presentation.close`, the toast wrapper, label and `detail`
+    conventions) were always-loaded context no such session could act on."""
+    claude = (support.REPO_ROOT / "templates" / "core" / "CLAUDE.md.tmpl").read_text(
+        encoding="utf-8"
+    )
+    for phrase in ("### VS Code tasks", '"type": "process"', '"close": false', "notify-wrap.py",
+                   "quick-pick"):
+        assert phrase not in claude, phrase
+
+
 def test_hook_tests_is_devkit_owned_so_every_checkout_can_run_it(checkouts, tmp_path):
     """`pytest scripts/hooks/tests/ -q` is byte-identical in every consumer.
 
