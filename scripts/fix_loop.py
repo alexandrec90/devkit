@@ -104,16 +104,14 @@ class Closed:
     stamped: dict[str, str] = field(default_factory=dict)
     # (project, branch) -> a tree some session other than the pass's is working in. A
     # fixer is never sent in beside it: the first supervised run sent one into the tree
-    # an interactive session was editing, which only went well because it sat idle.
+    # an interactive session was editing, which only went well because it sat idle. An
+    # idle one whose tree is clean and pushed holds nothing to race (`left_nothing`).
     busy: dict[tuple[str, str], str] = field(default_factory=dict)
     # Trees whose stamped session is done or dead, and the idle sessions stopped in them.
     finished: list[str] = field(default_factory=list)
     stopped: list[str] = field(default_factory=list)
     # Each tree some session is at work in now, as the record names it (`where`).
     at_work: list[str] = field(default_factory=list)
-    # The trees a dispatched session is still working in, a person's own tabs left out:
-    # with none, the next fixer runs alone (`host_memory.LONE_FLOOR_MB`).
-    fixing: list[str] = field(default_factory=list)
     # When the newest stamped session that reached an outcome began: proof the machine's
     # login worked then, which retires a `LOGIN_KIND` row older than it (`retire_login`).
     signed_in: str = ""
@@ -306,6 +304,29 @@ def went_out(tree: Path, runner=ship_intent.run_quiet) -> bool:
     return status.returncode == 0 and not (status.stdout or "").strip()
 
 
+def left_nothing(
+    rows: list[dict], tree: Path, branch: str, runner=ship_intent.run_quiet
+) -> bool:
+    """Whether the sessions in `tree` hold nothing a fixer could race: each one listed
+    there is idle, and the tree is clean at the very commit origin has for `branch`.
+
+    `/land` hands a conflict to the pass and its session stays open, idle, in the PR's
+    tree. Read as present, it held d2-trader #32 for hours on 2026-11-25, its transcript
+    restarting `QUIET_AFTER` when the idle session was compacted, while the PR it had
+    promised the pass would resolve sat conflicted. An empty listing cannot say who is
+    idle, and an unreadable tree cannot say it is pushed: either reads as present.
+    """
+    here = [row for row in bg_sessions.in_tree(rows, tree) if bg_sessions.alive(row)]
+    if not here or any(bg_sessions.status(row) != "idle" for row in here):
+        return False
+    status = runner(["git", "status", "--porcelain"], cwd=tree)
+    if status.returncode != 0 or (status.stdout or "").strip():
+        return False
+    heads = runner(["git", "rev-parse", "HEAD", f"refs/remotes/origin/{branch}"], cwd=tree)
+    shas = (heads.stdout or "").split()
+    return heads.returncode == 0 and len(shas) == 2 and shas[0] == shas[1]
+
+
 def _judge_session(
     ctx: Context, tree: fix_reports.Tree, where: str, journal: fix_findings.Journal, closed: Closed
 ) -> bool:
@@ -323,21 +344,15 @@ def _judge_session(
     # own transcript held six branches while this very pass shipped their intents. A
     # session listed busy in the tree is at work whoever it is, intent or no intent.
     running = bg_sessions.busy_in(closed.working, tree.path)
-    if tree.branch and (running or (live and str(live) != transcript)):
+    present = running or (live is not None and str(live) != transcript)
+    if tree.branch and present and not left_nothing(closed.listing, tree.path, tree.branch):
         closed.busy[(tree.project, tree.branch)] = str(tree.path)
     at_work = state == fix_reports.WORKING or running
-    _note_fixing(closed, tree, key, at_work)
     if state in fix_reports.DEAD:
         closed.lines.extend(judge_dead(ctx, tree, where, state, transcript, journal))
     elif at_work and fix_ledger.is_upstream(key):
         closed.harness_busy = str(tree.path)
     return running or live is not None
-
-
-def _note_fixing(closed: Closed, tree: fix_reports.Tree, key: str, at_work: bool) -> None:
-    """Record in `closed.fixing` a tree a dispatched session (`key`) is still at work in."""
-    if key and at_work:
-        closed.fixing.append(str(tree.path))
 
 
 def _note_signed_in(closed: Closed, transcript: str) -> None:

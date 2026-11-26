@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""How much physical memory the machine has free for another session.
+"""How much memory the machine has free for another session.
 
 The fix pass has no cap on how many sessions it sends, on purpose -- but each is a real
 process, and the fourth supervised round sent enough (nine fixers plus their MCP
@@ -27,10 +27,14 @@ SESSION_MB = 500
 # What anything a job starts must leave free: the person at the machine's room for their
 # own work.
 FLOOR_MB = 2048
-# What the fix pass's only fixer must leave free. Held to `FLOOR_MB`, 35 of 43 passes on
-# 2026-11-23/24 held a session, 33 of them with over 1 GB free, and every PR behind it
-# waited. The kill above was nine at once, so one alone is let in.
-LONE_FLOOR_MB = 512
+# What each fixer must leave free, however many already run. They are in the probe
+# already, and each one this pass sends is charged against it, which is what stops nine
+# at once; a floor raised whenever one is running counted them twice. Held to `FLOOR_MB`
+# that way, 35 of 43 passes on 2026-11-23/24 held a session, 33 of them with over 1 GB
+# free, while d2-trader #32 sat conflicted on 2026-11-25. Higher than the 512 that let
+# one alone in: the probe now includes commit, whose exhaustion fails an allocation in
+# the person's own program rather than paging it.
+FIX_FLOOR_MB = 1024
 
 
 class _MemoryStatus(ctypes.Structure):
@@ -47,6 +51,17 @@ class _MemoryStatus(ctypes.Structure):
     ]
 
 
+def windows_room(avail_phys: int, avail_commit: int) -> int:
+    """The MB a new process can take on Windows: the smaller of the two limits, in bytes.
+
+    Available physical memory (standby included) is what it can get without paging;
+    available commit (`ullAvailPageFile`, the commit limit less the charge) is what it
+    can get at all, past which an allocation fails. 2026-11-25: 1.0 GB physical and
+    1.4 GB commit free, with a game running; either limit alone can be the lower.
+    """
+    return int(min(avail_phys, avail_commit) // (1024 * 1024))
+
+
 def _windows_mb() -> int | None:
     if sys.platform != "win32":  # also what tells mypy `windll` exists below
         return None
@@ -54,7 +69,7 @@ def _windows_mb() -> int | None:
     status.dwLength = ctypes.sizeof(_MemoryStatus)
     if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
         return None
-    return int(status.ullAvailPhys // (1024 * 1024))
+    return windows_room(status.ullAvailPhys, status.ullAvailPageFile)
 
 
 def meminfo_mb(text: str) -> int | None:
@@ -67,7 +82,8 @@ def meminfo_mb(text: str) -> int | None:
 
 
 def available_mb() -> int | None:
-    """Physical memory available to a new process, in MB; `None` when it cannot be read."""
+    """Memory available to a new process, in MB (`windows_room` on Windows,
+    `MemAvailable` elsewhere); `None` when it cannot be read."""
     try:
         if sys.platform == "win32":
             return _windows_mb()

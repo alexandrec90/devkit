@@ -1566,13 +1566,14 @@ def test_a_session_the_machine_has_no_memory_for_is_held_for_the_next_pass(world
     )
 
 
-def test_a_fixer_that_would_run_alone_is_held_to_the_lower_floor(world, tmp_path):
-    """2026-11-24: the PC held 1.0-1.8 GB free all evening, and no fixer went. One may,
-    and only one: the second of the pass, or any beside one still working, keeps the
-    full floor."""
+def test_a_fixer_is_held_to_one_floor_however_many_already_run(world, tmp_path):
+    """2026-11-24: the PC held 1.0-1.8 GB free all evening, and no fixer went, behind a
+    floor raised whenever one already ran -- though the running ones were in the probe
+    already. Each fixer leaves the same room; what this pass sends is charged as it goes."""
     send = fix_pass.fix_send
-    lone = send.host_memory.LONE_FLOOR_MB + send.SESSION_MB
-    world["memory"] = lone + send.SESSION_MB
+    assert send.MEMORY_FLOOR_MB < send.host_memory.FLOOR_MB
+    one = send.MEMORY_FLOOR_MB + send.SESSION_MB
+    world["memory"] = one + send.SESSION_MB - 1
     go = [
         fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=1),)),
         fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=2),)),
@@ -1583,12 +1584,14 @@ def test_a_fixer_that_would_run_alone_is_held_to_the_lower_floor(world, tmp_path
     [(held, why)] = capped
     assert held.failures[0].number == 2 and why.startswith(send.HELD_FOR_MEMORY)
 
-    working = fix_pass.fix_loop.Closed(fixing=["some-tree"])
-    sent, capped, _ = send.send_all(go[1:], ctx, "claude", closed=working)
-    assert sent == [] and len(capped) == 1
-
-    world["memory"] = lone - 1
-    assert send.send_all(go[1:], ctx, "claude")[0] == []
+    world["memory"] = one
+    assert send.send_all(go[1:], ctx, "claude")[0] == ["carameli #2 -- dispatch"], (
+        "the one still working is in the probe: it raises no floor"
+    )
+    world["memory"] = one - 1
+    third = [fix_plan.Decision(fix_plan.DISPATCH, "n", (failure(number=3),))]
+    sent, [(_, why)], _ = send.send_all(third, ctx, "claude")
+    assert sent == [] and why.startswith(send.HELD_FOR_MEMORY)
 
 
 def test_no_session_is_launched_once_the_pass_is_out_of_time(world, tmp_path):

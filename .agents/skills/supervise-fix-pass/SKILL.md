@@ -150,7 +150,8 @@ problem is fixed in the pass like any other defect -- not by adding a cap back.
 
 Memory is the one limit the machine sets regardless: `fix_send` holds a session the
 free memory cannot take (`held for memory` in the record), and the next pass sends it.
-A fixer that would run alone has a lower floor (`host_memory.LONE_FLOOR_MB`).
+Each fixer is held to one floor however many already run (`host_memory.FIX_FLOOR_MB`),
+and on Windows the probe is the lower of free physical memory and free commit.
 A background fixer loads no MCP server for the same reason. Holds on every iteration
 mean something else is eating the memory -- find it (`claude agents` for finished
 sessions still alive, `python scripts/docker_memory.py` for stacks) rather than lowering

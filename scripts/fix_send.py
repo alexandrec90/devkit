@@ -170,7 +170,7 @@ def hold_if_moved(
 
 
 SESSION_MB = host_memory.SESSION_MB
-MEMORY_FLOOR_MB = host_memory.FLOOR_MB
+MEMORY_FLOOR_MB = host_memory.FIX_FLOOR_MB
 HELD_FOR_MEMORY = "held for memory"
 # Why a session is not launched by a pass past its deadline (`fix-pass.SEND_RESERVE_SECONDS`
 # before the watchdog's stop). A launch provisions a tree and starts a session, 1-2.5
@@ -321,7 +321,6 @@ def send_all(
     capped: list[tuple[fix_plan.Decision, str]] = []
     worst = EXIT_OK
     room = host_memory.available_mb()
-    floor = MEMORY_FLOOR_MB if closed.fixing else host_memory.LONE_FLOOR_MB
     turn = fix_claims.Turn(ctx.root, ctx.writes, room, closed.harness_busy, left)
     for decision in go:
         names = ", ".join(f"{f.project} {fix_plan.name_of(f)}" for f in decision.failures)
@@ -336,11 +335,10 @@ def send_all(
         if verdict.finding and journal is not None:
             since = fix_budget.since_for(decision, escalated)
             journal.add(verdict.finding.at(closed.tree_after(problem, since)))
-        if why := _kept_back(decision, verdict, room, floor, left, turn):
+        if why := _kept_back(decision, verdict, room, MEMORY_FLOOR_MB, left, turn):
             capped.append((decision, why))
             continue
         if decision.action not in fix_plan.NO_SESSION:
-            floor = MEMORY_FLOOR_MB
             room = None if room is None else room - SESSION_MB
         line, code = _send_one(decision, ctx, launch, verdict.effort, journal)
         sent.append(f"{names} -- {line}{turn.note(decision)}")
@@ -363,7 +361,7 @@ def _no_memory(decision: fix_plan.Decision, room: int | None, floor: int) -> str
     the pass has none -- but the one limit the machine sets regardless: round four sent
     nine at once and Claude Code killed the supervisor for low memory. A held decision
     is not recorded, so the next pass sends it; one held too long is a stale wait.
-    `floor` is lower for a fixer that would run alone (`host_memory.LONE_FLOOR_MB`)."""
+    `floor` is the same however many already run (`host_memory.FIX_FLOOR_MB`)."""
     if room is None or decision.action in fix_plan.NO_SESSION:
         return ""
     if host_memory.room_for_session(room, floor):
