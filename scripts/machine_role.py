@@ -13,9 +13,11 @@ fixers, test runs and queue sessions while an idle laptop watched. A role says i
 
 - **`worker`** claims a heavy job the moment it sees one, as every PC does today.
 - **`workstation`** leaves a heavy job for `job_claims.WORKER_FIRST` from when it first
-  saw it (`job_claims.Sightings`), and claims it only if it is still unclaimed then. A
-  worker that is off, asleep, offline or short of memory or disk never claims, so the
-  job falls back to the workstation and is late rather than lost.
+  saw it (`job_claims.Sightings`), and claims it only if it is still unclaimed then --
+  but only while some worker's heartbeat is fresh (`job_claims.live_workers`): a worker
+  says it is alive from its after-merge pass, so one that is off, asleep or offline
+  costs nothing once its beat ages out. One alive but short of memory or disk never
+  claims, so the job falls back to the workstation and is late rather than lost.
 - **unset** (`""`, the default in devkit's `workspace.jsonc`) is today's behaviour.
 
 What is heavy is the caller's to say, and listed in `scripts/CLAUDE.md`: the medium tier,

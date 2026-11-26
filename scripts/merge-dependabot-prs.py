@@ -472,18 +472,8 @@ def verdict(
     # what defuses a stray human commit on the branch, not the author field.
     labels = labels_of(pr)
     unlabelled = queue and ships_unlabelled(pr)
-    if not unlabelled and not any(label in labels for label in MERGE_LABELS):
-        return False, f"not labelled {AUTOMERGE_LABEL!r} (unclassified, or held for review)"
-    if pr.get("draft"):
-        return False, "still a draft"
-    # Anything but an explicit `true` declines. `false` is a conflict; `null` means GitHub
-    # has not finished computing the merge commit yet, which is a "come back later" rather
-    # than a refusal -- and the next hourly pass is exactly that. Testing `is False` here
-    # instead would merge on the undecided case, which is the one where nobody, including
-    # GitHub, yet knows whether the merge is clean.
-    if pr.get("mergeable") is not True:
-        state = pr.get("mergeable_state") or "undecided"
-        return False, f"not known-mergeable ({state})"
+    if why := unready(pr, labels, unlabelled):
+        return False, why
     if not (queue and (MERGE_NOW_LABEL in labels or unlabelled)):
         return gate_verdict(repo, pr, run, env_sha)
     number = int(pr.get("number") or 0)
@@ -496,6 +486,24 @@ def verdict(
     if MERGE_NOW_LABEL in labels:
         return True, f"labelled {MERGE_NOW_LABEL}: its checks run after it lands"
     return True, "a direct project's PR, unheld: its checks run after it lands"
+
+
+def unready(pr: dict, labels: set[str] | list[str], unlabelled: bool) -> str:
+    """Why `pr` may not merge by any route -- unlabelled, a draft, not known-mergeable --
+    or "" when it may go on to its gate or its label."""
+    if not unlabelled and not any(label in labels for label in MERGE_LABELS):
+        return f"not labelled {AUTOMERGE_LABEL!r} (unclassified, or held for review)"
+    if pr.get("draft"):
+        return "still a draft"
+    # Anything but an explicit `true` declines. `false` is a conflict; `null` means GitHub
+    # has not finished computing the merge commit yet, which is a "come back later" rather
+    # than a refusal -- and the next hourly pass is exactly that. Testing `is False` here
+    # instead would merge on the undecided case, which is the one where nobody, including
+    # GitHub, yet knows whether the merge is clean.
+    if pr.get("mergeable") is not True:
+        state = pr.get("mergeable_state") or "undecided"
+        return f"not known-mergeable ({state})"
+    return ""
 
 
 def gate_verdict(repo: str, pr: dict, run, env_sha: str) -> tuple[bool, str]:

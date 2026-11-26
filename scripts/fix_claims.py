@@ -19,8 +19,9 @@ and it ends on its own at the TTL.
 **A send that opens a session is a heavy job** (`machine_role.py`): below the disk floor
 it waits (`job_claims.disk_refusal`), and on a `workstation` it waits out
 `job_claims.WORKER_FIRST` from its first sight before it is claimed at all, so a worker
-running `devkit.fixPass: dispatch` sends it first. Both waits come before the claim, so
-neither pushes anything.
+running `devkit.fixPass: dispatch` sends it first -- but only while a worker's heartbeat
+is fresh (`job_claims.live_workers`): with none, the send goes now and its record line
+says why (`Turn.note`). Both waits come before the claim, so neither pushes anything.
 
 **A claim that could not be made fails open.** The send goes and its record line says so
 (`Turn.note`): every fixer on every project stopping for a push problem is far worse than
@@ -45,6 +46,7 @@ import sys
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -80,27 +82,26 @@ def repo_of(decision: fix_plan.Decision) -> str:
     return decision.failures[0].project
 
 
+@dataclass
 class Turn:
     """One `send_all`'s claims: the wait for this machine's turn, taken once, and what it
     took, so a send that failed can give its claim back."""
 
-    def __init__(
-        self,
-        root: Path,
-        writes: bool,
-        free_mb: int | None,
-        harness_busy: str = "",
-        left: Callable[[], float] | None = None,
-        role: str = "",
-        free_disk_mb: int | None = None,
-    ) -> None:
-        self.root, self.writes, self.free_mb, self.left = root, writes, free_mb, left
-        self.harness_busy = harness_busy
-        self.role, self.free_disk_mb = role, free_disk_mb
-        self.sightings = job_claims.Sightings(root / fix_cycle.DEVKIT, SIGHTINGS)
+    root: Path
+    writes: bool
+    free_mb: int | None
+    harness_busy: str = ""
+    left: Callable[[], float] | None = None
+    role: str = ""
+    free_disk_mb: int | None = None
+    sightings: job_claims.Sightings = field(init=False)
+    host: str = field(init=False)
+    started: bool = field(init=False, default=False)
+    unclaimed: dict[str, str] = field(init=False, default_factory=dict)
+
+    def __post_init__(self) -> None:
         self.host = host_name()
-        self.started = False
-        self.unclaimed: dict[str, str] = {}
+        self.sightings = job_claims.Sightings(self.root / fix_cycle.DEVKIT, SIGHTINGS, self.host)
 
     def _left(self) -> float:
         return self.left() if self.left else float("inf")
@@ -143,14 +144,24 @@ class Turn:
         or a rerun opens no session, is one call, and waits for neither."""
         if decision.action in fix_plan.NO_SESSION:
             return ""
-        return job_claims.disk_refusal(self.free_disk_mb) or self.sightings.hold(
-            self.role, claim_id
-        )
+        if why := job_claims.disk_refusal(self.free_disk_mb):
+            return why
+        # The heartbeat read is a fetch, held to the pass's deadline like every other call.
+        with self._within(job_claims.PUSH_SECONDS):
+            return self.sightings.hold(self.role, claim_id)
 
     def note(self, decision: fix_plan.Decision) -> str:
-        """What `decision`'s record line owes: that it went unclaimed, when it did."""
-        said = self.unclaimed.get(claim_of(decision)[0])
-        return "" if said is None else f" (claim failed open: {said[:120]})"
+        """What `decision`'s record line owes: that a workstation found no worker to
+        leave it to, and that it went unclaimed, when either is so."""
+        claim_id = claim_of(decision)[0]
+        alone = self.sightings.notes.get(claim_id)
+        said = self.unclaimed.get(claim_id)
+        return "".join(
+            (
+                "" if alone is None else f" ({alone})",
+                "" if said is None else f" (claim failed open: {said[:120]})",
+            )
+        )
 
     def failed(self, decision: fix_plan.Decision) -> None:
         """Hand back the claim of a send that did not open: nothing is on it."""

@@ -388,16 +388,37 @@ def test_a_pc_short_of_disk_claims_nothing_heavy(world):
     assert world.done(task)
 
 
-def test_a_workstation_leaves_a_command_to_a_worker_then_takes_it_when_none_did(world):
-    """A worker that is off never claims, so the window closing is the fallback: the
-    task is late on the workstation, never lost."""
+def test_a_worker_says_it_is_alive_on_devkit_and_a_workstation_does_not(world):
+    world.add_project("devkit")
+    world.run(role=lambda _root: "workstation")
+    assert not world.on_remote(jc.worker_ref("pc-a"), "devkit")
+    world.host = "pc-b"
+    world.run(role=lambda _root: "worker")
+    assert world.on_remote(jc.worker_ref("pc-b"), "devkit")
+
+
+def test_a_workstation_leaves_a_command_to_a_live_worker_until_its_beat_goes_quiet(world, capsys):
+    """A worker that went quiet -- off, asleep, offline -- stops costing the workstation
+    anything once its beat is older than `WORKER_ALIVE`, window or no window."""
+    world.add_project("devkit")
+    world.host = "pc-b"
+    world.run(role=lambda _root: "worker")
+    world.host = "pc-a"
     task = world.queue(TOUCH)
     world.run(role=lambda _root: "workstation")
     assert not world.claimed(task) and not world.done(task)
-    world.advance(jc.WORKER_FIRST.total_seconds() / DAY / 2)
+    assert "held for a worker (pc-b" in capsys.readouterr().out
+    world.advance(jc.WORKER_ALIVE.total_seconds() / DAY)
     world.run(role=lambda _root: "workstation")
-    assert not world.claimed(task), "the window is still open"
-    world.advance(jc.WORKER_FIRST.total_seconds() / DAY)
+    assert world.done(task), "the window is still open, and nobody is there to fill it"
+    assert "no worker to wait for" in capsys.readouterr().out
+
+
+def test_a_workstation_with_no_worker_beating_takes_a_command_at_once(world):
+    """The regression: the only worker offline for two weeks, and every heavy job on
+    the workstation held half an hour for it all the same."""
+    world.add_project("devkit")
+    task = world.queue(TOUCH)
     world.run(role=lambda _root: "workstation")
     assert world.done(task)
 
@@ -412,6 +433,9 @@ def test_only_a_heavy_task_that_another_machine_could_take_waits_for_a_worker(wo
     cycle = after_merge_pass.Cycle(
         world.seams(), after_merge_pass.fix_findings.Journal(world.devkit), role="workstation"
     )
+    unread = am.parse("carameli", f"{am.QUEUE_DIR}/n.toml", "c" * 12, 'run = "x"')
+    assert after_merge_pass._left_to_a_worker(unread, cycle) == "", "no devkit refs read"
+    cycle.devkit_refs = (jc.Ref(jc.worker_ref("pc-b"), "1", world.now()),)
     every = am.parse(
         "carameli", f"{am.QUEUE_DIR}/e.toml", "a" * 12, f'run = "x"\non = "{am.EVERY_MACHINE}"'
     )

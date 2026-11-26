@@ -114,6 +114,8 @@ TRAY_MODULES = (
     "host_memory",
     "job_claims",
     "machine_clock",
+    # `job_claims` reads this machine's role (worker or workstation) through it.
+    "machine_role",
     "devkit_jsonc",
     "sweep",
     "task_branch",

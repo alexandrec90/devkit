@@ -301,37 +301,57 @@ def dispatched(tree: Tree) -> bool:
     return bool(fix_reports.read_stamp(tree.path))
 
 
+@dataclass(frozen=True)
+class Seen:
+    """What this pass read of one tree. None for `dirty` or `idle` means the question
+    could not be answered, and an unanswered question keeps the tree -- except `idle` on
+    a `stillborn` tree, where no transcript is what never starting looks like."""
+
+    dirty: bool | None
+    idle: float | None
+    stillborn: bool = False
+
+
 def verdict(
     tree: Tree,
     checkout: Path,
-    dirty: bool | None,
+    seen: Seen,
     merged: dict[str, str],
-    idle: float | None,
-    stillborn: bool = False,
     abandoned: dict[str, str] | None = None,
 ) -> str:
-    """`""` when the tree may be reaped, else why it is kept. None for `dirty` or `idle`
-    means the question could not be answered, and an unanswered question keeps the tree --
-    except `idle` on a `stillborn` tree, where no transcript is what never starting looks
-    like, and which needs no merged PR because no commit of it is anywhere but on origin.
+    """`""` when the tree may be reaped, else why it is kept. A `stillborn` tree needs no
+    merged PR, because no commit of it is anywhere but on origin.
 
     `abandoned` is the closed-unmerged heads, handed in only for a `dispatched` tree: a
     fixer's PR closed at the tree's `HEAD` is work given up, and every commit of it is
     still on GitHub under the PR, so the tree holds nothing but its `.venv`."""
+    held = _held(tree, checkout, seen)
+    if held or seen.stillborn:
+        return held
+    return _unlanded(tree, merged, abandoned)
+
+
+def _held(tree: Tree, checkout: Path, seen: Seen) -> str:
+    """Why `tree` is kept whatever became of its PR; `""` when nothing holds it."""
     if wt.same_dir(tree.path, checkout) or wt.tier_of(tree.path) is None:
         return "not a session worktree"
     if tree.locked:
         return "locked -- a session is using it"
-    if not (stillborn and idle is None) and (idle is None or idle < QUIET_HOURS * 3600):
+    idle = seen.idle
+    if not (seen.stillborn and idle is None) and (idle is None or idle < QUIET_HOURS * 3600):
         return f"a session wrote in it within {QUIET_HOURS}h, or the store could not be read"
-    if dirty is None:
+    if seen.dirty is None:
         return "its status could not be read"
-    if dirty:
+    if seen.dirty:
         return "holds uncommitted or untracked files"
     if not tree.branch:
         return "detached HEAD"
-    if stillborn:
-        return ""
+    return ""
+
+
+def _unlanded(tree: Tree, merged: dict[str, str], abandoned: dict[str, str] | None) -> str:
+    """Why `tree`'s work is not known to be off it; `""` when its PR merged or was
+    given up at its `HEAD`."""
     if tree.branch not in merged:
         if abandoned and abandoned.get(tree.branch) == tree.head:
             return ""
@@ -544,34 +564,51 @@ def sweep_checkout(
     merged = merged_heads(prs.stdout)
     sent = {t.path for t in trees if t.branch and t.branch not in merged and dispatched(t)}
     closed = _closed(checkout, gh_for, say) if sent else {}
-    allowance = STILLBORN_PER_PASS
+    one = _Sweep(checkout, apply, say, run, merged)
     for tree in trees:
-        found = changes(tree.path, run)
-        work, noise = found if found is not None else ([], [])
-        dirty = None if found is None else bool(work)
-        unborn = allowance > 0 and stillborn(tree, run)
-        given_up = closed if tree.path in sent else None
-        why = verdict(
-            tree, checkout, dirty, merged, idle(tree.path), stillborn=unborn, abandoned=given_up
-        )
-        label = f"session tree {checkout.name}:{wt.label(tree.path)}"
-        if why:
-            continue  # kept trees are the ordinary case; the artifact names only reaps
-        if unborn:
-            reason = STILLBORN_SAID
-        else:
-            reason = MERGED_SAID if tree.branch in merged else ABANDONED_SAID
-        if stacks := running_stacks(tree, checkout, run):
-            say(f"{label}: {reason}, but {', '.join(stacks)} runs from it -- kept")
-            continue
-        allowance -= unborn
-        if not apply:
-            say(f"{label}: {reason} at this HEAD -- would reap")
-            continue
-        line, failed = reap_outcome(tree.path, reap(tree, checkout, run, noise), reason)
-        failures += failed
-        say(f"{label}: {line}")
+        failures += one.tree(tree, idle(tree.path), closed if tree.path in sent else None)
     return failures
+
+
+@dataclass
+class _Sweep:
+    """One checkout's pass over its session trees, a tree at a time. `allowance` is the
+    stillborn trees still to be reaped this pass (`STILLBORN_PER_PASS`)."""
+
+    checkout: Path
+    apply: bool
+    say: Callable[[str], None]
+    run: Run
+    merged: dict[str, str]
+    allowance: int = STILLBORN_PER_PASS
+
+    def tree(self, tree: Tree, idle: float | None, given_up: dict[str, str] | None) -> int:
+        """Assess (and with `apply`, reap) `tree`. 1 for a failed reap, else 0."""
+        found = changes(tree.path, self.run)
+        work, noise = found if found is not None else ([], [])
+        unborn = self.allowance > 0 and stillborn(tree, self.run)
+        seen = Seen(None if found is None else bool(work), idle, unborn)
+        if verdict(tree, self.checkout, seen, self.merged, given_up):
+            return 0  # kept trees are the ordinary case; the artifact names only reaps
+        label = f"session tree {self.checkout.name}:{wt.label(tree.path)}"
+        reason = self.reason(tree, unborn)
+        if stacks := running_stacks(tree, self.checkout, self.run):
+            self.say(f"{label}: {reason}, but {', '.join(stacks)} runs from it -- kept")
+            return 0
+        self.allowance -= unborn
+        if not self.apply:
+            self.say(f"{label}: {reason} at this HEAD -- would reap")
+            return 0
+        error = reap(tree, self.checkout, self.run, noise)
+        line, failed = reap_outcome(tree.path, error, reason)
+        self.say(f"{label}: {line}")
+        return int(failed)
+
+    def reason(self, tree: Tree, unborn: bool) -> str:
+        """What the artifact says let `tree` go."""
+        if unborn:
+            return STILLBORN_SAID
+        return MERGED_SAID if tree.branch in self.merged else ABANDONED_SAID
 
 
 def _closed(checkout: Path, gh_for: Callable[[Path], Run], say: Callable[[str], None]) -> dict:

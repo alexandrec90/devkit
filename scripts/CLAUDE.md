@@ -332,12 +332,19 @@ it solves.** What stays per machine, and is not papered over:
 Free memory alone handed heavy work to the desk a person works at whenever it had a
 moment free. A `workstation` waits `job_claims.WORKER_FIRST` from its first sight of a job
 (`job_claims.Sightings`, under `logs/claims/`) before claiming; a `worker` claims at once;
-unset is the memory order. Keep three things when touching it:
+unset is the memory order. Keep four things when touching it:
 
-- **The window is the only fallback, so it must close.** Nothing asks whether the worker
-  is alive. A worker that never claims is the workstation's job at the window's end, and
-  the window stays shorter than every heavy kind's TTL, or a claim a worker won and
-  finished would expire first and be broken rather than lost to.
+- **A workstation waits only for a worker that says it is alive.** Each worker's
+  after-merge pass refreshes `refs/devkit/worker/<host>` on devkit's origin
+  (`job_claims.worker_beat`), and a workstation defers only while another host's beat is
+  younger than `job_claims.WORKER_ALIVE`. No beat readable fails toward running here, said
+  in the log: with the only worker offline for two weeks, every heavy job on the
+  workstation -- the devkit session at a red main among them -- had waited half an hour
+  for nobody.
+- **The window is the fallback for a live worker that never claims, so it must close.**
+  It is the workstation's job at the window's end, and the window stays shorter than
+  every heavy kind's TTL, or a claim a worker won and finished would expire first and be
+  broken rather than lost to.
 - **Heavy is said by the caller, and is short.** The medium tier, the local e2e with no
   `hosts`, a fix-pass send that opens a session, a queue `run` or `agent`. A cheap job --
   the trigger, ship, an elevated request, an update or rerun send -- asks neither the

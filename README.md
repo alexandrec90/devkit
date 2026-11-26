@@ -1019,9 +1019,12 @@ python scripts/machine_role.py --set workstation     # the PC you work at
 python scripts/machine_role.py --set unset           # order by free memory alone, as before
 ```
 
-A `worker` claims a heavy job the moment it sees one. A `workstation` leaves it alone for
-`job_claims.WORKER_FIRST` from when it first saw it, then takes it only if nobody has, so a
-worker that is off is a job half an hour late, never lost. Heavy is the medium tier, the
+A `worker` claims a heavy job the moment it sees one, and its after-merge pass refreshes a
+heartbeat ref on devkit's origin, `refs/devkit/worker/<host>`. A `workstation` leaves a
+heavy job alone for `job_claims.WORKER_FIRST` from when it first saw it, then takes it only
+if nobody has -- and waits at all only while some worker's heartbeat is younger than
+`job_claims.WORKER_ALIVE`. A worker that is off stops costing anything once its beat ages
+out; with no beat readable the workstation runs the job now and its log says why. Heavy is the medium tier, the
 local e2e (when `devkit.localE2e` names no `hosts`), a fixer session and a queue `run` or
 `agent` task; the fix trigger, ship, an elevated request and the reconcile ignore the role.
 Every heavy job also waits on a PC with less than `job_claims.DISK_FLOOR_MB` free on the
