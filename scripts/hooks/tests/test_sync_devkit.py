@@ -182,6 +182,14 @@ def test_a_gate_runs_on_a_pr_only_when_the_pr_waits_for_one():
     assert notes == ["job `e2e` keeps its own `if:`, so it still runs on every PR"]
 
 
+def test_the_condition_is_a_valid_unquoted_yaml_value():
+    """#849 wrote `'hold: yes'` into it: YAML ends an unquoted value at `: `, so GitHub
+    rejected every gate carrying it, and the default branch's run had no jobs."""
+    for breaker in sh.PLAIN_SCALAR_BREAKERS:
+        assert breaker not in sh.PR_GATE_RUNS_IF, breaker
+    assert not sh.PR_GATE_RUNS_IF.endswith(":")
+
+
 def test_the_rewrite_is_idempotent():
     once, _ = sh.gate_pr_runs(PR_GATE)
     twice, _ = sh.gate_pr_runs(once)

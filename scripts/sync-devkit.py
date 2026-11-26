@@ -90,6 +90,9 @@ DEVKIT_SLUG = "alexandrec90/devkit"
 # one labelled `automerge` or `hold`, and one whose body says `Hold: yes`. `contains` is
 # case-blind, and a substring: a sentence quoting the line gates a PR, the safe side.
 # `gate_pr_runs` writes it onto a consumer's gate, which is a template and never refreshed.
+# Written as an unquoted YAML value, so it may hold no `: ` (YAML ends the value there and
+# GitHub rejects the whole file, with a run that has no jobs). That is why the hold line is
+# spelled with `format`. `PLAIN_SCALAR_BREAKERS` lists the sequences it must avoid.
 PR_GATE_RUNS_IF = (
     "${{ github.event_name != 'pull_request'"
     " || github.event.pull_request.user.type == 'Bot'"
@@ -97,8 +100,9 @@ PR_GATE_RUNS_IF = (
     " || startsWith(github.head_ref, 'release/')"
     " || contains(github.event.pull_request.labels.*.name, 'automerge')"
     " || contains(github.event.pull_request.labels.*.name, 'hold')"
-    " || contains(github.event.pull_request.body, 'hold: yes') }}"
+    " || contains(github.event.pull_request.body, format('hold:{0}yes', ' ')) }}"
 )
+PLAIN_SCALAR_BREAKERS = (": ", " #")
 # `labeled`, because `automerge` arrives after opening: `land.py` applies it to a money PR,
 # and to every PR in the gated flow.
 PR_GATE_EVENT_TYPES = "types: [opened, synchronize, reopened, labeled]"
