@@ -615,6 +615,89 @@ def test_run_pytest_is_empty_on_a_pass_and_the_artifact_text_on_a_failure(artifa
     assert "FAILED tests/test_b.py::test_b_thing" in text
 
 
+# --- durations (6dfc93ab) -----------------------------------------------------
+# A session told to balance CI shards by time found only "passed" in the gate's log,
+# and ran the whole suite with `--junit-xml` to time it. Every run now prints its
+# slowest files, so the gate's log of the suite is the measurement.
+
+TIMED_OUTPUT = """\
+..F
+=================================== FAILURES ===================================
+_____ test_b_thing _____
+E   assert 1 == 2
+============================= slowest durations ==============================
+2.50s call     tests/test_slow.py::test_one
+1.00s setup    tests/test_slow.py::test_two
+1.75s call     tests/test_b.py::test_b_thing
+0.25s teardown tests/test_slow.py::test_two
+
+(12 durations < 0.005s hidden.  Use -vv to show these durations.)
+=========================== short test summary info ============================
+FAILED tests/test_b.py::test_b_thing - assert 1 == 2
+1 failed, 2 passed in 5.50s
+"""
+
+
+@pytest.fixture(params=["devkit", "template"])
+def either_runner(request, monkeypatch) -> types.ModuleType:
+    """devkit's runner and the template's: the durations half is the same code in both."""
+    return run_tests if request.param == "devkit" else template_runner(monkeypatch)
+
+
+def test_file_durations_sum_every_phase_per_file_slowest_first(either_runner):
+    assert either_runner.file_durations(TIMED_OUTPUT) == [
+        ("tests/test_slow.py", 3.75),
+        ("tests/test_b.py", 1.75),
+    ]
+    assert either_runner.file_durations("3 passed\n") == []
+
+
+def test_the_durations_report_names_the_slowest_files_up_to_its_limit(either_runner):
+    report = either_runner.durations_report(TIMED_OUTPUT, limit=1)
+    assert report[0] == "run-tests: slowest test files, seconds per file (2 timed):"
+    assert report[1:] == ["run-tests:       3.75  tests/test_slow.py"]
+    assert either_runner.durations_report("3 passed\n") == []
+
+
+def test_the_durations_section_stays_out_of_the_artifact(either_runner):
+    """It prints between the failures and the summary, where the artifact keeps
+    everything: a suite's thousand timing lines would bury the failure they follow."""
+    kept = either_runner.filter_output(TIMED_OUTPUT)
+    assert "slowest durations" not in kept and "test_slow.py" not in kept
+    assert "E   assert 1 == 2" in kept
+    assert "FAILED tests/test_b.py::test_b_thing - assert 1 == 2" in kept
+    banner = "========================== slowest 10 durations ==========================="
+    assert either_runner.DURATIONS_BANNER.search(banner)
+
+
+def test_every_run_asks_pytest_for_its_durations_and_prints_them_on_a_pass(
+    artifact, monkeypatch, capsys
+):
+    seen = stub_pytest(monkeypatch, 0, TIMED_OUTPUT)
+    assert run_tests.main(["--only", "tests/test_slow.py"]) == 0
+    assert run_tests.DURATIONS_FLAG in seen[0]
+    out = capsys.readouterr().out
+    assert "run-tests:       3.75  tests/test_slow.py" in out
+    assert "test_slow.py" not in artifact.read_text(encoding="utf-8")
+
+
+def test_the_templates_runner_asks_for_and_prints_durations_too(tmp_path, monkeypatch, capsys):
+    runner = template_runner(monkeypatch)
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        seen.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, TIMED_OUTPUT, "")
+
+    monkeypatch.setattr(runner, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(runner, "ARTIFACT", tmp_path / "logs" / "test-failures.log")
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "rerun_in_tree_venv", lambda module, argv: None)
+    assert runner.main(["--only", "tests/test_slow.py"]) == 0
+    assert runner.DURATIONS_FLAG in seen[0]
+    assert "run-tests:       3.75  tests/test_slow.py" in capsys.readouterr().out
+
+
 # What a parallel run printed when it died before its summary (79bdb858), and the
 # serial rerun's report of the same tests.
 DIED_OUTPUT = "bringing up nodes...\n\n.[gw0] node down: Not properly terminated\nF"
