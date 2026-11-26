@@ -149,7 +149,6 @@ repos:
       - id: devkit-manifest
       - id: devkit-hooks-stdlib-only
       - id: devkit-drift
-      - id: devkit-push-gate
 ```
 
 `scripts/new-project.py` renders this into every new project already, pinned to the same
@@ -160,11 +159,13 @@ devkit ref as the PR gate.
 | `devkit-manifest` | A `.devkit.toml` the harness would silently ignore: unparseable TOML, a path prefix missing its trailing slash, a declared directory that does not exist in the repo, a `[db]`/`[frontend]` block switched on and left half-filled. |
 | `devkit-hooks-stdlib-only` | A third-party import in `scripts/hooks/`. Those scripts run *before* the virtualenv exists, so this cannot be caught by a test suite — which runs inside it. |
 | `devkit-drift` | A vendored file that differs from the pinned devkit rev. |
-| `devkit-push-gate` | Whatever the PR gate would have caught, before the push: `scripts/lint-all.py`, `scripts/run-tests.py`, then the hook tests, lint first because it auto-fixes, stopping at the first failure. A step whose file the project does not ship is skipped out loud. Runs at the **pre-push** stage, so a commit stays seconds and a failure is read from `logs/` instead of a workflow artifact. `SKIP=devkit-push-gate git push` bypasses it on purpose. |
+| `devkit-push-gate` | Published, wired nowhere: the PR gate's lint and tests at the **pre-push** stage. A project generated before 2026-11-26 still names it, and pre-commit refuses a config naming an id its rev lacks; nothing on this machine runs the pre-push stage, so it is inert there. |
 
-The commit stage is only fixers and sub-second checks. Everything a PR gate fails on and
-a commit hook did not run — mypy, the suites — is the push stage, which `pre-commit
-install` wires alongside the commit one (`default_install_hook_types`).
+**Nothing runs these at a commit or a push** (the owner's decision, 2026-11-26). The
+global git dispatcher keeps only the branch policy below, and every check runs after the
+change, in parallel with the work: the PR gate's `pre-commit` job runs every hook with
+`--all-files` on the default branch, and the tidy job (`scripts/tidy-main.py`, the
+`Tidy: formatters, baselines and mirrors` commits) applies the fixers to what merged.
 
 **Why `devkit-drift` exists next to `sync-devkit.py --check`.** The sync tool needs a
 **local devkit clone** for `$DEVKIT_DIR` to point at. Where there is none it can only
@@ -272,16 +273,15 @@ The global `pre-commit` hook:
   remote default branch;
 - asks GitHub whether the current branch name has ever had a merged PR, permanently
   retiring that name when it has;
-- runs the repository's `.pre-commit-config.yaml`, then an optional
-  `.githooks/pre-commit`.
+- runs an optional `.githooks/pre-commit`, and never the repository's
+  `.pre-commit-config.yaml`: no commit is gated on lint or tests.
 
 The global `pre-push` hook inspects the destination refs rather than just the current
 branch, so `git push origin HEAD:main` is blocked too. It rejects protected
 destinations and any branch name with an already-merged PR, while still allowing
 remote branch deletion. Non-GitHub remotes skip only the PR lookup; protected branch
-destinations remain blocked. When the push publishes a branch, it then runs the
-repository's `.pre-commit-config.yaml` at the `pre-push` stage — the push gate above —
-and an optional `.githooks/pre-push`; a deletion or a tag-only push skips the stage.
+destinations remain blocked. It then runs an optional `.githooks/pre-push`, and no
+pre-commit stage: no push is gated on lint or tests.
 
 It also refuses a push that creates or moves a **release tag** — a `vX.Y.Z` ref, the one
 thing consumers pin — because only a release workflow runs the suite against the commit
@@ -341,7 +341,7 @@ DEVKIT_SKIP_BRANCH_POLICY=1 git commit -m "seed"
 ```
 
 Unlike `--no-verify`, this skips only Devkit's branch policy — the repository's own
-`.pre-commit-config.yaml` and `.githooks/` still run. Values that read as "off"
+`.githooks/` still run. Values that read as "off"
 (`0`, `false`, `no`, `off`) leave the policy enforcing, so setting the variable to `0`
 does not disable it. Every run under the opt-out prints a warning and records it in
 `.git/devkit-branch-policy.json`, so a variable exported into a shell profile is
@@ -753,9 +753,18 @@ What stays open: a draft, a `hold` label, a `Hold: yes` line in the body, a bot'
 fork's, a `release/` branch, and anything labelled `automerge`, which asked for its gate.
 A PR touching a `[delivery] guarded` path waits for its gate whatever its label, and
 merges once that is green.
-The global git hook skips the pre-commit framework and the push gate on its own in such a
-repository (`git_policy.framework.flows_directly`), so `/ship`'s plain commit and push
-are not gated either.
+The global git hook runs no pre-commit framework at a commit or a push in any repository,
+so `/ship`'s plain commit and push are not gated either.
+
+**A PR that merges with no gate runs no CI either.** Every job of the PR gate carries
+`sync-devkit.PR_GATE_RUNS_IF`, which runs it on a PR only when the PR waits for a gate: a
+bot's, a fork's, a `release/` branch, one labelled `automerge` or `hold`, or one whose
+body says `Hold: yes`. The rest merge as they open, and the run on the default branch
+after the merge is their check, whose red the fix pass sends a fixer at. The trigger hears
+`labeled`, because `land.py` labels a money PR `automerge` after opening it; a money PR
+opened with no label gets the label and a dispatched gate from the queue
+(`merge-dependabot-prs.request_gate`). A project's gate is a template, so `--pull` writes
+the condition onto each of its jobs that has no `if:` of its own (`sync-devkit.gate_pr_runs`).
 
 `scripts/ship-pass.py` (`devkit-ship`, every two minutes, on every PC) ships the intents
 of sessions nobody typed `/ship` for: it commits with no `ship.py --fix` and no pre-commit
@@ -771,10 +780,10 @@ PC the ship task ships gated intents too, through the gated path, so a machine t
 not allowed to send fixers still gets its sessions' work out. `plan` is a dry run and
 ships nothing gated. To stop shipping, use `harness-switch.py --off --group jobs`.
 
-The commit keeps the global branch policy, which `--no-verify` would not: the hook
-reads `DEVKIT_SKIP_PRE_COMMIT_FRAMEWORK` and skips the framework alone, at the commit and
-the push. It is read by the installed policy (`~/.devkit/git-hooks`), so it takes effect
-from the first release that carries it, and a project should not opt in before then.
+The commit keeps the global branch policy, which `--no-verify` would not. The task still
+sets `DEVKIT_SKIP_PRE_COMMIT_FRAMEWORK`, which no current dispatcher reads, for a machine
+whose installed policy (`~/.devkit/git-hooks`) predates the release that stopped running
+the framework.
 
 The fix pass changes in three ways for such a project (`scripts/fix_plan.py`). A red
 default branch does not hold a conflict's resolver, since nothing waits on it being

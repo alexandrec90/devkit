@@ -33,7 +33,6 @@ from support import (  # also what puts `scripts/` on the path for the imports b
 import after_merge
 import delivery
 import devkit_manifest
-import git_policy
 import ship_intent
 import sweep
 
@@ -143,24 +142,6 @@ def test_a_generated_project_is_in_the_direct_flow(tmp_path, features):
 
 def test_devkit_itself_is_in_the_direct_flow():
     assert delivery.is_direct(ROOT)
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        '[delivery]\nflow = "direct"\n',
-        '[delivery]\nflow = "gated"\n',
-        "[delivery]\n",
-        'flow = "direct"\n',
-        "[delivery\n",
-        "",
-    ],
-)
-def test_the_hook_and_the_pass_read_the_flow_alike(tmp_path, text):
-    """The hook decides whether a commit is gated, the pass whether it ships `merge-now`.
-    Read apart, one could call a project direct while the other gates it."""
-    (tmp_path / ".devkit.toml").write_text(text, encoding="utf-8")
-    assert git_policy.framework.flows_directly(tmp_path) == delivery.is_direct(tmp_path)
 
 
 def test_a_held_intent_writes_the_line_the_merger_reads():

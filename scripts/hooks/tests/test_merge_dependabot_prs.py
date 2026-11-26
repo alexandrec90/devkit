@@ -411,6 +411,8 @@ ROUTE_SCOPES = {
     "actions/runs/*/cancel": {("actions", "write")},
     # Deleting a merged PR's head, so a checkout on it reads as spent.
     "git/refs/heads/*": {("contents", "write")},
+    # Labelling a money PR `automerge` when it asks for its gate (`request_gate`).
+    "issues/*/labels": {("issues", "write")},
 }
 
 # GitHub's own ordering. `write` implies `read`; an unlisted scope is `none`.
@@ -754,6 +756,52 @@ def test_a_pr_touching_money_still_merges_itself_once_green(tmp_path, opened):
     run = FakeRun(files_world(paths, prs=[opened()], gate="success"))
     assert guarded_queue(run, tmp_path) == 0
     assert merged_numbers(run) == [15]
+
+
+def label_calls(run: FakeRun) -> list[list[str]]:
+    return [call for call in run.calls if any("/labels" in arg for arg in call)]
+
+
+def dispatches(run: FakeRun) -> list[list[str]]:
+    return [call for call in run.calls if any("/dispatches" in arg for arg in call)]
+
+
+@pytest.mark.parametrize("opened", [shipped, merge_now], ids=["unlabelled", "merge-now"])
+def test_a_money_pr_with_no_gate_run_asks_for_one(tmp_path, opened):
+    """The PR gate skips a PR it cannot see waits (`sync-devkit.PR_GATE_RUNS_IF` cannot
+    read `[delivery] guarded`), so a money PR opened unlabelled would wait for a gate
+    nothing starts. The queue labels it and starts the gate on its branch."""
+    head = {"sha": SHA, "ref": "agent/orders-1126", "repo": HERE}
+    run = FakeRun(files_world(["src/app/execution/broker.py"], prs=[opened(head=head)]))
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == []
+    assert [call[-1] for call in label_calls(run)] == ["labels[]=automerge"]
+    assert f"repos/{REPO}/issues/15/labels" in label_calls(run)[0]
+    assert [call[-1] for call in dispatches(run)] == ["ref=agent/orders-1126"]
+
+
+def test_a_money_pr_already_labelled_automerge_is_not_asked_for_twice(tmp_path):
+    """The label is what the request is made once by: the next drain leaves it be."""
+    labels = [{"name": "automerge"}]
+    head = {"sha": SHA, "ref": "agent/orders-1126", "repo": HERE}
+    opened = shipped(labels=labels, head=head)
+    run = FakeRun(files_world(["src/app/execution/broker.py"], prs=[opened]))
+    assert guarded_queue(run, tmp_path) == 0
+    assert merged_numbers(run) == []
+    assert label_calls(run) == [] and dispatches(run) == []
+
+
+def test_a_refused_label_is_said_and_starts_no_gate():
+    run = FakeRun(fail={"/labels": (1, "HTTP 403")})
+    said = merger.request_gate(REPO, shipped(), run)
+    assert said.startswith("could not label it automerge") and "HTTP 403" in said
+    assert dispatches(run) == []
+
+
+def test_a_pr_with_no_head_branch_is_labelled_and_said_so():
+    run = FakeRun()
+    said = merger.request_gate(REPO, shipped(head={"sha": SHA}), run)
+    assert "no head branch" in said and dispatches(run) == []
 
 
 def test_a_pr_beside_the_money_merges_with_no_gate(tmp_path):

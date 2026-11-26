@@ -7,20 +7,15 @@
 # consumer has the opposite need (a pinned, known-good version), which is what
 # `.pre-commit-hooks.yaml` documents.
 #
-# Two stages, and the split is by cost. The commit stage is the fixers and the sub-second
-# checks, so a commit is never held up by a judgement. The pre-push stage is the PR gate
-# itself — `lint-all.py`, `run-tests.py`, the hook tests — run at the moment CI would run
-# it, so a failure is read from `logs/` a minute after the push attempt instead of from a
-# workflow artifact ten minutes after it. That gap was the routine way a green commit
-# became a red PR: nothing between a commit and the runner ever ran mypy or a test.
+# Nothing runs this at a commit or a push. The global git dispatcher
+# (`scripts/git_policy/`) keeps only the branch policy, so every check runs after the
+# change, in parallel with the work: CI's `pre-commit` job runs these hooks over the whole
+# repo on the default branch, and the tidy job (`scripts/tidy-main.py`, the "Tidy:
+# formatters, baselines and mirrors" commits) applies the fixers to what merged. There is
+# no pre-push stage: `devkit-push-gate` is published for the consumer configs generated
+# while it was wired, and is wired nowhere here.
 #
-# Install once per clone: `pre-commit install`. `default_install_hook_types` makes that
-# one command wire both stages. The global dispatcher (`scripts/git_policy/`) runs
-# both stages itself on a machine where it is installed.
-default_install_hook_types: [pre-commit, pre-push]
-# Without this, a hook that names no stage runs at every installed one — so the fixers
-# would rewrite the whole tree under `--all-files` on every push. Only `devkit-push-gate`
-# opts into the push stage.
+# Every hook is the commit stage's, which is the one `pre-commit run --all-files` runs.
 default_stages: [pre-commit]
 
 repos:
@@ -42,20 +37,6 @@ repos:
       # `devkit-drift` is deliberately absent: in devkit the comparison is against
       # itself. The hook detects that and skips, so running it here would only ever print
       # a line saying it did nothing.
-
-      - id: devkit-push-gate
-        name: the PR gate, before the push
-        # Three of the commands `.github/workflows/pr-gate.yml`'s test job runs, lint
-        # first because it auto-fixes, stopping at the first failure. Not all of them:
-        # `tests/test_gate_parity.py` holds every remaining difference to a written
-        # reason, so what this hook skips is a decision rather than an oversight.
-        # `SKIP=devkit-push-gate git push` is the bypass for a deliberate WIP push.
-        entry: scripts/precommit/run_push_gate.py
-        language: script
-        stages: [pre-push]
-        pass_filenames: false
-        always_run: true
-        verbose: true
 
       - id: ruff-check
         name: ruff (fix)

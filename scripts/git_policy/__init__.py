@@ -9,10 +9,11 @@ remotely:
 * pushes to those protected branches, or to a branch name whose GitHub PR merged;
 * pushes that create or move a release tag, which only a release workflow may do.
 
-After the policy passes, the dispatcher runs the repository's pre-commit framework
-configuration -- the commit stage for ``pre-commit``, the pre-push stage for a
-``pre-push`` that publishes a branch -- and an optional ``.githooks/<hook>``. Everything
-is stdlib-only because the hook runs before a project environment is guaranteed.
+After the policy passes, the dispatcher runs an optional ``.githooks/<hook>`` and nothing
+else. It ran the repository's pre-commit framework at both stages until 2026-11-26, when
+the owner decided nothing gates a commit or a push: every check runs after the change, in
+CI on the default branch, and the tidy job formats what merged. Everything is
+stdlib-only because the hook runs before a project environment is guaranteed.
 
 **Why this is a package.** It was one 837-line module, and the structure ratchet's
 `file_lines` ceiling for it had been raised on five consecutive branches -- which
@@ -22,7 +23,6 @@ that had never been cut apart, and every raise fed one of them without moving th
 
 * `branch` -- may this ref take a commit, may it take a push. Pure decisions over a
   `Runner`, which is what makes the whole tier testable without a repository.
-* `framework` -- where is this project's `pre-commit`, and what environment does it need.
 * `dispatch` -- what git actually calls. The only tier that prints or exits.
 * `_core` -- the constants, the small frozen types, and the single spawn point. Imports
   none of the others.
@@ -47,9 +47,9 @@ from __future__ import annotations
 
 # The submodules are bound as attributes by these imports, and that is load-bearing for
 # the tests: a name must be patched where it is *looked up*, so a test that replaces
-# `_pre_commit_command` patches `git_policy.framework`, not this module. Re-exporting a
-# function does not make this module the place it is resolved from.
-from . import _core, branch, dispatch, framework
+# `merged_pr` patches `git_policy.branch`, not this module. Re-exporting a function does
+# not make this module the place it is resolved from.
+from . import _core, branch, dispatch
 from ._core import (
     ALWAYS_PROTECTED,
     DEFAULT_PROJECT_HOOKS,
@@ -87,7 +87,6 @@ from .branch import (
     release_tag_decision,
 )
 from .dispatch import main, run_hook
-from .framework import framework_env, framework_skipped
 
 __all__ = [
     "ALWAYS_PROTECTED",
@@ -116,9 +115,6 @@ __all__ = [
     "emit",
     "evaluate_pre_commit",
     "evaluate_pre_push",
-    "framework",
-    "framework_env",
-    "framework_skipped",
     "github_repo",
     "inheritable_streams",
     "main",

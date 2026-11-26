@@ -2199,10 +2199,20 @@ def test_generated_lint_runner_covers_the_env_file_and_pre_commit_covers_the_wor
     config = yaml.safe_load((root / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     hooks = {h["id"] for repo in config["repos"] for h in repo["hooks"]}
     assert "actionlint" in hooks
-    assert "devkit-push-gate" in hooks, "the pre-push stage is missing from the project"
-    assert config["default_install_hook_types"] == ["pre-commit", "pre-push"], (
-        "`pre-commit install` must wire both stages, or the push gate never runs"
-    )
+    # Nothing gates a push: every check runs after the change, in CI.
+    assert "devkit-push-gate" not in hooks, "a generated project wires no pre-push stage"
+    assert "default_install_hook_types" not in config
+
+
+def test_a_generated_gate_runs_on_a_pr_only_when_the_pr_waits_for_one(tmp_path):
+    """Rendered, every job of the gate already carries `sync-devkit.PR_GATE_RUNS_IF` and
+    the trigger hears `labeled`, so the rewrite `--pull` applies finds nothing to do."""
+    sync = load_script("scripts/sync-devkit.py")
+    root = generate(tmp_path, {"desktop": True})
+    gate = (root / ".github" / "workflows" / "pr-gate.yml").read_text(encoding="utf-8")
+    assert sync.gate_pr_runs(gate) == (gate, [])
+    # pre-commit, lint, test, desktop and devkit-drift
+    assert gate.count(f"if: {sync.PR_GATE_RUNS_IF}") == 5
 
 
 def test_lint_all_does_not_rewrite_the_vendored_harness(tmp_path):

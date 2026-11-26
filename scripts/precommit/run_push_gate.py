@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Run the PR gate locally, before a push: lint, the test suite, then the hook tests.
 
-Published as the `devkit-push-gate` hook and wired at pre-commit's **pre-push** stage.
-The commit stage stays the sub-second fixers; this is the rest of what CI runs, at the
-moment CI would run it, so a failure is read from `logs/` a minute after `git push`
-instead of from a workflow artifact ten minutes after it. It exists because the gap
-between the two was the routine way a green commit became a red PR: nothing between a
-commit and the runner ever ran mypy or a test.
+Published as the `devkit-push-gate` hook, at pre-commit's **pre-push** stage, and **wired
+nowhere** since 2026-11-26: the owner decided nothing gates a commit or a push, and the
+global git dispatcher runs no pre-commit stage. It stays published because projects
+generated while it was wired name it, and pre-commit refuses a config naming an id its
+rev lacks. `ship_step` still borrows `interpreter` from it.
 
 Three of the commands CI runs, stopping at the first failure so each wrapper's artifact is
 the one still on disk when the push is refused, plus one CI has no use for:
@@ -30,13 +29,8 @@ a broken harness still reports when the application suite is red.
 The rehearsal is last because it is the only step that can pass and fail for the same
 reason twice: running it before the suite would report a platform assumption in a test
 that is simply broken, and "fix the real failure first" is the cheaper order. It is also
-the one step with no CI counterpart, which `tests/test_gate_parity.py` requires a written
-reason for -- see `LOCAL_ONLY` there. Running it in CI would rehearse POSIX on a POSIX
-runner, which is the suite a second time and nothing else.
-
-What the gate does *not* reproduce is not a judgement call left to the reader:
-`tests/test_gate_parity.py` reads `.github/workflows/pr-gate.yml` and fails on any `run:`
-step that neither matches a step here nor carries a written reason for the difference.
+the one step with no CI counterpart: in CI it would rehearse POSIX on a POSIX runner,
+which is the suite a second time and nothing else.
 
 Each step is skipped, out loud, when the project does not have the file it needs: the
 wrappers are project-owned (`.claude/rules/engineering.md`, "a missing one is a silent

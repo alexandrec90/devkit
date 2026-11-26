@@ -30,10 +30,10 @@ ago, so a winner asks the server for the done ref before it acts (`on_server`), 
 machine lets go of a claim only once the server holds that ref. What `mark_done` reports
 is likewise what the server says, not what the push said.
 
-**The push skips the pre-push hooks, and only here.** The global dispatcher already lets a
-ref outside `refs/heads/` through (`git_policy.framework._push_publishes_nothing`), but a
-machine with `pre-commit install` and no dispatcher reads a root commit as "publish
-everything" and runs the whole gate, for minutes, over an empty tree. `_push` refuses any
+**The push skips the pre-push hooks, and only here.** The global dispatcher runs no
+framework at the push, but a machine with `pre-commit install` and no dispatcher reads a
+root commit as "publish everything" and runs whatever its push stage holds over an empty
+tree. `_push` refuses any
 ref outside `refs/devkit/`, so `--no-verify` cannot reach a branch or a tag through it.
 
 **Free memory orders the PCs.** Every PC fires at the same scheduled minute, so a machine

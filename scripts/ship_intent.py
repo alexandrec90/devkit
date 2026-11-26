@@ -745,7 +745,8 @@ def run_git(
 
 def _without_framework() -> dict[str, str]:
     """The environment of a direct-flow commit or push: the git hook still runs, with its
-    branch policy, and skips the project's pre-commit framework alone."""
+    branch policy. The current hook runs no framework anyway; the variable is for one
+    installed from a tag that still ran it."""
     return {**os.environ, git_policy.FRAMEWORK_SKIP_ENV_VAR: "1"}
 
 

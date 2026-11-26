@@ -1,19 +1,13 @@
-# Local git gate, in two stages. Install once per clone with `pre-commit install` — the
-# `default_install_hook_types` line makes that one command wire both stages.
-#
-# The commit stage is the fast, deterministic subset of the PR gate: fixers and
-# sub-second checks, so a commit is never held up by a judgement. The pre-push stage is
-# the PR gate itself — `scripts/lint-all.py`, `scripts/run-tests.py` and the hook tests,
-# via devkit's `devkit-push-gate` hook — run at the moment CI would run it, so a failure
-# is read from `logs/` a minute after the push attempt instead of from a workflow
-# artifact ten minutes after it. `SKIP=devkit-push-gate git push` skips it on purpose.
+# The hooks the PR gate's `pre-commit` job runs over the whole repo. Nothing runs them at a
+# commit or a push: devkit's global git dispatcher keeps only the branch policy, every
+# check runs after the change, and the tidy job (`scripts/tidy-main.py`) applies the fixers
+# to what merged. There is no pre-push stage.
 #
 # Every `rev` is pinned and moved deliberately by `pre-commit autoupdate`. That includes
 # devkit's own hooks: a floating branch there would let one upstream commit change the
 # gate in every repo at once, which is the same reason the PR gate pins a tag.
-default_install_hook_types: [pre-commit, pre-push]
-# Without this, a hook that names no stage runs at every installed one — so the fixers
-# would rewrite the whole tree on every push. Only `devkit-push-gate` is a push hook.
+#
+# Every hook is the commit stage's, which is the one `pre-commit run --all-files` runs.
 default_stages: [pre-commit]
 
 repos:
@@ -36,8 +30,6 @@ repos:
       - id: devkit-hooks-stdlib-only
       # Byte-compares scripts/hooks/ and friends against the devkit rev pinned above.
       - id: devkit-drift
-      # The pre-push stage: the PR gate's own commands, before the push leaves.
-      - id: devkit-push-gate
 
   # --- formatting and lint ----------------------------------------------------
   # The same fixers `lint-fix.py` applies (no agent hook runs it today), so a human
