@@ -762,10 +762,6 @@ def label_calls(run: FakeRun) -> list[list[str]]:
     return [call for call in run.calls if any("/labels" in arg for arg in call)]
 
 
-def dispatches(run: FakeRun) -> list[list[str]]:
-    return [call for call in run.calls if any("/dispatches" in arg for arg in call)]
-
-
 @pytest.mark.parametrize("opened", [shipped, merge_now], ids=["unlabelled", "merge-now"])
 def test_a_money_pr_with_no_gate_run_asks_for_one(tmp_path, opened):
     """The PR gate skips a PR it cannot see waits (`sync-devkit.PR_GATE_RUNS_IF` cannot
@@ -1202,3 +1198,16 @@ def test_green_catches_up_on_the_schedule_with_no_run_to_name_the_commit():
     assert "github.event_name == 'schedule' ||" in condition
     assert "CATCH_UP: ${{ github.event_name == 'schedule' }}" in job
     assert "RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}" in job
+
+
+def test_unready_refuses_every_route_before_the_gate_is_asked():
+    ready = {"mergeable": True}
+    assert merger.unready(ready, [merger.AUTOMERGE_LABEL], False) == ""
+    assert merger.unready(ready, [], True) == "", "a queue PR that ships unlabelled"
+    assert merger.unready(ready, [], False).startswith("not labelled")
+    assert merger.unready({**ready, "draft": True}, [merger.AUTOMERGE_LABEL], False) == (
+        "still a draft"
+    )
+    assert merger.unready({"mergeable": None}, [], True) == "not known-mergeable (undecided)"
+    conflict = {"mergeable": False, "mergeable_state": "dirty"}
+    assert merger.unready(conflict, [], True) == "not known-mergeable (dirty)"

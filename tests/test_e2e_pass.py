@@ -477,7 +477,7 @@ def test_a_missing_tier_is_recorded_only_by_the_machine_assigned_it(tmp_path):
 def _role(workspace: Path, role: str, hosts=None) -> None:
     """Give a `_workspace` file `devkit.machineRole`, and `devkit.localE2e` hosts if any."""
     text = workspace.read_text(encoding="utf-8").rstrip()[:-1]
-    settings = {"devkit.machineRole": role}
+    settings: dict[str, object] = {"devkit.machineRole": role}
     if hosts is not None:
         settings[e2e_pass.SETTING] = {"hosts": hosts}
     workspace.write_text(f'{text}, "settings": {json.dumps(settings)}}}', encoding="utf-8")

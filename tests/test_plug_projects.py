@@ -1117,7 +1117,7 @@ def test_a_local_unplug_and_plug_say_what_they_will_do():
     assert "registry, then stop" in describe(Step(plug_projects.UNPLUG, "a", local=True))
     assert "put back what this PC retired" in describe(Step(plug_projects.PLUG, "a", local=True))
     clone = describe(Step(plug_projects.CLONE, "a", clone=True, unarchive=True, local=True))
-    assert "unarchive, clone" in clone and "put back" in clone
+    assert "unarchive its GitHub repo, clone" in clone and "put back" in clone
 
 
 def test_registry_notes_skip_a_run_that_only_acted_here():
@@ -1161,3 +1161,36 @@ def test_a_failed_local_half_raises_naming_the_project(monkeypatch):
         plug_projects.local_halves(
             [Step(plug_projects.RETIRE_HERE, "a", local=True)], "acme", out=lambda _line: None
         )
+
+
+def test_local_only_halves_owes_a_half_only_where_the_registry_half_already_holds():
+    idle = [
+        Candidate("gone", plugged=False, on_disk=True, on_github=True),
+        Candidate("live", plugged=True, on_disk=True, on_github=True),
+        Candidate("shut", plugged=True, on_disk=True, on_github=True, archived=True),
+        Candidate("kept", plugged=True, on_disk=True, on_github=True),
+    ]
+    got = plug_projects.local_only_halves(
+        idle,
+        plug=["live", "shut", "kept", "shut", "gone", "absent"],
+        unplug=["gone", "live", "gone", "absent"],
+        retired=frozenset({"kept"}),
+    )
+    assert got == [
+        Step(plug_projects.RETIRE_HERE, "gone", local=True),
+        Step(plug_projects.RESTORE_HERE, "shut", unarchive=True, local=True),
+        Step(plug_projects.RESTORE_HERE, "kept", local=True),
+    ], "still plugged is not retired; unplugged, unarchived and unretired is not restored"
+
+
+def test_named_halves_adds_nothing_to_a_pick_and_reads_the_record_for_a_plug(monkeypatch):
+    from argparse import Namespace
+
+    kept = Candidate("kept", plugged=True, on_disk=True, on_github=True)
+    monkeypatch.setattr(plug_projects.project_retire, "is_retired", lambda name: name == "kept")
+    pick = Namespace(picks="kept", plug=["kept"], unplug=[])
+    assert plug_projects.named_halves([], [kept], pick) == []
+    flags = Namespace(picks=None, plug=["kept"], unplug=[])
+    assert plug_projects.named_halves([], [kept], flags) == [
+        Step(plug_projects.RESTORE_HERE, "kept", local=True)
+    ]

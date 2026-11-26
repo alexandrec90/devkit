@@ -43,6 +43,13 @@ def tree(tmp_path: Path, name: str = "fix-nightly-0919", **kw):
     )
 
 
+def judge(one, checkout: Path, dirty, merged: dict, idle, **kw) -> str:
+    """`st.verdict` with what the pass read of the tree spelled out; `stillborn` and
+    `abandoned` by keyword, as the pass hands them."""
+    seen = st.Seen(dirty, idle, kw.get("stillborn", False))
+    return st.verdict(one, checkout, seen, merged, kw.get("abandoned"))
+
+
 # --- reading git and gh -------------------------------------------------------------
 
 
@@ -85,7 +92,7 @@ def test_generated_files_and_line_ending_churn_are_noise_not_work(tmp_path):
 
 def test_a_clean_quiet_tree_whose_pr_merged_at_its_head_is_reaped(tmp_path):
     one = tree(tmp_path)
-    assert st.verdict(one, tmp_path / "carameli", False, {one.branch: "abc"}, QUIET) == ""
+    assert judge(one, tmp_path / "carameli", False, {one.branch: "abc"}, QUIET) == ""
 
 
 def stamped(tmp_path: Path, dead: str, sent: str = "2026-11-01T00:00:00+00:00", **kw):
@@ -141,13 +148,22 @@ def test_a_commit_only_this_tree_holds_keeps_it_whatever_the_stamp_says(tmp_path
 def test_a_stillborn_tree_needs_no_merged_pr_and_no_transcript(tmp_path):
     one = tree(tmp_path)
     checkout = tmp_path / "carameli"
-    assert st.verdict(one, checkout, False, {}, None, stillborn=True) == ""
-    assert st.verdict(one, checkout, False, {}, QUIET, stillborn=True) == ""
-    assert "within" in st.verdict(one, checkout, False, {}, 60, stillborn=True), "someone is in it"
-    assert "uncommitted" in st.verdict(one, checkout, True, {}, None, stillborn=True)
-    assert st.verdict(one, checkout, None, {}, None, stillborn=True), "status unreadable"
+    assert judge(one, checkout, False, {}, None, stillborn=True) == ""
+    assert judge(one, checkout, False, {}, QUIET, stillborn=True) == ""
+    assert "within" in judge(one, checkout, False, {}, 60, stillborn=True), "someone is in it"
+    assert "uncommitted" in judge(one, checkout, True, {}, None, stillborn=True)
+    assert judge(one, checkout, None, {}, None, stillborn=True), "status unreadable"
     locked = tree(tmp_path, locked=True)
-    assert "locked" in st.verdict(locked, checkout, False, {}, None, stillborn=True)
+    assert "locked" in judge(locked, checkout, False, {}, None, stillborn=True)
+
+
+def test_seen_defaults_to_a_tree_that_started(tmp_path):
+    """`Seen` without `stillborn` is an ordinary tree: an unknown `idle` keeps it."""
+    one = tree(tmp_path)
+    merged = {one.branch: "abc"}
+    assert st.Seen(False, None).stillborn is False
+    assert st.verdict(one, tmp_path / "carameli", st.Seen(False, None), merged)
+    assert st.verdict(one, tmp_path / "carameli", st.Seen(False, QUIET), merged) == ""
 
 
 def test_closed_heads_keeps_only_prs_closed_without_merging():
@@ -171,14 +187,14 @@ def test_only_a_tree_the_pass_stamped_is_dispatched(tmp_path):
 def test_a_dispatched_tree_whose_pr_closed_at_its_head_may_go(tmp_path):
     one = tree(tmp_path)
     checkout = tmp_path / "carameli"
-    assert st.verdict(one, checkout, False, {}, QUIET, abandoned={one.branch: "abc"}) == ""
+    assert judge(one, checkout, False, {}, QUIET, abandoned={one.branch: "abc"}) == ""
     kept = {
-        "commits after the close": st.verdict(
+        "commits after the close": judge(
             one, checkout, False, {}, QUIET, abandoned={one.branch: "def"}
         ),
-        "not dispatched": st.verdict(one, checkout, False, {}, QUIET, abandoned=None),
-        "dirty": st.verdict(one, checkout, True, {}, QUIET, abandoned={one.branch: "abc"}),
-        "recently used": st.verdict(one, checkout, False, {}, 60, abandoned={one.branch: "abc"}),
+        "not dispatched": judge(one, checkout, False, {}, QUIET, abandoned=None),
+        "dirty": judge(one, checkout, True, {}, QUIET, abandoned={one.branch: "abc"}),
+        "recently used": judge(one, checkout, False, {}, 60, abandoned={one.branch: "abc"}),
     }
     assert all(kept.values()), [name for name, why in kept.items() if not why]
 
@@ -225,7 +241,7 @@ def test_closed_prs_that_cannot_be_read_keep_the_tree_and_say_so(tmp_path):
 
 
 def test_a_checkout_with_no_dispatched_tree_asks_for_no_closed_prs(tmp_path):
-    checkout, run, gh, calls = _checkout(tmp_path, head="newer")
+    checkout, run, gh, _calls = _checkout(tmp_path, head="newer")
     asked: list[tuple] = []
 
     def counting(path):
@@ -278,24 +294,24 @@ def test_every_reason_to_keep_a_tree_keeps_it(tmp_path):
     one = tree(tmp_path)
     merged = {one.branch: "abc"}
     kept = {
-        "the checkout itself": st.verdict(
+        "the checkout itself": judge(
             st.Tree(checkout, "master", "abc", False), checkout, False, merged, QUIET
         ),
-        "a box": st.verdict(
+        "a box": judge(
             st.Tree(tmp_path / ".worktrees" / "carameli--x", one.branch, "abc", False),
             checkout,
             False,
             merged,
             QUIET,
         ),
-        "locked": st.verdict(tree(tmp_path, locked=True), checkout, False, merged, QUIET),
-        "recently used": st.verdict(one, checkout, False, merged, 60),
-        "unknown activity": st.verdict(one, checkout, False, merged, None),
-        "unreadable status": st.verdict(one, checkout, None, merged, QUIET),
-        "dirty": st.verdict(one, checkout, True, merged, QUIET),
-        "detached": st.verdict(tree(tmp_path, branch=""), checkout, False, merged, QUIET),
-        "no merged PR": st.verdict(one, checkout, False, {}, QUIET),
-        "commits after the merge": st.verdict(one, checkout, False, {one.branch: "def"}, QUIET),
+        "locked": judge(tree(tmp_path, locked=True), checkout, False, merged, QUIET),
+        "recently used": judge(one, checkout, False, merged, 60),
+        "unknown activity": judge(one, checkout, False, merged, None),
+        "unreadable status": judge(one, checkout, None, merged, QUIET),
+        "dirty": judge(one, checkout, True, merged, QUIET),
+        "detached": judge(tree(tmp_path, branch=""), checkout, False, merged, QUIET),
+        "no merged PR": judge(one, checkout, False, {}, QUIET),
+        "commits after the merge": judge(one, checkout, False, {one.branch: "def"}, QUIET),
     }
     assert all(kept.values()), [name for name, why in kept.items() if not why]
 
