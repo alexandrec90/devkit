@@ -1,45 +1,42 @@
-#!/usr/bin/env python3
-"""Retire a project from this machine and the registry, or restore one, in one command.
+"""The halves of retiring a project that the registry edit leaves, and their reverse.
 
-    retire-project.py retire NAME [--yes] [--force] [--dry-run]
-    retire-project.py restore NAME [--yes] [--dry-run]
-    retire-project.py list                 # what this machine has retired, and how
-
-`plug-projects.py --unplug` is the registry half and nothing else: it touches nothing on
-disk, so a retired project's collector kept running, its claimed scheduled tasks kept
-firing (and, unclaimed once the project left the registry, were filed as
-`scheduled-job-unowned`), and its compose stack kept its containers. This script runs
-that unplug and then the three halves it leaves, in an order that fails safe:
+`plug-projects.py --unplug NAME` and `--plug NAME` drive this; it has no command line of
+its own. Unplugging is the registry and nothing else, so on its own a retired project's
+collector kept running, its claimed scheduled tasks kept firing (and, unclaimed once the
+project left the registry, were filed as `scheduled-job-unowned`), its compose stack
+kept its containers, and Dependabot kept opening PRs on its repo. After the registry
+step, this runs the rest, in an order that fails safe:
 
 | step | retire | restore |
 | --- | --- | --- |
-| registry | `plug-projects.py --unplug` (its gates and hazards) | `--plug`, cloning if absent |
 | collector | `collectors.py stop-here` | back to what it was: `run-here`, or `release` |
 | claimed tasks | exported to XML, then deleted | registered again from that XML |
 | compose stack | `docker compose down` -- **never `-v`** | `up -d` of what was running |
+| GitHub repo | `gh repo archive` | unarchived by `plug-projects.py`, before it clones |
 
-**The registry goes first** because it is the step with gates: a live box, unpushed work
-or the wrong branch refuses there, before anything has been stopped. **Volumes are never
-removed**: a static checkout's volumes hold a dev database that costs hours to rebuild,
-the reason `docker-maint.py` may not pass `-v` either. Images stay too, so a restore
-rebuilds nothing.
+**The repo is archived last**, so a run that failed earlier leaves it writable for the
+fix. Archiving is what stops Dependabot and every other automation on the repo: an
+archived repo is read-only, and `fix_dependabot` already skips an unregistered project,
+so nothing is left to open a PR or send a fixer at one. It is fully reversible.
+**Volumes are never removed**: a static checkout's volumes hold a dev database that costs
+hours to rebuild, the reason `docker-maint.py` may not pass `-v` either. Images stay too,
+so a restore rebuilds nothing.
 
 **What retire stopped is recorded on this machine** (`RECORD`, under devkit's ignored
 `logs/`), because the collector assignment, the tasks and the running containers are all
 per machine. That record is what lets a restore put back exactly what was there -- a
 collector that was hands-off goes back to hands-off rather than starting -- and a second
 retire keeps the first record's answers, which the first retire has since changed. The
-registry is global, so on a second PC that ran the project, `retire` again there: the
-registry step is skipped as already done and the local halves run.
+registry and the repo are global, so on a second PC that ran the project, `--unplug` it
+again there: the registry and archive steps are skipped as already done.
 
 Pure planning (`retire_plan`, `restore_plan`, `merged_record`) over gathered `Facts`;
 `execute` runs the steps through an injected runner. Tested in
-`tests/test_retire_project.py`.
+`tests/test_project_retire.py`.
 """
 
 from __future__ import annotations
 
-import argparse
 import datetime as _dt
 import json
 import os
@@ -61,7 +58,6 @@ import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
-ARTIFACT = REPO_ROOT / "logs" / "retire-project.log"
 
 # Machine-local by construction, beside the collector assignment it records: `logs/` of
 # devkit's static checkout (`collectors_config.home`), which git ignores.
@@ -84,7 +80,6 @@ class Facts:
 
     name: str
     checkout: Path
-    registered: bool
     on_disk: bool
     collector: config.Collector | None = None
     # This machine's collector assignment: `run`, `stop`, or None for hands-off.
@@ -95,6 +90,9 @@ class Facts:
     # Claimed scheduled tasks present on this machine.
     tasks: tuple[str, ...] = ()
     record: dict | None = None
+    # `owner/name` on GitHub, and whether it is archived; None when gh could not say.
+    repo: str = ""
+    archived: bool | None = False
 
 
 @dataclass(frozen=True)
@@ -163,6 +161,11 @@ def task_file(base: Path, project: str, task: str) -> Path:
     return base / TASKS_DIR / project / f"{slug}.xml"
 
 
+def is_retired(name: str, base: Path | None = None) -> bool:
+    """Has this machine a record of retiring `name`?"""
+    return name in load_records((base or config.home(REPO_ROOT)) / RECORD)
+
+
 # --- planning -----------------------------------------------------------------------
 
 
@@ -170,25 +173,23 @@ def _py(script: str, *args: str) -> tuple[str, ...]:
     return (sys.executable, str(SCRIPTS / script), *args)
 
 
-def refusal(facts: Facts) -> str:
-    """Why `facts.name` cannot be retired or restored at all; "" when it can."""
-    if facts.name == sweep.source_checkout(REPO_ROOT).name:
+def refusal(name: str) -> str:
+    """Why `name` cannot be retired or restored at all; "" when it can."""
+    if name == sweep.source_checkout(REPO_ROOT).name:
         return "devkit is the checkout every other one is driven from -- it cannot be retired"
-    if facts.name in devkit_project.NOT_PROJECTS:
-        return f"{facts.name} is a reference checkout, not a project"
+    if name in devkit_project.NOT_PROJECTS:
+        return f"{name} is a reference checkout, not a project"
     return ""
 
 
-def retire_plan(facts: Facts, base: Path, *, force: bool = False) -> Plan:
-    """The steps a retire of `facts.name` takes on this machine, registry first."""
+def archive_argv(repo: str, *, undo: bool = False) -> tuple[str, ...]:
+    """`gh repo archive` (or `unarchive`), with no prompt to answer."""
+    return ("gh", "repo", "unarchive" if undo else "archive", repo, "--yes")
+
+
+def retire_plan(facts: Facts, base: Path) -> Plan:
+    """The steps a retire of `facts.name` takes after its registry edit, archive last."""
     plan = Plan()
-    if facts.registered:
-        unplug = _py("plug-projects.py", "--unplug", facts.name, "--yes")
-        plan.steps.append(
-            Step("unplug from the registry", unplug + (("--force",) if force else ()))
-        )
-    else:
-        plan.notes.append("not in the registry -- that half is already done")
     if facts.collector is not None and facts.assigned != config.STOP:
         plan.steps.append(
             Step("stop its collector here", _py("collectors.py", "stop-here", facts.name))
@@ -211,6 +212,7 @@ def retire_plan(facts: Facts, base: Path, *, force: bool = False) -> Plan:
             )
         )
     _plan_compose_down(facts, plan)
+    _plan_archive(facts, plan)
     return plan
 
 
@@ -220,7 +222,7 @@ def _plan_compose_down(facts: Facts, plan: Plan) -> None:
     if facts.running is None:
         plan.notes.append(
             "docker did not answer -- its containers were not checked; start Docker and "
-            "retire again to take them down"
+            "unplug it again to take them down"
         )
         return
     plan.steps.append(
@@ -233,14 +235,30 @@ def _plan_compose_down(facts: Facts, plan: Plan) -> None:
     )
 
 
-def restore_plan(facts: Facts, base: Path) -> Plan:
-    """The steps a restore of `facts.name` takes: registry (and clone), then what the
-    record says this machine had running."""
-    plan = Plan()
-    if not facts.registered or not facts.on_disk:
-        plan.steps.append(
-            Step("plug into the registry", _py("plug-projects.py", "--plug", facts.name, "--yes"))
+def _plan_archive(facts: Facts, plan: Plan) -> None:
+    if not facts.repo:
+        plan.notes.append("no GitHub repo to archive")
+    elif facts.archived is None:
+        plan.notes.append(
+            f"gh could not say whether {facts.repo} is archived -- check `gh auth status` "
+            "and unplug it again to archive it"
         )
+    elif facts.archived:
+        plan.notes.append(f"{facts.repo} is already archived")
+    else:
+        plan.steps.append(
+            Step(
+                f"archive {facts.repo} on GitHub (stops Dependabot)",
+                archive_argv(facts.repo),
+                timeout=QUICK_TIMEOUT,
+            )
+        )
+
+
+def restore_plan(facts: Facts, base: Path) -> Plan:
+    """The steps a restore of `facts.name` takes once it is plugged (and cloned) again:
+    what the record says this machine had running."""
+    plan = Plan()
     record = facts.record
     if record is None:
         plan.notes.append(
@@ -323,20 +341,32 @@ def present_tasks(names: Sequence[str], run: Runner) -> tuple[str, ...]:
     return tuple(found)
 
 
-def gather(name: str, base: Path, run: Runner, *, local: bool = True) -> Facts:
-    """Read the registry, the collector setting, this machine's assignment and record,
-    and -- when `local` -- the checkout's running services and claimed tasks."""
-    workspace_root = sweep.default_workspace(base).parent
-    checkout = workspace_root / name
-    canonical = devkit_project.canonical_text()
-    collectors, _notes = config.parse_setting(canonical)
+def repo_archived(repo: str, run: Runner) -> tuple[str, bool | None]:
+    """`(repo, archived)`: `("", False)` when GitHub has no such repo, and `archived` None
+    when gh could not say at all -- not knowing is not "not archived"."""
+    result = run(["gh", "repo", "view", repo, "--json", "isArchived"], QUICK_TIMEOUT)
+    if result.returncode != 0:
+        said = (result.stderr or "").lower()
+        return ("", False) if "could not resolve" in said else (repo, None)
+    try:
+        return repo, bool(json.loads(result.stdout or "{}").get("isArchived"))
+    except (ValueError, AttributeError):
+        return repo, None
+
+
+def gather(
+    name: str, checkout: Path, base: Path, run: Runner, *, owner: str = "", local: bool = True
+) -> Facts:
+    """Read the collector setting, this machine's assignment and record, and -- when
+    `local` -- the checkout's running services, its claimed tasks and its repo."""
+    collectors, _notes = config.parse_setting(devkit_project.canonical_text())
     collector = next((c for c in collectors if c.project == name), None)
     on_disk = checkout.is_dir()
     has_compose = on_disk and bool(collector_build.compose_files(checkout))
+    repo, archived = repo_archived(f"{owner}/{name}", run) if local and owner else ("", False)
     return Facts(
         name=name,
         checkout=checkout,
-        registered=name in devkit_project.known_projects(canonical),
         on_disk=on_disk,
         collector=collector,
         assigned=config.load_assignment(base / config.ASSIGNMENT).get(name),
@@ -344,6 +374,8 @@ def gather(name: str, base: Path, run: Runner, *, local: bool = True) -> Facts:
         running=running_services(checkout, run) if local and has_compose else (),
         tasks=present_tasks(claimed_tasks(checkout), run) if local and on_disk else (),
         record=load_records(base / RECORD).get(name),
+        repo=repo,
+        archived=archived,
     )
 
 
@@ -378,125 +410,62 @@ def execute(steps: Sequence[Step], run: Runner, out=print) -> str:
     return ""
 
 
-def write_artifact(lines: Sequence[str]) -> None:
-    """This run's failures, per `.claude/rules/engineering.md`; emptied by a clean run."""
-    ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    body = "\n".join(lines)
-    ARTIFACT.write_text(body + "\n" if body else "", encoding="utf-8", newline="\n")
-
-
-def confirmed(plan: Plan, args: argparse.Namespace, ask=input) -> bool:
-    """Print the plan; whether to go on. `--dry-run` never does, `--yes` always does."""
-    print(f"  {args.verb} {args.name} will:")
-    for step in plan.steps:
-        print(f"    {step.label}")
-    for note in plan.notes:
-        print(f"  NOTE    {note}")
-    if not plan.steps or args.dry_run:
-        return False
-    if args.yes:
-        return True
-    try:
-        return ask("  apply? [y/N] ").strip().lower() in {"y", "yes"}
-    except EOFError:
-        return False
-
-
-def finish_record(args: argparse.Namespace, facts: Facts, base: Path, failed: str) -> None:
-    """Keep the record a retire made; drop the one a restore has put back."""
+def forget(base: Path, name: str, record: dict | None) -> None:
+    """Drop the record of a retire a restore has put back, and its kept task files."""
     records = load_records(base / RECORD)
-    if args.verb == "retire" or failed or args.name not in records:
+    if name not in records:
         return
-    records.pop(args.name)
+    records.pop(name)
     save_records(base / RECORD, records)
-    for task in (facts.record or {}).get("tasks", []):
-        task_file(base, args.name, task).unlink(missing_ok=True)
+    for task in (record or {}).get("tasks", []):
+        task_file(base, name, task).unlink(missing_ok=True)
 
 
-def act(args: argparse.Namespace, base: Path, run: Runner) -> int:
-    """`retire` or `restore` one project: plan, confirm, record, run."""
-    facts = gather(args.name, base, run, local=args.verb == "retire")
-    why = refusal(facts)
-    if why or not (facts.registered or facts.on_disk or facts.record):
-        why = why or f"{args.name} is not registered, not on this PC and not retired here"
-        print(f"ERROR   {why}", file=sys.stderr)
-        write_artifact([why])
-        return 2
-    if args.verb == "retire":
-        plan = retire_plan(facts, base, force=args.force)
-    else:
-        plan = restore_plan(facts, base)
-    if not confirmed(plan, args):
-        if not plan.steps and not args.dry_run:
-            # A restore with nothing left to start is already restored.
-            finish_record(args, facts, base, "")
-        print("  nothing changed")
-        write_artifact([])
-        return 0
-    if args.verb == "retire":
-        records = load_records(base / RECORD)
-        records[args.name] = merged_record(facts, _dt.datetime.now().isoformat(timespec="seconds"))
-        save_records(base / RECORD, records)
-    failed = execute(plan.steps, run)
-    finish_record(args, facts, base, failed)
-    if failed:
-        print(f"ERROR   {failed}", file=sys.stderr)
-        print(
-            "        fix that and run the same command again; done steps are skipped",
-            file=sys.stderr,
-        )
-    write_artifact([failed] if failed else [])
-    return 1 if failed else 0
+def _notes(plan: Plan, out) -> None:
+    for note in plan.notes:
+        out(f"  NOTE    {note}")
 
 
-def list_records(base: Path) -> int:
+def retire(
+    name: str,
+    checkout: Path,
+    owner: str,
+    run: Runner = sweep.run_bounded,
+    out=print,
+    base: Path | None = None,
+) -> str:
+    """Stop `name` on this machine and archive its repo: "" when done, else why not.
+
+    The record is written before anything runs, so a run that fails halfway still knows
+    what to put back."""
+    if why := refusal(name):
+        return why
+    base = base or config.home(REPO_ROOT)
+    facts = gather(name, checkout, base, run, owner=owner)
+    plan = retire_plan(facts, base)
+    _notes(plan, out)
     records = load_records(base / RECORD)
-    if not records:
-        print("  nothing is retired on this machine")
-    for name, record in records.items():
-        services = ", ".join(record.get("services", [])) or "none"
-        tasks = ", ".join(record.get("tasks", [])) or "none"
-        print(
-            f"  {name}: retired {record.get('retired_at', '?')}; collector was "
-            f"{record.get('collector') or 'hands-off'}; running: {services}; tasks: {tasks}"
-        )
-    write_artifact([])
-    return 0
+    records[name] = merged_record(facts, _dt.datetime.now().isoformat(timespec="seconds"))
+    save_records(base / RECORD, records)
+    return execute(plan.steps, run, out)
 
 
-def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    sub = parser.add_subparsers(dest="verb", required=True)
-    sub.add_parser("list", help="what this machine has retired, and what it stopped")
-    for verb, text in (
-        ("retire", "unplug and stop it here"),
-        ("restore", "plug and start it back"),
-    ):
-        cmd = sub.add_parser(verb, help=text)
-        cmd.add_argument("name")
-        cmd.add_argument("--yes", action="store_true", help="skip the confirmation")
-        cmd.add_argument("--dry-run", action="store_true", help="print the plan and stop")
-        if verb == "retire":
-            cmd.add_argument(
-                "--force", action="store_true", help="unplug over live boxes or unpushed work"
-            )
-        else:
-            cmd.set_defaults(force=False)
-    return parser.parse_args(argv)
-
-
-def main(argv: Sequence[str] | None = None, run: Runner = sweep.run_bounded) -> int:
-    args = parse_args(argv)
-    base = config.home(REPO_ROOT)
-    if args.verb == "list":
-        return list_records(base)
-    try:
-        return act(args, base, run)
-    except OSError as exc:
-        print(f"ERROR   {exc}", file=sys.stderr)
-        write_artifact([str(exc)])
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+def restore(
+    name: str,
+    checkout: Path,
+    run: Runner = sweep.run_bounded,
+    out=print,
+    base: Path | None = None,
+) -> str:
+    """Put back what retiring `name` stopped here: "" when done, else why not. The
+    record is kept until every step has run, so a failed restore can be run again."""
+    if why := refusal(name):
+        return why
+    base = base or config.home(REPO_ROOT)
+    facts = gather(name, checkout, base, run, local=False)
+    plan = restore_plan(facts, base)
+    _notes(plan, out)
+    failed = execute(plan.steps, run, out)
+    if not failed:
+        forget(base, name, facts.record)
+    return failed

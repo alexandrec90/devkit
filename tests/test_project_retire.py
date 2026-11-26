@@ -1,9 +1,10 @@
-"""Tests for `scripts/retire-project.py`.
+"""Tests for `scripts/project_retire.py`, the local and GitHub halves of
+`plug-projects.py --unplug` / `--plug`.
 
-What is pinned is what would fail quietly: the plan's order (the registry, the only step
-with gates, before anything is stopped), that no step ever removes a volume, that a
-restore puts back exactly what the record says and nothing it does not, and that a
-second retire does not overwrite the first record with the state the first one left.
+What is pinned is what would fail quietly: no step ever removes a volume, the repo is
+archived last and only when gh has said it is not archived already, a restore puts back
+exactly what the record says and nothing it does not, and a second retire does not
+overwrite the first record with the state the first one left.
 """
 
 import subprocess
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from support import load_script
 
-retire = load_script("scripts/retire-project.py")
+retire = load_script("scripts/project_retire.py")
 config = retire.config
 
 Facts = retire.Facts
@@ -19,12 +20,7 @@ Step = retire.Step
 
 
 def facts(**overrides):
-    base = {
-        "name": "geo",
-        "checkout": Path("/ws/geo"),
-        "registered": True,
-        "on_disk": True,
-    }
+    base = {"name": "geo", "checkout": Path("/ws/geo"), "on_disk": True}
     return Facts(**(base | overrides))
 
 
@@ -43,14 +39,40 @@ def done(stdout="", code=0, stderr=""):
 # --- retire -------------------------------------------------------------------------
 
 
-def test_the_registry_is_retired_before_anything_is_stopped(tmp_path):
+def test_the_repo_is_archived_last(tmp_path):
     plan = retire.retire_plan(
-        facts(collector=container(), assigned=config.RUN, has_compose=True, running=("db",)),
+        facts(
+            collector=container(),
+            assigned=config.RUN,
+            has_compose=True,
+            running=("db",),
+            repo="acme/geo",
+        ),
         tmp_path,
     )
-    assert labels(plan)[0] == "unplug from the registry"
-    assert "--unplug" in plan.steps[0].argv and "--yes" in plan.steps[0].argv
-    assert labels(plan)[1:] == ["stop its collector here", "remove its containers (volumes kept)"]
+    assert labels(plan) == [
+        "stop its collector here",
+        "remove its containers (volumes kept)",
+        "archive acme/geo on GitHub (stops Dependabot)",
+    ]
+    assert plan.steps[-1].argv == ("gh", "repo", "archive", "acme/geo", "--yes")
+
+
+def test_an_archived_repo_is_not_archived_again(tmp_path):
+    plan = retire.retire_plan(facts(repo="acme/geo", archived=True), tmp_path)
+    assert plan.steps == []
+    assert any("already archived" in note for note in plan.notes)
+
+
+def test_a_gh_that_could_not_say_is_a_note_not_an_archive(tmp_path):
+    plan = retire.retire_plan(facts(repo="acme/geo", archived=None), tmp_path)
+    assert plan.steps == []
+    assert any("could not say" in note for note in plan.notes)
+
+
+def test_a_project_with_no_repo_says_so(tmp_path):
+    plan = retire.retire_plan(facts(), tmp_path)
+    assert any("no GitHub repo" in note for note in plan.notes)
 
 
 def test_no_retire_step_ever_removes_a_volume(tmp_path):
@@ -59,17 +81,6 @@ def test_no_retire_step_ever_removes_a_volume(tmp_path):
     assert down.argv == ("docker", "compose", "down")
     assert all("-v" not in s.argv and "--volumes" not in s.argv for s in plan.steps)
     assert down.cwd == Path("/ws/geo")
-
-
-def test_force_reaches_the_unplug_and_nothing_else(tmp_path):
-    plan = retire.retire_plan(facts(), tmp_path, force=True)
-    assert plan.steps[0].argv[-1] == "--force"
-
-
-def test_an_unregistered_project_skips_the_registry_and_says_so(tmp_path):
-    plan = retire.retire_plan(facts(registered=False, has_compose=True), tmp_path)
-    assert labels(plan) == ["remove its containers (volumes kept)"]
-    assert any("already done" in note for note in plan.notes)
 
 
 def test_a_collector_already_stopped_here_is_not_stopped_again(tmp_path):
@@ -84,22 +95,22 @@ def test_a_hands_off_collector_is_still_stopped_here(tmp_path):
 
 
 def test_a_claimed_task_is_exported_before_it_is_deleted(tmp_path):
-    plan = retire.retire_plan(facts(registered=False, tasks=("Geo nightly",)), tmp_path)
+    plan = retire.retire_plan(facts(tasks=("Geo nightly",)), tmp_path)
     export, delete = plan.steps
     assert export.save_to == tmp_path / "logs/retired-projects/geo/Geo-nightly.xml"
     assert "/Query" in export.argv and "/Delete" in delete.argv
 
 
 def test_a_docker_that_did_not_answer_is_a_note_not_a_silent_skip(tmp_path):
-    plan = retire.retire_plan(facts(registered=False, has_compose=True, running=None), tmp_path)
+    plan = retire.retire_plan(facts(has_compose=True, running=None), tmp_path)
     assert plan.steps == []
     assert any("docker did not answer" in note for note in plan.notes)
 
 
 def test_devkit_itself_cannot_be_retired():
     own = retire.sweep.source_checkout(retire.REPO_ROOT).name
-    assert "cannot be retired" in retire.refusal(facts(name=own))
-    assert retire.refusal(facts()) == ""
+    assert "cannot be retired" in retire.refusal(own)
+    assert retire.refusal("geo") == ""
 
 
 # --- the record ---------------------------------------------------------------------
@@ -130,6 +141,9 @@ def test_records_round_trip_and_an_unreadable_file_is_empty(tmp_path):
     assert retire.load_records(path) == {}
     retire.save_records(path, {"geo": {"collector": None}})
     assert retire.load_records(path) == {"geo": {"collector": None}}
+    assert retire.is_retired("geo", tmp_path) is False
+    retire.save_records(tmp_path / retire.RECORD, {"geo": {}})
+    assert retire.is_retired("geo", tmp_path)
     path.write_text("not json", encoding="utf-8")
     assert retire.load_records(path) == {}
 
@@ -137,16 +151,10 @@ def test_records_round_trip_and_an_unreadable_file_is_empty(tmp_path):
 # --- restore ------------------------------------------------------------------------
 
 
-def test_a_restore_with_no_record_only_plugs_and_says_why(tmp_path):
-    plan = retire.restore_plan(facts(registered=False), tmp_path)
-    assert labels(plan) == ["plug into the registry"]
-    assert "--plug" in plan.steps[0].argv
+def test_a_restore_with_no_record_starts_nothing_and_says_why(tmp_path):
+    plan = retire.restore_plan(facts(), tmp_path)
+    assert plan.steps == []
     assert any("no record" in note for note in plan.notes)
-
-
-def test_a_registered_project_missing_here_is_plugged_so_it_is_cloned(tmp_path):
-    plan = retire.restore_plan(facts(on_disk=False, record={}), tmp_path)
-    assert labels(plan)[0] == "plug into the registry"
 
 
 def test_a_restore_puts_back_what_was_running_but_leaves_the_collector_to_run_here(tmp_path):
@@ -205,6 +213,18 @@ def test_running_services_reads_compose_and_none_means_docker_did_not_say(tmp_pa
     assert retire.running_services(tmp_path, lambda *a, **k: done(code=1)) is None
 
 
+def test_repo_archived_tells_no_repo_from_a_gh_that_could_not_say():
+    def answer(result):
+        return lambda argv, timeout, cwd=None: result
+
+    assert retire.repo_archived("a/g", answer(done('{"isArchived": true}'))) == ("a/g", True)
+    assert retire.repo_archived("a/g", answer(done('{"isArchived": false}'))) == ("a/g", False)
+    missing = done(code=1, stderr="GraphQL: Could not resolve to a Repository with the name")
+    assert retire.repo_archived("a/g", answer(missing)) == ("", False)
+    assert retire.repo_archived("a/g", answer(done(code=1, stderr="auth"))) == ("a/g", None)
+    assert retire.repo_archived("a/g", answer(done("not json"))) == ("a/g", None)
+
+
 def test_claimed_tasks_come_from_the_projects_manifest(tmp_path):
     assert retire.claimed_tasks(tmp_path) == ()
     (tmp_path / ".devkit.toml").write_text(
@@ -213,40 +233,20 @@ def test_claimed_tasks_come_from_the_projects_manifest(tmp_path):
     assert retire.claimed_tasks(tmp_path) == ("Geo nightly",)
 
 
-def test_a_restore_that_finished_drops_its_record(tmp_path, monkeypatch):
+def test_forget_drops_the_record_and_its_kept_task_files(tmp_path):
     path = tmp_path / retire.RECORD
     retire.save_records(path, {"geo": {"collector": None, "tasks": ["t"]}, "other": {}})
     saved = retire.task_file(tmp_path, "geo", "t")
     saved.parent.mkdir(parents=True)
     saved.write_text("x", encoding="utf-8")
-    args = retire.parse_args(["restore", "geo"])
-    retire.finish_record(args, facts(record={"tasks": ["t"]}), tmp_path, failed="")
+    retire.forget(tmp_path, "geo", {"tasks": ["t"]})
     assert set(retire.load_records(path)) == {"other"}
     assert not saved.exists()
+    retire.forget(tmp_path, "never", None)
+    assert set(retire.load_records(path)) == {"other"}
 
 
-def test_a_failed_restore_keeps_its_record_for_the_next_try(tmp_path):
-    path = tmp_path / retire.RECORD
-    retire.save_records(path, {"geo": {"collector": "run"}})
-    args = retire.parse_args(["restore", "geo"])
-    retire.finish_record(args, facts(record={}), tmp_path, failed="start: exit 1")
-    assert "geo" in retire.load_records(path)
-
-
-def test_a_dry_run_and_an_unconfirmed_run_change_nothing(capsys):
-    plan = retire.Plan(steps=[Step("one", ("a",))])
-    assert not retire.confirmed(plan, retire.parse_args(["retire", "geo", "--dry-run", "--yes"]))
-    assert not retire.confirmed(plan, retire.parse_args(["retire", "geo"]), ask=lambda _p: "n")
-    assert retire.confirmed(plan, retire.parse_args(["retire", "geo"]), ask=lambda _p: "y")
-
-    def eof(_prompt):
-        raise EOFError
-
-    assert not retire.confirmed(plan, retire.parse_args(["retire", "geo"]), ask=eof)
-    assert "retire geo will:" in capsys.readouterr().out
-
-
-# --- gathering and the command line -------------------------------------------------
+# --- gathering ----------------------------------------------------------------------
 
 
 def test_present_tasks_keeps_only_what_the_scheduler_holds(monkeypatch):
@@ -271,36 +271,39 @@ def test_present_tasks_is_empty_off_windows(monkeypatch):
     assert retire.present_tasks(["Geo nightly"], run) == ()
 
 
-def _stub_registry(monkeypatch, tmp_path, *, known=("geo",)):
-    monkeypatch.setattr(retire.sweep, "default_workspace", lambda base: tmp_path / "ws.code")
+def _stub_setting(monkeypatch):
     monkeypatch.setattr(retire.devkit_project, "canonical_text", lambda: "")
     monkeypatch.setattr(retire.config, "parse_setting", lambda text: ([container()], []))
-    monkeypatch.setattr(retire.devkit_project, "known_projects", lambda text: set(known))
     monkeypatch.setattr(retire.config, "load_assignment", lambda path: {"geo": config.RUN})
 
 
-def test_gather_reads_the_registry_the_assignment_and_the_record(tmp_path, monkeypatch):
-    _stub_registry(monkeypatch, tmp_path)
+def test_gather_reads_the_assignment_the_record_docker_and_github(tmp_path, monkeypatch):
+    _stub_setting(monkeypatch)
     (tmp_path / "geo").mkdir()
     monkeypatch.setattr(retire.collector_build, "compose_files", lambda checkout: ["c.yml"])
     retire.save_records(tmp_path / retire.RECORD, {"geo": {"collector": "run"}})
-    found = retire.gather("geo", tmp_path, lambda argv, timeout, cwd=None: done("db\n"))
-    assert found.checkout == tmp_path / "geo"
-    assert found.registered and found.on_disk and found.has_compose
+
+    def run(argv, timeout, cwd=None):
+        return done('{"isArchived": false}') if argv[0] == "gh" else done("db\n")
+
+    found = retire.gather("geo", tmp_path / "geo", tmp_path, run, owner="acme")
+    assert found.on_disk and found.has_compose
     assert found.collector == container() and found.assigned == config.RUN
     assert found.running == ("db",)
     assert found.record == {"collector": "run"}
+    assert (found.repo, found.archived) == ("acme/geo", False)
 
 
-def test_gather_for_a_restore_asks_docker_nothing(tmp_path, monkeypatch):
-    _stub_registry(monkeypatch, tmp_path, known=())
+def test_gather_for_a_restore_asks_docker_and_github_nothing(tmp_path, monkeypatch):
+    _stub_setting(monkeypatch)
 
     def run(*_a, **_k):
         raise AssertionError("a restore reads only the record")
 
-    found = retire.gather("geo", tmp_path, run, local=False)
-    assert not found.registered and not found.on_disk
+    found = retire.gather("geo", tmp_path / "geo", tmp_path, run, owner="acme", local=False)
+    assert not found.on_disk
     assert found.running == () and found.tasks == () and found.record is None
+    assert found.repo == ""
 
 
 def test_save_xml_creates_its_folder_and_normalises_line_endings(tmp_path):
@@ -309,72 +312,49 @@ def test_save_xml_creates_its_folder_and_normalises_line_endings(tmp_path):
     assert target.read_text(encoding="utf-16") == "<a/>\n<b/>\n"
 
 
-def test_write_artifact_keeps_failures_and_a_clean_run_empties_it(tmp_path, monkeypatch):
-    artifact = tmp_path / "logs" / "retire-project.log"
-    monkeypatch.setattr(retire, "ARTIFACT", artifact)
-    retire.write_artifact(["one", "two"])
-    assert artifact.read_text(encoding="utf-8") == "one\ntwo\n"
-    retire.write_artifact([])
-    assert artifact.read_text(encoding="utf-8") == ""
+# --- retire and restore, end to end -------------------------------------------------
 
 
-def test_list_records_names_each_retired_project(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
-    assert retire.list_records(tmp_path) == 0
-    assert "nothing is retired" in capsys.readouterr().out
-    retire.save_records(
-        tmp_path / retire.RECORD,
-        {"geo": {"collector": None, "services": ["db"], "tasks": [], "retired_at": "then"}},
+def test_retire_records_before_it_runs_and_reports_a_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        retire, "gather", lambda *a, **k: facts(assigned=config.RUN, repo="acme/geo")
     )
-    assert retire.list_records(tmp_path) == 0
-    out = capsys.readouterr().out
-    assert "geo: retired then; collector was hands-off; running: db; tasks: none" in out
-
-
-def test_act_refuses_a_project_it_knows_nothing_about(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
-    monkeypatch.setattr(retire, "gather", lambda *a, **k: facts(registered=False, on_disk=False))
-    args = retire.parse_args(["retire", "geo", "--yes"])
-    assert retire.act(args, tmp_path, run=lambda *a, **k: done()) == 2
-    assert "not retired here" in capsys.readouterr().err
-    assert "not retired here" in (tmp_path / "a.log").read_text(encoding="utf-8")
-
-
-def test_act_records_a_retire_before_it_runs_and_reports_a_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
-    monkeypatch.setattr(retire, "gather", lambda *a, **k: facts(assigned=config.RUN))
     seen = []
 
     def run(argv, timeout, cwd=None):
         seen.append(set(retire.load_records(tmp_path / retire.RECORD)))
         return done(code=1, stderr="refused")
 
-    args = retire.parse_args(["retire", "geo", "--yes"])
-    assert retire.act(args, tmp_path, run) == 1
+    failed = retire.retire("geo", Path("/ws/geo"), "acme", run, lambda _l: None, tmp_path)
+    assert failed == "archive acme/geo on GitHub (stops Dependabot): exit 1 -- refused"
     assert seen == [{"geo"}]
-    assert "exit 1 -- refused" in (tmp_path / "a.log").read_text(encoding="utf-8")
 
 
-def test_act_dry_run_changes_nothing(tmp_path, monkeypatch):
-    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
-    monkeypatch.setattr(retire, "gather", lambda *a, **k: facts())
+def test_retire_and_restore_refuse_devkit(tmp_path):
+    own = retire.sweep.source_checkout(retire.REPO_ROOT).name
 
     def run(*_a, **_k):
-        raise AssertionError("a dry run runs nothing")
+        raise AssertionError("a refusal runs nothing")
 
-    args = retire.parse_args(["retire", "geo", "--dry-run"])
-    assert retire.act(args, tmp_path, run) == 0
+    assert "cannot be retired" in retire.retire(own, tmp_path, "acme", run, print, tmp_path)
+    assert "cannot be retired" in retire.restore(own, tmp_path, run, print, tmp_path)
+
+
+def test_a_restore_that_finished_drops_its_record(tmp_path, monkeypatch):
+    retire.save_records(tmp_path / retire.RECORD, {"geo": {"collector": "stop"}})
+    monkeypatch.setattr(
+        retire, "gather", lambda *a, **k: facts(record={"collector": "stop"})
+    )
+    assert retire.restore("geo", Path("/ws/geo"), lambda *a, **k: done(), print, tmp_path) == ""
     assert retire.load_records(tmp_path / retire.RECORD) == {}
 
 
-def test_main_lists_from_the_machines_home_and_reports_an_os_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(retire, "ARTIFACT", tmp_path / "a.log")
-    monkeypatch.setattr(retire.config, "home", lambda root: tmp_path)
-    assert retire.main(["list"]) == 0
-
-    def broken(*_a, **_k):
-        raise OSError("disk gone")
-
-    monkeypatch.setattr(retire, "gather", broken)
-    assert retire.main(["retire", "geo", "--yes"]) == 1
-    assert "disk gone" in (tmp_path / "a.log").read_text(encoding="utf-8")
+def test_a_failed_restore_keeps_its_record_for_the_next_try(tmp_path, monkeypatch):
+    record = {"collector": None, "services": ["db"]}
+    retire.save_records(tmp_path / retire.RECORD, {"geo": record})
+    monkeypatch.setattr(retire, "gather", lambda *a, **k: facts(record=record))
+    failed = retire.restore(
+        "geo", Path("/ws/geo"), lambda *a, **k: done(code=1), lambda _l: None, tmp_path
+    )
+    assert failed == "start what was running: exit 1"
+    assert "geo" in retire.load_records(tmp_path / retire.RECORD)

@@ -102,10 +102,44 @@ def test_the_repo_listing_is_read_from_gh_json():
 
     def runner(argv):
         calls.append(argv)
-        return done('[{"name": "beta"}, {"name": "alpha"}]')
+        return done('[{"name": "beta", "isArchived": true}, {"name": "alpha"}]')
 
-    assert github_repos(runner) == ["alpha", "beta"]
-    assert "--no-archived" in calls[0]
+    assert github_repos(runner) == (["alpha", "beta"], frozenset({"beta"}))
+    assert "--no-archived" not in calls[0], "a retired project's repo is archived"
+    assert "name,isArchived" in calls[0]
+
+
+def test_an_archived_repo_is_offered_only_when_registered_or_on_disk():
+    """A retired project keeps its folder, so its row is there to plug back; a repo
+    archived long ago and never cloned here is not offered at all."""
+    found = {
+        c.name: c
+        for c in inventory(
+            REGISTRY,
+            ["alpha", "beta", "retired"],
+            ["alpha", "beta", "retired", "ancient"],
+            archived=frozenset({"retired", "ancient"}),
+        )
+    }
+    assert "ancient" not in found
+    assert found["retired"].archived and found["retired"].on_github
+    assert found["retired"].where == "folder + repo (archived)"
+    assert not found["alpha"].archived
+
+
+def test_plugging_an_archived_repo_unarchives_it_and_never_creates_one():
+    candidates = inventory(
+        REGISTRY,
+        ["alpha", "beta", "r"],
+        ["r"],
+        git_dirs=frozenset({"r"}),
+        archived=frozenset({"r"}),
+    )
+    (step,) = plan(candidates, {"alpha", "beta", "r"})
+    assert step == Step(plug_projects.PLUG, "r", unarchive=True)
+    assert "unarchive the GitHub repo" in describe(step)
+    assert "CREATE" not in describe(step)
+    assert "unarchives acme/r" in toggle_detail(candidates[-1], "acme")
 
 
 def test_a_failed_repo_listing_raises_rather_than_returning_nothing():
@@ -866,6 +900,7 @@ def test_the_json_listing_carries_every_source(listed, capsys):
         "on_github": True,
         "is_git": False,
         "harnessed": False,
+        "archived": False,
         "where": "repo only",
     }
 
@@ -901,6 +936,7 @@ def ticking(listed, monkeypatch):
     monkeypatch.setattr(plug_projects.sweep, "git_for", lambda root: lambda *a, **k: done("main\n"))
     monkeypatch.setattr(plug_projects.task_branch, "detect_default_branch", lambda git: "main")
     monkeypatch.setattr(plug_projects, "unplug_hazards", lambda *a, **kwargs: ())
+    monkeypatch.setattr(plug_projects.project_retire, "is_retired", lambda name: False)
     applied: list = []
     monkeypatch.setattr(plug_projects, "_apply", lambda steps, owner, out: applied.extend(steps))
     return applied
@@ -972,7 +1008,20 @@ def test_ticking_a_project_registered_elsewhere_clones_it_here(listed, ticking, 
 def test_unplugging_one_project_does_not_clone_the_others_absent_here(listed, ticking):
     listed[:] = inventory(REGISTRY, ["alpha"], ["alpha", "beta"])
     assert main(["--unplug", "alpha", "--yes"]) == 0
+    assert ticking == [Step(plug_projects.UNPLUG, "alpha", local=True)]
+
+
+def test_unplugging_by_name_is_the_whole_retirement(ticking, capsys):
+    """The flag retires it here and archives the repo; the tick stays registry-only."""
+    assert main(["--unplug", "alpha", "--yes"]) == 0
+    assert ticking == [Step(plug_projects.UNPLUG, "alpha", local=True)]
+    assert "archive its GitHub repo" in capsys.readouterr().out
+
+
+def test_a_tick_still_unplugs_the_registry_alone(ticking, capsys):
+    assert main(["--picks", "alpha", "--yes"]) == 0
     assert ticking == [Step(plug_projects.UNPLUG, "alpha")]
+    assert "nothing on disk is touched" in capsys.readouterr().out
 
 
 def test_plugging_a_project_registered_elsewhere_by_name_clones_it_here(listed, ticking):
@@ -1016,3 +1065,99 @@ def test_escaping_the_quick_pick_costs_a_line_even_where_the_gate_would_refuse(
     monkeypatch.setattr(plug_projects, "edit_verdict", lambda **kwargs: "a box may not publish")
     assert main(["--picks", "${input:plugSelection}", "--yes"]) == 0
     assert "nothing was picked" in capsys.readouterr().out
+
+
+# --- this PC's half of a retire or a restore ---------------------------------
+
+
+def _halves(steps, candidates, **kwargs):
+    named = {"plug": [], "unplug": []} | kwargs
+    return plug_projects.with_local_halves(steps, candidates, **named)
+
+
+def test_no_names_means_no_local_halves():
+    """The quick-pick and the terminal loop name nothing, and their rows promise the
+    registry alone."""
+    steps = [Step(plug_projects.UNPLUG, "alpha")]
+    assert _halves(steps, inventory(REGISTRY, ["alpha"], ["alpha"])) == steps
+
+
+def test_a_second_pc_retires_a_project_already_out_of_the_registry():
+    candidates = inventory('{"folders": []}', ["geo"], ["geo"])
+    assert _halves([], candidates, unplug=["geo", "geo"]) == [
+        Step(plug_projects.RETIRE_HERE, "geo", local=True)
+    ]
+    assert "not in the registry" in describe(Step(plug_projects.RETIRE_HERE, "geo"))
+
+
+def test_a_name_not_on_disk_here_has_no_local_half_to_run():
+    candidates = inventory('{"folders": []}', [], ["geo"])
+    assert _halves([], candidates, unplug=["geo"]) == []
+
+
+def test_a_plug_only_restores_what_was_retired_or_archived():
+    """A project plugged for the first time has nothing of this PC's to put back."""
+    candidates = inventory('{"folders": []}', ["new"], ["new"], git_dirs=frozenset({"new"}))
+    steps = plan(candidates, {"new"})
+    assert _halves(steps, candidates, plug=["new"]) == steps
+    assert _halves(steps, candidates, plug=["new"], retired=frozenset({"new"})) == [
+        Step(plug_projects.PLUG, "new", local=True)
+    ]
+
+
+def test_a_project_plugged_back_elsewhere_is_restored_here():
+    candidates = inventory(REGISTRY, ["alpha"], ["alpha"], archived=frozenset({"alpha"}))
+    (step,) = _halves([], candidates, plug=["alpha"])
+    assert step == Step(plug_projects.RESTORE_HERE, "alpha", unarchive=True, local=True)
+    assert "unarchive its GitHub repo" in describe(step)
+    assert _halves([], inventory(REGISTRY, ["alpha"], ["alpha"]), plug=["alpha"]) == []
+
+
+def test_a_local_unplug_and_plug_say_what_they_will_do():
+    assert "registry, then stop" in describe(Step(plug_projects.UNPLUG, "a", local=True))
+    assert "put back what this PC retired" in describe(Step(plug_projects.PLUG, "a", local=True))
+    clone = describe(Step(plug_projects.CLONE, "a", clone=True, unarchive=True, local=True))
+    assert "unarchive, clone" in clone and "put back" in clone
+
+
+def test_registry_notes_skip_a_run_that_only_acted_here():
+    assert plug_projects.after_apply_notes([Step(plug_projects.RETIRE_HERE, "a")]) == []
+
+
+def test_unarchiving_calls_gh_and_a_refusal_raises():
+    calls = []
+    plug_projects.unarchive_repo("acme", "geo", lambda argv: calls.append(argv) or done())
+    assert calls == [["gh", "repo", "unarchive", "acme/geo", "--yes"]]
+    with pytest.raises(PlugError, match="could not unarchive"):
+        plug_projects.unarchive_repo("acme", "geo", lambda argv: done(code=1, stderr="no"))
+
+
+def test_local_halves_retire_after_an_unplug_and_restore_after_a_plug(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        plug_projects.project_retire,
+        "retire",
+        lambda name, checkout, owner, run, out: seen.append(("retire", name, owner)) or "",
+    )
+    monkeypatch.setattr(
+        plug_projects.project_retire,
+        "restore",
+        lambda name, checkout, run, out: seen.append(("restore", name)) or "",
+    )
+    steps = [
+        Step(plug_projects.UNPLUG, "a", local=True),
+        Step(plug_projects.UNPLUG, "b"),
+        Step(plug_projects.RESTORE_HERE, "c", local=True),
+    ]
+    plug_projects.local_halves(steps, "acme", out=lambda _line: None)
+    assert seen == [("retire", "a", "acme"), ("restore", "c")]
+
+
+def test_a_failed_local_half_raises_naming_the_project(monkeypatch):
+    monkeypatch.setattr(
+        plug_projects.project_retire, "retire", lambda *a, **k: "remove its containers: exit 1"
+    )
+    with pytest.raises(PlugError, match="a: remove its containers: exit 1"):
+        plug_projects.local_halves(
+            [Step(plug_projects.RETIRE_HERE, "a", local=True)], "acme", out=lambda _line: None
+        )
