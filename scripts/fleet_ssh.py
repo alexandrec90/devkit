@@ -20,15 +20,17 @@ is, and each PC configures itself from what the others said:
 - **The keys.** Each peer's key in the file this PC's sshd reads for its login:
   `administrators_authorized_keys` under `ProgramData\\ssh` for an administrator (Windows
   OpenSSH's default `Match Group administrators`), else `~/.ssh/authorized_keys`. Keys are
-  added, never removed. The administrators file is writable only elevated, and the
-  elevated worker cannot carry it: a request there is the name of an empty file, by
-  design (`elevated_worker.py`), and a key is content. So an unelevated run files the
-  step as a person's (`PERSON_STEP`) with the exact command, `fleet.py authorize` from an
-  administrator shell, which also leaves `RECEIPT` saying which keys it saw -- the only
-  way an unelevated run can know, since it cannot read that file either.
+  added, never removed. The administrators file is writable only elevated, so for it
+  `join` asks the elevated worker for `fleet-authorize` by name (`elevated_request`) and
+  writes nothing itself: the worker fetches the records from devkit's origin, admits a key
+  only for a host Tailscale lists at the address its record claims, appends, and leaves
+  `elevated_request.FLEET_SEEN` saying what the file holds, since an unelevated run
+  cannot read that file to see its request was met. `elevated_worker.py` states what that
+  trusts. A PC with no worker gets the one person's step there is, to install it
+  (`fix_elevated.py`), and nothing else is ever a person's.
 
-`join` does all three, `authorize` the third alone; `devkit-after-merge` runs `join`
-every cycle on every PC (`scheduled`). A PC with no key gets one (`ssh-keygen -t ed25519`).
+`join` does all three; `devkit-after-merge` runs it every cycle on every PC
+(`scheduled`). A PC with no key gets one (`ssh-keygen -t ed25519`).
 
 `diagnose` turns ssh's refusal into the reason in words: no published record (wrong
 user), a record but no config entry here, a key the peer has not authorized, sshd not
@@ -52,6 +54,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collector_handoff as handoff
+import elevated_request
 import job_claims
 
 Runner = Callable[[Sequence[str], int], tuple[int, str]]
@@ -65,14 +68,7 @@ KEY_NAME = "id_ed25519"
 # The well-known SID of BUILTIN\Administrators, listed by `whoami /groups` for a member
 # even in an unelevated token, where it is "used for deny only".
 ADMINS_SID = "S-1-5-32-544"
-SYSTEM_SID = "S-1-5-18"
 ADMIN_KEYS = "administrators_authorized_keys"
-# Under the devkit checkout: which keys the last elevated `authorize` saw in the
-# administrators file, for the unelevated runs that cannot read it.
-RECEIPT = Path("logs") / "fleet-authorized.json"
-# `harness_triage.PERSON_STEP`, spelled rather than imported as `fix_reports` spells it; a
-# test holds the two equal. A finding carrying it awaits a person, not a fixer.
-PERSON_STEP = "a person's step:"
 WINDOWS = sys.platform == "win32"
 TIMEOUT = 30
 # `devkit-after-merge` runs `join` under pythonw.exe: see `scripts/windowless-jobs.md`.
@@ -447,19 +443,6 @@ def with_keys(text: str, peers: Iterable[Record]) -> tuple[str, list[str]]:
     return head + eol.join(added_lines) + eol, added
 
 
-def admin_command(devkit_dir: Path) -> str:
-    return f'python "{devkit_dir / "scripts" / "fleet.py"}" authorize'
-
-
-def step_line(peer: str, host: str, path: Path, devkit_dir: Path) -> str:
-    """The person's step for one key, stable across runs: no count, no date."""
-    return (
-        f"{peer}'s SSH key is not authorized on {host} ({path.name}), so fleet cannot reach "
-        f"{host} from {peer} -- {PERSON_STEP} from an administrator shell on {host}, run "
-        f"`{admin_command(devkit_dir)}`"
-    )
-
-
 def _read(path: Path) -> str | None:
     """The file's text, "" when it does not exist, None when it cannot be read."""
     try:
@@ -470,43 +453,62 @@ def _read(path: Path) -> str | None:
         return None
 
 
-def read_receipt(devkit_dir: Path) -> frozenset[str]:
+@dataclass(frozen=True)
+class Seen:
+    """What the elevated worker last saw (`elevated_request.FLEET_SEEN`): the keys the
+    administrators file holds, and each record it refused, `{host: (key, address)}`."""
+
+    keys: frozenset[str] = frozenset()
+    refused: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+
+
+def parse_seen(text: str) -> Seen:
+    """The worker's receipt; an empty one for anything that is not its shape."""
     try:
-        raw = json.loads((devkit_dir / RECEIPT).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return frozenset()
-    keys = raw.get("keys") if isinstance(raw, dict) else None
-    return frozenset(k for k in keys if isinstance(k, str)) if isinstance(keys, list) else frozenset()
+        raw = json.loads(text)
+    except ValueError:
+        return Seen()
+    if not isinstance(raw, dict):
+        return Seen()
+    keys = raw.get("keys") if isinstance(raw.get("keys"), list) else []
+    refused = raw.get("refused") if isinstance(raw.get("refused"), dict) else {}
+    return Seen(
+        frozenset(k for k in keys if isinstance(k, str)),
+        {
+            host: (str(entry.get("key", "")), str(entry.get("address", "")))
+            for host, entry in refused.items()
+            if isinstance(entry, dict)
+        },
+    )
 
 
-def write_receipt(devkit_dir: Path, path: Path, text: str) -> None:
-    target = devkit_dir / RECEIPT
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"file": str(path), "keys": sorted(present(text))}
-    target.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
+def read_seen(path: str = elevated_request.FLEET_SEEN) -> Seen:
+    return parse_seen(_read(Path(path)) or "")
+
+
+def owed_to_worker(peers: Iterable[Record], text: str | None, seen: Seen) -> list[str]:
+    """The peers whose key the administrators file still lacks, by host. Read off the file
+    when this run can read it, else off the worker's receipt. A record the worker refused
+    is not asked about again until it changes: asking would only be refused again."""
+    have = present(text) if text is not None else seen.keys
+    owed = []
+    for peer in sorted(peers, key=lambda r: r.host):
+        if key_material(peer.key) in have:
+            continue
+        if seen.refused.get(peer.host) == (peer.key, peer.address):
+            continue
+        owed.append(peer.host)
+    return owed
 
 
 @dataclass
 class Joined:
-    """What a `join` or `authorize` did: lines to print, and person's steps by peer."""
+    """What a `join` did, as lines to print."""
 
     lines: list[str] = field(default_factory=list)
-    steps: dict[str, str] = field(default_factory=dict)
 
 
-def secure_admin_file(path: Path, run: Runner) -> str:
-    """Give a new administrators file the ACL sshd insists on, or say it could not."""
-    argv = [
-        "icacls",
-        str(path),
-        "/inheritance:r",
-        "/grant",
-        f"*{ADMINS_SID}:F",
-        "/grant",
-        f"*{SYSTEM_SID}:F",
-    ]
-    code, out = run(argv, TIMEOUT)
-    return "" if code == 0 else f"icacls refused {path}: {out.strip()[:120]}"
+Ask = Callable[..., str]
 
 
 def authorize_peers(
@@ -516,8 +518,11 @@ def authorize_peers(
     run: Runner = spawn,
     home: Path | None = None,
     programdata: Path | None = None,
+    ask: Ask = elevated_request.request,
+    seen: Callable[[], Seen] = read_seen,
 ) -> Joined:
-    """Add every peer's key to the file this PC's sshd reads, and say what is left."""
+    """Every peer's key into the file this PC's sshd reads: written here for the user's own
+    file, asked of the elevated worker for the administrators one."""
     joined = Joined()
     if not peers:
         return joined
@@ -525,32 +530,22 @@ def authorize_peers(
     programdata = program_data() if programdata is None else programdata
     admin = is_admin(run)
     path = authorized_keys_path(admin, _read(programdata / "ssh" / "sshd_config"), home, programdata)
-    shared = path.name == ADMIN_KEYS
     text = _read(path)
-    if text is None:
-        # Unreadable, which is the administrators file to an unelevated run.
-        seen = read_receipt(devkit_dir)
-        for peer in peers:
-            if key_material(peer.key) not in seen:
-                joined.steps[peer.host] = step_line(peer.host, here, path, devkit_dir)
+    if path.name == ADMIN_KEYS:
+        if owed := owed_to_worker(peers, text, seen()):
+            said = ask(elevated_request.FLEET_AUTHORIZE, checkout=devkit_dir)
+            joined.lines.append(f"{', '.join(owed)} not yet in {ADMIN_KEYS}: {said}")
         return joined
+    if text is None:
+        return Joined([f"could not read {path}"])
     merged, added = with_keys(text, peers)
-    if shared:
-        write_receipt(devkit_dir, path, text)
     if not added:
         return joined
-    existed = path.exists()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(merged.encode("utf-8"))
-    except OSError:
-        for host in added:
-            joined.steps[host] = step_line(host, here, path, devkit_dir)
-        return joined
-    if shared and not existed and (why := secure_admin_file(path, run)):
-        joined.lines.append(why)
-    if shared:
-        write_receipt(devkit_dir, path, merged)
+    except OSError as exc:
+        return Joined([f"could not write {path}: {exc}"])
     joined.lines.append(f"authorized {', '.join(added)} in {path}")
     return joined
 
@@ -586,8 +581,10 @@ def join(
     fetch: bool = True,
     host: str = "",
     programdata: Path | None = None,
+    **asking: object,
 ) -> Joined:
-    """Publish this PC, write every peer into `~/.ssh/config`, authorize their keys."""
+    """Publish this PC, write every peer into `~/.ssh/config`, authorize their keys.
+    `asking` reaches `authorize_peers` (`ask`, `seen`), for a test's worker."""
     home = Path.home() if home is None else home
     host = host or handoff.this_host()
     published, why = read_published(git, fetch)
@@ -598,21 +595,8 @@ def join(
         joined.lines.append(said)
     peers = [r for h, r in records_of(published).items() if h != host]
     joined.lines += write_config(peers, host, home)
-    keys = authorize_peers(peers, host, devkit_dir, run, home, programdata)
-    joined.lines += keys.lines
-    joined.steps.update(keys.steps)
+    joined.lines += authorize_peers(peers, host, devkit_dir, run, home, programdata, **asking).lines
     return joined
-
-
-def authorize(devkit_dir: Path, git: Git, run: Runner = spawn, host: str = "") -> Joined:
-    """The key half of `join`, from the records the last fetch left: what an administrator
-    runs, so it pushes and fetches nothing."""
-    host = host or handoff.this_host()
-    published, _ = read_published(git, fetch=False)
-    peers = [r for h, r in records_of(published).items() if h != host]
-    if not peers:
-        return Joined(["no peer has published a record yet; nothing to authorize"])
-    return authorize_peers(peers, host, devkit_dir, run)
 
 
 def scheduled(devkit_dir: Path, git: Git) -> Joined:
@@ -656,8 +640,8 @@ def diagnose(said: str, host: str, facts: Known) -> str:
             )
         return (
             f"key not authorized: {host} refuses this PC's key for {record.user} -- its own "
-            f"devkit pass adds it, or for an administrator login {PERSON_STEP} from an "
-            f"administrator shell on {host}, run `python scripts/fleet.py authorize`"
+            "devkit pass adds it, through its elevated worker for an administrator login; "
+            f"a red `fleet-authorize` result on {host} says why it has not"
         )
     if "connection refused" in text:
         return (

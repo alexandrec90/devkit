@@ -6,8 +6,9 @@ to another machine, but it sees one machine and has to be typed on the one that 
 This is the layer above that: it asks every PC on the tailnet what it has free and what it
 runs, with no list of machines to maintain. Adding a PC means joining the tailnet and
 running OpenSSH Server: each PC publishes its login, key and address and configures itself
-from the others' (`fleet_ssh.py`, which `devkit-after-merge` runs every cycle), so the one
-step left to a person is an administrator login's `authorize`, which the pass names.
+from the others' (`fleet_ssh.py`, which `devkit-after-merge` runs every cycle). An
+administrator login's keys are added by the elevated worker (`fleet-authorize`), so
+nothing is left to a person but installing that worker, once per PC.
 
     fleet.py                            # every PC: memory, collectors, what is wrong
     fleet.py move PROJECT --to HOST     # from any PC, whichever one runs it
@@ -15,7 +16,6 @@ step left to a person is an administrator login's `authorize`, which the pass na
     fleet.py rebalance --apply          # make that one move
     fleet.py probe                      # this PC as JSON: what the others read over SSH
     fleet.py join                       # publish this PC for SSH, configure the others
-    fleet.py authorize                  # from an administrator shell: authorize peers' keys
 
 A PC that does not answer says why in words (`fleet_ssh.diagnose`): no published login,
 no config entry here, its key not authorized there, sshd not listening, or offline.
@@ -473,17 +473,15 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     balancing = verbs.add_parser("rebalance", help="the move that relieves the shortest machine")
     balancing.add_argument("--apply", action="store_true", help="make the move")
     verbs.add_parser("join", help="publish this PC for SSH and configure every peer here")
-    verbs.add_parser("authorize", help="add peers' keys to sshd's file (administrator shell)")
     return parser.parse_args(argv)
 
 
 def report(joined: fleet_ssh.Joined) -> int:
-    """Print what a `join` or `authorize` did; 1 while a step is left to a person."""
+    """Print what a `join` did. Nothing it says is a failure of the command: a key still
+    owed is the elevated worker's, and its result reaches the pass."""
     for line in joined.lines:
         print(f"fleet: {line}")
-    for step in joined.steps.values():
-        print(f"fleet: {step}", file=sys.stderr)
-    return 1 if joined.steps else 0
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -491,11 +489,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.verb == "probe":
         print(json.dumps(probe()))
         return 0
-    if args.verb in ("join", "authorize"):
+    if args.verb == "join":
         devkit = config.home(REPO_ROOT)
-        git = sweep.git_for(devkit)
-        verb = fleet_ssh.join if args.verb == "join" else fleet_ssh.authorize
-        return report(verb(devkit, git))
+        return report(fleet_ssh.join(devkit, sweep.git_for(devkit)))
     collectors, errors = config.declared(config.home(REPO_ROOT))
     for error in errors:
         print(f"fleet: {error}", file=sys.stderr)

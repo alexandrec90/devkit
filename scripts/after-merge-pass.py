@@ -910,21 +910,17 @@ def _heartbeat(boards: dict[str, Board], cycle: Cycle) -> None:
             cycle.journal.add(Finding("after-merge-missed", board.project, detail))
 
 
-FLEET_KIND = "fleet-key-unauthorized"
-
-
 def _fleet(boards: dict[str, Board], cycle: Cycle) -> None:
     """This PC's SSH record published and its peers set up here (`fleet_ssh.join`), from
-    the refs this cycle's fetch of devkit brought. A peer's key only an administrator can
-    authorize is filed as that person's step, one finding per peer."""
+    the refs this cycle's fetch of devkit brought. It files nothing: a key only an
+    administrator may add is asked of the elevated worker, whose result reaches the pass
+    through `fix_elevated.py`, as does a PC with no worker to ask."""
     devkit = boards.get(DEVKIT)
     if devkit is None:
         return
     joined = cycle.seams.fleet(devkit.path, cycle.git(devkit))
     for line in joined.lines:
         print(f"fleet: {line}", flush=True)
-    for step in joined.steps.values():
-        cycle.journal.add(Finding(FLEET_KIND, DEVKIT, step))
 
 
 def _unread_clock(names: list[str], errors: dict[str, str], since: dict, cycle: Cycle) -> None:

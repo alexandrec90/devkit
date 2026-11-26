@@ -226,7 +226,10 @@ looks like the house pattern and is a privilege escalation here:
   before anything there runs, on a reinstall too, refusing rather than reusing.
 - **The name of an empty file is the whole interface** (`elevated_worker.py`): no content
   read, no argument, nothing from the environment, which here is the user's. It is
-  Windows-only, and elsewhere each part says so and exits 0.
+  Windows-only, and elsewhere each part says so and exits 0. A verb that needs data
+  fetches it itself from a source no unelevated process here controls: `fleet-authorize`
+  reads peers' keys from devkit's origin by a literal URL and admits one only where
+  Tailscale agrees, so its trust is push access to devkit plus a place on the tailnet.
 
 Every installer declares `TASK_NAME` and `ARTIFACT`, because `pythonw.exe` sends stdout
 nowhere and a job leaves exactly what it writes itself;
@@ -293,8 +296,9 @@ create** (`job_claims.py`, which says why each detail of the push is the way it 
 its commit unique per call, keep `FAILED` distinct from `LOST`, and keep `--no-verify`
 inside `_push`, which refuses anything outside `refs/devkit/`. The same push carries each
 PC's SSH record (`refs/devkit/fleet/<host>`, `fleet_ssh.py`), so adding a PC to the fleet
-is no hand-copied key: what a record may hold is refused rather than escaped, because it
-lands in `~/.ssh/config` and an authorized_keys file.
+is no hand-copied key and no person's step: what a record may hold is refused rather than
+escaped, because it lands in `~/.ssh/config` and an authorized_keys file, and an
+administrator's file is written only by the elevated worker's `fleet-authorize`.
 
 **No task may be silently lost, so a change here keeps these:**
 

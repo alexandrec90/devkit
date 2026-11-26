@@ -595,17 +595,14 @@ def test_a_pass_records_its_host_in_devkits_repo_at_most_daily(world):
     assert out(world.remote("devkit"), "rev-parse", ref) != first
 
 
-def test_a_pass_joins_the_fleet_from_devkits_checkout_and_files_a_person_s_step(world):
-    """The key only an administrator can authorize is that person's, not a fixer's."""
+def test_a_pass_joins_the_fleet_from_devkits_checkout_and_files_no_person_s_step(world, capsys):
+    """A key only an administrator may add is the elevated worker's, so nothing here is."""
     devkit_world(world)
-    step = f"pc-b's SSH key is not authorized on pc-a -- {triage.PERSON_STEP} run it"
-    world.joined = after_merge_pass.fleet_ssh.Joined(["wrote 1 peer(s)"], {"pc-b": step})
+    world.joined = after_merge_pass.fleet_ssh.Joined(["pc-b not yet in the file: requested"])
     world.run()
     assert world.joins == [world.ws / "devkit"]
-    items = [
-        i for i in triage.load(world.devkit) if after_merge_pass.FLEET_KIND in str(i.fields)
-    ]
-    assert items and all(triage.person_step(i) for i in items)
+    assert "fleet: pc-b not yet in the file: requested" in capsys.readouterr().out
+    assert not [line for line in world.findings() if triage.PERSON_STEP in line]
 
 
 def test_a_pass_with_no_devkit_checkout_joins_nothing(world):

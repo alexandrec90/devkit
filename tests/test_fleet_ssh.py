@@ -19,7 +19,6 @@ from support import REPO_ROOT
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import fleet_ssh as fs
-import harness_triage
 import sweep
 
 KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGl0c2Fua2V5"
@@ -82,10 +81,6 @@ def test_the_listing_reads_each_host_and_drops_a_record_naming_another():
     assert found[FAR] == fs.Published(FAR, "sha1", far)
     assert found[HERE] == fs.Published(HERE, "sha2", None)
     assert fs.records_of(found) == {FAR: far}
-
-
-def test_person_step_is_the_ledger_s_own_marker():
-    assert fs.PERSON_STEP == harness_triage.PERSON_STEP
 
 
 # --- publishing, against real git ----------------------------------------------------------
@@ -295,53 +290,100 @@ def test_with_keys_appends_what_is_missing_and_removes_nothing():
 
 def test_authorize_writes_a_user_s_own_file(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(fs, "WINDOWS", False)
-    joined = fs.authorize_peers([record()], HERE, tmp_path, no_spawn, tmp_path, tmp_path)
-    assert joined.steps == {}
+    joined = fs.authorize_peers(
+        [record()], HERE, tmp_path, no_spawn, tmp_path, tmp_path, ask=never_asked
+    )
+    assert joined.lines and "authorized" in joined.lines[0]
     keys = (tmp_path / ".ssh" / "authorized_keys").read_text(encoding="utf-8")
     assert KEY in keys
+
+
+def never_asked(verb: str, **_: object) -> str:
+    pytest.fail(f"asked the worker for {verb}")
+
+
+class Worker:
+    """What `elevated_request.request` was asked, answering as an installed worker does."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, Path]] = []
+
+    def __call__(self, verb: str, checkout: Path | None = None) -> str:
+        self.asked.append((verb, checkout))
+        return f"{verb} requested"
 
 
 def admin_here(monkeypatch) -> None:
     monkeypatch.setattr(fs, "is_admin", lambda run: True)
 
 
-def test_an_unreadable_administrators_file_is_a_person_s_step_unless_the_receipt_saw_it(
+def test_the_administrators_file_is_asked_of_the_worker_and_never_written(
+    tmp_path: Path, monkeypatch
+):
+    """No person's step: the worker adds the key, and this run writes nothing there."""
+    admin_here(monkeypatch)
+    worker = Worker()
+    devkit = tmp_path / "devkit"
+    joined = fs.authorize_peers(
+        [record()], HERE, devkit, no_spawn, tmp_path, tmp_path, ask=worker, seen=fs.Seen
+    )
+    assert worker.asked == [(fs.elevated_request.FLEET_AUTHORIZE, devkit)]
+    assert FAR in joined.lines[0] and "requested" in joined.lines[0]
+    assert "person" not in joined.lines[0]
+    assert not (tmp_path / "ssh" / fs.ADMIN_KEYS).exists()
+
+
+def test_an_unreadable_administrators_file_is_judged_by_the_worker_s_receipt(
     tmp_path: Path, monkeypatch
 ):
     admin_here(monkeypatch)
     monkeypatch.setattr(fs, "_read", lambda path: None if path.name == fs.ADMIN_KEYS else "")
-    devkit = tmp_path / "devkit"
-    joined = fs.authorize_peers([record()], HERE, devkit, no_spawn, tmp_path, tmp_path)
-    step = joined.steps[FAR]
-    assert harness_triage.PERSON_STEP in step and "authorize" in step and HERE in step
-    fs.write_receipt(devkit, tmp_path / fs.ADMIN_KEYS, f"{KEY}\n")
-    assert fs.authorize_peers([record()], HERE, devkit, no_spawn, tmp_path, tmp_path).steps == {}
+    joined = fs.authorize_peers(
+        [record()],
+        HERE,
+        tmp_path,
+        no_spawn,
+        tmp_path,
+        tmp_path,
+        ask=never_asked,
+        seen=lambda: fs.Seen(frozenset({KEY})),
+    )
+    assert joined.lines == []
 
 
-def test_an_elevated_authorize_creates_the_administrators_file_with_its_acl(
+def test_a_key_already_in_a_readable_administrators_file_asks_nothing(
     tmp_path: Path, monkeypatch
 ):
     admin_here(monkeypatch)
-    asked: list[Sequence[str]] = []
-    devkit = tmp_path / "devkit"
-
-    def run(argv: Sequence[str], timeout: int) -> tuple[int, str]:
-        asked.append(argv)
-        return 0, ""
-
-    joined = fs.authorize_peers([record()], HERE, devkit, run, tmp_path, tmp_path)
-    shared = tmp_path / "ssh" / fs.ADMIN_KEYS
-    assert KEY in shared.read_text(encoding="utf-8") and not joined.steps
-    assert asked[0][:3] == ["icacls", str(shared), "/inheritance:r"]
-    assert fs.read_receipt(devkit) == {KEY}
+    (tmp_path / "ssh").mkdir()
+    (tmp_path / "ssh" / fs.ADMIN_KEYS).write_text(f"{KEY} x\n", encoding="utf-8")
+    joined = fs.authorize_peers(
+        [record()], HERE, tmp_path, no_spawn, tmp_path, tmp_path, ask=never_asked, seen=fs.Seen
+    )
+    assert joined.lines == []
 
 
-def test_a_refused_write_is_a_person_s_step(tmp_path: Path, monkeypatch):
-    admin_here(monkeypatch)
-    blocked = tmp_path / "ssh"
-    blocked.write_text("a file where the folder should be", encoding="utf-8")
-    joined = fs.authorize_peers([record()], HERE, tmp_path, no_spawn, tmp_path, tmp_path)
-    assert FAR in joined.steps
+def test_a_record_the_worker_refused_is_asked_again_only_once_it_changes():
+    far = record()
+    refused = fs.Seen(refused={FAR: (far.key, far.address)})
+    assert fs.owed_to_worker([far], None, refused) == []
+    moved = record(address="100.64.0.9")
+    assert fs.owed_to_worker([moved], None, refused) == [FAR]
+    assert fs.owed_to_worker([far], None, fs.Seen()) == [FAR]
+
+
+def test_the_worker_s_receipt_is_read_as_it_writes_it():
+    text = json.dumps(
+        {
+            "keys": [KEY, 3],
+            "refused": {FAR: {"key": KEY, "address": "100.64.0.2", "why": "x"}, "bad": 1},
+        }
+    )
+    seen = fs.parse_seen(text)
+    assert seen.keys == {KEY}
+    assert seen.refused == {FAR: (KEY, "100.64.0.2")}
+    assert fs.parse_seen("not json") == fs.Seen()
+    assert fs.parse_seen("[]") == fs.Seen()
 
 
 def test_join_publishes_configures_and_authorizes(pcs, tmp_path: Path, monkeypatch):

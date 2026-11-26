@@ -561,32 +561,29 @@ def test_render_adds_what_is_wrong():
     assert fleet.render([machine(HERE, 8)], [collector()])[-1] == "problem: cheap runs nowhere"
 
 
-def test_report_prints_what_was_done_and_fails_while_a_person_s_step_is_left(capsys):
+def test_report_prints_what_was_done(capsys):
     assert fleet.report(fleet.fleet_ssh.Joined(["wrote 1 peer(s)"])) == 0
     assert "wrote 1 peer(s)" in capsys.readouterr().out
-    assert fleet.report(fleet.fleet_ssh.Joined([], {FAR: "a person's step: x"})) == 1
-    assert "a person's step: x" in capsys.readouterr().err
 
 
-def test_main_dispatches_join_and_authorize(monkeypatch: pytest.MonkeyPatch, here: Path):
-    ran: list[str] = []
+def test_main_dispatches_join(monkeypatch: pytest.MonkeyPatch, here: Path):
+    ran: list[Path] = []
     monkeypatch.setattr(
-        fleet.fleet_ssh, "join", lambda devkit, git: ran.append("join") or fleet.fleet_ssh.Joined()
-    )
-    monkeypatch.setattr(
-        fleet.fleet_ssh,
-        "authorize",
-        lambda devkit, git: ran.append("authorize") or fleet.fleet_ssh.Joined(),
+        fleet.fleet_ssh, "join", lambda devkit, git: ran.append(devkit) or fleet.fleet_ssh.Joined()
     )
     assert fleet.main(["join"]) == 0
-    assert fleet.main(["authorize"]) == 0
-    assert ran == ["join", "authorize"]
+    assert ran == [here]
+
+
+def test_there_is_no_verb_a_person_has_to_run_elevated():
+    """Keys for an administrator login are the elevated worker's (`fleet-authorize`)."""
+    with pytest.raises(SystemExit):
+        fleet.parse_args(["authorize"])
 
 
 def test_parse_args_reads_each_verb():
     assert fleet.parse_args([]).verb is None
     assert fleet.parse_args(["join"]).verb == "join"
-    assert fleet.parse_args(["authorize"]).verb == "authorize"
     assert fleet.parse_args(["rebalance", "--apply"]).apply is True
     moving = fleet.parse_args(["move", "cheap", "--to", FAR])
     assert (moving.project, moving.to) == ("cheap", FAR)
