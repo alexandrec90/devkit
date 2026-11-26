@@ -1509,9 +1509,7 @@ def test_the_registration_branch_carries_projects_toml_too(tmp_path, capsys, mon
     assert "workspace.jsonc and projects.toml registration" in out
 
 
-def test_a_registration_left_in_place_names_projects_toml_beside_it(
-    tmp_path, capsys, monkeypatch
-):
+def test_a_registration_left_in_place_names_projects_toml_beside_it(tmp_path, capsys, monkeypatch):
     canonical = _devkit_checkout(tmp_path / "devkit", ports=True, projects=True)
     checkout = canonical.parent
     subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", "-b", "agent/x-1126"])
@@ -1529,9 +1527,7 @@ def test_a_registration_left_in_place_names_projects_toml_beside_it(
     assert "commit devkit's workspace.jsonc, projects.toml and ports.toml on a branch" in out
 
 
-def test_a_hand_edit_already_in_projects_toml_is_never_carried_off(
-    tmp_path, capsys, monkeypatch
-):
+def test_a_hand_edit_already_in_projects_toml_is_never_carried_off(tmp_path, capsys, monkeypatch):
     canonical = _devkit_checkout(tmp_path / "devkit", projects=True)
     toml = canonical.parent / project_registry.REGISTRY_NAME
     toml.write_text(toml.read_text(encoding="utf-8") + "\n", encoding="utf-8", newline="\n")

@@ -91,9 +91,7 @@ def _commit_beside(canonical: Path, name: str, text: str) -> Path:
     path = canonical.parent / name
     path.write_text(text, encoding="utf-8", newline="\n")
     for args in (("add", name), ("commit", "--quiet", "-m", f"add {name}")):
-        subprocess.run(
-            ["git", "-C", str(canonical.parent), *args], check=True, capture_output=True
-        )
+        subprocess.run(["git", "-C", str(canonical.parent), *args], check=True, capture_output=True)
     return path
 
 
@@ -119,7 +117,7 @@ def test_a_file_the_same_edit_wrote_moves_onto_the_same_branch(tmp_path):
 def test_an_edit_of_the_sibling_alone_is_still_handed_off(tmp_path):
     canonical = checkout(tmp_path / "devkit")
     toml = _commit_beside(canonical, "projects.toml", 'projects = ["a"]\n')
-    toml.write_text('projects = []\n', encoding="utf-8", newline="\n")
+    toml.write_text("projects = []\n", encoding="utf-8", newline="\n")
 
     cut = canonical_handoff.hand_off(canonical, "x", "X\n", also=("projects.toml",))
 

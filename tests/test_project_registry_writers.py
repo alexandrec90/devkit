@@ -80,7 +80,7 @@ def test_a_name_goes_before_a_reference_checkout():
 
 
 def test_a_one_line_array_is_laid_out_one_name_per_line():
-    edited = pr.register_text('projects = []\n\n[settings]\n', "alpha")
+    edited = pr.register_text("projects = []\n\n[settings]\n", "alpha")
     assert edited == 'projects = [\n    "alpha",\n]\n\n[settings]\n'
     edited = pr.register_text('projects = ["alpha"]  # why\n', "beta")
     assert edited == 'projects = [  # why\n    "alpha",\n    "beta",\n]\n'
