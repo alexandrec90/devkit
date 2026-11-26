@@ -109,7 +109,12 @@ def test_a_first_retire_records_the_machine_as_it_stands():
     record = retire.merged_record(
         facts(assigned=config.RUN, running=("web", "db"), tasks=("t",)), "now"
     )
-    assert record == {"collector": "run", "services": ["db", "web"], "tasks": ["t"], "retired_at": "now"}
+    assert record == {
+        "collector": "run",
+        "services": ["db", "web"],
+        "tasks": ["t"],
+        "retired_at": "now",
+    }
 
 
 def test_a_second_retire_keeps_what_the_first_one_recorded():
@@ -187,8 +192,12 @@ def test_an_exported_task_is_kept_in_the_encoding_it_declares(tmp_path):
     xml = '<?xml version="1.0" encoding="UTF-16"?>\r\r\n<Task/>\r\r\n'
     target = tmp_path / "t.xml"
     step = Step("export", ("schtasks",), save_to=target)
-    assert retire.execute([step], lambda argv, timeout, cwd=None: done(xml), out=lambda _l: None) == ""
-    assert target.read_text(encoding="utf-16") == '<?xml version="1.0" encoding="UTF-16"?>\n<Task/>\n'
+    assert (
+        retire.execute([step], lambda argv, timeout, cwd=None: done(xml), out=lambda _l: None) == ""
+    )
+    assert (
+        target.read_text(encoding="utf-16") == '<?xml version="1.0" encoding="UTF-16"?>\n<Task/>\n'
+    )
 
 
 def test_running_services_reads_compose_and_none_means_docker_did_not_say(tmp_path):
@@ -198,7 +207,9 @@ def test_running_services_reads_compose_and_none_means_docker_did_not_say(tmp_pa
 
 def test_claimed_tasks_come_from_the_projects_manifest(tmp_path):
     assert retire.claimed_tasks(tmp_path) == ()
-    (tmp_path / ".devkit.toml").write_text('[schedule]\ntasks = ["Geo nightly"]\n', encoding="utf-8")
+    (tmp_path / ".devkit.toml").write_text(
+        '[schedule]\ntasks = ["Geo nightly"]\n', encoding="utf-8"
+    )
     assert retire.claimed_tasks(tmp_path) == ("Geo nightly",)
 
 

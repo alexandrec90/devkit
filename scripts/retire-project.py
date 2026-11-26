@@ -184,7 +184,9 @@ def retire_plan(facts: Facts, base: Path, *, force: bool = False) -> Plan:
     plan = Plan()
     if facts.registered:
         unplug = _py("plug-projects.py", "--unplug", facts.name, "--yes")
-        plan.steps.append(Step("unplug from the registry", unplug + (("--force",) if force else ())))
+        plan.steps.append(
+            Step("unplug from the registry", unplug + (("--force",) if force else ()))
+        )
     else:
         plan.notes.append("not in the registry -- that half is already done")
     if facts.collector is not None and facts.assigned != config.STOP:
@@ -194,11 +196,19 @@ def retire_plan(facts: Facts, base: Path, *, force: bool = False) -> Plan:
     for task in facts.tasks:
         saved = task_file(base, facts.name, task)
         plan.steps.append(
-            Step(f"export task {task}", tuple(devkit_schtasks.query_xml_argv(task)),
-                 timeout=QUICK_TIMEOUT, save_to=saved)
+            Step(
+                f"export task {task}",
+                tuple(devkit_schtasks.query_xml_argv(task)),
+                timeout=QUICK_TIMEOUT,
+                save_to=saved,
+            )
         )
         plan.steps.append(
-            Step(f"delete task {task}", tuple(devkit_schtasks.delete_argv(task)), timeout=QUICK_TIMEOUT)
+            Step(
+                f"delete task {task}",
+                tuple(devkit_schtasks.delete_argv(task)),
+                timeout=QUICK_TIMEOUT,
+            )
         )
     _plan_compose_down(facts, plan)
     return plan
@@ -214,8 +224,12 @@ def _plan_compose_down(facts: Facts, plan: Plan) -> None:
         )
         return
     plan.steps.append(
-        Step("remove its containers (volumes kept)", ("docker", "compose", "down"),
-             cwd=facts.checkout, timeout=COMPOSE_DOWN_TIMEOUT)
+        Step(
+            "remove its containers (volumes kept)",
+            ("docker", "compose", "down"),
+            cwd=facts.checkout,
+            timeout=COMPOSE_DOWN_TIMEOUT,
+        )
     )
 
 
@@ -237,14 +251,21 @@ def restore_plan(facts: Facts, base: Path) -> Plan:
     for task in record.get("tasks", []):
         saved = task_file(base, facts.name, task)
         plan.steps.append(
-            Step(f"register task {task}", tuple(devkit_schtasks.register_argv(task, saved)),
-                 timeout=QUICK_TIMEOUT)
+            Step(
+                f"register task {task}",
+                tuple(devkit_schtasks.register_argv(task, saved)),
+                timeout=QUICK_TIMEOUT,
+            )
         )
     services = _restart_services(facts, record)
     if services:
         plan.steps.append(
-            Step("start what was running", ("docker", "compose", "up", "-d", *services),
-                 cwd=facts.checkout, timeout=COMPOSE_UP_TIMEOUT)
+            Step(
+                "start what was running",
+                ("docker", "compose", "up", "-d", *services),
+                cwd=facts.checkout,
+                timeout=COMPOSE_UP_TIMEOUT,
+            )
         )
     _plan_collector_back(facts, record, plan)
     return plan
@@ -349,7 +370,9 @@ def execute(steps: Sequence[Step], run: Runner, out=print) -> str:
             out(f"    {line}")
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip().splitlines()
-            return f"{step.label}: exit {result.returncode}" + (f" -- {detail[-1]}" if detail else "")
+            return f"{step.label}: exit {result.returncode}" + (
+                f" -- {detail[-1]}" if detail else ""
+            )
         if step.save_to is not None:
             save_xml(result.stdout, step.save_to)
     return ""
@@ -418,7 +441,10 @@ def act(args: argparse.Namespace, base: Path, run: Runner) -> int:
     finish_record(args, facts, base, failed)
     if failed:
         print(f"ERROR   {failed}", file=sys.stderr)
-        print("        fix that and run the same command again; done steps are skipped", file=sys.stderr)
+        print(
+            "        fix that and run the same command again; done steps are skipped",
+            file=sys.stderr,
+        )
     write_artifact([failed] if failed else [])
     return 1 if failed else 0
 
@@ -442,7 +468,10 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="verb", required=True)
     sub.add_parser("list", help="what this machine has retired, and what it stopped")
-    for verb, text in (("retire", "unplug and stop it here"), ("restore", "plug and start it back")):
+    for verb, text in (
+        ("retire", "unplug and stop it here"),
+        ("restore", "plug and start it back"),
+    ):
         cmd = sub.add_parser(verb, help=text)
         cmd.add_argument("name")
         cmd.add_argument("--yes", action="store_true", help="skip the confirmation")
