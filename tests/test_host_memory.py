@@ -26,11 +26,22 @@ def test_a_session_needs_its_own_size_above_the_floor():
 
 
 def test_a_caller_may_ask_about_a_lower_floor():
-    lone = host_memory.LONE_FLOOR_MB
-    assert lone < host_memory.FLOOR_MB
-    assert host_memory.room_for_session(lone + host_memory.SESSION_MB, lone)
-    assert not host_memory.room_for_session(lone + host_memory.SESSION_MB - 1, lone)
-    assert not host_memory.room_for_session(lone + host_memory.SESSION_MB)
+    fix = host_memory.FIX_FLOOR_MB
+    assert fix < host_memory.FLOOR_MB
+    assert host_memory.room_for_session(fix + host_memory.SESSION_MB, fix)
+    assert not host_memory.room_for_session(fix + host_memory.SESSION_MB - 1, fix)
+    assert not host_memory.room_for_session(fix + host_memory.SESSION_MB)
+
+
+MB = 1024 * 1024
+
+
+def test_windows_room_is_the_lower_of_physical_and_commit():
+    """2026-11-25: 1.0 GB physical, 1.4 GB commit, a game running. Commit past its limit
+    fails an allocation outright; physical past its limit pages. Either can be lower."""
+    assert host_memory.windows_room(1022 * MB, 1459 * MB) == 1022
+    assert host_memory.windows_room(6000 * MB, 700 * MB) == 700, "a full commit charge"
+    assert host_memory.windows_room(0, 4000 * MB) == 0
 
 
 def test_a_probe_that_failed_guards_nothing():
@@ -43,8 +54,8 @@ def test_this_machine_answers_with_a_plausible_figure():
     assert free is None or 0 < free < 10_000_000
 
 
-def test_the_floor_is_one_value_however_many_jobs_ask():
-    assert fix_send.MEMORY_FLOOR_MB == host_memory.FLOOR_MB
+def test_the_fix_pass_floor_is_the_module_one():
+    assert fix_send.MEMORY_FLOOR_MB == host_memory.FIX_FLOOR_MB
 
 
 def test_a_probe_that_fails_reads_as_no_answer(monkeypatch, tmp_path):

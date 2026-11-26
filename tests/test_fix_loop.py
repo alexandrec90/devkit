@@ -837,7 +837,6 @@ def test_a_working_devkit_session_is_the_harness_busy(ctx, monkeypatch):
     )
     closed, journal = close(ctx)
     assert closed.harness_busy == str(path) and journal.findings == []
-    assert closed.fixing == [str(path)]
 
 
 def test_a_working_sweep_of_the_ledger_alone_is_the_harness_busy(ctx, monkeypatch):
@@ -869,7 +868,6 @@ def test_a_session_still_busy_after_its_intent_holds_its_tree_and_the_harness(ct
     (path / "logs" / "ship-intent.md").write_text("S\n", encoding="utf-8")
     closed, _ = close(ctx)
     assert closed.busy == {} and closed.harness_busy == "", "idle: finished, holds nothing"
-    assert closed.fixing == [], "a finished fixer leaves the next one alone"
     listed = [{"kind": "background", "state": "working", "cwd": str(path)}]
     monkeypatch.setattr(fix_loop, "session_listing", lambda: listed)
     closed, _ = close(ctx)
@@ -1838,6 +1836,79 @@ def test_a_recent_transcript_whose_session_the_listing_shows_gone_holds_nothing(
     monkeypatch.setattr(fix_loop, "session_listing", lambda: [elsewhere, here])
     closed, _ = close(ctx)
     assert closed.busy == {("carameli", "agent/x-0919"): str(path)}, "idle, but present"
+
+
+def _git(tree: Path, *argv: str) -> str:
+    who = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    done = subprocess.run(
+        ["git", *who, *argv], cwd=tree, capture_output=True, text=True, check=True
+    )
+    return done.stdout.strip()
+
+
+def _pushed_tree(path: Path, branch: str) -> None:
+    """`path` as `/land` leaves it: one commit on `branch`, origin's ref at that commit,
+    and `logs/` ignored, as every project ignores it."""
+    _git(path, "init", "-q", "-b", branch)
+    (path / ".gitignore").write_text("logs/\n", encoding="utf-8")
+    _git(path, "add", ".gitignore")
+    _git(path, "commit", "-q", "-m", "work")
+    _git(path, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
+
+
+def test_an_idle_session_over_a_clean_pushed_tree_holds_nothing(ctx, monkeypatch):
+    """d2-trader #32, 2026-11-25: `/land` told the person the pass would resolve the
+    conflict, and its idle session, still open in the PR's tree, held that tree as
+    "a session is working in" for hours. Compacting it restarted the hold."""
+    path = tree(
+        ctx,
+        monkeypatch,
+        sent=NOW - _dt.timedelta(minutes=20),
+        transcript_age=_dt.timedelta(minutes=10),
+    )
+    _pushed_tree(path, "agent/x-0919")
+    resident = fix_reports.transcript_dir(path) / "resident.jsonl"
+    resident.write_text(
+        f'{{"timestamp": "{(NOW - _dt.timedelta(minutes=2)).isoformat()}"}}\n', encoding="utf-8"
+    )
+    idle = {"kind": "interactive", "pid": 1, "cwd": str(path), "status": "idle"}
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [idle])
+    closed, _ = close(ctx)
+    assert closed.busy == {}, "idle, clean and pushed: nothing a fixer could race"
+
+    busy = {**idle, "status": "busy"}
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [busy])
+    closed, _ = close(ctx)
+    assert closed.busy == {("carameli", "agent/x-0919"): str(path)}, "busy is present"
+
+    monkeypatch.setattr(fix_loop, "session_listing", lambda: [idle])
+    (path / "edit.py").write_text("x = 1\n", encoding="utf-8")
+    closed, _ = close(ctx)
+    assert closed.busy == {("carameli", "agent/x-0919"): str(path)}, "uncommitted work"
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [],
+        [{"kind": "interactive", "pid": 1, "cwd": "elsewhere", "status": "idle"}],
+        [{"kind": "background", "cwd": "HERE", "state": "idle"}],
+    ],
+    ids=["listing-could-not-say", "nobody-listed-here", "listed-with-no-process"],
+)
+def test_left_nothing_needs_a_live_idle_session_listed_in_the_tree(tmp_path, rows):
+    _pushed_tree(tmp_path, "b")
+    rows = [{**row, "cwd": str(tmp_path)} if row["cwd"] == "HERE" else row for row in rows]
+    assert not fix_loop.left_nothing(rows, tmp_path, "b")
+
+
+def test_left_nothing_refuses_a_commit_origin_does_not_have(tmp_path):
+    _pushed_tree(tmp_path, "b")
+    row = {"kind": "interactive", "pid": 1, "cwd": str(tmp_path), "status": "idle"}
+    assert fix_loop.left_nothing([row], tmp_path, "b")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "later")
+    assert not fix_loop.left_nothing([row], tmp_path, "b"), "ahead of origin: unpushed work"
+    assert not fix_loop.left_nothing([row], tmp_path, "other"), "no origin ref for the branch"
 
 
 def test_the_pass_own_session_that_finished_does_not_hold_its_tree(ctx, monkeypatch):
