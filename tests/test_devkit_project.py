@@ -383,8 +383,13 @@ def test_the_generated_instructions_carry_no_vs_code_ui_conventions():
     claude = (support.REPO_ROOT / "templates" / "core" / "CLAUDE.md.tmpl").read_text(
         encoding="utf-8"
     )
-    for phrase in ("### VS Code tasks", '"type": "process"', '"close": false', "notify-wrap.py",
-                   "quick-pick"):
+    for phrase in (
+        "### VS Code tasks",
+        '"type": "process"',
+        '"close": false',
+        "notify-wrap.py",
+        "quick-pick",
+    ):
         assert phrase not in claude, phrase
 
 
