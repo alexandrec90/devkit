@@ -285,6 +285,10 @@ GIT_C = re.compile(r"\bgit\s(?:[^\n]*?\s)?-C\s+(\S+)")
 ASSIGNMENT = re.compile(r"\s*(?P<name>[A-Za-z_]\w*)=(?P<value>\"[^\"$`]*\"|'[^']*'|[^\s\"'$`]*)\s*")
 EXPANSION = re.compile(r"\$(?:(?P<bare>[A-Za-z_]\w*)|\{(?P<braced>[A-Za-z_]\w*)\})")
 ROOTED = re.compile(r"[\\/~$]|\w:")
+# Every spelling of a step into a directory, lower-cased: PowerShell's own and its aliases
+# beside the shell's, flags such as `-LiteralPath` skipped (6c15f5c6, a probe worktree under
+# the job's `tmp/` entered with `Set-Location`).
+CHANGES_DIRECTORY = frozenset({"cd", "pushd", "chdir", "set-location", "sl", "push-location"})
 # What `taken_back` reads. A WIP commit is how a session carries a dirty tree over a rebase,
 # since the stash stack is shared: undone in the call that made it, it reached nothing a
 # hook guards (ded3ca52). `GIT_UNDO` is a `reset` to some steps behind `HEAD`.
@@ -516,7 +520,10 @@ LEFT_TO_DO = re.compile(
 TODO_EXCUSED = re.compile(
     r"\bnothing (?:for you|you need|to do)|\bno need\b|"
     r"\b(?:don't|do not|won't|will not|never) (?:need|have) to\b|"
-    r"\bif you (?:want|would like|'d like|prefer|need)\b|/ship\b|\byou (?:can|could)\b|\boptional",
+    r"\bif you (?:want|would like|'d like|prefer|need)\b|/ship\b|\byou (?:can|could)\b|\boptional|"
+    # The conditional: what a plan not yet built would cost the person, laid out for them to
+    # choose (c1292059). It becomes a job only once the plan is built, and is filed then.
+    r"\bwould (?:\w+ )?(?:need|have|require|mean)\b|\byou'd (?:\w+ )?(?:need|have) to\b",
     re.I,
 )
 # Someone else's words being reported: a session sent at a `left-to-do` row says what the
@@ -758,8 +765,9 @@ def scratch_only(command: str) -> bool:
         words = [word.strip("'\"") for word in part.split()]
         if bound := ASSIGNMENT.fullmatch(part):
             names[bound["name"]] = bound["value"].strip("'\"")
-        elif words and words[0] in ("cd", "pushd"):
-            where = entered(where, expanded(words[1]) if len(words) > 1 else "")
+        elif words and words[0].lower() in CHANGES_DIRECTORY:
+            places = [word for word in words[1:] if not word.startswith("-")]
+            where = entered(where, expanded(places[0]) if places else "")
         elif NO_VERIFY.search(part):
             target = GIT_C.search(part)
             at = entered(where, expanded(target[1].strip("'\""))) if target else where
