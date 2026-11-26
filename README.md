@@ -1764,27 +1764,30 @@ land in `logs/plug-projects.log`, overwritten per run and emptied by a clean one
 
 ### Retiring a project, and restoring it
 
-Unplugging is the registry and nothing else, so a retired project's collector, its
-claimed scheduled tasks and its compose containers carry on. `scripts/retire-project.py`
-is the whole retirement on this machine, and its reverse:
+A tick in the picker is the registry and nothing else, so a project unticked there keeps
+its collector, its claimed scheduled tasks, its compose containers, and a GitHub repo
+that Dependabot keeps opening PRs on. Naming the project on the command line does the
+whole retirement on this machine, and its reverse:
 
 ```bash
-python scripts/retire-project.py retire geo --dry-run   # the plan, nothing run
-python scripts/retire-project.py retire geo             # unplug, stop, export, down
-python scripts/retire-project.py restore geo            # plug (clone), put it all back
-python scripts/retire-project.py list                   # what this PC retired, and how
+python scripts/plug-projects.py --unplug geo   # unplug, stop, export, down, archive the repo
+python scripts/plug-projects.py --plug geo     # unarchive, plug (clone), put it all back
 ```
 
-`retire` unplugs first, through `plug-projects.py` and its refusals, so a live box or
-unpushed work stops it before anything else has moved. Then it runs `collectors.py
+`--unplug` edits the registry first, behind its refusals, so a live box or unpushed work
+stops it before anything else has moved. Then `project_retire` runs `collectors.py
 stop-here`, exports each task the project's `[schedule] tasks` claims to XML and deletes
-it, and runs `docker compose down` in the checkout. It never passes `-v`, so volumes and
-images survive. What it found running is recorded in devkit's
-`logs/retired-projects.json`, so `restore` puts back exactly that: the same services, the
+it, runs `docker compose down` in the checkout, and archives the GitHub repo last. It
+never passes `-v`, so volumes and images survive. The archive is what stops Dependabot:
+an archived repo is read-only, and the fix pass already skips an unregistered project.
+What it found running is recorded in devkit's `logs/retired-projects.json`, so `--plug`
+puts back exactly that: the repo unarchived before the clone, the same services, the
 tasks from their XML, and the collector as it was (`run-here`, or `release` for one that
-was hands-off). The registry is global and everything else is per machine, so on a second
-PC that ran the project, run `retire` there too; the registry step is skipped as done.
-Failures land in `logs/retire-project.log`.
+was hands-off). The registry and the repo are global and everything else is per machine,
+so on a second PC that ran the project, run `--unplug` there too; the registry and
+archive steps are skipped as done. A retired project's archived repo is listed only while
+its folder is on this PC, so after deleting the folder, `gh repo unarchive` it before
+plugging it back. Failures land in `logs/plug-projects.log`.
 
 ### Host ports: `ports.toml`
 

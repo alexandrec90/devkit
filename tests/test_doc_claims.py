@@ -388,8 +388,8 @@ ALLOWED_MISSING = {
     "repo to a second machine",
     "logs/reconcile.running.json": "the step a reconcile pass is in now, written by "
     "`scripts/reconcile_journal.py` and removed when the pass ends; under the ignored `logs/`",
-    "logs/retired-projects.json": "the per-machine record `scripts/retire-project.py "
-    "retire` writes into devkit's static checkout; under the ignored `logs/`",
+    "logs/retired-projects.json": "the per-machine record `scripts/plug-projects.py "
+    "--unplug` writes into devkit's static checkout; under the ignored `logs/`",
     "check-lock-markers.py": "a project-owned Stop tier devkit has no lockfiles for; "
     "its absence is an explicit skip, documented in test_repo_contract.py",
     "test_codex_hooks_contract.py": "carameli's, cited as the coupling the vendored "
