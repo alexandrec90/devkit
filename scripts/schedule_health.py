@@ -143,11 +143,14 @@ NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) |
 # running, and the second start it is refused is the one tray working.
 # `devkit-fix-trigger` is the ship task's shape again, and `devkit-local-e2e` the medium
 # tier's: a run lasts up to an hour a project on a half-hourly cadence.
+# `devkit-dashboards` is resident with a 15-minute repetition that exists only to restart
+# a gateway that died (`install-dashboards.py`), so every refused fire is it running.
 OVERLAP_EXPECTED = frozenset(
     {
         "devkit-ship",
         "devkit-medium-tier",
         "devkit-tray",
+        "devkit-dashboards",
         "devkit-fix-trigger",
         "devkit-local-e2e",
     }
@@ -211,6 +214,7 @@ ARTIFACTS: dict[str, str] = {
     "devkit-fix-trigger": "logs/scheduled-fix-trigger.log",
     "devkit-ship": "logs/ship-pass.log",
     "devkit-collectors": "logs/collectors.log",
+    "devkit-dashboards": "logs/dashboards.log",
     "devkit-local-e2e": "logs/scheduled-local-e2e.log",
     "devkit-medium-tier": "logs/scheduled-medium-tier.log",
     "devkit-after-merge": "logs/scheduled-after-merge.log",

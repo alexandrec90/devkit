@@ -1,0 +1,6 @@
+# Register and start the dashboard gateway (`devkit-dashboards`) now rather than at the
+# next daily `installers.py` pass. Every workstation: a PC with no checkout of a declared
+# project skips that dashboard. d2-trader's `dashboard-backend-port-1126` waits on this.
+on = "every-machine"
+when = "merged"
+run = "python scripts/install-dashboards.py --yes"

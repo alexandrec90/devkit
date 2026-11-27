@@ -985,6 +985,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-fix-trigger` | `scripts/install-fix-trigger.py` | every 2 min; starts the fix pass when something is newly red or a devkit commit passed, moves `green`, and starts the checkout sync and collectors for what moved (`scripts/fix_trigger.py`) | `logs/scheduled-fix-trigger.log` |
 | `devkit-ship` | `scripts/install-ship-schedule.py` | every 2 min, on every PC; a fire with nothing to ship exits within seconds | `logs/ship-pass.log` |
 | `devkit-collectors` | `scripts/install-collectors.py` | every 15 min, and at logon; acts only where `run-here`/`stop-here` assigned | `logs/collectors.log` |
+| `devkit-dashboards` | `scripts/install-dashboards.py` | at logon, resident; its 15-min repetition restarts a gateway that died | `logs/dashboards.log` |
 | `devkit-elevated` | `scripts/install-elevated-worker.py` | every 5 min, elevated; installed once per PC by an administrator, never by a job | `C:\ProgramData\devkit\elevated\worker.log` |
 | `devkit-after-merge` | `scripts/install-after-merge-schedule.py` | every 5 min, on every PC | `logs/scheduled-after-merge.log`, each task under `logs/after-merge/` |
 
@@ -1325,6 +1326,27 @@ holder renews every pass. When the holder goes quiet for the claim's TTL, anothe
 it over, the one with most free memory first; a PC that comes back stands by. No data
 moves, so it suits only a collector whose copies can be merged afterwards. A PC on a devkit
 older than this ignores the claim.
+
+#### Dashboards that sleep when nobody is looking
+
+`devkit.dashboards` in `workspace.jsonc` declares each project's dashboard. One stdlib
+gateway, `scripts/dashboards.py serve` (task `devkit-dashboards`, at logon, resident),
+holds every dashboard's public port on 127.0.0.1. The first request starts that dashboard
+and waits until it answers. After 30 minutes with no traffic (`idleMinutes`), the gateway
+stops it, so it holds no memory until the next request. An entry is a host `command` run
+from the checkout, carrying `{port}`, or a compose `service` with the `backendPort` it
+publishes. The public port is the project's `app` port in `ports.toml` unless the entry
+names one.
+
+```bash
+python scripts/dashboards.py                 # each URL, awake or asleep
+python scripts/dashboards.py open d2-trader  # open it in the browser, which wakes it
+python scripts/install-dashboards.py --yes   # register the gateway and start it
+```
+
+A host dashboard is restarted onto merged code once its checkout's default branch moves.
+The gateway's own log is `logs/dashboards.log`, and each dashboard's output from its last
+wake is in `logs/dashboards/<project>.log`.
 
 #### Remote Control servers, and why keeping them up is a job
 
