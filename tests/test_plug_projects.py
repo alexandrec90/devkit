@@ -877,14 +877,14 @@ def test_a_registry_write_with_no_projects_toml_writes_the_workspace_file_alone(
 
 
 def test_a_projects_toml_that_already_agrees_is_not_rewritten(tmp_path):
-    canonical, toml = _registry_pair(tmp_path, toml='projects = [\n    "beta",\n]\n')
+    canonical, _toml = _registry_pair(tmp_path, toml='projects = [\n    "beta",\n]\n')
     written = plug_projects.write_registry(canonical, [Step(plug_projects.UNPLUG, "alpha")])
     assert written == [canonical]
 
 
 def test_a_projects_toml_it_cannot_edit_writes_neither_file(tmp_path):
     """Both edits are made before either is written: one written alone is the drift."""
-    canonical, toml = _registry_pair(tmp_path, toml='projects = [\n    "alpha", "beta",\n]\n')
+    canonical, _toml = _registry_pair(tmp_path, toml='projects = [\n    "alpha", "beta",\n]\n')
     with pytest.raises(PlugError, match="nothing was written"):
         plug_projects.write_registry(canonical, [Step(plug_projects.UNPLUG, "alpha")])
     assert canonical.read_text(encoding="utf-8") == PICKED

@@ -116,6 +116,8 @@ TRAY_MODULES = (
     "machine_clock",
     # `job_claims` reads this machine's role (worker or workstation) through it.
     "machine_role",
+    # `collectors_config` and `machine_role` read their settings through it.
+    "project_registry",
     "devkit_jsonc",
     "sweep",
     "task_branch",

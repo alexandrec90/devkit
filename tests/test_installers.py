@@ -138,12 +138,42 @@ def test_anything_but_a_map_of_string_lists_yields_no_options(text):
     assert installers.parse_options(text) == {}
 
 
-def test_a_machine_with_no_workspace_file_has_no_options(tmp_path):
-    assert installers.read_options(None) == {}
-    assert installers.read_options(tmp_path / "absent.code-workspace") == {}
+def test_options_of_reads_a_stored_value_as_the_text_reader_does():
+    value = {"install-x.py": ["--a"], "install-y.py": "--b"}
+    assert installers.options_of(value) == {"install-x.py": ["--a"]}
+    assert installers.options_of(["--a"]) == {}
+
+
+def test_a_machine_with_neither_file_has_no_options(tmp_path):
+    root = tmp_path / "devkit"
+    root.mkdir()
+    assert installers.read_options(None, root) == {}
+    assert installers.read_options(tmp_path / "absent.code-workspace", root) == {}
     present = tmp_path / "w.code-workspace"
     present.write_text('{"settings": {"devkit.installers": {"a.py": ["-x"]}}}', encoding="utf-8")
-    assert installers.read_options(present) == {"a.py": ["-x"]}
+    assert installers.read_options(present, root) == {"a.py": ["-x"]}
+
+
+def test_options_are_read_from_projects_toml_over_the_workspace_file(tmp_path):
+    root = tmp_path / "devkit"
+    root.mkdir()
+    (root / "projects.toml").write_text(
+        '[settings."devkit.installers"]\n"a.py" = ["--merge"]\n', encoding="utf-8"
+    )
+    present = tmp_path / "w.code-workspace"
+    present.write_text('{"settings": {"devkit.installers": {"a.py": ["-x"]}}}', encoding="utf-8")
+    assert installers.read_options(present, root) == {"a.py": ["--merge"]}
+
+
+def test_a_malformed_projects_toml_yields_no_options(tmp_path):
+    root = tmp_path / "devkit"
+    root.mkdir()
+    (root / "projects.toml").write_text("[settings\n", encoding="utf-8")
+    assert installers.read_options(None, root) == {}
+
+
+def test_the_committed_registry_keeps_reconcile_off_merge():
+    assert installers.read_options(None, REPO_ROOT)["install-reconcile-task.py"] == []
 
 
 def test_the_options_follow_the_mode_on_both_spellings():

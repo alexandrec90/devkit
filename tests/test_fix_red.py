@@ -45,19 +45,32 @@ def test_a_project_another_machine_tests_has_no_local_result_here(tmp_path):
     """This machine's results from before the run moved are never replaced, and held six
     projects for two weeks behind a re-test due nowhere (DESKTOP-ML5F3PJ, 2026-11-21)."""
     workspace = _e2e_workspace(tmp_path, {"*": "desktop-a", "carameli": "desktop-b"})
-    assert fix_red.e2e_here(workspace, ["carameli", "devkit"], "desktop-b") == ["carameli"]
-    assert fix_red.e2e_here(workspace, ["carameli", "devkit"], "desktop-c") == []
+    root = tmp_path / "devkit"
+    assert fix_red.e2e_here(workspace, ["carameli", "devkit"], "desktop-b", root) == ["carameli"]
+    assert fix_red.e2e_here(workspace, ["carameli", "devkit"], "desktop-c", root) == []
 
 
 def test_with_no_assignment_or_no_workspace_every_project_is_read_here(tmp_path):
     projects = ["carameli", "devkit"]
-    assert fix_red.e2e_here(_e2e_workspace(tmp_path), projects, "desktop-a") == projects
-    assert fix_red.e2e_here(tmp_path / "absent", projects, "desktop-a") == projects
+    root = tmp_path / "devkit"
+    assert fix_red.e2e_here(_e2e_workspace(tmp_path), projects, "desktop-a", root) == projects
+    assert fix_red.e2e_here(tmp_path / "absent", projects, "desktop-a", root) == projects
+
+
+def test_the_assignment_is_read_from_projects_toml_first(tmp_path):
+    root = tmp_path / "devkit"
+    root.mkdir()
+    (root / "projects.toml").write_text(
+        '[settings."devkit.localE2e"]\nhosts = "desktop-b"\n', encoding="utf-8"
+    )
+    workspace = _e2e_workspace(tmp_path, "desktop-a")
+    assert fix_red.e2e_here(workspace, ["carameli"], "desktop-b", root) == ["carameli"]
 
 
 def test_collect_red_reads_only_this_machines_heavy_tier_and_every_medium_one(
     monkeypatch, tmp_path
 ):
+    monkeypatch.setattr(fix_red, "REPO_ROOT", tmp_path / "devkit")
     workspace = _e2e_workspace(tmp_path, "desktop-a")
     monkeypatch.setattr(fix_red.rc_config.harness_events, "host_name", lambda: "desktop-b")
     monkeypatch.setattr(fix_red.menu, "scan", lambda *_a: [])

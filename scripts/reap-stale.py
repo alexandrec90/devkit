@@ -24,9 +24,12 @@ is never rewritten -- fifteen minutes later the artifact describes a quiet machi
 `sessionIdleMinutes` is kept; a server the state file knows is `rc-servers.py`'s to
 restart, not this job's to stop; a dev server whose ancestry reaches a living editor,
 terminal or agent is owned however old it is. The settings live beside
-`devkit.remoteControl` in the workspace file:
+`devkit.remoteControl` in devkit's `projects.toml`, unset there today:
 
-    "devkit.reapStale": {"sessionIdleMinutes": 120, "devServers": true, "dockerClis": true}
+    [settings."devkit.reapStale"]
+    sessionIdleMinutes = 120
+    devServers = true
+    dockerClis = true
 
 Stdlib only, and every decision is an importable function tested in
 `tests/test_reap_stale.py`.
@@ -47,6 +50,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
 import elevated_writes
+import project_registry
 import rc_config
 import rc_machine
 import reap_machine
@@ -105,7 +109,22 @@ def parse_settings(text: str) -> Settings:
     except (json.JSONDecodeError, TypeError):
         return Settings()
     settings = payload.get("settings") if isinstance(payload, dict) else None
-    raw = settings.get(SETTING) if isinstance(settings, dict) else None
+    return settings_of(settings.get(SETTING) if isinstance(settings, dict) else None)
+
+
+def read_settings(workspace: Path, root: Path) -> Settings:
+    """`SETTING` as `project_registry.setting` reads it for the devkit checkout at
+    `root` -- its `projects.toml`, else `workspace`. Defaults for a malformed file, as
+    `parse_settings` gives them for a broken workspace file."""
+    try:
+        raw = project_registry.setting(SETTING, repo_root=root, workspace=workspace)
+    except (project_registry.RegistryError, OSError):
+        return Settings()
+    return settings_of(raw)
+
+
+def settings_of(raw: object) -> Settings:
+    """`SETTING`'s value, as stored, as `Settings`; defaults for anything malformed."""
     if not isinstance(raw, dict):
         return Settings()
     idle = raw.get("sessionIdleMinutes")
@@ -377,10 +396,9 @@ def build_plan(
     if workspace is None or not workspace.is_file():
         report.say(f"no workspace file at {workspace} -- no served projects, no stray servers")
         return plan
-    text = workspace.read_text(encoding="utf-8")
-    plan.settings = parse_settings(text)
+    plan.settings = read_settings(workspace, root)
     plan.root = workspace.parent
-    plan.projects = rc_config.parse_config(text).projects
+    plan.projects = rc_config.read_config(workspace, root).projects
     return plan
 
 

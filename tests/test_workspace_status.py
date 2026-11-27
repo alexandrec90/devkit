@@ -240,6 +240,23 @@ def test_a_toast_that_cannot_be_shown_costs_nothing(monkeypatch, tmp_path, capsy
     assert "something is wrong" in capsys.readouterr().out
 
 
+def test_the_daily_pass_moves_this_pcs_settings_into_the_machine_file(
+    monkeypatch, tmp_path, capsys
+):
+    _workspace_reporting(monkeypatch, tmp_path, "")
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text(
+        '{"folders": [{"path": "proj"}], "settings": {"devkit.fixPass": "plan"}}',
+        encoding="utf-8",
+    )
+    assert ws.main([]) == 0
+    machine = tmp_path / ws.machine_role.project_registry.MACHINE_FILE_NAME
+    assert json.loads(machine.read_text(encoding="utf-8")) == {"devkit.fixPass": "plan"}
+    assert "moved devkit.fixPass into" in capsys.readouterr().out
+    assert ws.main([]) == 0
+    assert "moved" not in capsys.readouterr().out, "one-shot: a second day copies nothing"
+
+
 def test_the_toast_body_leads_with_the_first_finding_and_counts_the_rest():
     """Two short strings is all a toast has, so it is a pointer: the leading finding,
     how many followed it, and the file holding all of them."""

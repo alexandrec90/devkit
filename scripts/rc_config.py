@@ -6,10 +6,11 @@ already showed: everything here is a decision read off a file, with no process a
 filesystem behind it. `rc_machine.py` is the machine, and `rc-servers.py` is the pass
 that drives both.
 
-The opt-in lives beside `sweep.ON_HOLD_SETTING` in the workspace file, for that
-setting's reason: the workspace file is already the registry every tool in this repo
-reads the checkouts from, so "which of them get a server" belongs there rather than in
-a second file nothing else knows about.
+The opt-in lives in devkit's `projects.toml`, beside the registry every tool in this
+repo reads the checkouts from (`project_registry.setting`), so "which of them get a
+server" belongs there rather than in a second file nothing else knows about. The
+`parse_*` readers take a workspace file's text, as the fallback that file still is;
+`read_config` and `read_hosts` are what the jobs call.
 """
 
 from __future__ import annotations
@@ -243,7 +244,26 @@ def parse_config(text: str) -> Config:
     settings = payload.get("settings")
     if not isinstance(settings, dict):
         return Config()
-    raw = settings.get(RC_SETTING)
+    return config_of(settings.get(RC_SETTING))
+
+
+def read_config(workspace: Path, root: Path) -> Config:
+    """`RC_SETTING` as `project_registry.setting` reads it for the devkit checkout at
+    `root` -- its `projects.toml`, else `workspace` -- with `all` expanded from the
+    project registry (`every_project`).
+
+    An empty `Config` for a malformed or unreadable file, as `parse_config` gives one.
+    """
+    try:
+        raw = project_registry.setting(RC_SETTING, repo_root=root, workspace=workspace)
+        workspace.read_text(encoding="utf-8")  # a missing live file serves nothing
+    except (project_registry.RegistryError, OSError):
+        return Config()
+    return config_of(raw)
+
+
+def config_of(raw: object) -> Config:
+    """`RC_SETTING`'s value, as stored, as a `Config`; `all` means `every_project`."""
     if isinstance(raw, list) or raw == ALL_PROJECTS:
         raw = {"projects": raw}
     if not isinstance(raw, dict):
@@ -301,7 +321,22 @@ def setting_hosts(text: str, setting: str) -> Config:
     except (json.JSONDecodeError, TypeError):
         return Config()
     settings = payload.get("settings") if isinstance(payload, dict) else None
-    raw = settings.get(setting) if isinstance(settings, dict) else None
+    return hosts_of(settings.get(setting) if isinstance(settings, dict) else None)
+
+
+def read_hosts(setting: str, workspace: Path, root: Path) -> Config:
+    """`setting`'s `hosts` as `project_registry.setting` reads it for the devkit
+    checkout at `root` (its `projects.toml`, else `workspace`). No hosts for a malformed
+    file, as `setting_hosts` gives none for a broken workspace file."""
+    try:
+        raw = project_registry.setting(setting, repo_root=root, workspace=workspace)
+    except (project_registry.RegistryError, OSError):
+        return Config()
+    return hosts_of(raw)
+
+
+def hosts_of(raw: object) -> Config:
+    """A setting's value, as stored, as a `Config` carrying only its `hosts`."""
     hosts = raw.get("hosts") if isinstance(raw, dict) else None
     return Config(hosts=parse_hosts(hosts))
 

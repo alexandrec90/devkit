@@ -139,12 +139,14 @@ UPGRADE_PATHS: tuple[str, ...] = (
 # things that are not consumers, and one of them is devkit itself.
 SKIP_SOURCE = "is the devkit checkout this run pulls from"
 SKIP_UNADOPTED = "has no DEVKIT_VERSION -- it has never vendored devkit"
-# `workspace.jsonc`'s `devkit.onHold` list (`sweep.on_hold`). A paused project is not
+# This PC's `devkit.onHold` list (`worktree.on_hold_projects`). A paused project is not
 # upgraded by the nightly `--all`: the box it would cut has no session to ship it and
 # no reviewer to merge it, so it sits holding a vendored bump until something calls it
 # stranded. Naming the project explicitly still upgrades it -- the skip is for the
 # unattended pass, not a lock.
-SKIP_ON_HOLD = "is on hold (workspace.jsonc `devkit.onHold`) -- name it explicitly to upgrade it"
+SKIP_ON_HOLD = (
+    "is on hold (`devkit.onHold` in .devkit-machine.json) -- name it explicitly to upgrade it"
+)
 
 # How a reader is told to cut the release this run needed and could not have. Named
 # here rather than spelled into each message because there are three of them, and a
@@ -1319,7 +1321,7 @@ def main(argv: list[str] | None = None) -> int:
         preflight.append(Outcome(RELEASE_SCOPED, 1, warning))
 
     scope = names if args.every else requested
-    paused = sweep.on_hold(args.workspace.read_text(encoding="utf-8")) - set(requested)
+    paused = worktree.on_hold_projects(args.workspace) - set(requested)
     selected = select_all(candidates_for(root, scope, args.devkit, on_hold=paused))
     todo: list[str] = []
     for name, skip in selected:

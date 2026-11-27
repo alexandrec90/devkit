@@ -349,7 +349,9 @@ def test_a_night_with_no_idle_runs_nothing_and_is_not_a_failure(tmp_path, capsys
     workspace = _workspace(tmp_path, ["carameli"], opted=["carameli"])
     ran, run_one = _recording()
     clock = Clock(_dt.datetime(2026, 11, 2, 6, 0))
-    seams = e2e_pass.Seams(idle=lambda: 0.0, now=clock.now, sleep=clock.sleep)
+    seams = e2e_pass.Seams(
+        root=tmp_path / "devkit", idle=lambda: 0.0, now=clock.now, sleep=clock.sleep
+    )
     code = e2e_pass.run_pass(workspace, [], _args(), seams, run_one)
     assert (code, ran) == (0, [])
     assert "never idle before 06:30; not run tonight: carameli" in capsys.readouterr().out
@@ -358,7 +360,7 @@ def test_a_night_with_no_idle_runs_nothing_and_is_not_a_failure(tmp_path, capsys
 def test_by_hand_no_wait_runs_whoever_is_at_the_keyboard(tmp_path):
     workspace = _workspace(tmp_path, ["carameli", "devkit"], opted=["carameli", "devkit"])
     ran, run_one = _recording()
-    seams = e2e_pass.Seams(idle=lambda: 0.0)
+    seams = e2e_pass.Seams(root=tmp_path / "devkit", idle=lambda: 0.0)
     code = e2e_pass.run_pass(workspace, ["devkit"], _args(no_wait=True), seams, run_one)
     assert (code, ran) == (0, ["devkit"])
 
@@ -457,7 +459,9 @@ def test_a_machine_hosts_does_not_name_tests_nothing_and_says_who_does(tmp_path,
     workspace = _workspace(tmp_path, ["carameli", "devkit"], opted=["carameli", "devkit"])
     _assigned(workspace, "desktop-a")
     ran, run_one = _recording()
-    seams = e2e_pass.Seams(idle=lambda: 1e9, now=lambda: NIGHT, host="desktop-b")
+    seams = e2e_pass.Seams(
+        root=tmp_path / "devkit", idle=lambda: 1e9, now=lambda: NIGHT, host="desktop-b"
+    )
     assert e2e_pass.run_pass(workspace, [], _args(), seams, run_one) == 0
     assert ran == []
     assert "carameli: tested by desktop-a, not here (desktop-b)" in capsys.readouterr().out
@@ -466,10 +470,13 @@ def test_a_machine_hosts_does_not_name_tests_nothing_and_says_who_does(tmp_path,
 def test_projects_can_be_spread_across_machines(tmp_path):
     workspace = _workspace(tmp_path, ["carameli", "devkit"], opted=["carameli", "devkit"])
     _assigned(workspace, {"*": "desktop-a", "carameli": "desktop-b"})
-    assert e2e_pass.tested_here(workspace, ["carameli", "devkit"], "desktop-b") == ["carameli"]
+    root = tmp_path / "devkit"
+    assert e2e_pass.tested_here(workspace, ["carameli", "devkit"], "desktop-b", root) == [
+        "carameli"
+    ]
     for host, expected in (("desktop-a", ["devkit"]), ("desktop-b", ["carameli"])):
         ran, run_one = _recording()
-        seams = e2e_pass.Seams(idle=lambda: 1e9, now=lambda: NIGHT, host=host)
+        seams = e2e_pass.Seams(root=root, idle=lambda: 1e9, now=lambda: NIGHT, host=host)
         e2e_pass.run_pass(workspace, [], _args(), seams, run_one)
         assert ran == expected, host
 
@@ -609,17 +616,35 @@ def test_a_run_s_claim_is_marked_finished_on_the_machine_that_holds_it(tmp_path)
     "text",
     ["{", "[]", '{"settings": []}', '{"settings": {"devkit.localE2e": "pc"}}', "{}"],
 )
-def test_an_absent_or_broken_setting_assigns_nobody_so_every_machine_tests_its_own(text):
-    assert e2e_pass.assignment(text).hosts == ()
+def test_an_absent_or_broken_setting_assigns_nobody_so_every_machine_tests_its_own(tmp_path, text):
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text(text, encoding="utf-8")
+    assert e2e_pass.assignment(workspace, tmp_path / "devkit").hosts == ()
 
 
-def test_the_canonical_workspace_assigns_the_nightly_run_to_a_machine():
+def test_a_malformed_projects_toml_assigns_nobody(tmp_path):
+    root = tmp_path / "devkit"
+    root.mkdir()
+    (root / "projects.toml").write_text("[settings\n", encoding="utf-8")
+    assert e2e_pass.assignment(tmp_path / "none", root).hosts == ()
+
+
+def test_projects_toml_assigns_over_the_workspace_file(tmp_path):
+    workspace = _workspace(tmp_path, ["carameli"], opted=[])
+    _assigned(workspace, "desktop-a")
+    root = tmp_path / "devkit"
+    root.mkdir()
+    (root / "projects.toml").write_text(
+        '[settings."devkit.localE2e"]\nhosts = "desktop-b"\n', encoding="utf-8"
+    )
+    assert e2e_pass.assignment(workspace, root).hosts == (("*", "desktop-b"),)
+
+
+def test_the_committed_registry_assigns_the_nightly_run_to_a_machine(tmp_path):
     """With several PCs registering the job, an absent setting would have each of them
     test every project; the committed file names the one that does."""
-    canonical = (Path(__file__).resolve().parents[1] / "workspace.jsonc").read_text(
-        encoding="utf-8"
-    )
-    assert e2e_pass.assignment(canonical).hosts
+    root = Path(__file__).resolve().parents[1]
+    assert e2e_pass.assignment(tmp_path / "none", root).hosts
 
 
 def test_registered_reads_the_registry_and_opted_in_splits_it_by_the_contract(tmp_path):

@@ -158,7 +158,7 @@ def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
         "Each fire runs every other installer's --check and re-registers whatever has",
         "drifted: a job never installed, a checkout that moved, an installer that gained a",
         "flag, a task disabled by nobody. A job stood down by harness-switch.py stays down.",
-        "Options an installer should keep are `devkit.installers` in the workspace file.",
+        "Options an installer should keep are `devkit.installers` in devkit's projects.toml.",
         "",
         f"  log: {ARTIFACT}, rewritten on every pass",
         "",

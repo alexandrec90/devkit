@@ -31,9 +31,10 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   sessions (`fix_budget.DEPENDABOT_DAILY`) -- and nothing else: the supervisor's spend
   watch does that job, with a person reading it.
 
-The switch is the workspace file: `"devkit.fixPass"` under `settings`, `off` (the
-default), `plan` (write what would happen, do nothing) or `dispatch`. The scheduled job
-reads it on every pass; the VS Code task passes `dispatch` explicitly. Wired to be fully
+The switch is this PC's machine file, `<projects-root>/.devkit-machine.json`
+(`project_registry.MACHINE_KEYS`, falling back to the live workspace file's `settings`):
+`"devkit.fixPass"`, `off` (the default), `plan` (write what would happen, do nothing) or
+`dispatch`. The scheduled job reads it on every pass; `--mode` overrides it by hand. Wired to be fully
 automatic, and off until a week of manual passes has read right.
 """
 
@@ -51,12 +52,13 @@ import devkit_jsonc
 import e2e_results
 import fix_ledger
 import fix_plan
+import project_registry
 
 HARNESS = "harness"
 PROJECT = "project"
 UNKNOWN = "unknown"
 
-# The switch, under `"settings"` in the workspace file.
+# The switch, a `project_registry.MACHINE_KEYS` setting.
 SETTING = "devkit.fixPass"
 OFF = "off"
 PLAN = "plan"
@@ -142,8 +144,23 @@ def mode_from_workspace(text: str) -> str:
     except (json.JSONDecodeError, TypeError):
         return OFF
     settings = payload.get("settings") if isinstance(payload, dict) else None
-    value = settings.get(SETTING) if isinstance(settings, dict) else None
-    return value if value in MODES else OFF
+    return mode_value(settings.get(SETTING) if isinstance(settings, dict) else None)
+
+
+def mode_value(value: object) -> str:
+    """A stored `devkit.fixPass` as a mode; `OFF` for anything absent or misspelt."""
+    return value if isinstance(value, str) and value in MODES else OFF
+
+
+def mode_here(workspace: Path) -> str:
+    """`devkit.fixPass` on the machine whose live workspace file is `workspace`: the
+    machine file beside it (`project_registry.setting`), else that file's `settings`.
+    `OFF` for anything absent, misspelt or unreadable -- a malformed machine file
+    included, as a malformed workspace file always was."""
+    try:
+        return mode_value(project_registry.setting(SETTING, workspace=workspace))
+    except (project_registry.RegistryError, OSError):
+        return OFF
 
 
 # --- classification -------------------------------------------------------------------

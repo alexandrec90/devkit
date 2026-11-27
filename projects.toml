@@ -28,6 +28,108 @@ projects = [
     "host-scripts",
 ]
 
-# Settings every PC shares, keyed by their full name ("devkit.collectors"). Empty until
-# they move out of the workspace file; a key absent here is read from that file.
+# Settings every PC shares, keyed by their full name, quoted ("devkit.collectors"). Read
+# through `project_registry.setting`; a key absent here is read from the live workspace
+# file. Until `workspace.jsonc` is deleted it carries the same values, and
+# `tests/test_project_registry.py` fails the two the moment they disagree: change both.
+# The settings one PC alone decides -- devkit.fixPass, devkit.onHold,
+# devkit.machineRole -- are never here.
+#
+# `devkit.reapStale` is unset: `reap-stale.py`'s defaults are the setting.
 [settings]
+
+# Projects that get a standing `claude remote-control` server, so a session is reachable
+# from the phone. `devkit-rc-servers` restarts any that exits and, once a day, updates the
+# Claude CLI in the gap between stopping them and starting them again -- see README,
+# "Remote Control servers".
+#
+# `"all"` rather than a list: every project checked out on the serving PC gets a server,
+# read on each fire, so a project plugged in later is served without editing this -- on
+# hold or not: the phone always matches that machine's checkouts.
+#
+# `bypassPermissions` because a phone has no way to escalate: a session spawned from the
+# mobile app opens in `auto` and the UI offers no switch. It is a standing grant on an
+# unattended machine, which is exactly why it is written down rather than defaulted.
+#
+# `worktree` so a session started from the phone lands somewhere it can be abandoned:
+# Claude Code cuts these under `<repo>/.claude/worktrees/<name>` and reaps its own. What
+# they lack is the stack half -- no port lease, no COMPOSE_PROJECT_NAME -- so use
+# `worktree.py new` for a session that runs compose.
+#
+# `hosts`: the phone needs one server per project, not one per project per machine -- so
+# only desktop-900mt6f, the laptop kept on for background work, serves.
+[settings."devkit.remoteControl"]
+projects = "all"
+spawn = "worktree"
+permissionMode = "bypassPermissions"
+hosts = "desktop-900mt6f"
+
+# Which machine runs each project's nightly local end-to-end tests (`devkit-local-e2e`,
+# `scripts/e2e-pass.py`). Every PC registers the job; at fire time each tests only what
+# `hosts` assigns it, so two PCs never test, record and send fixers at the same red. Same
+# shape as `devkit.remoteControl`'s: one name for every project, or a table to spread
+# them. Moving the job to another PC is editing this value on a task branch -- nothing is
+# re-registered.
+[settings."devkit.localE2e"]
+# tvshell's tier checks the TV's own logs and crash events, so it runs on the PC the TV
+# is plugged into. Every other project's runs on the always-on background PC.
+hosts = { "*" = "desktop-900mt6f", tvshell = "desktop-ml5f3pj" }
+
+# Ingestion that runs with nobody connected, kept going by `devkit-collectors` -- see
+# README, "Ingestion collectors". Declared here for every machine; RUN on none until
+# `collectors.py run-here` on that machine, which is recorded in devkit's ignored `logs/`
+# and so never follows this file to a second PC.
+# A `service` is a compose service kept up; `health` runs inside the container and its
+# exit code is the project's own verdict on whether ingestion is pulling data, not asked
+# for `settle` minutes (default 60) after a start or redeploy.
+# A `command` is argv run from the project's checkout every `minutes`, by a Scheduled
+# Task named after the collector (never `devkit-`: it is not devkit's job), after
+# starting the compose services it `needs`. Its exit code is the verdict.
+[settings."devkit.collectors".ibkr_trader]
+service = "app"
+health = ["ibkr-trader", "health"]
+# Its image copies the sibling data-lake checkout in, so a merge there redeploys it as
+# one in ibkr_trader does.
+buildsFrom = ["data-lake"]
+# The project's own command that carries its database through its archive store for
+# `collectors.py move` (`collector_handoff`); `--extra archive` because boto3 comes only
+# with it.
+handoff = ["uv", "run", "--extra", "archive", "python", "scripts/handoff.py"]
+# Its `app` and `db` caps. Not `rebalance`: the move carries the whole database.
+memoryGb = 3
+
+[settings."devkit.collectors".sports_betting]
+service = "collector"
+health = ["sports-betting", "health", "--quiet"]
+# As ibkr_trader's. The data-lake store it imports lazily is declared in no form (its
+# pyproject says why), so the argv brings the sibling itself: a hand install into the
+# venv was missing on the second PC, and every `uv sync` removes one.
+handoff = ["uv", "run", "--with-editable", "../data-lake[archive]", "python", "scripts/handoff.py"]
+# Its one container's cap. `rebalance`: the only collector whose move is cheap.
+memoryGb = 0.5
+rebalance = true
+# Its datasets merge by union, so a second PC may take it over without a move.
+failover = true
+
+# On the host, not in a container: it drives the installed Chrome with the browser
+# profiles in its checkout. `handoff` dumps its `db` through the archive store; boto3 is a
+# core dependency, so no extra.
+[settings."devkit.collectors".social-scraper]
+command = ["uv", "run", "social-scraper", "scrape"]
+minutes = 30
+needs = ["db"]
+handoff = ["uv", "run", "python", "scripts/handoff.py"]
+# An estimate of its `db` and Chrome, which `docker stats` sees only half of. Not
+# `rebalance`: its browser logins belong to one machine.
+memoryGb = 2
+
+# Options an installer should keep, keyed by installer file name. The daily
+# `devkit-installers` pass (`installers.py`) re-registers a scheduled job from what its
+# installer builds today, and an option chosen at install time is remembered by nothing
+# but the registered task -- so it goes here, and is passed to that installer's `--check`
+# and `--yes` alike.
+[settings."devkit.installers"]
+# No `--merge`: the fix pass merges green ADOPTION PRs itself and nothing else, so every
+# other green PR is the auto-merge workflow's (a fixer's carries the label) or a
+# person's. Reconcile keeps reaping.
+"install-reconcile-task.py" = []

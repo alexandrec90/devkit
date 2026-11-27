@@ -359,7 +359,8 @@ def gather(
 ) -> Facts:
     """Read the collector setting, this machine's assignment and record, and -- when
     `local` -- the checkout's running services, its claimed tasks and its repo."""
-    collectors, _notes = config.parse_setting(devkit_project.canonical_text())
+    # This checkout's committed declaration (`projects.toml`), not the live file's.
+    collectors, _notes = config.declared(REPO_ROOT)
     collector = next((c for c in collectors if c.project == name), None)
     on_disk = checkout.is_dir()
     has_compose = on_disk and bool(collector_build.compose_files(checkout))

@@ -161,6 +161,11 @@ def test_on_hold_is_empty_for_every_workspace_that_predates_it():
     assert sweep.on_hold(json.dumps({"settings": {"devkit.onHold": ["", 3, "x"]}})) == {"x"}
 
 
+def test_held_reads_a_stored_value_as_the_text_reader_does():
+    assert sweep.held(["a", "", 3]) == frozenset({"a"})
+    assert sweep.held("a") == sweep.held(None) == frozenset()
+
+
 def test_only_restricts_the_sweep_to_the_named_checkouts():
     names = ["carameli", "carameli-b", "devkit"]
     assert sweep.select(names, ["devkit"]) == (["devkit"], [])
@@ -2659,3 +2664,10 @@ def test_git_for_inherits_the_environment_unless_a_push_hands_it_one(tmp_path):
     }
     handed = git("config", "--get", "devkit.probe", env={**os.environ, **probe})
     assert (handed.returncode, handed.stdout.strip()) == (0, "yes")
+
+
+def test_managed_drops_the_excluded_names_and_keeps_the_registry_order(monkeypatch):
+    assert sweep.managed(["b", "ref", "a"], frozenset({"ref"})) == ["b", "a"]
+    monkeypatch.setattr(sweep, "DEFAULT_EXCLUDE", frozenset({"b"}))
+    assert sweep.managed(["b", "a"]) == ["a"]  # the default is read at call time
+    assert sweep.managed([]) == []

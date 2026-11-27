@@ -36,7 +36,7 @@ are gone rather than paused, which is why this restarts immediately after updati
 rather than leaving the servers down until someone notices.
 
 **Nothing is served for a project that did not ask for one.** The opt-in is
-`devkit.remoteControl` in the workspace file, beside `devkit.onHold` -- a project absent
+`devkit.remoteControl` in devkit's `projects.toml` (`rc_config.read_config`) -- a project absent
 from it gets no server, because a standing server costs real memory (measured on this
 desk: 300-420 MB per `claude` process) and a project nobody opens from a phone is paying
 it for nothing.
@@ -256,10 +256,9 @@ def build_plan(workspace: Path, root: Path, report: Pass, host: str | None = Non
     A machine `hosts` assigns nothing still gets a `Plan`, with no names in it: that is
     what lets `retire` stop the servers it was running before the assignment moved.
     """
-    text = workspace.read_text(encoding="utf-8")
-    config = rc_config.parse_config(text)
+    config = rc_config.read_config(workspace, root)
     if not config.projects:
-        report.say(f"nothing to serve -- no `{rc_config.RC_SETTING}` in {workspace.name}")
+        report.say(f"nothing to serve -- no `{rc_config.RC_SETTING}` in projects.toml")
         return None
     names, notes = rc_config.selected(config, rc_config.every_project())
     for note in notes:

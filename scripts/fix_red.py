@@ -36,6 +36,8 @@ import rc_config
 import sweep
 import task_branch as tb
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 # A gate GitHub refused to start over the account's billing (`fix_plan.is_billing_refused`):
 # one group for the account, whichever checkouts it hit, naming the step only its owner
 # can take, so it awaits that person (`triage.awaiting_person`) and the morning toast says
@@ -75,7 +77,9 @@ def collect_red(
     return failures, green, unread
 
 
-def e2e_here(workspace: Path, projects: list[str], host: str = "") -> list[str]:
+def e2e_here(
+    workspace: Path, projects: list[str], host: str = "", root: Path | None = None
+) -> list[str]:
     """The projects whose nightly local result is this machine's to act on: the ones
     `devkit.localE2e` assigns it, as `e2e-pass.py` reads the same setting at fire time.
 
@@ -84,13 +88,12 @@ def e2e_here(workspace: Path, projects: list[str], host: str = "") -> list[str]:
     behind "the next scheduled local run re-tests the tip", a run due nowhere, while the
     assigned PC's own pass acts on its fresh results. The medium tier has no
     assignment, so every machine reads its own; so does this tier with no `hosts`, or no
-    workspace file to read them from.
+    file to read them from. `root` is the devkit checkout whose `projects.toml` assigns
+    them (default: this one), with `workspace` as the fallback.
     """
-    try:
-        text = workspace.read_text(encoding="utf-8")
-    except OSError:
-        return list(projects)
-    config = rc_config.setting_hosts(text, rc_config.LOCAL_E2E_SETTING)
+    config = rc_config.read_hosts(
+        rc_config.LOCAL_E2E_SETTING, workspace, REPO_ROOT if root is None else root
+    )
     here, _ = rc_config.assigned_here(
         config, projects, host or rc_config.harness_events.host_name(), verb="tested"
     )

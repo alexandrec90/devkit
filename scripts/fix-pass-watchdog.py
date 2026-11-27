@@ -127,7 +127,7 @@ def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def mode_of(argv: list[str], workspace: Path) -> str:
-    """`--mode` when the caller passed one, else the workspace file's switch, else off."""
+    """`--mode` when the caller passed one, else this PC's switch (`fix_switch`), else off."""
     if "--mode" in argv and argv.index("--mode") + 1 < len(argv):
         return argv[argv.index("--mode") + 1]
     return fix_switch.workspace_mode(workspace)

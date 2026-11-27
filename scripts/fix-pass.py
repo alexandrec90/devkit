@@ -47,8 +47,8 @@ under way is ended and held, no further step starts and no session is launched, 
 record says what was left. Each step prints a line as it starts.
 
 Every pass appends a line to `logs/fix-pass.history.jsonl`, which `fix_stall` reads.
-`"devkit.fixPass"` in the workspace file is `off` (the default), `plan` (write it all,
-do nothing) or `dispatch`. **`off` means this PC sends no fixers, not that nothing runs:**
+`"devkit.fixPass"` in this PC's machine file (`fix_cycle.mode_here`) is `off` (the
+default), `plan` (write it all, do nothing) or `dispatch`. **`off` means this PC sends no fixers, not that nothing runs:**
 the ship task still ships this machine's intents, gated ones included. `plan` is the dry
 run, and ships nothing gated. `harness-switch.py` is the stop. Scheduled runs use
 `claude-bg`. The record is `logs/fix-pass.log`, overwritten per pass.
@@ -633,7 +633,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=fix_cycle.MODES,
         default=None,
-        help=f"off, plan or dispatch (default: the workspace file's {fix_cycle.SETTING}, else off)",
+        help=f"off, plan or dispatch (default: this PC's {fix_cycle.SETTING}, else off)",
     )
     parser.add_argument(
         "--agent",
@@ -644,7 +644,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scheduled",
         action="store_true",
-        help="the scheduled job: mode from the workspace file, agent forced to claude-bg",
+        help="the scheduled job: mode from this PC's machine file, agent forced to claude-bg",
     )
     parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
     # Carried, never interpreted: the pair reaches `fix-prs.open_session` unchanged. A
@@ -749,11 +749,10 @@ def main(argv: list[str] | None = None) -> int:
     if not workspace.is_file():
         print(f"fix-pass: no workspace file at {workspace}", file=sys.stderr)
         return EXIT_USAGE
-    text = workspace.read_text(encoding="utf-8")
-    mode = args.mode or fix_cycle.mode_from_workspace(text)
+    mode = args.mode or fix_cycle.mode_here(workspace)
     agent = SCHEDULED_AGENT if args.scheduled else args.agent
     if args.scheduled:
-        mode = fix_cycle.mode_from_workspace(text)
+        mode = fix_cycle.mode_here(workspace)
     mode = fix_send.dispatch_mode(mode, REPO_ROOT)
     if mode == fix_cycle.DISPATCH and not args.scheduled and agent_tabs.is_elevated():
         return hand_to_scheduled_task()

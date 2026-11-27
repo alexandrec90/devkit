@@ -318,15 +318,16 @@ def registered(workspace: Path) -> list[str]:
     return devkit_project.known_projects()
 
 
-def assignment(text: str) -> rc_config.Config:
-    """`SETTING`'s `hosts` off a workspace file; no hosts for anything absent or broken,
-    which reads as "every machine tests its own"."""
-    return rc_config.setting_hosts(text, SETTING)
+def assignment(workspace: Path, root: Path) -> rc_config.Config:
+    """`SETTING`'s `hosts` for the devkit checkout at `root` (its `projects.toml`, else
+    `workspace`); no hosts for anything absent or broken, which reads as "every machine
+    tests its own"."""
+    return rc_config.read_hosts(SETTING, workspace, root)
 
 
-def tested_here(workspace: Path, names: list[str], host: str) -> list[str]:
+def tested_here(workspace: Path, names: list[str], host: str, root: Path = REPO_ROOT) -> list[str]:
     """The names `SETTING` assigns this machine, saying where each other one is tested."""
-    config = assignment(workspace.read_text(encoding="utf-8"))
+    config = assignment(workspace, root)
     here, elsewhere = rc_config.assigned_here(config, names, host, verb="tested")
     for line in elsewhere:
         print(line, flush=True)
@@ -372,7 +373,9 @@ def run_pass(
     if unknown:
         print(f"e2e-pass: not in the project registry: {', '.join(unknown)}", file=sys.stderr)
         return 2
-    having, lacking = opted_in(workspace, tested_here(workspace, only or known, seams.host))
+    having, lacking = opted_in(
+        workspace, tested_here(workspace, only or known, seams.host, seams.root)
+    )
     having += to_run_after_all(workspace, lacking, seams)
     deadline = deadline_at(args.until, seams.now())
     need = args.idle_minutes * 60.0
@@ -453,7 +456,7 @@ def run_due(
     if seams.idle() < args.idle_minutes * 60.0:
         print("e2e-pass: the PC is in use; the next fire looks again")
         return 0
-    names = tested_here(workspace, registered(workspace), seams.host)
+    names = tested_here(workspace, registered(workspace), seams.host, seams.root)
     role = shared(workspace, seams)
     due = []
     tips: dict[str, str] = {}
@@ -497,11 +500,7 @@ def shared(workspace: Path, seams: Seams) -> str:
     """This machine's role when it claims each run, else "": it has one
     (`machine_role.py`) and `SETTING` names no `hosts`. Named hosts are a person's
     assignment and stand; no role is today's behaviour, every machine testing its own."""
-    try:
-        text = workspace.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    return "" if assignment(text).hosts else machine_role.role_of(text)
+    return "" if assignment(workspace, seams.root).hosts else machine_role.role_here(workspace)
 
 
 def not_ours(name: str, project_dir: Path, job: str, role: str, seams: Seams) -> str:

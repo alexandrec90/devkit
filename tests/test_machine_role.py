@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -55,30 +56,30 @@ def test_the_role_beside_a_devkit_root_is_that_root_s_file_not_the_live_one(tmp_
     assert mr.role_beside(root) == mr.WORKSTATION
 
 
-def test_setting_a_role_adds_it_keeping_every_comment():
-    edited = mr.with_role(LIVE, mr.WORKER)
-    assert edited is not None
-    assert mr.role_of(edited) == mr.WORKER
-    assert '// "devkit.machineRole": "worker" in a comment' in edited
-    assert devkit_jsonc.loads(edited)["settings"]["devkit.fixPass"] == "dispatch"
+def _machine_file(tmp_path: Path) -> Path:
+    return tmp_path / mr.project_registry.MACHINE_FILE_NAME
 
 
-def test_setting_a_role_again_replaces_it_where_it_stands():
-    once = mr.with_role(LIVE, mr.WORKER)
-    twice = mr.with_role(once, mr.WORKSTATION)
-    assert twice is not None and mr.role_of(twice) == mr.WORKSTATION
-    assert twice.count('"devkit.machineRole":') == once.count('"devkit.machineRole":')
-    unset = mr.with_role(twice, mr.UNSET)
-    assert unset is not None and mr.role_of(unset) == mr.UNSET
-    assert '"devkit.machineRole": ""' in unset
+def test_the_machine_file_wins_over_the_workspace_file(tmp_path):
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text('{"settings": {"devkit.machineRole": "worker"}}', encoding="utf-8")
+    _machine_file(tmp_path).write_text('{"devkit.machineRole": "workstation"}', encoding="utf-8")
+    assert mr.role_here(workspace) == mr.WORKSTATION
 
 
-def test_a_file_with_nowhere_to_put_it_or_a_role_that_is_not_one_is_refused():
-    assert mr.with_role('{"folders": []}', mr.WORKER) is None
-    assert mr.with_role(LIVE, "laptop") is None
+def test_a_malformed_machine_file_has_no_role(tmp_path):
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text('{"settings": {"devkit.machineRole": "worker"}}', encoding="utf-8")
+    _machine_file(tmp_path).write_text("{", encoding="utf-8")
+    assert mr.role_here(workspace) == mr.UNSET
 
 
-def test_the_cli_shows_and_sets_this_machine_s_role(tmp_path, capsys):
+@pytest.mark.parametrize("value", ["laptop", 3, None])
+def test_a_stored_value_that_is_not_a_role_is_unset(value):
+    assert mr.role_value(value) == mr.UNSET
+
+
+def test_the_cli_shows_and_sets_this_machine_s_role_in_the_machine_file(tmp_path, capsys):
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text(LIVE, encoding="utf-8")
     assert mr.main(["--workspace", str(workspace)]) == mr.EXIT_OK
@@ -86,25 +87,71 @@ def test_the_cli_shows_and_sets_this_machine_s_role(tmp_path, capsys):
     assert mr.main(["--workspace", str(workspace), "--set", "worker"]) == mr.EXIT_OK
     assert "machine role: worker" in capsys.readouterr().out
     assert mr.role_here(workspace) == mr.WORKER
+    assert workspace.read_text(encoding="utf-8") == LIVE, "the workspace file is not edited"
+    assert json.loads(_machine_file(tmp_path).read_text(encoding="utf-8")) == {
+        mr.SETTING: mr.WORKER
+    }
     assert mr.main(["--workspace", str(workspace), "--set", "unset"]) == mr.EXIT_OK
     assert mr.role_here(workspace) == mr.UNSET
 
 
-def test_each_role_says_what_it_does_and_where_it_is_set(tmp_path):
+def test_setting_a_role_keeps_the_machine_file_s_other_settings(tmp_path):
     workspace = tmp_path / "w.code-workspace"
+    _machine_file(tmp_path).write_text('{"devkit.fixPass": "dispatch"}', encoding="utf-8")
+    assert mr.main(["--workspace", str(workspace), "--set", "workstation"]) == mr.EXIT_OK
+    assert json.loads(_machine_file(tmp_path).read_text(encoding="utf-8")) == {
+        "devkit.fixPass": "dispatch",
+        mr.SETTING: mr.WORKSTATION,
+    }
+
+
+def test_each_role_says_what_it_does_and_where_it_is_set(tmp_path):
+    machine = _machine_file(tmp_path)
     for role in (*mr.ROLES, mr.UNSET):
-        line = mr.describe(role, workspace)
+        line = mr.describe(role, machine)
         assert line.startswith(f"machine role: {role or mr.UNSET_WORD} -- {mr.MEANING[role]}")
-        assert str(workspace) in line and mr.SETTING in line
+        assert str(machine) in line and mr.SETTING in line
 
 
-def test_the_cli_refuses_a_file_it_cannot_read_or_write_into(tmp_path, capsys):
-    missing = tmp_path / "missing.code-workspace"
-    assert mr.main(["--workspace", str(missing), "--set", "worker"]) == mr.EXIT_USAGE
-    bare = tmp_path / "bare.code-workspace"
-    bare.write_text('{"folders": []}', encoding="utf-8")
-    assert mr.main(["--workspace", str(bare), "--set", "worker"]) == mr.EXIT_USAGE
-    assert "no `settings` object" in capsys.readouterr().err
+def test_the_cli_refuses_a_malformed_machine_file_and_leaves_it(tmp_path, capsys):
+    workspace = tmp_path / "w.code-workspace"
+    _machine_file(tmp_path).write_text("{", encoding="utf-8")
+    assert mr.main(["--workspace", str(workspace), "--set", "worker"]) == mr.EXIT_USAGE
+    assert "cannot write" in capsys.readouterr().err
+    assert _machine_file(tmp_path).read_text(encoding="utf-8") == "{"
+
+
+def test_migrate_copies_the_machine_settings_out_of_the_workspace_file(tmp_path, capsys):
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text(
+        '{"settings": {"devkit.machineRole": "worker", "devkit.fixPass": "plan",'
+        ' "devkit.collectors": {}}}',
+        encoding="utf-8",
+    )
+    assert mr.main(["--workspace", str(workspace), "--migrate"]) == mr.EXIT_OK
+    assert "copied devkit.fixPass, devkit.machineRole" in capsys.readouterr().out
+    assert json.loads(_machine_file(tmp_path).read_text(encoding="utf-8")) == {
+        "devkit.fixPass": "plan",
+        mr.SETTING: mr.WORKER,
+    }
+
+
+def test_the_daily_line_is_silent_with_nothing_to_copy_and_never_raises(tmp_path):
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text('{"settings": {"devkit.onHold": ["x"]}}', encoding="utf-8")
+    assert mr.migrate_line(workspace).startswith("moved devkit.onHold into")
+    assert mr.migrate_line(workspace) == ""
+    _machine_file(tmp_path).write_text("[]", encoding="utf-8")
+    assert mr.migrate_line(workspace).startswith("machine settings not migrated")
+
+
+def test_migrate_and_say_prints_only_a_move(tmp_path, capsys):
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text('{"settings": {"devkit.fixPass": "off"}}', encoding="utf-8")
+    mr.migrate_and_say(workspace, "[x] ")
+    assert capsys.readouterr().out.startswith("[x] moved devkit.fixPass into")
+    mr.migrate_and_say(workspace, "[x] ")
+    assert capsys.readouterr().out == ""
 
 
 def test_the_role_is_a_machine_setting_a_render_carries_and_an_adopt_never_records():

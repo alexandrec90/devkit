@@ -272,8 +272,7 @@ def test_present_tasks_is_empty_off_windows(monkeypatch):
 
 
 def _stub_setting(monkeypatch):
-    monkeypatch.setattr(retire.devkit_project, "canonical_text", lambda: "")
-    monkeypatch.setattr(retire.config, "parse_setting", lambda text: ([container()], []))
+    monkeypatch.setattr(retire.config, "declared", lambda root: ([container()], []))
     monkeypatch.setattr(retire.config, "load_assignment", lambda path: {"geo": config.RUN})
 
 

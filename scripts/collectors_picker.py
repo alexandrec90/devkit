@@ -3,7 +3,7 @@
 
 One live list, one pick: every verb `collectors.py` takes, once for all collectors and
 once per collector, each row saying what this PC is set to now. Live because the set is
-`devkit.collectors` in the workspace file and the state is this machine's assignment --
+`devkit.collectors` in `projects.toml` and the state is this machine's assignment --
 a templated list would be a second copy of the first and could not show the second.
 
 A row's value is the verb, or `<verb>:<project>` for one collector: the dispatcher

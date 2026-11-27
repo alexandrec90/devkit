@@ -79,7 +79,7 @@ def ledger_dir(tmp_path_factory, monkeypatch):
     return scratch
 
 
-def register(monkeypatch, *names: str) -> None:
+def registry_lists(monkeypatch, *names: str) -> None:
     """Make the project registry list `names`, as `projects.toml` would.
 
     The dispatcher reads its projects off `project_registry`, not the workspace file a
@@ -102,21 +102,21 @@ def ledger_rows(root: Path) -> list[dict[str, str]]:
 
 
 def test_projects_come_from_the_project_registry(monkeypatch):
-    register(monkeypatch, "alpha", "beta")
+    registry_lists(monkeypatch, "alpha", "beta")
     assert known_projects() == ["alpha", "beta"]
 
 
 def test_the_reference_checkout_is_not_a_project(monkeypatch):
     # A NOT_PROJECTS entry ships no harness; nothing in ACTIONS applies to it.
     monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({REFERENCE}))
-    register(monkeypatch, "alpha", "beta", REFERENCE)
+    registry_lists(monkeypatch, "alpha", "beta", REFERENCE)
     assert known_projects() == ["alpha", "beta"]
 
 
 def test_workspace_text_still_names_the_projects_it_lists(monkeypatch):
     """The deprecated argument: the workspace writers verify their own edit with it, so
     it reads the text it is given, never the registry."""
-    register(monkeypatch, "elsewhere")
+    registry_lists(monkeypatch, "elsewhere")
     monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({REFERENCE}))
     assert known_projects(WORKSPACE) == ["alpha", "beta"]
     assert known_projects(REFERENCE_WORKSPACE) == ["alpha", "beta"]
@@ -150,7 +150,7 @@ def test_duplicate_and_empty_multi_pick_values_are_ignored():
 
 def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
     workspace = tmp_path / "projects.code-workspace"
-    register(monkeypatch, "alpha", "beta")
+    registry_lists(monkeypatch, "alpha", "beta")
     for name in ("alpha", "beta"):
         scripts = tmp_path / name / "scripts"
         scripts.mkdir(parents=True)
@@ -176,7 +176,7 @@ def test_a_dispatched_task_runs_in_utf8_mode_down_to_its_grandchildren(tmp_path,
     no encoding, and only the watchdog's path ran it in UTF-8 mode. Asserted through the
     real wrappers, since the variable has to survive log-wrap to reach the script."""
     workspace = tmp_path / "projects.code-workspace"
-    register(monkeypatch, "alpha")
+    registry_lists(monkeypatch, "alpha")
     (tmp_path / "alpha" / "scripts").mkdir(parents=True)
     (tmp_path / "alpha" / "scripts" / "run-tests.py").write_text(
         "import pathlib, subprocess, sys\n"
@@ -947,7 +947,7 @@ def test_a_pair_the_checkout_cannot_run_is_skipped_by_name_not_refused():
 def menu_run(tmp_path, monkeypatch, kinds, projects=("alpha",), scripts=("run-tests.py",)):
     """Dispatch the test menu over a throwaway workspace, recording what it ran."""
     workspace = tmp_path / "projects.code-workspace"
-    register(monkeypatch, *projects)
+    registry_lists(monkeypatch, *projects)
     for name in projects:
         (tmp_path / name / "scripts").mkdir(parents=True)
         for script in scripts:
@@ -1007,7 +1007,7 @@ def test_a_selection_with_nothing_in_scope_is_a_refusal_not_a_green_run(
 
     monkeypatch.setattr(devkit_project.subprocess, "run", boom)
     workspace = tmp_path / "projects.code-workspace"
-    register(monkeypatch, "alpha")
+    registry_lists(monkeypatch, "alpha")
     (tmp_path / "alpha" / "scripts").mkdir(parents=True)
 
     code = devkit_project.main(
@@ -2072,7 +2072,7 @@ def test_a_missing_live_file_is_still_an_error_for_the_other_workspace_verbs(
     machine that has no workspace file at all."""
     _canonical, live = workspace_pair
     live.unlink()
-    register(monkeypatch, "alpha", "beta")
+    registry_lists(monkeypatch, "alpha", "beta")
 
     assert _run(live, "--check-workspace") == 2
     capsys.readouterr()
@@ -3721,7 +3721,7 @@ def test_generated_actions_get_distinct_branches_and_only_codex_opts_into_autome
 def autofix_run(tmp_path, monkeypatch, argv, dirty=("app/main.py",), returncode=0):
     """Dispatch a lint action over one checkout, recording every command it runs."""
     workspace = tmp_path / "projects.code-workspace"
-    register(monkeypatch, "alpha")
+    registry_lists(monkeypatch, "alpha")
     scripts = tmp_path / "alpha" / "scripts"
     scripts.mkdir(parents=True)
     action_name = argv[-1]
@@ -3777,7 +3777,7 @@ def test_no_ship_fixes_leaves_the_churn_in_the_working_tree(tmp_path, monkeypatc
 def test_a_non_autofix_action_is_never_snapshotted(tmp_path, monkeypatch):
     """`autofix_state` shells out to git; a `test` run must not pay for that."""
     workspace = tmp_path / "projects.code-workspace"
-    register(monkeypatch, "alpha")
+    registry_lists(monkeypatch, "alpha")
     scripts = tmp_path / "alpha" / "scripts"
     scripts.mkdir(parents=True)
     (scripts / "run-tests.py").write_text("")
@@ -3797,7 +3797,7 @@ def test_a_non_autofix_action_is_never_snapshotted(tmp_path, monkeypatch):
 def failed_sweep_step(tmp_path, monkeypatch):
     """Dispatch `lint` over one checkout whose run passes and whose `--branch` step fails."""
     workspace = tmp_path / "projects.code-workspace"
-    register(monkeypatch, "alpha")
+    registry_lists(monkeypatch, "alpha")
     scripts = tmp_path / "alpha" / "scripts"
     scripts.mkdir(parents=True)
     (scripts / "lint-all.py").write_text("")

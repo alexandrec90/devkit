@@ -154,9 +154,7 @@ def render_plan(schedule: Schedule, windows: bool = WINDOWS) -> str:
         "servers rc-servers.py no longer owns once nothing live is under them, and dev",
         "servers whose agent has gone. Interactive sessions are never candidates.",
         "",
-        f"Settings are `devkit.reapStale` in {Path(schedule.workspace).name}"
-        if schedule.workspace
-        else "Settings are `devkit.reapStale` in the workspace file.",
+        "Settings are `devkit.reapStale` in devkit's projects.toml.",
         "Without one the defaults apply and no stray server is ever named.",
         "",
     ]

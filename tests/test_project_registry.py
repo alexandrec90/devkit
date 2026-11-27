@@ -285,6 +285,84 @@ def test_the_watchdogs_pattern_reads_the_machine_file_unchanged():
     assert found and found.group(1) == "dispatch"
 
 
+def test_a_workspace_handed_in_is_the_fallback_and_locates_the_machine_file(tmp_path):
+    """A `--workspace` the caller was given, not the one `repo_root` resolves to."""
+    _, devkit = _tree(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    handed = _live(elsewhere, [], {"devkit.onHold": ["a"], "devkit.collectors": {"x": {}}})
+    assert pr.setting("devkit.onHold", repo_root=devkit, workspace=handed) == ["a"]
+    assert pr.setting("devkit.collectors", repo_root=devkit, workspace=handed) == {"x": {}}
+    _machine(elsewhere, {"devkit.onHold": ["b"]})
+    assert pr.setting("devkit.onHold", repo_root=devkit, workspace=handed) == ["b"]
+
+
+# --- writing the machine file -----------------------------------------------------------
+
+
+def test_write_machine_replaces_the_file_and_leaves_no_temporary_behind(tmp_path):
+    path = tmp_path / pr.MACHINE_FILE_NAME
+    pr.write_machine(path, {"devkit.fixPass": "plan"})
+    pr.write_machine(path, {"devkit.machineRole": "worker"})
+    assert pr.parse_machine(path.read_text(encoding="utf-8")) == {"devkit.machineRole": "worker"}
+    assert [p.name for p in tmp_path.iterdir()] == [pr.MACHINE_FILE_NAME]
+
+
+def test_set_machine_setting_keeps_the_other_keys(tmp_path):
+    root, devkit = _tree(tmp_path)
+    _machine(root, {"devkit.fixPass": "dispatch"})
+    path = pr.set_machine_setting("devkit.machineRole", "worker", repo_root=devkit)
+    assert path == pr.machine_path(devkit)
+    assert pr.setting("devkit.machineRole", repo_root=devkit) == "worker"
+    assert pr.setting("devkit.fixPass", repo_root=devkit) == "dispatch"
+
+
+def test_set_machine_setting_refuses_a_shared_key_and_a_malformed_file(tmp_path):
+    root, devkit = _tree(tmp_path)
+    with pytest.raises(ValueError, match="not a machine setting"):
+        pr.set_machine_setting("devkit.collectors", {}, repo_root=devkit)
+    (root / pr.MACHINE_FILE_NAME).write_text("{", encoding="utf-8")
+    with pytest.raises(pr.RegistryError):
+        pr.set_machine_setting("devkit.fixPass", "off", repo_root=devkit)
+    assert (root / pr.MACHINE_FILE_NAME).read_text(encoding="utf-8") == "{"
+
+
+def test_migrate_copies_only_machine_keys_the_machine_file_lacks(tmp_path):
+    root, devkit = _tree(tmp_path)
+    live = {
+        "devkit.fixPass": "plan",
+        "devkit.onHold": [],
+        "devkit.machineRole": "worker",
+        "devkit.collectors": {},
+    }
+    _live(root, ["devkit"], live)
+    _machine(root, {"devkit.machineRole": "workstation"})
+    assert pr.migrate_machine_settings(repo_root=devkit) == ["devkit.fixPass", "devkit.onHold"]
+    assert pr.parse_machine(pr.machine_path(devkit).read_text(encoding="utf-8")) == {
+        "devkit.fixPass": "plan",
+        "devkit.onHold": [],
+        "devkit.machineRole": "workstation",
+    }
+    assert pr.migrate_machine_settings(repo_root=devkit) == [], "one-shot"
+
+
+def test_migrate_with_nothing_to_copy_writes_nothing(tmp_path):
+    root, devkit = _tree(tmp_path)
+    assert pr.migrate_machine_settings(repo_root=devkit) == []
+    _live(root, ["devkit"], {"devkit.collectors": {}})
+    assert pr.migrate_machine_settings(repo_root=devkit) == []
+    assert not pr.machine_path(devkit).exists()
+
+
+def test_migrate_leaves_a_malformed_machine_file_as_found(tmp_path):
+    root, devkit = _tree(tmp_path)
+    _live(root, ["devkit"], {"devkit.fixPass": "plan"})
+    (root / pr.MACHINE_FILE_NAME).write_text("[]", encoding="utf-8")
+    with pytest.raises(pr.RegistryError):
+        pr.migrate_machine_settings(repo_root=devkit)
+    assert (root / pr.MACHINE_FILE_NAME).read_text(encoding="utf-8") == "[]"
+
+
 # --- the committed registry ------------------------------------------------------------
 
 
@@ -300,3 +378,29 @@ def test_the_committed_registry_holds_devkit_and_parses_its_settings():
     text = (REPO_ROOT / pr.REGISTRY_NAME).read_text(encoding="utf-8")
     assert "devkit" in pr.all_projects(REPO_ROOT)
     assert isinstance(pr.parse_shared_settings(text), dict)
+
+
+# The settings every reader now takes from `projects.toml`. Until `workspace.jsonc` is
+# deleted it is rendered into each PC's live file and still carries them, so a value
+# changed in one file and not the other would read differently on a PC whose live file
+# answers a key `projects.toml` lacks.
+SHARED_KEYS = (
+    "devkit.collectors",
+    "devkit.remoteControl",
+    "devkit.localE2e",
+    "devkit.installers",
+    "devkit.reapStale",
+)
+
+
+def test_the_committed_shared_settings_agree_with_the_canonical_workspace():
+    shared = pr.parse_shared_settings((REPO_ROOT / pr.REGISTRY_NAME).read_text(encoding="utf-8"))
+    canonical = pr.workspace_settings((REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8"))
+    for key in SHARED_KEYS:
+        assert shared.get(key) == canonical.get(key), key
+
+
+def test_the_committed_registry_holds_no_machine_setting():
+    shared = pr.parse_shared_settings((REPO_ROOT / pr.REGISTRY_NAME).read_text(encoding="utf-8"))
+    assert not pr.MACHINE_KEYS & shared.keys()
+    assert set(shared) <= set(SHARED_KEYS)

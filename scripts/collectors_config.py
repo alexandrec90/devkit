@@ -3,10 +3,11 @@
 
 Two answers from two places, and the split between them is the whole design:
 
-- **Which collectors exist** is the workspace file's `devkit.collectors`, beside
-  `devkit.remoteControl`. That file is devkit's canonical `workspace.jsonc`, the same on
-  every workstation, so declaring a collector there declares it everywhere -- once, with a
-  branch and a review, and without an edit to the project that owns it.
+- **Which collectors exist** is `devkit.collectors` in devkit's committed
+  `projects.toml`, beside `devkit.remoteControl` (`project_registry.setting`). That file
+  is the same on every workstation, so declaring a collector there declares it
+  everywhere -- once, with a branch and a review, and without an edit to the project
+  that owns it.
 - **Whether this machine runs one** is a file under this checkout's `logs/`, which git
   ignores and nothing syncs. That is what keeps a laptop that shares the workspace from
   starting an ingestion job just because the desktop runs one: two collectors against
@@ -34,6 +35,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
+import project_registry
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -236,18 +238,22 @@ def _container_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
 
 
 def parse_setting(text: str) -> tuple[list[Collector], list[str]]:
-    """`(collectors, notes)` out of a workspace file's text. Never raises.
-
-    The setting is hand-edited, so a malformed entry is a note rather than silence: an
-    entry that quietly declared nothing would read, on the machine meant to run it,
-    exactly like a collector nobody had asked for.
-    """
+    """`(collectors, notes)` out of a workspace file's text. Never raises."""
     try:
         payload = devkit_jsonc.loads(text)
     except (json.JSONDecodeError, TypeError):
         return [], ["the workspace file does not parse"]
     settings = payload.get("settings") if isinstance(payload, dict) else None
-    raw = settings.get(SETTING) if isinstance(settings, dict) else None
+    return parse_value(settings.get(SETTING) if isinstance(settings, dict) else None)
+
+
+def parse_value(raw: object) -> tuple[list[Collector], list[str]]:
+    """`(collectors, notes)` out of the setting's value, as stored. Never raises.
+
+    The setting is hand-edited, so a malformed entry is a note rather than silence: an
+    entry that quietly declared nothing would read, on the machine meant to run it,
+    exactly like a collector nobody had asked for.
+    """
     if raw is None:
         return [], []
     if not isinstance(raw, dict):
@@ -264,13 +270,22 @@ def parse_setting(text: str) -> tuple[list[Collector], list[str]]:
 
 
 def declared(root: Path) -> tuple[list[Collector], list[str]]:
-    """The collectors the workspace file beside `root` declares, with any notes."""
-    workspace = sweep.default_workspace(root)
+    """The collectors the checkout at `root` declares, with any notes.
+
+    Read through `project_registry.setting`: `projects.toml` in `root`, else the live
+    workspace file beside it. A file that is there and malformed is a note, as an
+    unparseable workspace file always was, rather than a crash of the scheduled job.
+    """
     try:
-        text = workspace.read_text(encoding="utf-8")
-    except OSError:
-        return [], [f"no workspace file at {workspace}"]
-    return parse_setting(text)
+        raw = project_registry.setting(SETTING, repo_root=root)
+    except (project_registry.RegistryError, OSError) as exc:
+        return [], [str(exc)]
+    if raw is None:
+        registry = project_registry.registry_path(root)
+        workspace = project_registry.live_workspace(root)
+        if not registry.is_file() and not workspace.is_file():
+            return [], [f"no {registry.name} at {registry} and no workspace file at {workspace}"]
+    return parse_value(raw)
 
 
 def load_assignment(path: Path) -> dict[str, str]:

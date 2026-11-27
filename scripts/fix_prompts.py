@@ -98,7 +98,7 @@ READ_SENTENCE = (
 )
 TEST_RUNS_SENTENCE = (
     "Run the failing tests once before you change anything and once after, then the "
-    "checks below once: do not re-run them after each edit, since every run's output also "
+    "checks below once: do not re-run them after each edit, since the output of every run also "
     "stays in every later turn. "
 )
 
