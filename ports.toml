@@ -106,3 +106,4 @@ tvshell = 11
 # left in devkit's checkout rather than handed off, so only the hint carried the slot.
 radio = 12
 host-scripts = 13
+personal-website = 14

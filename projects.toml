@@ -26,6 +26,7 @@ projects = [
     "tvshell",
     "radio",
     "host-scripts",
+    "personal-website",
 ]
 
 # Settings every PC shares, keyed by their full name, quoted ("devkit.collectors"). Read
