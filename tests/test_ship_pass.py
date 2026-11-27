@@ -40,6 +40,12 @@ def world(tmp_path, monkeypatch):
 
     table["mode"] = fix_pass_mode
     fix_pass_mode("dispatch")
+    # The projects come off the registry; the workspace file carries only the setting.
+    monkeypatch.setattr(
+        ship_pass.devkit_project.project_registry,
+        "all_projects",
+        lambda *_a, **_k: ["devkit", "roguelike"],
+    )
     monkeypatch.setattr(ship_pass, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(
         ship_pass.ship_intent, "find_intents", lambda root, projects: list(table["intents"])

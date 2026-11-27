@@ -8,6 +8,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import project_registry
 import pytest
 from support import load_script
 
@@ -236,7 +237,19 @@ def test_a_tier_handed_to_ci_is_still_read_from_a_clean_checkout_only(tmp_path, 
 # --- the pass -----------------------------------------------------------------------------
 
 
+REGISTERED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch):
+    """The project registry, as `_workspace` last set it: the pass reads its projects
+    there, and the workspace file only for its settings and where the checkouts sit."""
+    REGISTERED.clear()
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
+
+
 def _workspace(tmp_path: Path, names: list[str], opted: list[str]) -> Path:
+    REGISTERED[:] = names
     folders = ",".join(f'{{"path": "{name}"}}' for name in names)
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text(f'{{"folders": [{folders}]}}', encoding="utf-8")
@@ -603,9 +616,7 @@ def test_a_run_s_claim_is_marked_finished_on_the_machine_that_holds_it(tmp_path)
     "text",
     ["{", "[]", '{"settings": []}', '{"settings": {"devkit.localE2e": "pc"}}', "{}"],
 )
-def test_an_absent_or_broken_setting_assigns_nobody_so_every_machine_tests_its_own(
-    tmp_path, text
-):
+def test_an_absent_or_broken_setting_assigns_nobody_so_every_machine_tests_its_own(tmp_path, text):
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text(text, encoding="utf-8")
     assert e2e_pass.assignment(workspace, tmp_path / "devkit").hosts == ()
@@ -636,10 +647,11 @@ def test_the_committed_registry_assigns_the_nightly_run_to_a_machine(tmp_path):
     assert e2e_pass.assignment(tmp_path / "none", root).hosts
 
 
-def test_registered_reads_the_workspace_and_opted_in_splits_it_by_the_contract(tmp_path):
+def test_registered_reads_the_registry_and_opted_in_splits_it_by_the_contract(tmp_path):
     workspace = _workspace(tmp_path, ["carameli", "roguelike"], opted=["roguelike"])
+    workspace.write_text('{"folders": [{"path": "not-the-registry"}]}', encoding="utf-8")
     names = e2e_pass.registered(workspace)
-    assert names == ["carameli", "roguelike"]
+    assert names == ["carameli", "roguelike"], "the workspace file's folders were read"
     assert e2e_pass.opted_in(workspace, names) == (["roguelike"], ["carameli"])
 
 
@@ -670,7 +682,7 @@ def test_main_reports_each_last_result_and_refuses_a_missing_workspace(
 def test_a_name_the_workspace_does_not_register_is_refused(tmp_path, capsys):
     workspace = _workspace(tmp_path, ["carameli"], opted=[])
     assert e2e_pass.run_pass(workspace, ["nope"], _args(no_wait=True)) == 2
-    assert "not registered in the workspace: nope" in capsys.readouterr().err
+    assert "not in the project registry: nope" in capsys.readouterr().err
 
 
 def test_each_result_is_one_line_that_says_what_happened():

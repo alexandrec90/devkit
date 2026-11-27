@@ -268,9 +268,11 @@ def scan(workspace: Path, projects: list[str] | None = None) -> dict[str, list[d
     scheduled pass, and six serial `gh pr list` calls are five seconds of nothing. The
     calls share nothing and `broken_prs` is total, so a pool of them cannot fail
     differently from the loop it replaced -- only sooner.
+
+    The checkouts are the project registry's; `workspace` is a deprecated alias for the
+    directory they sit in, and the file it names is not read.
     """
-    text = workspace.read_text(encoding="utf-8")
-    names = devkit_project.known_projects(text) if projects is None else projects
+    names = devkit_project.known_projects() if projects is None else projects
     root = workspace.parent
     if not names:
         return {}

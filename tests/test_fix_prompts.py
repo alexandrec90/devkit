@@ -908,3 +908,14 @@ def test_the_devkit_session_cuts_sibling_trees_with_the_verb_that_marks_them():
     steps = fix_prompts.LEDGER_STEPS
     assert "scripts/agent-worktree.py new" in steps and "merges once green" in steps
     assert "gets a copy" not in steps
+
+
+def test_every_fixer_is_told_to_read_in_parts_and_run_tests_twice():
+    """Ledger fixers averaged 45 turns at up to 240k of context: whole reads of 95-320 KB
+    modules and up to 66 test runs a session, each kept in every later turn."""
+    finish = fix_prompts.FINISH
+    for sentence in (fix_prompts.READ_SENTENCE, fix_prompts.TEST_RUNS_SENTENCE):
+        assert sentence in finish
+        assert not any(q in sentence for q in "\"'`"), "the prompt crosses a wt command line"
+    assert "offset and limit" in fix_prompts.READ_SENTENCE
+    assert "once before you change anything and once after" in fix_prompts.TEST_RUNS_SENTENCE

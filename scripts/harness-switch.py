@@ -171,10 +171,11 @@ def default_roots(workspace: Path) -> list[Path]:
 
     The user tier and the workspace root come first because they are the two that reach a
     session running in an ephemeral box, where the checkout tier is the box's own copy.
+    The projects are the registry's; `workspace` is a deprecated alias for the projects
+    root, and only its directory is read.
     """
     roots = [Path.home() / ".claude", workspace.parent]
-    text = workspace.read_text(encoding="utf-8") if workspace.is_file() else ""
-    roots += [workspace.parent / name for name in devkit_project.known_projects(text)]
+    roots += [workspace.parent / name for name in devkit_project.known_projects()]
     return [root for root in roots if root.is_dir()]
 
 

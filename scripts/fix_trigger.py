@@ -21,6 +21,7 @@ refuses to send twice at one problem, so a signal too many costs a pass that sen
 | `local:` a local end-to-end or medium tier run came back red | `logs/e2e`, `logs/medium-tier` |
 | `tree:` a session reported a blocker or friction, or its ship was refused | each worktree's `logs/` |
 | `event:` a scheduled job or collector failed, or an agent reported a defect | the events ledger |
+| `revert-due:` a direct-flow red reached its revert grace or ceiling (`fix_revert.py`) | `logs/red-seen` |
 
 Rows the pass writes itself (`fix-pass-finding`, `session-friction`) are not signals, or
 each pass would start the next.
@@ -59,6 +60,7 @@ import devkit_project
 import e2e_results
 import fix_switch
 import harness_events
+import red_seen
 import sweep
 import worktree_tiers
 
@@ -374,13 +376,28 @@ def event_signals(devkit: Path) -> set[str]:
     return {key for row in rows if (key := event_key(row))}
 
 
-def signals(root: Path, projects: list[str], repos: dict[str, dict]) -> set[str]:
+def revert_signals(devkit: Path, now: _dt.datetime) -> set[str]:
+    """Each red whose revert clock (`red_seen`) has reached its grace, and its ceiling: a
+    red nothing new lands on raises no other signal, and the half-hourly backstop would
+    stretch a twenty-minute grace by up to thirty more. One signal per mark per red."""
+    marks = (("grace", red_seen.REVERT_GRACE), ("ceiling", red_seen.REVERT_CEILING))
+    return {
+        f"revert-due:{project}@{key[:12]}:{mark}"
+        for mark, after in marks
+        for project, key in red_seen.lapsed(devkit, red_seen.REVERT, now, after)
+    }
+
+
+def signals(
+    root: Path, projects: list[str], repos: dict[str, dict], now: _dt.datetime | None = None
+) -> set[str]:
     devkit = root / DEVKIT
     return (
         github_signals(root, repos)
         | local_signals(devkit, projects)
         | tree_signals(root, projects)
         | event_signals(devkit)
+        | (revert_signals(devkit, now) if now is not None else set())
     )
 
 
@@ -494,7 +511,7 @@ def run_once(
     now = now or _dt.datetime.now(_dt.UTC)
     mode = fix_switch.workspace_mode(workspace)
     root = workspace.parent
-    projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    projects = devkit_project.known_projects()  # the registry, not the workspace file
     path = state_path(root)
     seen, follow = read_state(path)
     repos = repositories(root, projects, run)
@@ -508,7 +525,7 @@ def run_once(
     follow = start_follower(follow, run)
     spent, code = passing, 0
     if mode == fix_switch.DISPATCH:
-        current = signals(root, projects, repos)
+        current = signals(root, projects, repos, now)
         done, code = pass_for(root, sorted(current - seen.keys()), run, clock)
         spent = spent | (current if done else current & seen.keys())
     else:

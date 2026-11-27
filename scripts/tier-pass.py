@@ -421,7 +421,10 @@ def judge(target: Target, timeout: float, seams: Seams) -> e2e_results.Result | 
 
 
 def registered(workspace: Path) -> list[str]:
-    return devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    """The project registry. `workspace` is deprecated and not read: it still carries the
+    setting this pass reads, and only names where the checkouts sit."""
+    del workspace
+    return devkit_project.known_projects()
 
 
 def waiting(name: str, last: e2e_results.Result | None, tip: str, seams: Seams) -> bool:
@@ -548,7 +551,7 @@ def run_pass(
     known = registered(workspace)
     unknown = [name for name in only if name not in known]
     if unknown:
-        print(f"tier-pass: not registered in the workspace: {', '.join(unknown)}", file=sys.stderr)
+        print(f"tier-pass: not in the project registry: {', '.join(unknown)}", file=sys.stderr)
         return 2
     with machine_lock(seams.root / TIER.results_dir / LOCK_FILE) as held:
         if not held:

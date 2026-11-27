@@ -3,6 +3,8 @@
 import pytest
 from support import REPO_ROOT, devkit_ports, devkit_project
 
+import project_registry  # on sys.path once `support` is imported
+
 Registry = devkit_ports.Registry
 RegistryError = devkit_ports.RegistryError
 from_dict = devkit_ports.from_dict
@@ -268,12 +270,19 @@ SLOTLESS: dict[str, str] = {
 }
 
 
-# NB the converse is deliberately NOT asserted. A registered checkout need not be a
-# workspace folder: `sports_betting` holds slots 4-5 and is not in the `project` picker,
-# and that is correct — a slot reserves the host ports a stack publishes, which it does
-# whether or not the repo is open in the multi-root workspace. A test requiring
-# registry ⊆ picker was written here first and deleted: it failed on sports_betting, and
-# "fixing" it would have freed ports a live stack is using.
+# NB the converse is deliberately NOT asserted. A checkout holding a slot need not be
+# registered in `projects.toml`: a slot reserves the host ports a stack publishes, which
+# it does whether or not devkit manages the repo. A test requiring slots ⊆ registry was
+# written here first, against the old `project` picker, and deleted: it failed on
+# sports_betting, then unlisted, and "fixing" it would have freed ports a live stack was
+# using.
+
+
+def _registered() -> set[str]:
+    """Every checkout devkit registers, read off `projects.toml` -- the registry's home
+    since the VS Code `project` picker that used to stand in for it is being retired --
+    less the reference checkouts `devkit_project.NOT_PROJECTS` keeps out of the word."""
+    return set(project_registry.all_projects(REPO_ROOT)) - devkit_project.NOT_PROJECTS
 
 
 def test_every_checkout_either_holds_a_slot_or_says_why_not():
@@ -286,10 +295,7 @@ def test_every_checkout_either_holds_a_slot_or_says_why_not():
     hand, which is the part this test replaces.
     """
     registry = load(REPO_ROOT)
-    canonical = devkit_project.canonical_tasks()
-    picker = next(i for i in canonical["inputs"] if i["id"] == "project")
-    options = picker.get("options", picker["args"]["optionGroups"][0]["options"])
-    known = {o if isinstance(o, str) else o["value"] for o in options}
+    known = _registered()
     missing = sorted(known - set(registry.slots) - set(SLOTLESS))
     assert not missing, (
         f"{missing} have no slot in ports.toml and no reason in SLOTLESS — either add "
@@ -304,10 +310,7 @@ def test_every_slotless_exclusion_names_a_real_checkout_and_a_reason():
     checkout exempt forever, and invite the next omission to be silenced by adding a
     line here rather than a slot there."""
     registry = load(REPO_ROOT)
-    canonical = devkit_project.canonical_tasks()
-    picker = next(i for i in canonical["inputs"] if i["id"] == "project")
-    options = picker.get("options", picker["args"]["optionGroups"][0]["options"])
-    known = {o if isinstance(o, str) else o["value"] for o in options}
+    known = _registered()
     for name, reason in SLOTLESS.items():
         assert name in known, f"SLOTLESS names {name}, which is not a checkout"
         assert reason.strip(), f"SLOTLESS excludes {name} with no reason given"

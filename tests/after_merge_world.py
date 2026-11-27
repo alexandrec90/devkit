@@ -14,6 +14,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
+import project_registry
 from support import load_script
 
 after_merge_pass = load_script("scripts/after-merge-pass.py")
@@ -179,7 +180,7 @@ class World:
     def run(self, **changes) -> int:
         self.write_workspace()
         seams = self.seams(**changes)
-        code = after_merge_pass.run_pass(self.workspace, [], seams)
+        code = after_merge_pass.run_pass(self.ws, [], seams)
         assert not [
             item for item in triage.load(seams.root) if "pass-step-crashed" in str(item.fields)
         ], "a step of the pass raised"
@@ -239,4 +240,8 @@ def make_world(tmp_path: Path, monkeypatch) -> World:
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setattr(after_merge_pass.fix_reports, "trust", lambda _checkout: True)
-    return World(tmp_path)
+    world = World(tmp_path)
+    # The pass reads its projects off the registry, so the registry is the world's list,
+    # read live: a project a test adds or appends is registered from then on.
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(world.projects))
+    return world

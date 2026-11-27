@@ -19,6 +19,7 @@ import subprocess
 import types
 from pathlib import Path
 
+import project_registry
 import pytest
 from support import REPO_ROOT, load_script, sweep
 
@@ -1015,8 +1016,20 @@ def test_a_missing_checkout_directory_is_an_unadopted_one(tmp_path):
 # --- the CLI scope contract ---------------------------------------------------
 
 
+# The project registry `main` validates against, as the last `workspace` set it. The
+# workspace file still carries `devkit.onHold` and names the projects root.
+REGISTERED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch):
+    REGISTERED.clear()
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
+
+
 def workspace(tmp_path, *names):
-    """A `.code-workspace` listing `names`, as `parse_workspace` reads them."""
+    """A `.code-workspace` beside checkouts `names`, and a registry listing them."""
+    REGISTERED[:] = names
     path = tmp_path / "alex-projects.code-workspace"
     path.write_text(json.dumps({"folders": [{"path": n} for n in names]}), encoding="utf-8")
     return path
@@ -1389,6 +1402,7 @@ def test_a_project_ahead_does_not_stop_the_ones_behind(tmp_path, monkeypatch):
     ws.write_text(
         json.dumps({"folders": [{"path": "carameli"}, {"path": "ibkr_trader"}]}), encoding="utf-8"
     )
+    REGISTERED[:] = ["carameli", "ibkr_trader"]
     assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 1
     assert upgraded_names == ["ibkr_trader"]
 

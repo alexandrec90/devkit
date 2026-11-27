@@ -20,6 +20,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import project_registry
 import pytest
 from support import devkit_project, load_script
 
@@ -93,9 +94,13 @@ def run(fake, base=merge_default.AUTO, remote="origin"):
 
 # --- the registry seam ------------------------------------------------------
 
-WORKSPACE = json.dumps(
-    {"folders": [{"path": "carameli"}, {"path": "devkit"}, {"path": "reference-checkout"}]}
-)
+REGISTRY = ("carameli", "devkit", "reference-checkout")
+WORKSPACE = json.dumps({"folders": [{"path": name} for name in REGISTRY]})
+
+
+def register(monkeypatch, *names: str) -> None:
+    """Make the project registry list `names`, as `projects.toml` would."""
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(names))
 
 
 def test_the_reference_checkout_is_reachable_from_here(monkeypatch):
@@ -108,20 +113,26 @@ def test_the_reference_checkout_is_reachable_from_here(monkeypatch):
     difference — and the difference is the reason this script is not a dispatch.
     """
     monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({"reference-checkout"}))
+    register(monkeypatch, *REGISTRY)
+    assert "reference-checkout" in every_checkout()
+    assert "reference-checkout" not in devkit_project.known_projects()
+    # The deprecated workspace-text form draws the same line.
     assert "reference-checkout" in every_checkout(WORKSPACE)
     assert "reference-checkout" not in devkit_project.known_projects(WORKSPACE)
 
 
-def test_a_named_checkout_resolves_to_its_directory(tmp_path):
+def test_a_named_checkout_resolves_to_its_directory(tmp_path, monkeypatch):
+    """Off the registry: the workspace path only says where the checkouts sit, and the
+    file it names need not exist."""
+    register(monkeypatch, *REGISTRY)
     workspace = tmp_path / "registry.code-workspace"
-    workspace.write_text(WORKSPACE, encoding="utf-8")
     (tmp_path / "reference-checkout").mkdir()
     assert target_repo("reference-checkout", workspace) == tmp_path / "reference-checkout"
 
 
-def test_an_unknown_checkout_names_the_real_ones(tmp_path):
+def test_an_unknown_checkout_names_the_real_ones(tmp_path, monkeypatch):
+    register(monkeypatch, *REGISTRY)
     workspace = tmp_path / "registry.code-workspace"
-    workspace.write_text(WORKSPACE, encoding="utf-8")
     with pytest.raises(
         devkit_project.ProjectError, match=r"unknown checkout 'nope'.*reference-checkout"
     ):
@@ -133,8 +144,13 @@ def test_no_checkout_means_the_current_directory(tmp_path, monkeypatch):
     assert target_repo("", tmp_path / "missing.code-workspace") == Path.cwd()
 
 
-def test_a_missing_registry_is_reported_rather_than_traced(tmp_path):
-    with pytest.raises(MergeError, match="cannot read the workspace registry"):
+def test_an_unreadable_registry_is_reported_rather_than_traced(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        project_registry,
+        "all_projects",
+        lambda *_a, **_k: project_registry.parse_registry("projects = ["),
+    )
+    with pytest.raises(MergeError, match="cannot read the project registry"):
         target_repo("reference-checkout", tmp_path / "missing.code-workspace")
 
 
@@ -511,9 +527,9 @@ def test_the_remediation_block_says_where_the_work_went_only_when_it_went_somewh
 # --- the entrypoint ---------------------------------------------------------
 
 
-def test_main_runs_against_the_checkout_it_was_given(tmp_path):
+def test_main_runs_against_the_checkout_it_was_given(tmp_path, monkeypatch):
+    register(monkeypatch, *REGISTRY)
     workspace = tmp_path / "registry.code-workspace"
-    workspace.write_text(WORKSPACE, encoding="utf-8")
     (tmp_path / "reference-checkout").mkdir()
     seen = {}
 
@@ -528,9 +544,9 @@ def test_main_runs_against_the_checkout_it_was_given(tmp_path):
     assert seen["repo"] == tmp_path / "reference-checkout"
 
 
-def test_main_reports_a_bad_checkout_without_touching_git(tmp_path, capsys):
+def test_main_reports_a_bad_checkout_without_touching_git(tmp_path, monkeypatch, capsys):
+    register(monkeypatch, *REGISTRY)
     workspace = tmp_path / "registry.code-workspace"
-    workspace.write_text(WORKSPACE, encoding="utf-8")
 
     def factory(repo):  # pragma: no cover - reaching this is the failure
         raise AssertionError("git must not be reached for an unresolvable checkout")

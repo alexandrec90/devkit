@@ -86,6 +86,57 @@ def test_git_in_runs_git_in_the_checkout_and_never_raises(tmp_path):
     assert git("no-such-verb").returncode != 0
 
 
+def _commit_beside(canonical: Path, name: str, text: str) -> Path:
+    """Commit `name` holding `text` beside `canonical`, in its checkout."""
+    path = canonical.parent / name
+    path.write_text(text, encoding="utf-8", newline="\n")
+    for args in (("add", name), ("commit", "--quiet", "-m", f"add {name}")):
+        subprocess.run(["git", "-C", str(canonical.parent), *args], check=True, capture_output=True)
+    return path
+
+
+def test_a_file_the_same_edit_wrote_moves_onto_the_same_branch(tmp_path):
+    """The registry is written to `projects.toml` and `workspace.jsonc` both until the
+    latter is gone, and the two must land in one commit: apart, the branch holding one
+    fails `tests/test_project_registry.py` for disagreeing with the other."""
+    canonical = checkout(tmp_path / "devkit")
+    toml = _commit_beside(canonical, "projects.toml", 'projects = ["a"]\n')
+    canonical.write_text('{"folders": [{"path": "b"}]}\n', encoding="utf-8", newline="\n")
+    toml.write_text('projects = ["a", "b"]\n', encoding="utf-8", newline="\n")
+
+    cut = canonical_handoff.hand_off(canonical, "plug-b", "Plug b\n", also=("projects.toml",))
+
+    assert cut.tree is not None and cut.said == ""
+    assert git_out(canonical.parent, "status", "--porcelain", "--untracked-files=no") == ""
+    assert toml.read_text(encoding="utf-8") == 'projects = ["a"]\n'
+    assert (cut.tree / "projects.toml").read_text(encoding="utf-8") == 'projects = ["a", "b"]\n'
+    changed = sorted(git_out(cut.tree, "diff", "--name-only").splitlines())
+    assert changed == ["projects.toml", "workspace.jsonc"]
+
+
+def test_an_edit_of_the_sibling_alone_is_still_handed_off(tmp_path):
+    canonical = checkout(tmp_path / "devkit")
+    toml = _commit_beside(canonical, "projects.toml", 'projects = ["a"]\n')
+    toml.write_text("projects = []\n", encoding="utf-8", newline="\n")
+
+    cut = canonical_handoff.hand_off(canonical, "x", "X\n", also=("projects.toml",))
+
+    assert cut.tree is not None
+    assert git_out(cut.tree, "diff", "--name-only") == "projects.toml"
+    assert git_out(canonical.parent, "status", "--porcelain", "--untracked-files=no") == ""
+
+
+def test_a_sibling_that_is_absent_or_unedited_is_skipped(tmp_path):
+    canonical = checkout(tmp_path / "devkit")
+    canonical.write_text("{ }\n", encoding="utf-8", newline="\n")
+
+    cut = canonical_handoff.hand_off(canonical, "x", "X\n", also=("projects.toml",))
+
+    assert cut.tree is not None
+    assert git_out(cut.tree, "diff", "--name-only") == "workspace.jsonc"
+    assert not (canonical.parent / "projects.toml").exists()
+
+
 def test_a_path_git_cannot_read_is_not_dirty(tmp_path):
     (tmp_path / "workspace.jsonc").write_text("{}", encoding="utf-8")
     assert not canonical_handoff.dirty(tmp_path / "workspace.jsonc")

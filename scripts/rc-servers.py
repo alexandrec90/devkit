@@ -256,12 +256,11 @@ def build_plan(workspace: Path, root: Path, report: Pass, host: str | None = Non
     A machine `hosts` assigns nothing still gets a `Plan`, with no names in it: that is
     what lets `retire` stop the servers it was running before the assignment moved.
     """
-    text = workspace.read_text(encoding="utf-8")
     config = rc_config.read_config(workspace, root)
     if not config.projects:
         report.say(f"nothing to serve -- no `{rc_config.RC_SETTING}` in projects.toml")
         return None
-    names, notes = rc_config.selected(config, sweep.parse_workspace(text))
+    names, notes = rc_config.selected(config, rc_config.every_project())
     for note in notes:
         report.fail(note)
     names, elsewhere = rc_config.assigned_here(

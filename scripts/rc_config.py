@@ -205,6 +205,19 @@ def _positive_int(value: object, fallback: int) -> int:
     return value
 
 
+def every_project() -> list[str]:
+    """What `ALL_PROJECTS` expands to: the project registry, every registered checkout.
+
+    Off `project_registry`, not the workspace file's `folders`. A registry that cannot be
+    read expands to nothing, for the reason `parse_config` serves nothing on a broken
+    workspace file: visible in the artifact, rather than a crashed scheduled task.
+    """
+    try:
+        return sweep.managed(project_registry.all_projects())
+    except project_registry.RegistryError:
+        return []
+
+
 def parse_config(text: str) -> Config:
     """Read `RC_SETTING` out of a workspace file.
 
@@ -214,8 +227,8 @@ def parse_config(text: str) -> Config:
         "devkit.remoteControl": ["devkit", "carameli"]
         "devkit.remoteControl": {"projects": ["devkit"], "idleMinutes": 30}
 
-    Either list may be `ALL_PROJECTS` instead, which expands to every one of the
-    workspace's folders.
+    Either list may be `ALL_PROJECTS` instead, which expands to every registered
+    project (`every_project`).
 
     Malformed input yields an empty `Config`, matching `sweep.parse_workspace` and
     `sweep.on_hold`: this job's failure mode for a broken workspace file is to serve
@@ -231,26 +244,26 @@ def parse_config(text: str) -> Config:
     settings = payload.get("settings")
     if not isinstance(settings, dict):
         return Config()
-    return config_of(settings.get(RC_SETTING), sweep.parse_workspace(text))
+    return config_of(settings.get(RC_SETTING))
 
 
 def read_config(workspace: Path, root: Path) -> Config:
     """`RC_SETTING` as `project_registry.setting` reads it for the devkit checkout at
-    `root` -- its `projects.toml`, else `workspace` -- with `all` expanded from
-    `workspace`'s folders, this machine's checkouts.
+    `root` -- its `projects.toml`, else `workspace` -- with `all` expanded from the
+    project registry (`every_project`).
 
     An empty `Config` for a malformed or unreadable file, as `parse_config` gives one.
     """
     try:
         raw = project_registry.setting(RC_SETTING, repo_root=root, workspace=workspace)
-        text = workspace.read_text(encoding="utf-8")
+        workspace.read_text(encoding="utf-8")  # a missing live file serves nothing
     except (project_registry.RegistryError, OSError):
         return Config()
-    return config_of(raw, sweep.parse_workspace(text))
+    return config_of(raw)
 
 
-def config_of(raw: object, folders: Sequence[str]) -> Config:
-    """`RC_SETTING`'s value, as stored, as a `Config`; `all` means `folders`."""
+def config_of(raw: object) -> Config:
+    """`RC_SETTING`'s value, as stored, as a `Config`; `all` means `every_project`."""
     if isinstance(raw, list) or raw == ALL_PROJECTS:
         raw = {"projects": raw}
     if not isinstance(raw, dict):
@@ -258,7 +271,7 @@ def config_of(raw: object, folders: Sequence[str]) -> Config:
 
     names = raw.get("projects")
     if names == ALL_PROJECTS:
-        names = list(folders)
+        names = every_project()
     projects = (
         tuple(name for name in names if isinstance(name, str) and name)
         if isinstance(names, list)

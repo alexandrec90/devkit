@@ -89,6 +89,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import harness_events
 import policy_runtime
 import precommit_store
+import project_registry
 from adoption_prs import (
     UPGRADE_SLUG,
     close_superseded,
@@ -143,7 +144,9 @@ SKIP_UNADOPTED = "has no DEVKIT_VERSION -- it has never vendored devkit"
 # no reviewer to merge it, so it sits holding a vendored bump until something calls it
 # stranded. Naming the project explicitly still upgrades it -- the skip is for the
 # unattended pass, not a lock.
-SKIP_ON_HOLD = "is on hold (`devkit.onHold` in .devkit-machine.json) -- name it explicitly to upgrade it"
+SKIP_ON_HOLD = (
+    "is on hold (`devkit.onHold` in .devkit-machine.json) -- name it explicitly to upgrade it"
+)
 
 # How a reader is told to cut the release this run needed and could not have. Named
 # here rather than spelled into each message because there are three of them, and a
@@ -1281,12 +1284,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.workspace.is_file():
         return stopped(2, f"upgrade: no workspace file at {args.workspace}")
-    names = sweep.parse_workspace(args.workspace.read_text(encoding="utf-8"))
+    names = sweep.managed(project_registry.all_projects())
     unknown = [name for name in requested if name not in names]
     if unknown:
         return stopped(
             2,
-            f"upgrade: {', '.join(unknown)} not in {args.workspace.name}. "
+            f"upgrade: {', '.join(unknown)} not in the project registry. "
             f"Known checkouts: {', '.join(names)}",
         )
 

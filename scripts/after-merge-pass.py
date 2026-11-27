@@ -80,6 +80,7 @@ import git_trust
 import host_memory
 import job_claims
 import machine_role
+import project_registry
 import ship_intent
 import sweep
 import task_branch as tb
@@ -835,21 +836,21 @@ def _run_board(
 # --- the pass ---------------------------------------------------------------------------------
 
 
-def here(workspace: Path, only: list[str]) -> list[str]:
-    """The registered projects with a checkout on this machine, `only` if any are named.
+def here(root: Path, only: list[str]) -> list[str]:
+    """The registered projects with a checkout under `root`, `only` if any are named.
     A project with none here is another PC's to run."""
-    known = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    known = devkit_project.known_projects()
     names = [name for name in known if not only or name in only]
-    return [name for name in names if (workspace.parent / name / ".git").exists()]
+    return [name for name in names if (root / name / ".git").exists()]
 
 
 def _read_boards(
-    workspace: Path, names: list[str], seams: Seams, unread: dict[str, str] | None = None
+    root: Path, names: list[str], seams: Seams, unread: dict[str, str] | None = None
 ) -> dict[str, Board]:
     """The boards that could be read; `unread` collects why each other one could not."""
     boards = {}
     for name in names:
-        path = workspace.parent / name
+        path = root / name
         boards[name] = after_merge_board.read_board(name, path, seams.git_for(path))
         if boards[name].error:
             print(f"{name}: {boards[name].error}; next cycle", flush=True)
@@ -924,13 +925,13 @@ def _file(cycle: Cycle) -> None:
         print(f"filed {finding.headline[:160]}", flush=True)
 
 
-def run_pass(workspace: Path, only: list[str], seams: Seams) -> int:
+def run_pass(root: Path, only: list[str], seams: Seams) -> int:
     """One cycle: every queue here read, whatever is due taken, whatever is out read back,
     each project tidied once a day, and what went wrong filed. One project's crash is a
     finding, not the pass's end."""
-    names = here(workspace, only)
+    names = here(root, only)
     errors: dict[str, str] = {}
-    boards = _read_boards(workspace, names, seams, errors)
+    boards = _read_boards(root, names, seams, errors)
     cycle = _begin(boards, seams)
     state = read_state(seams)
     seen = dict(state.get("seen", {}))
@@ -948,9 +949,9 @@ def run_pass(workspace: Path, only: list[str], seams: Seams) -> int:
     return 0
 
 
-def tidy_now(workspace: Path, only: list[str], seams: Seams) -> int:
+def tidy_now(root: Path, only: list[str], seams: Seams) -> int:
     """The clean-up PR of each project, whatever the day, taking no task."""
-    boards = _read_boards(workspace, here(workspace, only), seams)
+    boards = _read_boards(root, here(root, only), seams)
     cycle = _begin(boards, seams)
     cycle.journal.step("heartbeat", _heartbeat, boards, cycle)
     tidied: dict[str, str] = {}
@@ -962,9 +963,9 @@ def tidy_now(workspace: Path, only: list[str], seams: Seams) -> int:
     return 0
 
 
-def status(workspace: Path, only: list[str], seams: Seams) -> int:
+def status(root: Path, only: list[str], seams: Seams) -> int:
     """Each task and what this machine would do about it. Nothing is claimed or written."""
-    boards = _read_boards(workspace, here(workspace, only), seams)
+    boards = _read_boards(root, here(root, only), seams)
     seen = read_state(seams).get("seen", {})
     now = seams.now()
     docker = _needs_docker(boards) and seams.docker()
@@ -992,16 +993,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
-    workspace = sweep.default_workspace(REPO_ROOT)
-    if not workspace.is_file():
-        print(f"after-merge-pass: no workspace file at {workspace}", file=sys.stderr)
+    # The projects come off the registry, so no workspace file is needed: only the
+    # directory the checkouts sit in.
+    root = project_registry.projects_root(REPO_ROOT)
+    if not root.is_dir():
+        print(f"after-merge-pass: no projects root at {root}", file=sys.stderr)
         return 2
     # Reads must work on a checkout an elevated process made; `_trust_refusal` is the
     # separate question of running a command in one.
-    git_trust.adopt(workspace.parent, False)
+    git_trust.adopt(root, False)
     seams = Seams()
     verbs = {"run": run_pass, "status": status, "tidy": tidy_now}
-    return verbs[args.verb](workspace, args.projects, seams)
+    return verbs[args.verb](root, args.projects, seams)
 
 
 if __name__ == "__main__":

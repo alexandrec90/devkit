@@ -8,6 +8,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import project_registry
 import pytest
 from support import load_script
 
@@ -247,6 +248,13 @@ def test_the_ledgers_rows_are_read_off_its_end(tmp_path):
 # --- what is new, and starting the pass ------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def registry(monkeypatch):
+    """The project registry `Machine` stands for: the trigger reads its projects there,
+    and the workspace file only for `devkit.fixPass` and where the checkouts sit."""
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: ["devkit"])
+
+
 class Machine:
     def __init__(self, tmp_path: Path, mode="dispatch", started=0):
         self.root, self.started = tmp_path, started
@@ -372,6 +380,21 @@ def test_signals_gathers_every_source(tmp_path):
     repos = trigger.repositories(tmp_path, ["devkit"], machine.run)
     found = trigger.signals(tmp_path, ["devkit"], repos)
     assert {key.split(":")[0] for key in found} == {"red", "conflict", "tree", "local", "event"}
+
+
+def test_a_red_whose_revert_clock_reached_each_mark_starts_a_pass_once_per_mark(tmp_path):
+    """A red nothing lands on raises no other signal: without this, the half-hourly
+    backstop would stretch the revert grace by up to thirty minutes."""
+    devkit = tmp_path / "devkit"
+    seen = trigger.red_seen.first_seen(devkit, "roguelike", "revert", "a" * 40, NOW)
+    grace, ceiling = trigger.red_seen.REVERT_GRACE, trigger.red_seen.REVERT_CEILING
+    assert trigger.revert_signals(devkit, seen + grace - _dt.timedelta(seconds=1)) == set()
+    at = f"revert-due:roguelike@{'a' * 12}"
+    assert trigger.revert_signals(devkit, seen + grace) == {f"{at}:grace"}
+    assert trigger.revert_signals(devkit, seen + ceiling) == {f"{at}:grace", f"{at}:ceiling"}
+    repos: dict[str, dict] = {}
+    assert "revert-due" not in str(trigger.signals(tmp_path, ["roguelike"], repos)), "no clock"
+    assert trigger.revert_signals(tmp_path / "nowhere", NOW + ceiling) == set()
 
 
 def test_what_still_stands_is_remembered_and_the_rest_forgotten(tmp_path):

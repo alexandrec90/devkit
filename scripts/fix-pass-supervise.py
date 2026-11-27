@@ -450,7 +450,7 @@ def iterate(
         record, code, open_kinds(devkit_dir)
     )
     if mode == "dispatch":
-        projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+        projects = devkit_project.known_projects()
         frm = since or started
         out = REPO_ROOT / READABLE / f"iteration-{number}"
         iteration.sessions = settle(

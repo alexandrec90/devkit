@@ -38,8 +38,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -280,3 +282,194 @@ def migrate_machine_settings(
     if copied:
         write_machine(path, {**values, **{key: found[key] for key in copied}})
     return copied
+
+
+# --- writing the registry --------------------------------------------------------------
+#
+# The `projects` array is edited a line at a time, as `new-project.py`'s `register_slot`
+# edits `ports.toml`'s `[slots]`: the stdlib has no TOML writer, and a dump-and-rewrite
+# would drop the comments this file exists to carry. Every edit is reparsed before it is
+# returned, because a half-applied one is a registry every reader sees as wrong.
+#
+# Until `workspace.jsonc` is deleted, every writer of the registry writes BOTH: this
+# file and the workspace file's `folders` (`devkit_project.register` / `unregister`),
+# and `tests/test_project_registry.py` fails the moment they disagree.
+
+_ARRAY_OPEN = re.compile(r"^\s*projects\s*=\s*\[")
+_ENTRY = re.compile(r'^(?P<indent>\s*)"(?P<name>[^"\\]*)"\s*(?P<comma>,?)\s*(?P<comment>#.*)?$')
+_DEFAULT_INDENT = "    "
+
+
+def _code(line: str) -> str:
+    """`line` without its newline or a trailing `#` comment (names hold no `#`)."""
+    body = line.rstrip("\r\n")
+    in_string = False
+    for i, char in enumerate(body):
+        if char == '"':
+            in_string = not in_string
+        elif char == "#" and not in_string:
+            return body[:i].rstrip()
+    return body.rstrip()
+
+
+def _checked_name(name: str) -> str:
+    if not name or any(c in name for c in '"\\#\r\n'):
+        raise RegistryError(f"{REGISTRY_NAME}: {name!r} is not a project name")
+    return name
+
+
+def _array_span(lines: list[str]) -> tuple[int, int] | None:
+    """`(open, close)` line indices of the multi-line `projects = [` array, or None.
+
+    A one-line array (`projects = []`, `projects = ["a"]`) is first laid out one name
+    per line by `_spread`, so every edit below works on the one shape.
+    """
+    open_at = None
+    for i, line in enumerate(lines):
+        if _ARRAY_OPEN.match(line):
+            open_at = i
+            break
+        if line.lstrip().startswith("["):
+            return None  # a table header: `projects` would have had to come before it
+    if open_at is None:
+        return None
+    for j in range(open_at + 1, len(lines)):
+        if _code(lines[j]).lstrip().startswith("]"):
+            return open_at, j
+    raise RegistryError(f"{REGISTRY_NAME}: the `projects` array is never closed")
+
+
+def _spread(lines: list[str]) -> list[str]:
+    """`lines` with a one-line `projects = [...]` rewritten one name per line."""
+    for i, line in enumerate(lines):
+        if _ARRAY_OPEN.match(line) and "]" in _code(line):
+            names = parse_registry(_code(line) + "\n")
+            comment = line.rstrip("\r\n")[len(_code(line)) :].strip()
+            opener = "projects = [" + (f"  {comment}" if comment else "") + "\n"
+            body = [f'{_DEFAULT_INDENT}"{n}",\n' for n in names]
+            return [*lines[:i], opener, *body, "]\n", *lines[i + 1 :]]
+        if line.lstrip().startswith("["):
+            break
+    return lines
+
+
+def _entries(lines: list[str], open_at: int, close_at: int) -> list[tuple[int, re.Match[str]]]:
+    """The array's name lines; a line that is neither a name, a comment nor blank is
+    refused rather than guessed at."""
+    found = []
+    for i in range(open_at + 1, close_at):
+        if not _code(lines[i]).strip():
+            continue
+        match = _ENTRY.match(lines[i].rstrip("\r\n"))
+        if match is None:
+            raise RegistryError(f"{REGISTRY_NAME}: lay out `projects` one name per line")
+        found.append((i, match))
+    return found
+
+
+def _verified(edited: str, expected: list[str]) -> str:
+    got = parse_registry(edited)
+    if sorted(got) != sorted(expected):
+        raise RegistryError(f"{REGISTRY_NAME}: the edit did not take effect")
+    return edited
+
+
+def register_text(text: str, *names: str, before: frozenset[str] = frozenset()) -> str:
+    """`projects.toml` text with each of `names` added to `projects`.
+
+    Appended at the end of the array -- before the first name in `before`, when one is
+    there -- which is where `devkit_project.insert_folder` puts a folder (ahead of any
+    `NOT_PROJECTS` reference checkout), so the two registries keep one order. A name
+    already registered is skipped, so a re-run changes nothing; comments and blank lines
+    are kept. A file with no `projects` gets one, ahead of its first table.
+    """
+    current = parse_registry(text)
+    adding = [_checked_name(n) for n in dict.fromkeys(names) if n not in current]
+    if not adding:
+        return text
+    lines = _spread(text.splitlines(keepends=True))
+    span = _array_span(lines)
+    if span is None:
+        _add_array(lines, adding)
+    else:
+        _add_entries(lines, span, adding, before)
+    return _verified("".join(lines), current + adding)
+
+
+def _add_array(lines: list[str], adding: list[str]) -> None:
+    """Give `lines` a `projects` array holding `adding`, ahead of the first table."""
+    block = ["projects = [\n", *(f'{_DEFAULT_INDENT}"{n}",\n' for n in adding), "]\n"]
+    header = next((i for i, line in enumerate(lines) if line.lstrip().startswith("[")), None)
+    if header is not None:
+        lines[header:header] = [*block, "\n"]
+        return
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines += (["\n"] if lines else []) + block
+
+
+def _add_entries(
+    lines: list[str], span: tuple[int, int], adding: list[str], before: frozenset[str]
+) -> None:
+    """Insert `adding` into the array at `span`: before the first name in `before`, else
+    at the end, giving the last name the comma it then needs."""
+    open_at, close_at = span
+    entries = _entries(lines, open_at, close_at)
+    indent = entries[0][1]["indent"] if entries else _DEFAULT_INDENT
+    at = next((i for i, m in entries if m["name"] in before), close_at)
+    if at == close_at and entries:
+        last, match = entries[-1]
+        if not match["comma"]:
+            comment = f"  {match['comment']}" if match["comment"] else ""
+            lines[last] = f'{match["indent"]}"{match["name"]}",{comment}\n'
+    lines[at:at] = [f'{indent}"{n}",\n' for n in adding]
+
+
+def unregister_text(text: str, *names: str) -> str:
+    """`projects.toml` text with each of `names` dropped from `projects`.
+
+    The inverse of `register_text`: a name not registered is skipped, so a re-run
+    changes nothing, and every other line -- a comment above a dropped name included --
+    is kept, since whose comment it was is not something a line edit can tell.
+    """
+    current = parse_registry(text)
+    dropping = {n for n in names if n in current}
+    if not dropping:
+        return text
+    lines = _spread(text.splitlines(keepends=True))
+    span = _array_span(lines)
+    if span is None:  # parse_registry found names, so the array is there
+        raise RegistryError(f"{REGISTRY_NAME}: cannot find the `projects` array to edit")
+    gone = {i for i, m in _entries(lines, *span) if m["name"] in dropping}
+    edited = "".join(line for i, line in enumerate(lines) if i not in gone)
+    return _verified(edited, [n for n in current if n not in dropping])
+
+
+def _write_edit(path: Path, edit: Callable[[str], str]) -> bool:
+    """Apply `edit` to the registry at `path`; whether the file changed.
+
+    A missing file is left missing: while `projects.toml` is absent the live workspace
+    file is the registry (`all_projects`), and a file created here holding only the new
+    name would shadow every other project.
+    """
+    text = _read(path)
+    if text is None:
+        return False
+    edited = edit(text)
+    if edited == text:
+        return False
+    path.write_text(edited, encoding="utf-8", newline="\n")
+    return True
+
+
+def register_file(path: Path, *names: str, before: frozenset[str] = frozenset()) -> bool:
+    """`register_text` applied to the file at `path`; whether it was written."""
+    return _write_edit(path, lambda text: register_text(text, *names, before=before))
+
+
+def unregister_file(path: Path, *names: str) -> bool:
+    """`unregister_text` applied to the file at `path`; whether it was written."""
+    return _write_edit(path, lambda text: unregister_text(text, *names))
+
+
+# --- end of writing the registry -------------------------------------------------------

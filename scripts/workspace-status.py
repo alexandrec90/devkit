@@ -67,6 +67,7 @@ import harness_triage as _triage
 import machine_clock
 import machine_role
 import notify as _notify
+import project_registry
 import schedule_health
 import sweep
 import task_branch
@@ -787,10 +788,11 @@ def _age(seconds: float) -> str:
 
 def launcher_lines(workspace: Path = DEFAULT_WORKSPACE) -> list[str]:
     """One line per checkout with console scripts that name a gone interpreter; [] for
-    none, or no workspace to read. No gate runs a launcher, and a filed line is a fixer."""
+    none, or no registry to read. No gate runs a launcher, and a filed line is a fixer.
+    The checkouts are the project registry's; `workspace` only names where they sit."""
     try:
-        names = sweep.parse_workspace(workspace.read_text(encoding="utf-8"))
-    except OSError:
+        names = sweep.managed(project_registry.all_projects())
+    except project_registry.RegistryError:
         return []
     gaps = ((name, toolchain.launcher_gap(workspace.parent / name)) for name in names)
     return [f"{name}: {gap.line}" for name, gap in gaps if gap]
@@ -1241,7 +1243,7 @@ def main(argv: list[str] | None = None) -> int:
         # The unattended run only: a person at a terminal is not made to wait.
         _time.sleep(catch_up_wait(SOURCE_ROOT, _time.time(), resumed))
     try:
-        names = sweep.parse_workspace(workspace.read_text(encoding="utf-8"))
+        names = sweep.managed(project_registry.all_projects())
         if not names:
             return 0
         root = workspace.parent

@@ -146,6 +146,7 @@ def _crashing(monkeypatch, tmp_path) -> None:
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
+    monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: ["proj"])
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
 
 
@@ -195,6 +196,7 @@ def _workspace_reporting(monkeypatch, tmp_path, message: str) -> None:
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
+    monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: ["proj"])
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: [])
     monkeypatch.setattr(ws, "render", lambda *a, **k: message)
     monkeypatch.setattr(ws, "toolchain_lines", lambda *a, **k: [])
@@ -634,6 +636,7 @@ def test_the_report_is_toolchain_and_render_and_nothing_else(monkeypatch, capsys
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
+    monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: ["proj"])
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: [])
     monkeypatch.setattr(ws, "toolchain_lines", lambda **k: [])
     monkeypatch.setattr(ws, "render", lambda *a, **k: "")
@@ -717,14 +720,18 @@ def test_a_dead_launcher_in_any_checkout_is_named_with_the_checkout_and_its_fix(
     """513c55e5: `.venv/Scripts/mypy` dead for 26 days, and nothing said so until a session
     tried it. No gate runs a launcher, so a check somebody has to run would never fire."""
     workspace = tmp_path / "ws.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(ws.sweep, "parse_workspace", lambda _text: ["fine", "broken"])
+    monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: ["fine", "broken"])
     gaps = {"broken": ws.toolchain.Gap("8 console scripts dead", "uv sync --reinstall")}
     monkeypatch.setattr(ws.toolchain, "launcher_gap", lambda root: gaps.get(root.name))
     assert ws.launcher_lines(workspace) == [
         "broken: 8 console scripts dead (fix: uv sync --reinstall)"
-    ]
-    assert ws.launcher_lines(tmp_path / "gone.code-workspace") == [], "no workspace to read"
+    ], "the checkouts come off the registry: the workspace file need not exist"
+    monkeypatch.setattr(
+        ws.project_registry,
+        "all_projects",
+        lambda *_a, **_k: ws.project_registry.parse_registry("projects = ["),
+    )
+    assert ws.launcher_lines(workspace) == [], "no registry to read"
     assert toolchain(launchers=lambda: ["broken: x"]) == ["broken: x"]
 
 

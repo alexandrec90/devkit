@@ -11,15 +11,27 @@ from __future__ import annotations
 import datetime as _dt
 import json
 
+import project_registry
 import pytest
 from support import REPO_ROOT, TEMPLATES, load_script
 
 rc_config = load_script("scripts/rc_config.py")
 
+# The project registry `ALL_PROJECTS` expands to, as the last `workspace_text` set it:
+# `folders` stands for the machine's registered projects.
+REGISTERED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch):
+    REGISTERED.clear()
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
+
 
 def workspace_text(
     setting: object = None, folders: tuple[str, ...] = ("devkit", "carameli")
 ) -> str:
+    REGISTERED[:] = folders
     payload: dict = {"folders": [{"path": name} for name in folders], "settings": {}}
     if setting is not None:
         payload["settings"][rc_config.RC_SETTING] = setting
@@ -84,11 +96,22 @@ def held_text(setting: object, folders: tuple[str, ...], held: list[str]) -> str
     [rc_config.ALL_PROJECTS, {"projects": rc_config.ALL_PROJECTS, "spawn": "worktree"}],
     ids=["bare", "object"],
 )
-def test_all_serves_every_folder_in_the_workspace(setting):
+def test_all_serves_every_registered_project(setting):
     """A list is a second copy of the registry, and a project plugged in after it was
-    written got no server. `all` reads the folders on every fire instead."""
-    text = workspace_text(setting, ("devkit", "carameli", "freshly-plugged"))
+    written got no server. `all` reads the registry on every fire instead -- the project
+    registry, not the workspace file's folders."""
+    text = workspace_text(setting, ("devkit", "carameli"))
+    REGISTERED[:] = ["devkit", "carameli", "freshly-plugged"]
     assert rc_config.parse_config(text).projects == ("devkit", "carameli", "freshly-plugged")
+
+
+def test_all_serves_nothing_off_a_registry_that_cannot_be_read(monkeypatch):
+    monkeypatch.setattr(
+        project_registry,
+        "all_projects",
+        lambda *_a, **_k: project_registry.parse_registry("projects = ["),
+    )
+    assert rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS)).projects == ()
 
 
 def test_all_keeps_the_object_form_s_knobs():
@@ -266,11 +289,12 @@ def _checkout(tmp_path, registry: str | None, setting: object = None):
     return workspace, root
 
 
-def test_read_config_prefers_projects_toml_and_expands_all_from_the_live_folders(tmp_path):
+def test_read_config_prefers_projects_toml_and_expands_all_from_the_registry(tmp_path):
     registry = '[settings."devkit.remoteControl"]\nprojects = "all"\nspawn = "worktree"\n'
     workspace, root = _checkout(tmp_path, registry, ["devkit"])
+    REGISTERED[:] = ["devkit", "radio", "freshly-plugged"]
     config = rc_config.read_config(workspace, root)
-    assert config.projects == ("devkit", "radio")
+    assert config.projects == ("devkit", "radio", "freshly-plugged")
     assert config.spawn == "worktree"
 
 
@@ -287,10 +311,11 @@ def test_read_config_serves_nothing_for_a_malformed_registry_or_a_missing_file(t
     assert rc_config.read_config(tmp_path / "absent", root) == rc_config.Config()
 
 
-def test_config_of_reads_a_stored_value_with_all_meaning_the_folders():
-    assert rc_config.config_of("all", ["a", "b"]).projects == ("a", "b")
-    assert rc_config.config_of(["a"], ["b"]).projects == ("a",)
-    assert rc_config.config_of(3, ["b"]) == rc_config.Config()
+def test_config_of_reads_a_stored_value_with_all_meaning_the_registry():
+    REGISTERED[:] = ["a", "b"]
+    assert rc_config.config_of("all").projects == ("a", "b")
+    assert rc_config.config_of(["a"]).projects == ("a",)
+    assert rc_config.config_of(3) == rc_config.Config()
 
 
 def test_read_hosts_prefers_projects_toml_and_a_malformed_one_assigns_nobody(tmp_path):
@@ -449,3 +474,14 @@ def test_a_truthy_non_boolean_never_turns_power_saving_on(value):
     sessions."""
     config = rc_config.parse_config(workspace_text({"projects": ["d"], "powerSaving": value}))
     assert config.power_saving is False
+
+
+def test_every_project_is_the_registry_and_nothing_when_it_cannot_be_read(monkeypatch):
+    REGISTERED[:] = ["devkit", "radio"]
+    assert rc_config.every_project() == ["devkit", "radio"]
+
+    def broken(*_a, **_k):
+        raise project_registry.RegistryError("projects.toml: broken")
+
+    monkeypatch.setattr(project_registry, "all_projects", broken)
+    assert rc_config.every_project() == []

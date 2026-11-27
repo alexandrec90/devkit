@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+import project_registry
 import pytest
 from support import load_script
 
@@ -28,6 +29,12 @@ aw = agent_worktree.aw
 CLAUDE = agent_worktree.agent_models.Launch("claude")
 CODEX = agent_worktree.agent_models.Launch("codex")
 NONE = agent_worktree.agent_models.Launch("none")
+
+
+def register(monkeypatch, *names: str) -> None:
+    """Make the project registry list `names`, as `projects.toml` would: the tool reads
+    its projects there, and `--workspace` only says where the checkouts sit."""
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_args, **_kw: list(names))
 
 
 class FakeRun:
@@ -185,7 +192,7 @@ def test_listed_trees_runs_one_git_call_per_checkout(monkeypatch):
 def test_a_scan_of_one_half_never_reads_the_other(tmp_path, monkeypatch):
     (tmp_path / "devkit").mkdir()
     registry = tmp_path / "registry.code-workspace"
-    registry.write_text('{"folders": [{"path": "devkit"}]}', encoding="utf-8")
+    register(monkeypatch, "devkit")
     monkeypatch.setattr(
         agent_worktree, "trees_for", lambda _dir: pytest.fail("the base half read the trees")
     )
@@ -371,9 +378,7 @@ def test_the_scan_covers_the_registry_and_skips_a_checkout_that_is_not_on_disk(
     taking the whole menu down with it."""
     (tmp_path / "devkit").mkdir()
     registry = tmp_path / "registry.code-workspace"
-    registry.write_text(
-        '{"folders": [{"path": "devkit"}, {"path": "moved-away"}]}', encoding="utf-8"
-    )
+    register(monkeypatch, "devkit", "moved-away")
     monkeypatch.setattr(agent_worktree, "trees_for", lambda _dir: [])
     monkeypatch.setattr(agent_worktree, "recent_bases", lambda _dir: [("main", "the default")])
 
@@ -410,6 +415,7 @@ def workspace(tmp_path, monkeypatch):
     (root / "devkit").mkdir()
     file = root / "alex-projects.code-workspace"
     file.write_text('{"folders": [{"path": "devkit"}]}', encoding="utf-8")
+    register(monkeypatch, "devkit")
     monkeypatch.setattr(
         agent_worktree.sweep,
         "git_for",
@@ -773,16 +779,18 @@ def test_a_missing_registry_is_a_usage_error_rather_than_a_traceback(tmp_path, c
     assert "no workspace file" in capsys.readouterr().err
 
 
-def test_a_registry_that_cannot_be_parsed_still_draws_the_sentinel(tmp_path, capsys):
-    """`sweep.parse_workspace` answers a file it cannot parse with an empty list rather
-    than a raise, so "no checkouts" is what a truncated registry looks like from here.
-    The cached menu refused to write in that state, because overwriting a good file with
-    an empty one outlived the bad read. There is no file to protect now, so the honest
-    answer is the row that says there is nothing -- and it is one click, not a quarter of
-    an hour, from being asked again."""
-    broken = tmp_path / "truncated.code-workspace"
-    broken.write_text("{not json", encoding="utf-8")
-    assert agent_worktree.main(["rows", "--workspace", str(broken)]) == 0
+def test_a_registry_with_nothing_here_still_draws_the_sentinel(tmp_path, monkeypatch, capsys):
+    """ "No checkouts" is what an empty registry, or one listing nothing on this machine,
+    looks like from here. The cached menu refused to write in that state, because
+    overwriting a good file with an empty one outlived the bad read. There is no file to
+    protect now, so the honest answer is the row that says there is nothing -- and it is
+    one click, not a quarter of an hour, from being asked again.
+
+    The workspace file's content is not read: the projects come off the registry."""
+    workspace = tmp_path / "truncated.code-workspace"
+    workspace.write_text("{not json", encoding="utf-8")
+    register(monkeypatch, "elsewhere")
+    assert agent_worktree.main(["rows", "--workspace", str(workspace)]) == 0
     printed = capsys.readouterr().out.splitlines()
     assert len(printed) == 1
     assert printed[0].split(picker_rows.FIELD_SEP)[0] == picker_rows.NOTHING

@@ -435,7 +435,8 @@ def context(workspace: Path, mode: str, now: _dt.datetime) -> fix_loop.Context:
     root = workspace.parent
     # Every registered checkout, `devkit.onHold` or not: a PR that exists is work in
     # flight whatever the setting says, and the pass is the last thing that would move it.
-    projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    # Off the project registry; `workspace` only names where the checkouts sit.
+    projects = devkit_project.known_projects()
     ledger_path = worktree.boxes_root(root) / fix_ledger.LEDGER_NAME
     devkit_dir = root / fix_cycle.DEVKIT
     booted = fix_loop.fix_reports.booted_at(now)

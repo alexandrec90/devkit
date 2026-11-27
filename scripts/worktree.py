@@ -163,6 +163,12 @@ NAME_SEP = sweep.NAME_SEP
 # was the only one resolving both; `sweep.default_workspace` is that logic, moved down so
 # every workspace-aware script gets it instead of its own naive copy.
 DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
+# `--workspace` survives as a deprecated spelling of the projects root: the registry is
+# `project_registry`'s, and installed scheduled tasks still pass the flag.
+WORKSPACE_HELP = (
+    "deprecated: names the projects root (this file's directory); the project list "
+    "comes from projects.toml"
+)
 
 # Verdicts that mean the work has left the box, so the box is free to destroy.
 #   spent-branch  nothing beyond the base — nothing to lose
@@ -3258,12 +3264,18 @@ def load_registry(root: Path) -> devkit_ports.Registry | None:
     return None
 
 
-def known_projects(workspace: Path) -> list[str]:
-    """Registered checkouts, from the same parser `sweep` and the dispatcher use."""
+def known_projects(workspace: Path | None = None) -> list[str]:
+    """Registered projects, off `project_registry` as the dispatcher reads them.
+
+    `workspace` is **deprecated** and not read: the registry is `projects.toml`, and the
+    workspace file's only remaining job for a caller is where the checkouts sit. It stays
+    in the signature until the callers that still pass it are rewritten.
+    """
+    del workspace
     try:
-        return devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise WorktreeError(f"cannot read the workspace registry at {workspace}: {exc}") from exc
+        return devkit_project.known_projects()
+    except project_registry.RegistryError as exc:
+        raise WorktreeError(f"cannot read the project registry: {exc}") from exc
 
 
 def run_steps(
@@ -5328,15 +5340,17 @@ def sync_checkouts(
     for one tier's lifecycle -- the thing the box/checkout split exists to avoid.
     It was retired once this pass had been syncing every checkout unattended for
     long enough to prove it; `sweep.py --sync` remains reachable on the CLI.
+
+    The checkouts are `project_registry.all_projects()`; `workspace` is a deprecated
+    alias for where they sit, and only its directory is read.
     """
     try:
-        registry = workspace.read_text(encoding="utf-8")
-    except OSError as exc:
+        names = sweep.managed(project_registry.all_projects())
+    except project_registry.RegistryError as exc:
         # A pass that cannot read the registry has not decided anything, so it must not
         # report a clean sweep of the checkouts it never looked at.
-        return 1, {"rows": [], "failed": True, "report": f"cannot read {workspace}: {exc}"}
+        return 1, {"rows": [], "failed": True, "report": f"cannot read the registry: {exc}"}
 
-    names = sweep.parse_workspace(registry)
     if not names:
         return 0, {"rows": [], "failed": False, "report": ""}
 
@@ -6253,7 +6267,7 @@ def add_common_args(parser: argparse.ArgumentParser, dry_run: bool = True) -> No
 
     One function called per subparser is the version with neither failure mode.
     """
-    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE, help=WORKSPACE_HELP)
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     apply_mode = parser.add_mutually_exclusive_group()
     apply_mode.add_argument(

@@ -312,7 +312,10 @@ def record_missing(
 
 
 def registered(workspace: Path) -> list[str]:
-    return devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    """The project registry. `workspace` is deprecated and not read: it still carries the
+    settings this pass reads, and only names where the checkouts sit."""
+    del workspace
+    return devkit_project.known_projects()
 
 
 def assignment(workspace: Path, root: Path) -> rc_config.Config:
@@ -368,7 +371,7 @@ def run_pass(
     known = registered(workspace)
     unknown = [name for name in only if name not in known]
     if unknown:
-        print(f"e2e-pass: not registered in the workspace: {', '.join(unknown)}", file=sys.stderr)
+        print(f"e2e-pass: not in the project registry: {', '.join(unknown)}", file=sys.stderr)
         return 2
     having, lacking = opted_in(
         workspace, tested_here(workspace, only or known, seams.host, seams.root)

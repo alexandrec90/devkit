@@ -5,10 +5,16 @@ A project in the direct flow (`delivery.py`) merges first, so a bad commit reach
 default branch and a fixer goes after it there. If that fixer has not turned it green
 within `RED_GRACE` of the first pass that saw the red (`red_seen.py`, never the commit's own
 time: a PC that slept through the hours must not spend the fixer's chance in its first
-pass), the branch stops waiting: every project session is cutting from a red tip. So the
+pass), the branch stops waiting: every project session is cutting from a red tip, every
+merge on it lands one more red, and devkit's own release waits for a green commit. So the
 commits that made it red are reverted, each through the same road as any other change,
 and each revert carries a queue task to land the work again with the failure fixed, so
 nothing is lost with it.
+
+**A fixer still at the red holds it** (`fix_ledger.fixer_at_branch`), past the grace to
+`RED_CEILING` and no further: reverting under a fixer about to land would only queue the
+same work twice. The fix trigger starts a pass once either mark is reached
+(`red_seen.lapsed`), so the grace is not stretched by the half-hourly backstop.
 
 **The red range** (`red_range`) is the commits of the default branch after `origin/green`
 up to the oldest one that failed the way the tip fails: its failing jobs, read per commit,
@@ -57,6 +63,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fix_findings
+import fix_ledger
 import fix_loop
 import fix_plan
 import fix_reports
@@ -67,8 +74,10 @@ import ship_intent
 import sweep
 
 # How long a default branch may stay red, from when a pass first saw it, before the commits
-# are reverted. Long enough for two passes' fixers to land something.
-RED_GRACE = _dt.timedelta(hours=2)
+# are reverted; and how long a fixer still at it may hold that. Both live in `red_seen`,
+# which says why each is what it is, because the fix trigger reads them too.
+RED_GRACE = red_seen.REVERT_GRACE
+RED_CEILING = red_seen.REVERT_CEILING
 
 # The branch the post-merge job fast-forwards to each commit whose gate passed. Missing means
 # no commit has been judged green yet: with no floor there is no range, so nothing is reverted.
@@ -217,9 +226,14 @@ def _first_named(
     return end
 
 
-def overdue(seen: _dt.datetime, now: _dt.datetime) -> bool:
-    """Whether `RED_GRACE` has passed since a pass first saw this red (`red_seen`)."""
-    return now - seen >= RED_GRACE
+def overdue(seen: _dt.datetime, now: _dt.datetime, fixing: bool = False) -> bool:
+    """Whether this red has waited long enough since a pass first saw it (`red_seen`):
+    `RED_GRACE`, or `RED_CEILING` while a fixer is still at it."""
+    return now - seen >= (RED_CEILING if fixing else RED_GRACE)
+
+
+def _minutes(waited: _dt.timedelta) -> str:
+    return f"{max(0, int(waited.total_seconds() // 60))} minutes"
 
 
 def candidates(commits: list[Commit]) -> list[Commit]:
@@ -247,24 +261,38 @@ def revertible(failure: fix_plan.Failure) -> bool:
     return failure.tidy_lapsed or not fix_plan.is_tidy_owned(sig, failure.hooks)
 
 
-def _shown(signature: tuple[str, ...]) -> str:
-    more = f" (+{len(signature) - 6} more)" if len(signature) > 6 else ""
-    return ", ".join(signature[:6]) + more
+def _shown(signature: tuple[str, ...], most: int = 6) -> str:
+    more = f" (+{len(signature) - most} more)" if len(signature) > most else ""
+    return ", ".join(signature[:most]) + more
 
 
-def reland_task(commit: Commit, failure: fix_plan.Failure) -> str:
+# How much of the failure a re-land's prompt names: all of it, in practice. The re-landing
+# session sees nothing else of the red, and a failure it was not told of lands red again.
+RELAND_SHOWN = 40
+
+
+def reland_task(
+    commit: Commit, failure: fix_plan.Failure, waited: _dt.timedelta = RED_GRACE
+) -> str:
     """The queue file a revert commits, which is what keeps the work from being lost.
+
+    It carries the change (its sha, which stays reachable on the default branch's history)
+    and the failure that took it off (every failing id, the run, how to read its log), so
+    the session re-landing it fixes it rather than landing it red again.
 
     `json.dumps` writes a TOML basic string: the same quotes and the same escapes, and a
     subject can hold either."""
-    hours = int(RED_GRACE.total_seconds() // 3600)
+    run = f" The red run: {failure.url}" if failure.url else ""
+    log = f"; `gh run view {failure.run_id} --log-failed` has its output" if failure.run_id else ""
     prompt = (
         f"The fix pass reverted {commit.sha} ({commit.subject}) from {failure.base}: "
-        f"{failure.workflow} stayed red for {hours} hours after the fix pass first saw it, and "
-        f"that commit was in the range that could have caused it. The failure: "
-        f"{_shown(failure.signature)}. Read the reverted work with `git show {commit.sha}`, "
-        f"land it again on a new branch with that failure fixed, and ship it, with "
-        f"`Reland-of: {commit.sha}` on a line of its own in the intent's body. If the fix is "
+        f"{failure.workflow} stayed red for {_minutes(waited)} after the fix pass first saw "
+        f"it, and that commit was in the range that could have caused it. The failure: "
+        f"{_shown(failure.signature, RELAND_SHOWN)}.{run}{log}. Read the reverted work with "
+        f"`git show {commit.sha}`, land it again on a new branch with every failure above "
+        f"fixed, and ship it, with `Reland-of: {commit.sha}` on a line of its own in the "
+        f"intent's body. Do not land it unchanged: it is the change that went red, and a "
+        f"re-land that goes red is reverted again with no further try. If the fix is "
         f"to a file vendored from devkit, it cannot be made here: when it is already on "
         f"devkit's main and not in this project's DEVKIT_VERSION, do not land the work yet "
         f"but ship a new file in {QUEUE_DIR.as_posix()} with this same prompt and "
@@ -274,10 +302,12 @@ def reland_task(commit: Commit, failure: fix_plan.Failure) -> str:
 
 
 def revert_intent(
-    commit: Commit, failure: fix_plan.Failure, tidied: tuple[Commit, ...] = ()
+    commit: Commit,
+    failure: fix_plan.Failure,
+    tidied: tuple[Commit, ...] = (),
+    waited: _dt.timedelta = RED_GRACE,
 ) -> str:
     """The commit message the ship task commits the revert under."""
-    hours = int(RED_GRACE.total_seconds() // 3600)
     also = (
         f"Tidy's {', '.join(f'`{t.short}`' for t in tidied)} rewrote these lines, so "
         "it goes too; the next tidy formats again.\n\n"
@@ -297,7 +327,7 @@ def revert_intent(
     return (
         f'{REVERT_SUBJECT}{commit.subject}"\n\n'
         f"`{commit.short}` is in the range that turned {failure.workflow} red on "
-        f"`{failure.base}`, which stayed red for {hours} hours. The failure: "
+        f"`{failure.base}`, which stayed red for {_minutes(waited)}. The failure: "
         f"{_shown(failure.signature)}.\n\n{also}{after}"
     )
 
@@ -427,9 +457,10 @@ def revert_one(
     commit: Commit,
     failure: fix_plan.Failure,
     journal: fix_findings.Journal,
+    waited: _dt.timedelta = RED_GRACE,
 ) -> str:
     """Revert `commit`, and the tidy commits that rewrote its lines, in a fresh tree left as
-    an intent for the ship task; the record's line."""
+    an intent for the ship task; the record's line. `waited` is how long the red stood."""
     where = f"{project} {commit.short}"
     tree, branch = fix_trees.cut_fresh_tree(checkout, commit.branch, failure.base)
     if tree is None:
@@ -454,25 +485,30 @@ def revert_one(
     if commit.reland_of:
         _file_second_red(project, commit, failure, journal)
     else:
-        _write(tree, commit.task, reland_task(commit, failure))
+        _write(tree, commit.task, reland_task(commit, failure, waited))
     _write(tree, fix_reports.ORIGIN_FILE, "fix-pass\n")
-    _write(tree, ship_intent.INTENT_FILE, revert_intent(commit, failure, tidied))
+    _write(tree, ship_intent.INTENT_FILE, revert_intent(commit, failure, tidied, waited))
     return f"{where} -- reverting {commit.subject}: {branch} left to the ship task"
 
 
 def revert_range(
     ctx: fix_loop.Context, failure: fix_plan.Failure, journal: fix_findings.Journal
 ) -> list[str]:
-    """Every commit of `failure`'s red range, newest first, once it is `overdue`."""
+    """Every commit of `failure`'s red range, newest first, once it is `overdue`. A fixer
+    still at the red holds it past the grace, said in a line, to `RED_CEILING`."""
     project, checkout = failure.project, ctx.root / failure.project
     commits = read_range(checkout, failure)
     if not commits:
         return []
     seen = red_seen.first_seen(
-        ctx.devkit_dir, project, "revert", commits[-1].sha, ctx.now, ctx.writes
+        ctx.devkit_dir, project, red_seen.REVERT, commits[-1].sha, ctx.now, ctx.writes
     )
     if not overdue(seen, ctx.now):
         return []
+    fixer = fix_ledger.fixer_at_branch(failure, fix_ledger.read_ledger(ctx.ledger_path), ctx.now)
+    if fixer and not overdue(seen, ctx.now, fixing=True):
+        waited = _minutes(ctx.now - seen)
+        return [f"{project} -- red {waited}; the fixer sent at {fixer} holds the revert"]
     named = candidates(commits)
     if len(named) > MOST_REVERTS:
         detail = f"{project}: a red range too long to revert; `green` may have stopped moving"
@@ -483,7 +519,7 @@ def revert_range(
         if reverted_before(checkout, commit):
             continue
         if ctx.writes:
-            lines.append(revert_one(project, checkout, commit, failure, journal))
+            lines.append(revert_one(project, checkout, commit, failure, journal, ctx.now - seen))
         else:
             lines.append(f"{project} {commit.short} -- would revert: {commit.subject}")
     return lines

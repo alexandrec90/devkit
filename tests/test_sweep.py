@@ -2664,3 +2664,10 @@ def test_git_for_inherits_the_environment_unless_a_push_hands_it_one(tmp_path):
     }
     handed = git("config", "--get", "devkit.probe", env={**os.environ, **probe})
     assert (handed.returncode, handed.stdout.strip()) == (0, "yes")
+
+
+def test_managed_drops_the_excluded_names_and_keeps_the_registry_order(monkeypatch):
+    assert sweep.managed(["b", "ref", "a"], frozenset({"ref"})) == ["b", "a"]
+    monkeypatch.setattr(sweep, "DEFAULT_EXCLUDE", frozenset({"b"}))
+    assert sweep.managed(["b", "a"]) == ["a"]  # the default is read at call time
+    assert sweep.managed([]) == []

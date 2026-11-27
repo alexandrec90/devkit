@@ -80,6 +80,8 @@ READ_BY: dict[str, tuple[str, ...]] = {
     "ports.toml": ("tests/test_devkit_ports.py", "tests/test_worktree_port.py"),
     "projects.toml": (
         "tests/test_project_registry.py",
+        "tests/test_project_registry_writers.py",
+        "tests/test_devkit_ports.py",
         "tests/test_collectors_config.py",
         "tests/test_fleet.py",
         "tests/test_installers.py",

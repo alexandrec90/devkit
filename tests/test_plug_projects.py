@@ -27,6 +27,8 @@ import subprocess
 import pytest
 from support import REPO_ROOT, devkit_project, load_script, worktree
 
+import project_registry  # on sys.path once `support` is imported
+
 picker_rows = load_script("scripts/picker_rows.py")
 
 plug_projects = load_script("scripts/plug-projects.py")
@@ -524,6 +526,38 @@ def test_an_unplug_leaves_the_static_checkout_on_main_and_clean(tmp_path):
     assert intent.startswith("Unplug alpha in the workspace registry\n")
 
 
+def test_an_unplug_hands_off_projects_toml_on_the_same_branch(tmp_path):
+    path = tmp_path / "devkit"
+    path.mkdir()
+    canonical = path / "workspace.jsonc"
+    canonical.write_text(REGISTRY, encoding="utf-8", newline="\n")
+    toml = path / "projects.toml"
+    toml.write_text('projects = [\n    "alpha",\n    "beta",\n]\n', encoding="utf-8", newline="\n")
+    for args in (
+        ("init", "--quiet", "-b", "main"),
+        ("config", "core.hooksPath", str(path / ".nohooks")),
+        ("config", "user.email", "t@e.st"),
+        ("config", "user.name", "t"),
+        ("add", "-A"),
+        ("commit", "--quiet", "-m", "init"),
+    ):
+        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
+    steps = [Step(plug_projects.UNPLUG, "alpha")]
+    canonical.write_text('{"folders": [{"path": "beta"}]}', encoding="utf-8", newline="\n")
+    toml.write_text('projects = [\n    "beta",\n]\n', encoding="utf-8", newline="\n")
+
+    said = plug_projects.hand_off_registry(steps, canonical, also=("projects.toml",))
+
+    assert said.startswith("  branch  agent/unplug-alpha-")
+    assert "workspace.jsonc and projects.toml, for the fix pass" in said
+    (tree,) = (path / ".claude" / "worktrees").iterdir()
+    changed = subprocess.run(
+        ["git", "-C", str(tree), "diff", "--name-only"], capture_output=True, text=True
+    ).stdout.split()
+    assert sorted(changed) == ["projects.toml", "workspace.jsonc"]
+    assert project_registry.parse_registry(toml.read_text(encoding="utf-8")) == ["alpha", "beta"]
+
+
 def test_toggling_is_its_own_inverse():
     """What makes the answer safe to apply against a registry that moved under it: the
     same pick, applied twice, is the state it started from."""
@@ -790,6 +824,70 @@ def test_the_registry_halves_are_applied_in_one_pass_each_way():
 
 def test_applying_no_steps_changes_nothing():
     assert apply_registry(REGISTRY, []) == REGISTRY
+
+
+PROJECTS_TOML = '# kept\nprojects = [\n    "alpha",\n    "beta",\n]\n\n[settings]\n'
+
+
+def test_the_projects_toml_halves_are_applied_the_same_way():
+    steps = [Step(plug_projects.UNPLUG, "alpha"), Step(plug_projects.PLUG, "gamma")]
+    edited = plug_projects.apply_projects(PROJECTS_TOML, steps)
+    assert project_registry.parse_registry(edited) == ["beta", "gamma"]
+    assert edited.startswith("# kept\n")
+    assert plug_projects.apply_projects(PROJECTS_TOML, []) == PROJECTS_TOML
+    clone_only = [Step(plug_projects.CLONE, "beta", clone=True)]
+    assert plug_projects.apply_projects(PROJECTS_TOML, clone_only) == PROJECTS_TOML
+
+
+PICKED = """{
+    "folders": [{"path": "alpha"}, {"path": "beta"}],
+    "tasks": {"inputs": [{"id": "project", "options": ["alpha", "beta"], "default": "beta"}]}
+}"""
+
+
+def _registry_pair(tmp_path, toml: str | None = PROJECTS_TOML):
+    canonical = tmp_path / "workspace.jsonc"
+    canonical.write_text(PICKED, encoding="utf-8", newline="\n")
+    if toml is not None:
+        (tmp_path / "projects.toml").write_text(toml, encoding="utf-8", newline="\n")
+    return canonical, tmp_path / "projects.toml"
+
+
+def test_a_registry_write_lands_in_both_files(tmp_path):
+    """`tests/test_project_registry.py` fails `projects.toml` the moment it disagrees
+    with `workspace.jsonc`, so an unplug that edits one is a red PR."""
+    canonical, toml = _registry_pair(tmp_path)
+    steps = [Step(plug_projects.UNPLUG, "alpha"), Step(plug_projects.PLUG, "gamma")]
+
+    written = plug_projects.write_registry(canonical, steps)
+
+    assert written == [canonical, toml]
+    assert devkit_project.known_projects(canonical.read_text(encoding="utf-8")) == [
+        "beta",
+        "gamma",
+    ]
+    assert project_registry.parse_registry(toml.read_text(encoding="utf-8")) == ["beta", "gamma"]
+
+
+def test_a_registry_write_with_no_projects_toml_writes_the_workspace_file_alone(tmp_path):
+    canonical, toml = _registry_pair(tmp_path, toml=None)
+    written = plug_projects.write_registry(canonical, [Step(plug_projects.UNPLUG, "alpha")])
+    assert written == [canonical] and not toml.exists()
+    assert devkit_project.known_projects(canonical.read_text(encoding="utf-8")) == ["beta"]
+
+
+def test_a_projects_toml_that_already_agrees_is_not_rewritten(tmp_path):
+    canonical, _toml = _registry_pair(tmp_path, toml='projects = [\n    "beta",\n]\n')
+    written = plug_projects.write_registry(canonical, [Step(plug_projects.UNPLUG, "alpha")])
+    assert written == [canonical]
+
+
+def test_a_projects_toml_it_cannot_edit_writes_neither_file(tmp_path):
+    """Both edits are made before either is written: one written alone is the drift."""
+    canonical, _toml = _registry_pair(tmp_path, toml='projects = [\n    "alpha", "beta",\n]\n')
+    with pytest.raises(PlugError, match="nothing was written"):
+        plug_projects.write_registry(canonical, [Step(plug_projects.UNPLUG, "alpha")])
+    assert canonical.read_text(encoding="utf-8") == PICKED
 
 
 def test_a_clone_targets_the_workspace_root(tmp_path):

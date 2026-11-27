@@ -356,9 +356,7 @@ def world(tmp_path, monkeypatch):
     # session before it as stopped by a restart.
     monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "booted_at", lambda now=None: None)
     monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: table["moved"])
-    monkeypatch.setattr(
-        fix_pass.devkit_project, "known_projects", lambda _t: ["devkit", "carameli"]
-    )
+    monkeypatch.setattr(fix_pass.devkit_project, "known_projects", lambda: ["devkit", "carameli"])
     monkeypatch.setattr(
         fix_pass.ship_intent, "find_intents", lambda root, projects: table["intents"]
     )
@@ -2444,7 +2442,7 @@ def test_a_project_on_hold_is_read_and_fixed_like_any_other(world, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        fix_pass.devkit_project, "known_projects", lambda _t: ["devkit", "carameli", "paused"]
+        fix_pass.devkit_project, "known_projects", lambda: ["devkit", "carameli", "paused"]
     )
     seen = []
     monkeypatch.setattr(

@@ -484,6 +484,29 @@ def open_branch_session(
     return ""
 
 
+def fixer_at_branch(failure: fix_plan.Failure, ledger: dict[str, dict], now: _dt.datetime) -> str:
+    """When a session that may still be at this default branch's red was sent, or "".
+
+    Wider than `open_branch_session`, which is one problem: any session at this branch, at
+    any commit and any signature, since a merge that lands one more failure on a red
+    branch changes the signature under a fixer still working the first. What
+    `fix_revert` holds a revert for, to `red_seen.REVERT_CEILING`. A free action is no
+    session, and one that died or reported itself blocked is not working."""
+    if failure.kind != fix_plan.BRANCH:
+        return ""
+    prefix = [failure.kind, failure.project, target(failure)]
+    for key, entry in ledger.items():
+        parts = key.split(":")
+        if len(parts) != 6 or parts[:3] != prefix or parts[5] in fix_plan.NO_SESSION:
+            continue
+        if not isinstance(entry, dict) or entry.get("dead") or entry.get("blocked"):
+            continue
+        when = str(entry.get("when", "?"))
+        if _recent(when, now, BRANCH_SETTLE):
+            return when
+    return ""
+
+
 def render(decisions: Iterable[fix_plan.Decision], ledger: dict[str, dict]) -> str:
     """The plan, for the terminal: what will be sent, what was already, what is skipped."""
     lines = []
