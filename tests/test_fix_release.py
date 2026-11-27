@@ -128,6 +128,47 @@ def test_release_skew_holds_edits_the_labels_and_says_so(monkeypatch, tmp_path):
     assert calls[-1] == ("pr", "edit", "9", "--add-label", "merge-now")
 
 
+def test_label_names_and_routing_label_read_either_label_shape():
+    assert fix_release.label_names({"labels": [{"name": "hold"}, "automerge", {}]}) == [
+        "hold",
+        "automerge",
+        "",
+    ]
+    assert fix_release.label_names({}) == []
+    assert fix_release.routing_label({"labels": ["hold", "automerge"]}) == "automerge"
+    assert fix_release.routing_label({"labels": ["hold"]}) == "merge-now"
+
+
+def fake_git(shown: subprocess.CompletedProcess):
+    def git(*args):
+        return shown if args[0] == "show" else subprocess.CompletedProcess(args, 0, "", "")
+
+    return lambda _d: git
+
+
+SCHEMA_SOURCE = (
+    "from dataclasses import dataclass\n\n\n"
+    "@dataclass(frozen=True)\nclass DeliveryConfig:\n    flow: str = 'direct'\n    e2e: str = ''\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("shown", "expected"),
+    [
+        (subprocess.CompletedProcess([], 0, SCHEMA_SOURCE, ""), frozenset({"flow", "e2e"})),
+        (subprocess.CompletedProcess([], 128, "", "no such path"), None),
+        (subprocess.CompletedProcess([], 0, "raise RuntimeError('no')\n", ""), None),
+        (subprocess.CompletedProcess([], 0, "def broken(:\n", ""), None),
+    ],
+)
+def test_default_branch_schema_reads_the_vendored_copy_or_none(
+    monkeypatch, tmp_path, shown, expected
+):
+    monkeypatch.setattr(fix_release.sweep, "git_for", fake_git(shown))
+    schema = fix_release.default_branch_schema(tmp_path)
+    assert (schema if schema is None else schema["delivery"]) == expected
+
+
 def test_release_skew_holds_asks_nothing_when_no_pr_is_skew_held(monkeypatch, tmp_path):
     def unasked(_d):
         raise AssertionError("no schema read with no skew-held PR")

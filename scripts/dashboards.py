@@ -68,7 +68,6 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
 import devkit_ports
-import devkit_schtasks
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -82,8 +81,9 @@ DEFAULT_PATH = "/"
 # The `ports.toml` service whose port a dashboard takes when its entry names none.
 DEFAULT_SERVICE = "app"
 
-PORT_TOKEN = "{port}"
-PYTHON_TOKEN = "{python}"
+# The placeholders a `command` carries (module docstring).
+PORT_SLOT = "{port}"
+PYTHON_SLOT = "{python}"
 
 ARTIFACT = Path("logs/dashboards.log")
 STATE = Path("logs/dashboards.state.json")
@@ -139,50 +139,84 @@ def _port(raw: object) -> int | None:
     return value if value is not None and value < 65536 else None
 
 
+# Each helper below answers `(fields, "")`, or `({}, why)` naming the first thing wrong.
+Fields = tuple[dict[str, Any], str]
+
+
+def _command_fields(project: str, command: object) -> Fields:
+    if not isinstance(command, list) or not all(isinstance(p, str) and p for p in command):
+        return {}, f"{project}: `command` must be a list of non-empty strings"
+    if not any(PORT_SLOT in part for part in command):
+        return {}, f"{project}: `command` must carry {PORT_SLOT}, the port it serves on"
+    return {"command": tuple(command)}, ""
+
+
+def _service_fields(project: str, service: object, backend_raw: object) -> Fields:
+    backend = _port(backend_raw)
+    if not isinstance(service, str) or not service or backend is None:
+        return {}, f"{project}: a `service` needs `backendPort`, the port it publishes"
+    return {"service": service, "backend_port": backend}, ""
+
+
+def _kind_fields(project: str, raw: Mapping[str, Any]) -> Fields:
+    """The host-command or compose-service half of an entry: exactly one of them."""
+    command = raw.get("command")
+    service = raw.get("service")
+    if (command is None) == (service is None):
+        return {}, f"{project}: give exactly one of `command` and `service`"
+    if command is not None:
+        return _command_fields(project, command)
+    return _service_fields(project, service, raw.get("backendPort"))
+
+
+def _public_port(
+    project: str, raw: Mapping[str, Any], default_port: Callable[[str], int | None]
+) -> tuple[int | None, str]:
+    if "port" not in raw:
+        port = default_port(project)
+        return (
+            port,
+            "" if port is not None else f"{project}: no `port`, and no slot for it in ports.toml",
+        )
+    port = _port(raw["port"])
+    return port, "" if port is not None else f"{project}: `port` must be a port number"
+
+
+def _option_fields(project: str, raw: Mapping[str, Any]) -> Fields:
+    fields: dict[str, Any] = {}
+    for key, name in (("idleMinutes", "idle_minutes"), ("startSeconds", "start_seconds")):
+        if key not in raw:
+            continue
+        value = _positive(raw[key])
+        if value is None:
+            return {}, f"{project}: `{key}` must be a positive whole number"
+        fields[name] = value
+    if "path" in raw:
+        path = raw["path"]
+        if not isinstance(path, str) or not path.startswith("/"):
+            return {}, f"{project}: `path` must start with /"
+        fields["path"] = path
+    return fields, ""
+
+
 def parse_entry(
     project: str, raw: object, default_port: Callable[[str], int | None]
 ) -> tuple[Dashboard | None, str]:
     """`(dashboard, "")`, or `(None, why)` for an entry that declares nothing usable."""
     if not isinstance(raw, dict):
         return None, f"{project}: an entry must be an object"
-    command = raw.get("command")
-    service = raw.get("service")
-    if (command is None) == (service is None):
-        return None, f"{project}: give exactly one of `command` and `service`"
-    fields: dict[str, Any] = {}
-    if command is not None:
-        if not isinstance(command, list) or not all(isinstance(p, str) and p for p in command):
-            return None, f"{project}: `command` must be a list of non-empty strings"
-        if not command or not any(PORT_TOKEN in part for part in command):
-            return None, f"{project}: `command` must carry {PORT_TOKEN}, the port it serves on"
-        fields["command"] = tuple(command)
-    else:
-        backend = _port(raw.get("backendPort"))
-        if not isinstance(service, str) or not service or backend is None:
-            return None, f"{project}: a `service` needs `backendPort`, the port it publishes"
-        fields.update(service=service, backend_port=backend)
-    if "port" in raw:
-        port = _port(raw["port"])
-        if port is None:
-            return None, f"{project}: `port` must be a port number"
-    else:
-        port = default_port(project)
-        if port is None:
-            return None, f"{project}: no `port`, and no slot for it in ports.toml"
+    fields, why = _kind_fields(project, raw)
+    if why:
+        return None, why
+    port, why = _public_port(project, raw, default_port)
+    if port is None:
+        return None, why
     if fields.get("backend_port") == port:
         return None, f"{project}: `backendPort` and `port` must differ"
-    for key, name in (("idleMinutes", "idle_minutes"), ("startSeconds", "start_seconds")):
-        if key in raw:
-            value = _positive(raw[key])
-            if value is None:
-                return None, f"{project}: `{key}` must be a positive whole number"
-            fields[name] = value
-    if "path" in raw:
-        path = raw["path"]
-        if not isinstance(path, str) or not path.startswith("/"):
-            return None, f"{project}: `path` must start with /"
-        fields["path"] = path
-    return Dashboard(project=project, port=port, **fields), ""
+    options, why = _option_fields(project, raw)
+    if why:
+        return None, why
+    return Dashboard(project=project, port=port, **fields, **options), ""
 
 
 def parse_setting(
@@ -216,7 +250,7 @@ def parse_setting(
         if clash is not None:
             notes.append(f"{project}: its port is already {clash}'s")
             continue
-        taken.update(dict.fromkeys(ports, project))
+        taken.update(dict.fromkeys(ports, str(project)))
         found.append(dashboard)
     return found, notes
 
@@ -265,7 +299,7 @@ def checkout_of(project: str, root: Path) -> Path:
 
 def expand(command: Sequence[str], port: int, python: str) -> list[str]:
     """`command` with its tokens filled in."""
-    return [part.replace(PORT_TOKEN, str(port)).replace(PYTHON_TOKEN, python) for part in command]
+    return [part.replace(PORT_SLOT, str(port)).replace(PYTHON_SLOT, python) for part in command]
 
 
 def is_idle(last_activity: float, now: float, idle_minutes: int) -> bool:
@@ -386,7 +420,7 @@ def kill_tree(process: subprocess.Popen, run: Run = run_quiet) -> None:
         return
     if WINDOWS:
         run(["taskkill", "/PID", str(process.pid), "/T", "/F"])
-    else:
+    elif sys.platform != "win32":  # also what tells mypy on Windows `killpg` is POSIX's
         with contextlib.suppress(OSError):
             os.killpg(process.pid, 15)
     try:
@@ -403,6 +437,8 @@ def die_with_me() -> str:
     Children join the job as they are created, so this runs once, before any spawn.
     """
     if not WINDOWS:
+        return ""
+    if sys.platform != "win32":  # also what tells mypy `WinDLL` exists below
         return ""
     import ctypes
     from ctypes import wintypes
@@ -496,6 +532,19 @@ class WakeError(RuntimeError):
     """A dashboard that could not be started; the message says why."""
 
 
+@dataclass(frozen=True)
+class Machinery:
+    """Everything `Backend` asks of the machine, so a test can stand in for any of it.
+    `stop` unset is `kill_tree` through `run`."""
+
+    run: Run = run_quiet
+    start: Callable[[Sequence[str], Path, Path], subprocess.Popen] = spawn
+    stop: Callable[[subprocess.Popen], None] | None = None
+    probe: Callable[[int, str], bool] = probe_http
+    clock: Callable[[], float] = time.monotonic
+    pause: Callable[[float], None] = time.sleep
+
+
 class Backend:
     """One dashboard: asleep, or awake behind `backend_port`.
 
@@ -511,30 +560,27 @@ class Backend:
         python: str,
         log: Callable[[str], None],
         output: Path,
-        run: Run = run_quiet,
-        start: Callable[[Sequence[str], Path, Path], subprocess.Popen] = spawn,
-        stop: Callable[[subprocess.Popen], None] | None = None,
-        probe: Callable[[int, str], bool] = probe_http,
-        clock: Callable[[], float] = time.monotonic,
-        pause: Callable[[float], None] = time.sleep,
+        machinery: Machinery | None = None,
     ):
+        machinery = machinery or Machinery()
+        run = machinery.run
         self.dashboard = dashboard
         self.checkout = checkout
         self.python = python
         self.log = log
         self.output = output
         self.run = run
-        self.start = start
-        self.stop = stop or (lambda process: kill_tree(process, run))
-        self.probe = probe
-        self.clock = clock
-        self.pause = pause
+        self.start = machinery.start
+        self.stop = machinery.stop or (lambda process: kill_tree(process, run))
+        self.probe = machinery.probe
+        self.clock = machinery.clock
+        self.pause = machinery.pause
         self.lock = threading.Lock()
         self.process: subprocess.Popen | None = None
         self.awake = False
         self.backend_port = 0
         self.started_at = ""
-        self.last_activity = clock()
+        self.last_activity = self.clock()
         self.error = ""
 
     # Called from every pump on every chunk, so it takes no lock: a float store is atomic.
@@ -816,8 +862,9 @@ class Gateway:
         for backend in self.backends:
             try:
                 backend.tick()
-            # Broad on purpose: one dashboard's fault must not stop the others' clock.
-            except Exception as exc:
+            # One dashboard's fault must not stop the others' clock: what a tick's git,
+            # docker and process calls raise is logged, and anything else is a bug.
+            except (OSError, subprocess.SubprocessError, RuntimeError, ValueError) as exc:
                 self.log(f"{backend.dashboard.project}: tick failed: {exc!r}")
         self.write_state()
 
@@ -854,26 +901,27 @@ class Gateway:
 # --- the CLI ---------------------------------------------------------------------------
 
 
+def _verdict(row: object) -> str:
+    """What one dashboard's row in the state file says about it."""
+    if not isinstance(row, Mapping):
+        return "no gateway has served it"
+    if row.get("error"):
+        return f"error: {row['error']}"
+    if not row.get("listening"):
+        return "not listening"
+    if row.get("awake"):
+        return f"awake, idle {int(row.get('idleSeconds') or 0) // 60} min"
+    return "asleep"
+
+
 def status_lines(dashboards: Sequence[Dashboard], state: Mapping[str, Any]) -> list[str]:
     """One line per dashboard from the gateway's state file. Pure."""
     rows = state.get("dashboards", {}) if isinstance(state, Mapping) else {}
     if not dashboards:
         return [f"dashboards: none declared in `{SETTING}`"]
-    lines = []
-    for dashboard in dashboards:
-        row = rows.get(dashboard.project) if isinstance(rows, Mapping) else None
-        if not isinstance(row, Mapping):
-            verdict = "no gateway has served it"
-        elif row.get("error"):
-            verdict = f"error: {row['error']}"
-        elif not row.get("listening"):
-            verdict = "not listening"
-        elif row.get("awake"):
-            verdict = f"awake, idle {int(row.get('idleSeconds') or 0) // 60} min"
-        else:
-            verdict = "asleep"
-        lines.append(f"{dashboard.project:<16} {dashboard.url:<28} {verdict}")
-    return lines
+    if not isinstance(rows, Mapping):
+        rows = {}
+    return [f"{d.project:<16} {d.url:<28} {_verdict(rows.get(d.project))}" for d in dashboards]
 
 
 def read_state(path: Path) -> dict[str, Any]:
@@ -902,7 +950,7 @@ def serve(root: Path, dashboards: Sequence[Dashboard], notes: Sequence[str]) -> 
     why = die_with_me()
     if why:
         log(f"note: children may outlive this gateway: {why}")
-    python = devkit_schtasks.console(sys.executable)
+    python = sweep.console_python()
     backends = []
     for dashboard in dashboards:
         checkout = checkout_of(dashboard.project, root)

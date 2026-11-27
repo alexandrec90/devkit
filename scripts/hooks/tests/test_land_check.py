@@ -155,6 +155,21 @@ def test_a_held_pr_is_releasable_once_the_schema_knows_every_key_it_names():
     assert not land_check.releasable("Why.", adopted), "naming nothing, nothing says it arrived"
 
 
+def test_known_reads_a_key_or_a_whole_table():
+    assert land_check.known("[delivery] flow", SCHEMA)
+    assert not land_check.known("[delivery] e2e", SCHEMA)
+    assert land_check.known("[delivery]", SCHEMA)
+    assert not land_check.known("[novel]", SCHEMA)
+    assert not land_check.known("delivery e2e", SCHEMA), "not a key spelling at all"
+
+
+def test_skew_line_names_every_key_and_what_it_waits_for():
+    line = land_check.skew_line(["[delivery] e2e", "[novel]"])
+    assert line.startswith(land_check.SKEW_LINE)
+    assert land_check.named_keys(line) == ["[delivery] e2e", "[novel]"]
+    assert line.endswith(land_check.SKEW_TAIL)
+
+
 def test_each_reader_says_nothing_of_what_it_can_read():
     assert land_check.python_problem("x = 1") == ""
     assert land_check.python_problem("x = '\0'") == ""

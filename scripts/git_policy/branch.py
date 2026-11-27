@@ -240,6 +240,23 @@ def release_tag_decision(raw_updates: str) -> Decision:
     )
 
 
+RELEASE_WORKFLOW = ".github/workflows/release.yml"
+
+
+def tag_push_is_the_release(workflow: str) -> bool:
+    """Whether a project's release workflow is *started* by the tag push, so pushing the
+    tag is its release flow rather than a way round it. Pure.
+
+    devkit's `release.yml` is dispatched and pushes the tag itself after the suite passes
+    on it, which is what `release_tag_decision` holds a hand push to. A project whose
+    release runs on `push: tags:` and offers no `workflow_dispatch` has no other way to
+    cut one, and refusing the push left skinamp's first release behind the skip variable
+    (0b32da85). No workflow, or one that can be dispatched, keeps the refusal."""
+    if not workflow or "workflow_dispatch" in workflow:
+        return False
+    return re.search(r"^\s*tags\s*:", workflow, re.MULTILINE) is not None
+
+
 def _remote_url(runner: Runner, remote: str, supplied_url: str = "") -> str:
     configured = _stdout(_git(runner, "remote", "get-url", remote))
     return configured or supplied_url
@@ -351,7 +368,9 @@ def evaluate_pre_push(
     # `push.followTags` ride-along carries no branch update at all, so anything that
     # reads `updates` first has already decided there is nothing to check.
     tag_decision = release_tag_decision(raw_updates)
-    if not tag_decision.ok:
+    if not tag_decision.ok and not tag_push_is_the_release(
+        _stdout(_git(runner, "show", f"HEAD:{RELEASE_WORKFLOW}"))
+    ):
         return tag_decision
 
     updates = tuple(update for update in parse_push_updates(raw_updates) if not update.deletion)

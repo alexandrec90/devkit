@@ -212,15 +212,18 @@ def skew_keys(repo: Repo, files: list[str], merger, run, check) -> list[str]:
         return []
     try:
         return check.skew(repo.root, settings_at(repo, f"origin/{repo.default}", merger, run))
-    except Exception:  # fail-open by contract, like `land_check.skew` itself
+    # Fail-open by contract, like `land_check.skew` itself: reading the base's copy is the
+    # one part that can still raise, as a git that cannot run or a failed `git` call.
+    except (OSError, subprocess.SubprocessError, LandError):
         return []
 
 
-def hold_for_skew(repo: Repo, number: int, keys: list[str], pr: dict, merger, run, check):
-    """Hold the PR until a release knows `keys`: the `hold` label, which the queue honours,
-    `land_check.SKEW_LABEL`, which the fix pass releases by, and the skew line in the body,
-    which names what it waits for. Applied before the routing label, so the queue's run for
-    that label already sees the hold."""
+def hold_for_skew(repo: Repo, pr: dict, keys: list[str], merger, run, check):
+    """Hold `pr` (as `gh_json` read it, with its `number`) until a release knows `keys`:
+    the `hold` label, which the queue honours, `land_check.SKEW_LABEL`, which the fix pass
+    releases by, and the skew line in the body, which names what it waits for. Applied
+    before the routing label, so the queue's run for that label already sees the hold."""
+    number = int(pr["number"])
     body = str(pr.get("body") or "")
     if not check.named_keys(body):
         path = f"repos/{repo.slug}/pulls/{number}"
@@ -374,7 +377,7 @@ def land(
     if skew:
         # Merged now, it reddens the project's vendored contract test until a release
         # carrying the keys is adopted; held, the fix pass releases it at that adoption.
-        hold_for_skew(repo, number, skew, pr, merger, run, check)
+        hold_for_skew(repo, {**pr, "number": number}, skew, merger, run, check)
         routing = merger.AUTOMERGE_LABEL if gate_for else merger.MERGE_NOW_LABEL
         label(repo, number, routing, merger, run)
         print(

@@ -275,6 +275,33 @@ def test_the_reland_task_carries_every_failure_and_the_run_so_it_is_not_landed_r
     assert "20 minutes" in fix_revert.revert_intent(commit("a"), failure)
 
 
+def test_split_failure_sorts_the_ids_by_the_files_the_commit_touched():
+    sig = (
+        "tests/test_land.py::test_x",
+        "lint scripts/land.py",
+        "scripts/fix_release.py::y",
+        "tests/test_fix_prompts.py::test_z",
+    )
+    mine, others = fix_revert.split_failure(sig, frozenset({"scripts/land.py"}))
+    assert mine == ("tests/test_land.py::test_x", "lint scripts/land.py")
+    assert others == ("scripts/fix_release.py::y", "tests/test_fix_prompts.py::test_z")
+    assert fix_revert.split_failure(sig, frozenset()) == ((), sig)
+
+
+def test_a_reland_names_its_own_share_of_a_shared_red_run_apart():
+    """0b2a2c28: a re-land was credited with #861's and #864's failures from the same run,
+    and splitting its share from the range's took several turns."""
+    sig = ("tests/test_land.py::test_x", "tests/test_fix_prompts.py::test_z")
+    task = fix_revert.reland_task(
+        commit("a"), red(signature=sig), paths=frozenset({"scripts/land.py"})
+    )
+    prompt = tomllib.loads(task)["agent"]
+    assert "files that commit touched: tests/test_land.py::test_x." in prompt
+    assert "likely other commits' of the range" in prompt and sig[1] in prompt
+    alone = tomllib.loads(fix_revert.reland_task(commit("a"), red(signature=sig)))["agent"]
+    assert f"The failure: {', '.join(sig)}." in alone
+
+
 def test_the_revert_is_staged_and_a_merge_commit_names_its_mainline():
     assert fix_revert.revert_argv(commit("a")) == ["git", "revert", "--no-commit", "a"]
     merged = fix_revert.Commit("b", "Merge", 0.0, merge=True)

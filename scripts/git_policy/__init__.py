@@ -85,6 +85,7 @@ from .branch import (
     policy_skipped,
     protected_branches,
     release_tag_decision,
+    tag_push_is_the_release,
 )
 from .dispatch import main, run_hook
 
@@ -126,4 +127,5 @@ __all__ = [
     "release_tag_decision",
     "run_command",
     "run_hook",
+    "tag_push_is_the_release",
 ]

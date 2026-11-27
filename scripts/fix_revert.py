@@ -271,14 +271,55 @@ def _shown(signature: tuple[str, ...], most: int = 6) -> str:
 RELAND_SHOWN = 40
 
 
+def _named_path(entry: str) -> str:
+    """The file a failure id names: `tests/x.py::test_y`, `lint scripts/x.py`."""
+    head = entry.split("::", 1)[0].strip()
+    return head.removeprefix("lint ").strip().replace("\\", "/")
+
+
+def split_failure(
+    signature: tuple[str, ...], paths: frozenset[str]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """`(mine, others)`: the ids naming a file the commit touched, or the test of one, and
+    the rest, which one red run of a range may owe to the other commits in it. Pure."""
+    stems = {Path(p).stem for p in paths}
+
+    def touches(entry: str) -> bool:
+        named = _named_path(entry)
+        return named in paths or Path(named).stem.removeprefix("test_") in stems
+
+    mine = tuple(entry for entry in signature if touches(entry))
+    return mine, tuple(entry for entry in signature if entry not in mine)
+
+
+def _failure_said(signature: tuple[str, ...], paths: frozenset[str]) -> str:
+    """The failure as a re-land's prompt names it: the reverted commit's share first, and
+    the rest of the run apart, so a session does not take other commits' reds for its own
+    (0b2a2c28). With no share to tell, the whole failure."""
+    mine, others = split_failure(signature, paths)
+    if not mine:
+        return f"The failure: {_shown(signature, RELAND_SHOWN)}."
+    said = f"The failure in the files that commit touched: {_shown(mine, RELAND_SHOWN)}."
+    if others:
+        said += (
+            " Also red in that run, in files it did not touch, so likely other commits' of the "
+            f"range -- fix any your change caused: {_shown(others, RELAND_SHOWN)}."
+        )
+    return said
+
+
 def reland_task(
-    commit: Commit, failure: fix_plan.Failure, waited: _dt.timedelta = RED_GRACE
+    commit: Commit,
+    failure: fix_plan.Failure,
+    waited: _dt.timedelta = RED_GRACE,
+    paths: frozenset[str] = frozenset(),
 ) -> str:
     """The queue file a revert commits, which is what keeps the work from being lost.
 
     It carries the change (its sha, which stays reachable on the default branch's history)
     and the failure that took it off (every failing id, the run, how to read its log), so
-    the session re-landing it fixes it rather than landing it red again.
+    the session re-landing it fixes it rather than landing it red again. `paths` are the
+    files the commit touched (`touched`), which `_failure_said` sorts the ids by.
 
     `json.dumps` writes a TOML basic string: the same quotes and the same escapes, and a
     subject can hold either."""
@@ -287,8 +328,8 @@ def reland_task(
     prompt = (
         f"The fix pass reverted {commit.sha} ({commit.subject}) from {failure.base}: "
         f"{failure.workflow} stayed red for {_minutes(waited)} after the fix pass first saw "
-        f"it, and that commit was in the range that could have caused it. The failure: "
-        f"{_shown(failure.signature, RELAND_SHOWN)}.{run}{log}. Read the reverted work with "
+        f"it, and that commit was in the range that could have caused it. "
+        f"{_failure_said(failure.signature, paths)}{run}{log}. Read the reverted work with "
         f"`git show {commit.sha}`, land it again on a new branch with every failure above "
         f"fixed, and ship it, with `Reland-of: {commit.sha}` on a line of its own in the "
         f"intent's body. Do not land it unchanged: it is the change that went red, and a "
@@ -485,7 +526,7 @@ def revert_one(
     if commit.reland_of:
         _file_second_red(project, commit, failure, journal)
     else:
-        _write(tree, commit.task, reland_task(commit, failure, waited))
+        _write(tree, commit.task, reland_task(commit, failure, waited, touched(checkout, commit)))
     _write(tree, fix_reports.ORIGIN_FILE, "fix-pass\n")
     _write(tree, ship_intent.INTENT_FILE, revert_intent(commit, failure, tidied, waited))
     return f"{where} -- reverting {commit.subject}: {branch} left to the ship task"

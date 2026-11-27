@@ -80,6 +80,18 @@ def test_a_malformed_entry_is_a_note_not_silence(entry, says):
     assert len(notes) == 1 and says in notes[0] and notes[0].startswith("p:")
 
 
+def test_parse_entry_answers_a_dashboard_or_why_not():
+    dashboard, why = dashboards.parse_entry(
+        "p", {"service": "app", "backendPort": 19100, "idleMinutes": 5}, lambda _p: 9100
+    )
+    assert why == ""
+    assert dashboard == Dashboard(
+        project="p", port=9100, service="app", backend_port=19100, idle_minutes=5
+    )
+    dashboard, why = dashboards.parse_entry("p", {"command": []}, lambda _p: 9100)
+    assert dashboard is None and dashboards.PORT_SLOT in why
+
+
 def test_no_port_anywhere_is_a_note():
     found, notes = dashboards.parse_setting(setting({"p": {"command": ["s", "{port}"]}}), no_port)
     assert found == [] and "ports.toml" in notes[0]
@@ -267,10 +279,13 @@ class Clock:
         self.now += seconds
 
 
+MAIN_AT_C1 = Head("main", "c1")
+
+
 class Machine:
     """Everything `Backend` asks of the machine, recorded."""
 
-    def __init__(self, *, ready_after=0, head=Head("main", "c1"), up_code=0):
+    def __init__(self, *, ready_after=0, head=MAIN_AT_C1, up_code=0):
         self.clock = Clock()
         self.started: list[list[str]] = []
         self.stopped: list[FakeProcess] = []
@@ -317,12 +332,14 @@ class Machine:
             python="py",
             log=self.lines.append,
             output=checkout / "out.log",
-            run=self.run,
-            start=self.start,
-            stop=self.stop,
-            probe=self.probe,
-            clock=self.clock,
-            pause=self.pause,
+            machinery=dashboards.Machinery(
+                run=self.run,
+                start=self.start,
+                stop=self.stop,
+                probe=self.probe,
+                clock=self.clock,
+                pause=self.pause,
+            ),
         )
 
 
@@ -719,11 +736,15 @@ def test_the_gateway_run_ticks_until_closed(tmp_path):
     assert state.is_file()
 
 
+# A workspace file under `tmp_path`, never the live one: these run in CI.
+WORKSPACE = "projects.code-workspace"
+
+
 def workspace_with(tmp_path, entries) -> Path:
     """A devkit checkout beside a workspace file declaring `entries`."""
     devkit = tmp_path / "devkit"
     (devkit / "logs").mkdir(parents=True)
-    (tmp_path / "alex-projects.code-workspace").write_text(setting(entries), encoding="utf-8")
+    (tmp_path / WORKSPACE).write_text(setting(entries), encoding="utf-8")
     return devkit
 
 
@@ -731,11 +752,7 @@ def test_declared_reads_the_workspace_beside_the_checkout(tmp_path, monkeypatch)
     devkit = workspace_with(tmp_path, {"p": {"command": ["s", "{port}"], "port": 9100}})
     monkeypatch.setattr(dashboards.sweep, "default_workspace", lambda _root: tmp_path / "w")
     assert dashboards.declared(devkit) == ([], [f"no workspace file at {tmp_path / 'w'}"])
-    monkeypatch.setattr(
-        dashboards.sweep,
-        "default_workspace",
-        lambda _root: tmp_path / "alex-projects.code-workspace",
-    )
+    monkeypatch.setattr(dashboards.sweep, "default_workspace", lambda _root: tmp_path / WORKSPACE)
     found, notes = dashboards.declared(devkit)
     assert [d.project for d in found] == ["p"] and notes == []
     assert dashboards.checkout_of("p", devkit) == tmp_path / "p"
@@ -760,11 +777,7 @@ def test_serve_with_no_checkout_on_this_pc_serves_nothing(tmp_path, monkeypatch)
 def test_main_status_and_open(tmp_path, monkeypatch, capsys):
     devkit = workspace_with(tmp_path, {"p": {"command": ["s", "{port}"], "port": 9100}})
     monkeypatch.setenv("DEVKIT_DIR", str(devkit))
-    monkeypatch.setattr(
-        dashboards.sweep,
-        "default_workspace",
-        lambda _root: tmp_path / "alex-projects.code-workspace",
-    )
+    monkeypatch.setattr(dashboards.sweep, "default_workspace", lambda _root: tmp_path / WORKSPACE)
     opened: list[str] = []
     monkeypatch.setattr(dashboards.webbrowser, "open", opened.append)
     assert dashboards.main([]) == 0
