@@ -573,7 +573,7 @@ def test_a_spool_that_cannot_be_written_is_tried_next_cycle(world):
 
 def test_status_says_what_is_due_and_touches_nothing(world, capsys):
     task = world.queue(TOUCH)
-    assert after_merge_pass.status(world.ws,[], world.seams()) == 0
+    assert after_merge_pass.status(world.ws, [], world.seams()) == 0
     said = capsys.readouterr().out
     assert f"carameli job [{task}]: take" in said
     assert not world.claimed(task) and not (world.checkout / "ran.txt").exists()
@@ -595,7 +595,7 @@ def test_tidy_now_takes_no_task_and_keeps_the_rest_of_the_state(world):
 
         return gh
 
-    assert after_merge_pass.tidy_now(world.ws,[], world.seams(gh_for=gh_for)) == 0
+    assert after_merge_pass.tidy_now(world.ws, [], world.seams(gh_for=gh_for)) == 0
     assert not (world.checkout / "new.txt").exists(), "the queue is not run by a tidy"
     assert any(call[:2] == ("pr", "create") and finished in " ".join(call) for call in created)
     assert after_merge_pass.read_state(world.seams())["seen"] == seen
@@ -604,7 +604,7 @@ def test_tidy_now_takes_no_task_and_keeps_the_rest_of_the_state(world):
 def test_a_pass_with_nothing_queued_reports_and_writes_its_state(world, capsys):
     seams = world.seams()
     assert isinstance(seams, after_merge_pass.Seams)
-    assert after_merge_pass.run_pass(world.ws,[], seams) == 0
+    assert after_merge_pass.run_pass(world.ws, [], seams) == 0
     assert "1 queues read on pc-a" in capsys.readouterr().out
     assert set(after_merge_pass.read_state(seams)) == {"seen", "due", "unread", "tidied"}
 
@@ -612,12 +612,12 @@ def test_a_pass_with_nothing_queued_reports_and_writes_its_state(world, capsys):
 def test_a_project_with_no_checkout_here_is_another_pcs(world):
     world.projects.append("elsewhere")
     world.write_workspace()
-    assert after_merge_pass.here(world.ws,[]) == ["carameli"]
+    assert after_merge_pass.here(world.ws, []) == ["carameli"]
 
 
 def test_a_named_project_narrows_the_pass(world):
     world.add_project("devkit")
-    assert after_merge_pass.here(world.ws,["devkit"]) == ["devkit"]
+    assert after_merge_pass.here(world.ws, ["devkit"]) == ["devkit"]
 
 
 def test_a_fetch_that_fails_is_next_cycles_and_no_other_projects_problem(world, capsys):

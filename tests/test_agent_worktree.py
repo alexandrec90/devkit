@@ -780,7 +780,7 @@ def test_a_missing_registry_is_a_usage_error_rather_than_a_traceback(tmp_path, c
 
 
 def test_a_registry_with_nothing_here_still_draws_the_sentinel(tmp_path, monkeypatch, capsys):
-    """"No checkouts" is what an empty registry, or one listing nothing on this machine,
+    """ "No checkouts" is what an empty registry, or one listing nothing on this machine,
     looks like from here. The cached menu refused to write in that state, because
     overwriting a good file with an empty one outlived the bad read. There is no file to
     protect now, so the honest answer is the row that says there is nothing -- and it is

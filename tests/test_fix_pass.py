@@ -356,9 +356,7 @@ def world(tmp_path, monkeypatch):
     # session before it as stopped by a restart.
     monkeypatch.setattr(fix_pass.fix_loop.fix_reports, "booted_at", lambda now=None: None)
     monkeypatch.setattr(fix_pass.fix_send, "code_moved", lambda root: table["moved"])
-    monkeypatch.setattr(
-        fix_pass.devkit_project, "known_projects", lambda: ["devkit", "carameli"]
-    )
+    monkeypatch.setattr(fix_pass.devkit_project, "known_projects", lambda: ["devkit", "carameli"])
     monkeypatch.setattr(
         fix_pass.ship_intent, "find_intents", lambda root, projects: table["intents"]
     )
