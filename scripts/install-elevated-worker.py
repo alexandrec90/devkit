@@ -146,7 +146,7 @@ PYTHON = INTERPRETER + r"\python.exe"
 # Isolated, no `site`, no bytecode. The module docstring has why each of the first two.
 INTERPRETER_FLAGS = ("-I", "-S", "-B")
 # What the worker imports, tried once on the copy before any task points at it.
-SMOKE = "import base64, binascii, ctypes, json, re, subprocess, dataclasses, stat, traceback"
+SMOKE = "import ctypes, json, re, subprocess, dataclasses, stat, traceback"
 
 # The private interpreter is the DLLs, `DLLs\` and `Lib\`, minus everything below.
 INTERPRETER_FILES = ("python.exe", "pythonw.exe", "python3*.dll", "vcruntime*.dll")

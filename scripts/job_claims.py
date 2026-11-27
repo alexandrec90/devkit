@@ -92,7 +92,6 @@ FAILED_REFS = f"{REFS}failed/"  # out of attempts, and filed
 REROUTED = f"{REFS}rerouted/"  # when an agent was last sent at a late condition
 HOST = f"{REFS}host/"  # a machine's heartbeat, in devkit's repository alone
 WORKER_REFS = f"{REFS}worker/"  # a worker's heartbeat, likewise, and far more often
-FLEET = f"{REFS}fleet/"  # who a machine is for SSH (`fleet_ssh.py`), in devkit's alone
 # git's empty tree, which it knows without the object existing: a claim carries no files.
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # pragma: allowlist secret
 
@@ -207,16 +206,14 @@ def _identity(now: float) -> dict[str, str]:
     }
 
 
-def make_commit(git: Git, subject: str, now: float, nonce: str = "", detail: str = "") -> str:
+def make_commit(git: Git, subject: str, now: float, nonce: str = "") -> str:
     """A root commit of the empty tree saying `subject`, unique to this call; "" on failure.
 
     `nonce` is what makes it unique (see the module docstring), so two machines handing in
-    one subject and one second still make two commits. `detail` is a paragraph between the
-    two, for a ref whose message is its data (`FLEET`).
+    one subject and one second still make two commits.
     """
     body = f"nonce {nonce or uuid.uuid4().hex}"
-    extra = ("-m", detail) if detail else ()
-    made = git("commit-tree", EMPTY_TREE, "-m", subject, *extra, "-m", body, env=_identity(now))
+    made = git("commit-tree", EMPTY_TREE, "-m", subject, "-m", body, env=_identity(now))
     return (made.stdout or "").strip() if made.returncode == 0 else ""
 
 
@@ -272,10 +269,6 @@ def host_ref(host: str) -> str:
 
 def worker_ref(host: str) -> str:
     return f"{WORKER_REFS}{host}"
-
-
-def fleet_ref(host: str) -> str:
-    return f"{FLEET}{host}"
 
 
 def ttl_of(kind: str) -> _dt.timedelta:
@@ -380,14 +373,11 @@ def mark_done(git: Git, ref: str, subject: str, now: float | None = None) -> boo
     return _push(git, commit, ref, "")[0] == WON or bool(on_server(git, ref))
 
 
-def stamp(
-    git: Git, ref: str, subject: str, expected: str, now: float | None = None, detail: str = ""
-) -> bool:
-    """Point `ref` at a new commit saying `subject` (and `detail`, see `make_commit`), only
-    if it still holds `expected` ("" for nothing), so of two machines acting on one reading
-    exactly one moves it."""
+def stamp(git: Git, ref: str, subject: str, expected: str, now: float | None = None) -> bool:
+    """Point `ref` at a new commit saying `subject`, only if it still holds `expected` (""
+    for nothing), so of two machines acting on one reading exactly one moves it."""
     now = time.time() if now is None else now
-    commit = make_commit(git, subject, now, detail=detail)
+    commit = make_commit(git, subject, now)
     return bool(commit) and _push(git, commit, ref, expected)[0] == WON
 
 

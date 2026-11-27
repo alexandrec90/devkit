@@ -1142,16 +1142,11 @@ Every job above runs unelevated, and one recovery cannot: the DACL on `WSLServic
 an unelevated token neither start nor stop, and a service stuck in `STOP_PENDING` hangs
 every `wsl` call until an administrator ends it. A dispatcher running tasks as admin would
 run merged, unreviewed code as admin, so there is no dispatcher. Each PC gets
-`devkit-elevated`, a worker with two verbs, neither taking arguments:
+`devkit-elevated`, a worker with one verb that takes no arguments:
 
 ```bash
 python scripts/elevated_request.py restart-wsl-service   # from any unelevated process
-python scripts/elevated_request.py fleet-authorize       # peers' SSH keys, see fleet.py
 ```
-
-`fleet-authorize` adds fleet peers' ed25519 keys to sshd's administrators file. It
-appends and never removes, and it trusts only what it fetches from devkit's origin and
-what Tailscale says; `elevated_worker.py`'s docstring has the trade-off.
 
 Or `elevated_request.request(verb)` from Python. Either way the only thing crossing to the
 elevated side is the name of an empty file in `C:\ProgramData\devkit\requests\`: the worker
@@ -1319,31 +1314,9 @@ python scripts/fleet.py rebalance               # what would relieve the shortes
 python scripts/fleet.py rebalance --apply       # make that one move
 ```
 
-There is no list of machines. A PC joins by being on the tailnet with this checkout and
-OpenSSH Server running; the rest sets itself up. The PCs share no login, so each publishes
-who it is for SSH -- its login name, its ed25519 public key (made if it has none), its
-tailnet address and where its checkout sits under its home -- as
-`refs/devkit/fleet/<host>` in this repository, and `fleet.py join` on every PC reads the
-others' into a marked block of `~/.ssh/config` (`Host` / `HostName` / `User`, nothing
-outside the markers touched) and adds their keys to the file its own sshd reads. The
-`devkit-after-merge` job runs `join` every cycle, so by hand it is only for a PC you want
-set up now:
-
-```bash
-python scripts/fleet.py join        # publish this PC, configure and authorize the others
-```
-
-For an administrator login that file is `C:\ProgramData\ssh\administrators_authorized_keys`,
-which only an elevated process may write, so `join` asks the
-[elevated worker](#the-elevated-worker-one-admin-action-per-pc) for `fleet-authorize`. The
-worker fetches the records from devkit's origin itself and adds a key only for a host
-Tailscale lists at the address its record claims; a failure reaches the fix pass like any
-other worker result. Nothing is left to a person but installing the worker. Keys are only
-ever added. **The trade-off:** whoever can push refs to this repository *and* is a peer on
-the tailnet can add an SSH key that logs in to an administrator account. One PC that
-does not answer costs a row saying why in words -- no published login (wrong user), no
-config entry here, its key not authorized there, sshd not listening, offline -- and changes
-nothing else: `fleet.py` holds no state
+There is no list of machines. A PC joins by being on the tailnet with this checkout at the
+same place under its home and accepting the SSH key of the PC you run this from. One that
+does not answer costs a row saying why, and changes nothing else: `fleet.py` holds no state
 and a move is still `collectors.py move`, run over SSH on the machine that owns the
 collector and picked up by the destination's next pass. A PC that answers but whose
 checkout predates `fleet.py` says so rather than reading as unreachable: pull devkit there.
