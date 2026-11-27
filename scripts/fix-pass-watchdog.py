@@ -485,9 +485,7 @@ def file_once(
 # --- 4. repair ----------------------------------------------------------------------------
 
 
-def rescue_prompt(
-    kind: str, detail: str, branch: str, behind: str = "", base: str = "main"
-) -> str:
+def rescue_prompt(kind: str, detail: str, branch: str, behind: str = "", base: str = "main") -> str:
     """What the rescue session is told. It retires the finding `file_once` filed, against
     its own branch: unretired, the pass's next ledger sweep was sent at the same defect
     while the rescue's PR was in review (755ee62b, #564).
