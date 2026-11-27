@@ -62,6 +62,9 @@
 		},
 		{
 			"path": "host-scripts"
+		},
+		{
+			"path": "personal-website"
 		}
 	],
 	"extensions": {
@@ -1724,7 +1727,8 @@
 								"d2-trader",
 								"tvshell",
 								"radio",
-								"host-scripts"
+								"host-scripts",
+								"personal-website"
 							]
 						}
 					]
@@ -1771,7 +1775,8 @@
 								"d2-trader",
 								"tvshell",
 								"radio",
-								"host-scripts"
+								"host-scripts",
+								"personal-website"
 							]
 						}
 					]
@@ -1920,7 +1925,8 @@
 					"d2-trader",
 					"tvshell",
 					"radio",
-					"host-scripts"
+					"host-scripts",
+					"personal-website"
 				],
 				"default": "ibkr_trader"
 			},
@@ -2626,7 +2632,8 @@
 					"d2-trader",
 					"tvshell",
 					"radio",
-					"host-scripts"
+					"host-scripts",
+					"personal-website"
 				],
 				"default": "ibkr_trader"
 			},
