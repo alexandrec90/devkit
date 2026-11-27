@@ -813,6 +813,32 @@ def test_a_directory_that_is_not_a_checkout_answers_nothing(tmp_path):
     assert rp.changed_since_tag(tmp_path, "v0.0.1") == []
 
 
+def test_what_is_owed_is_what_green_carries_and_never_what_main_alone_does(tmp_path):
+    """Main's tip may be red; a release is cut from `green`, so that is what it owes."""
+    run = _a_repo(tmp_path)
+    run("commit", "--allow-empty", "-m", "first")
+    (tmp_path / "released.py").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "base")
+    run("commit", "--allow-empty", "-m", "Release v0.0.1")
+    run("tag", "v0.0.1")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "sync-devkit.py").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "judged green")
+    run("update-ref", "refs/remotes/origin/green", "HEAD")
+    (tmp_path / ".pre-commit-hooks.yaml").write_text("", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-m", "red on main")
+    run("update-ref", "refs/remotes/origin/main", "HEAD")
+
+    assert rp.release_base(tmp_path) == rp.release.GREEN
+    assert rp.changed_since_tag(tmp_path, "v0.0.1", rp.release.GREEN) == ["scripts/sync-devkit.py"]
+    assert rp.release_needed(tmp_path, "v0.0.1") == ["scripts/sync-devkit.py"]
+    run("update-ref", "refs/remotes/origin/green", "v0.0.1~2")
+    assert rp.release_needed(tmp_path, "v0.0.1") == [], "a green behind the release owes nothing"
+
+
 # --- what a failed prepare leaves behind --------------------------------------
 #
 # A release branch that survives a run nobody can see is a wall, not a resumption
@@ -1092,8 +1118,11 @@ def test_the_clear_out_happens_before_the_worktree_is_cut(tmp_path):
     assert source.index("discard_stale_branch(devkit, branch, run)") < source.index(
         '"worktree", "add"'
     ), "the worktree is cut before the ref is cleared"
-    assert "release.prepare(devkit, version, _run, _say)" in inspect.getsource(rp.prepare_pr)
-    assert "prepare_pr(devkit, version)" in inspect.getsource(rp.run_pipeline)
+    assert "release.prepare(devkit, version, _run, _say, base)" in inspect.getsource(rp.prepare_pr)
+    assert "prepare_pr(devkit, version, base)" in inspect.getsource(rp.prepare_and_merge)
+    assert "prepare_and_merge(devkit, version, release_base(devkit))" in inspect.getsource(
+        rp.run_pipeline
+    )
 
 
 # --- a push that never got its PR ---------------------------------------------
@@ -1324,6 +1353,60 @@ def test_a_reused_pr_that_cannot_take_main_stops_the_release(monkeypatch):
     assert number == 0
     assert "#7" in why and "merge conflict" in why
     assert steps == ["gh pr update-branch"]
+
+
+def test_an_open_pr_cut_from_green_is_reused_without_taking_main_in(monkeypatch):
+    """Its tree is a commit whose gate passed plus the bump; main's tip may be red, and
+    bringing it in is what would hand the release that red."""
+    steps = _pr_stage(monkeypatch, "OPEN", "")
+
+    assert rp.prepare_pr(Path("devkit"), "v0.0.2", rp.release.GREEN) == (7, "")
+    assert steps == []
+
+
+def test_a_new_release_branch_is_cut_from_the_base_it_is_given(monkeypatch):
+    bases: list[str] = []
+    _pr_stage(monkeypatch, "", "not on origin")
+    monkeypatch.setattr(
+        rp.release, "prepare", lambda *a: bases.append(a[-1]) or (True, "release/v0.0.2")
+    )
+    assert rp.prepare_pr(Path("devkit"), "v0.0.2", rp.release.GREEN) == (42, "")
+    assert bases == [rp.release.GREEN]
+
+
+def test_the_release_pr_merges_as_a_merge_commit_under_the_release_subject():
+    """A squash would leave the tagged bump out of main's history, where the newest-tag
+    test looks for it; the subject is what every reader of a release commit matches."""
+    argv = rp.merge_argv(42, "v0.0.2")
+    assert "--merge" in argv and "--squash" not in argv
+    assert argv[argv.index("--subject") + 1] == "Release v0.0.2 (#42)"
+    assert rp.release.release_commit("m\x1fa b\x1fRelease v0.0.2 (#42)\n", "v0.0.2") == "b"
+
+
+def test_the_tag_dispatch_names_the_commit_only_when_there_is_one():
+    assert rp.tag_inputs("v0.0.2", "abc") == [
+        "-f",
+        "version=v0.0.2",
+        "-f",
+        "phase=tag",
+        "-f",
+        "commit=abc",
+    ]
+    assert rp.tag_inputs("v0.0.2", "") == ["-f", "version=v0.0.2", "-f", "phase=tag"]
+
+
+def test_the_tag_commit_is_read_off_main_after_a_fetch(monkeypatch):
+    calls: list[list[str]] = []
+
+    def run(cmd, *_a, **_kw):
+        calls.append(list(cmd))
+        out = "m\x1fmain1 bump1\x1fRelease v1.0.0 (#5)\n" if "log" in cmd else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(rp, "_run", run)
+    assert rp.release_tag_commit(Path("devkit"), "v1.0.0") == "bump1"
+    assert "fetch" in calls[0] and rp.release.MAIN in calls[1]
+    assert rp.release_tag_commit(Path("devkit"), "v9.9.9") == "", "main's tip, as before"
 
 
 REJECTED = "`git push -u origin release/v0.0.2`: ! [remote rejected] (reference already exists)"

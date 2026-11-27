@@ -295,14 +295,17 @@ def test_a_start_that_could_not_spawn_says_why_and_leaves_no_stamp(monkeypatch, 
 def devkit(tmp_path, monkeypatch):
     """A workspace beside a devkit checkout, with git, gh and the spawn replaced."""
     (tmp_path / "devkit").mkdir()
-    table = {"owed": list(OWED), "in_flight": 0, "started": []}
+    table = {"owed": list(OWED), "in_flight": 0, "started": [], "base": "origin/green"}
     monkeypatch.setattr(
         fix_release.sweep,
         "git_for",
         lambda _d: lambda *a: subprocess.CompletedProcess(a, 0, stdout=""),
     )
+    monkeypatch.setattr(fix_release.release_pipeline, "release_base", lambda d: table["base"])
     monkeypatch.setattr(
-        fix_release.release_pipeline, "release_needed", lambda d, tag: table["owed"]
+        fix_release.release_pipeline,
+        "release_needed",
+        lambda d, tag, base="": table["owed"] if base == table["base"] else [],
     )
     monkeypatch.setattr(fix_release, "release_pr_in_flight", lambda d: table["in_flight"])
     table["tag_run"] = 0
@@ -323,6 +326,25 @@ def test_the_step_starts_an_owed_release_when_dispatching(devkit):
     assert line.startswith("started -- 2 change(s) v0.11.25 cannot deliver")
     assert fix_release.RECORD.as_posix() in line
     assert devkit["started"] == [(devkit["workspace"].parent / "devkit", devkit["workspace"])]
+
+
+def test_a_red_main_does_not_hold_a_release_cut_from_green(devkit):
+    """2026-11-26: main stayed red for over an hour as merges each added a red, and the
+    release five projects waited on waited with them. `green` passed its gate."""
+    line = fix_release.cut_release(devkit["workspace"], "v0.11.25", False, True, NOW)
+    assert line.startswith("started -- ") and "from origin/green" in line
+    devkit["base"] = "origin/main"
+    line = fix_release.cut_release(devkit["workspace"], "v0.11.25", False, True, NOW)
+    assert line.startswith("not started -- ") and "not green" in line, "no green: main's tip"
+
+
+@pytest.mark.parametrize("green", [False, None, "running"])
+def test_a_main_that_is_not_green_holds_only_a_release_cut_from_main(green):
+    from_green = fix_release.base_verdict(green, "origin/green")
+    assert from_green is True
+    assert fix_release.release_refusal(OWED, "v0.11.25", from_green, 0, None, NOW) == ""
+    assert "#401" in fix_release.release_refusal(OWED, "v0.11.25", from_green, 401, None, NOW)
+    assert fix_release.base_verdict(green, "origin/main") == green
 
 
 def test_the_step_only_says_it_would_when_planning(devkit):

@@ -26,19 +26,44 @@ does, the fix is a release, not a re-run.
 
 ## Nobody cuts a release
 
-**`devkit-release` fires nightly at 02:00 and cuts one when, and only when, `main`
+**`devkit-release` fires nightly at 02:00 and cuts one when, and only when, `green`
 carries something a consumer cannot otherwise reach.** That is the intended path now.
+
+## A release is cut from `green`, not from main's tip
+
+`green` (`refs/heads/green`, moved by `green-ref.py` and the fix trigger) is the newest
+default-branch commit whose gate passed. A release is that commit plus the
+`FALLBACK_DEVKIT_REF` bump, **whatever main's tip is doing**: on 2026-11-26 main stayed
+red for over an hour as merges each added a red, and a release cut from the tip could
+only carry that red, so none went out and five projects waited on one. So:
+
+| | What it is |
+| --- | --- |
+| the release branch | `release/vX.Y.Z`, cut from `origin/green` (`release.release_base`); from `origin/main` only where no `green` exists |
+| what is owed | the vendored and published-channel diff from the newest tag to `green` (`release_needed`), and nothing while `green` has not reached what that tag released (`release.base_is_past`) |
+| the PR's gate | the branch's **own head**, not GitHub's merge with main: every `pr-gate.yml` job checks out `pull_request.head.sha` on a `release/` PR |
+| the merge | a merge commit subjected `Release vX.Y.Z (#N)` (`merge_argv`), never a squash, so the bump commit is in main's history and `git describe` there still finds the tag |
+| the tagged commit | the merge's second parent, the bump on `green` (`release.release_commit`), passed to `release.yml` as `commit`; main's tip only when no release commit is found, where the tag phase's own suite still refuses a red one |
+| what consumers pin | that tag, exactly as before: the refs below do not change |
+
+Every other check stands: the release PR's gate and `gate_verdict`, the tag
+workflow's suite and lint on the tagged commit before any push, the fix pass's
+cooldown, one release PR or tag run in flight. Main's own red stays its fixer's
+(`fix_revert.py` takes it off within the hour). Main moving past `green` while a release
+is cut is routine: those changes are untagged by construction and the next release
+carries them (`adoption_outcome`).
 `scripts/install-release-schedule.py` registers it; `logs/scheduled-devkit-release.log`
 is its account of every night, including the quiet ones.
 
 **The fix pass starts the same run between nights** (`scripts/fix_release.py`), once
-devkit's own `main` is green and no release PR is already up, so a merged vendored fix
-does not wait for 02:00 while consumers stay red on it. It never waits for the run;
+`green` carries something owed and no release PR is already up, so a merged vendored fix
+does not wait for 02:00 while consumers stay red on it. Main's tip being red holds it
+only in a checkout with no `green` (`fix_release.base_verdict`). It never waits for the run;
 the `release` line in `logs/fix-pass.log` says what it did, and
 `logs/fix-pass-devkit-release.log` is the run's own record.
 
 The predicate is `release_pipeline.release_needed`: the diff from the newest tag to
-`origin/main`, restricted to the two tiers a consumer actually receives — the vendored
+`origin/green`, restricted to the two tiers a consumer actually receives — the vendored
 `MANIFEST` and the published pre-commit channel (`.pre-commit-hooks.yaml`,
 `scripts/precommit/`). A night whose only changes were docs, tests, the generator or
 the pipeline itself ends with one line saying so. **Tagging those would not be
@@ -48,11 +73,14 @@ nothing runnable trains everyone to merge them unread.
 It is also **the one devkit job that merges a pull request**, which is worth knowing
 before you install it. Its sibling `install-upgrade-schedule.py` says in as many words
 that it never does — a green gate plus a label is what authorises a merge here. The
-release PR cannot use that route at all: it is red *by construction* on
-`test_fallback_devkit_ref_tracks_the_newest_tag`, so no label-driven auto-merge can
-ever fire on it. `gate_verdict` is what stands in for the human read of that red, and
-it refuses on a second failing test, on a failure in another job, and on an artifact
-naming no tests at all.
+release PR cannot use that route at all: on GitHub's merge ref it is red *by
+construction* on `test_fallback_devkit_ref_tracks_the_newest_tag`, so no label-driven
+auto-merge can ever fire on it. `gate_verdict` is what stands in for the human read of
+that red, and it refuses on a second failing test, on a failure in another job, and on
+an artifact naming no tests at all. Judged at its own head, as `pr-gate.yml` now does,
+HEAD is the `Release vX.Y.Z` commit the test already excuses, so the gate is usually
+all green, which `gate_verdict` proceeds on; the comparison itself is made for real by
+the tag phase's suite, with the tag staged.
 
 ## Or click the task
 
@@ -68,7 +96,8 @@ resolved; that mode changes nothing. On the CLI it is
 `vX.Y.Z`), and the run's output survives as `logs/devkit-cut-release.log`.
 
 The run is **resumable and idempotent**: it re-uses an open prepare PR rather than
-opening a second one, skips straight to the tag phase if `main` already carries the
+opening a second one (one cut from `green` is reused as it is: bringing main into it
+would hand it main's red), skips straight to the tag phase if `main` already carries the
 bump, and discards a `release/vX.Y.Z` an earlier run left behind without pushing it. So
 the answer to a run that died in the middle — a dropped network, a closed terminal — is
 to click it again.
@@ -103,15 +132,17 @@ release usually is, and the scheduled pass never picks anything else. A `minor` 
 the ordering below is not optional — the fallback bump has to be **committed before the
 tag exists**.
 
-1. **Land the work on `main`** and confirm CI is green, `generated-project` job
-   included. That job renders a project of every preset and runs its suites — it is
-   the only check that catches vendored-tier coupling.
+1. **Land the work on `main`** and let `green` reach it: its gate, `generated-project`
+   job included, has passed. That job renders a project of every preset and runs its
+   suites — it is the only check that catches vendored-tier coupling. Main's tip need
+   not be green; the release is cut from `green`.
 
 2. **Decide the version.** Bump the minor for new vendored files, published
    pre-commit hooks, or a manifest field; bump the patch for fixes to existing ones.
 
 3. **Run the workflow with `phase=prepare`.** It bumps `FALLBACK_DEVKIT_REF`, pushes
-   `release/vX.Y.Z`, and opens its PR.
+   `release/vX.Y.Z`, and opens its PR. The workflow cuts it from main's tip;
+   `release-pipeline.py` cuts it from `origin/green`, which is the path to use.
 
    ```bash
    gh workflow run release.yml -f version=vX.Y.Z -f phase=prepare
@@ -134,6 +165,10 @@ tag exists**.
 
 4. **Merge that PR — expecting exactly one red test.**
 
+   > A gate on the PR's head (what `pr-gate.yml` runs for a `release/` branch) sees
+   > HEAD as the release commit and skips this test, so it is usually all green; a
+   > gate on the merge ref does what follows.
+   >
    > `test_fallback_devkit_ref_tracks_the_newest_tag` **will fail on the release PR**.
    > That is the check working, not a problem to route around: it compares the constant
    > against `git describe --tags`, and the tag does not exist yet. Do not "fix" it by
@@ -153,11 +188,13 @@ tag exists**.
 5. **Run the workflow with `phase=tag`.**
 
    ```bash
-   gh workflow run release.yml -f version=vX.Y.Z -f phase=tag
+   gh workflow run release.yml -f version=vX.Y.Z -f phase=tag -f commit=<the bump's sha>
    ```
 
-   It stages the tag **locally**, runs the full suite and lint against that exact
-   commit, and only then pushes it. That order is the point: a tag is what every
+   The PR merges as a merge commit (`gh pr merge --merge --subject "Release vX.Y.Z (#N)"`),
+   and `commit` is its second parent, the bump on `green`; omitted, main's tip is tagged.
+   It checks out and stages the tag on that commit **locally**, runs the full suite and
+   lint against that exact commit, and only then pushes it. That order is the point: a tag is what every
    consumer pins, so it must never name a commit whose suite was red. It then proves
    the tag carries the published pre-commit hooks.
 

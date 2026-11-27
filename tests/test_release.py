@@ -117,6 +117,63 @@ def test_phase_two_tags_main_once_the_bump_landed():
     assert steps[0] == "git tag v0.5.3 origin/main"
 
 
+def test_phase_two_tags_the_release_commit_it_is_given():
+    steps, refusal = release.tag_plan("v0.5.3", "v0.5.3", set(), "abc123")
+    assert refusal == "" and steps[0] == "git tag v0.5.3 abc123"
+
+
+def _log(*records: tuple[str, str, str]) -> str:
+    return "".join(f"{sha}\x1f{parents}\x1f{subject}\n" for sha, parents, subject in records)
+
+
+def test_a_release_merged_from_green_is_tagged_at_its_bump_not_at_the_merge():
+    """The merge commit carries main's tip, red or not; its second parent is `green`
+    plus the bump, the commit the release PR's gate judged."""
+    log = _log(
+        ("m2", "x b2", "Add a thing (#9)"),
+        ("m1", "main1 bump1", "Release v0.5.3 (#8)"),
+        ("m0", "old", "Release v0.5.2 (#7)"),
+    )
+    assert release.release_commit(log, "v0.5.3") == "bump1"
+    assert release.release_commit(log, "v0.5.2") == "m0", "a squashed release is itself"
+    assert release.release_commit(log, "v0.5.4") == ""
+    lookalike = _log(("m", "a b", "Release v0.5.30 (#8)"), ("n", "a b", "Release v0.5.3 notes"))
+    assert release.release_commit(lookalike, "v0.5.3") == ""
+
+
+def _git(cwd, *args):
+    done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+def _runner(cmd, **_kw):
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
+def test_a_release_is_cut_from_green_when_there_is_one_and_only_once_it_passed_the_tag(
+    tmp_path,
+):
+    repo = tmp_path / "devkit"
+    repo.mkdir()
+    for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@t")):
+        _git(repo, *args)
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "config", "commit.gpgsign", "false")
+    _git(repo, "config", "core.hooksPath", str(tmp_path / "no-hooks"))
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    assert release.release_base(repo, _runner) == release.MAIN, "no green: main's tip"
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "Release v0.5.3")
+    _git(repo, "tag", "v0.5.3")
+    _git(repo, "update-ref", "refs/remotes/origin/green", "HEAD~1")
+    assert release.release_base(repo, _runner) == release.GREEN
+    assert release.base_is_past(repo, "v0.5.3", release.GREEN, _runner), "the bump's base"
+    _git(repo, "checkout", "-q", "--orphan", "elsewhere")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "unrelated")
+    _git(repo, "update-ref", "refs/remotes/origin/green", "HEAD")
+    assert not release.base_is_past(repo, "v0.5.3", release.GREEN, _runner)
+
+
 def test_an_unreadable_tag_list_is_refused_not_read_as_empty(capsys, monkeypatch):
     """An empty set passes both plans' "that tag already exists" refusal, so a git
     failure read as one would re-cut an immutable release. It stops at the read."""

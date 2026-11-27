@@ -11,12 +11,15 @@ noticed. So the pass cuts it too, under the same predicate the nightly job uses
 **Started, never awaited.** `release-pipeline.py` blocks on two CI gates; run inline, a
 half-hourly pass would spend twenty minutes on one release. It is spawned detached
 under `log-wrap.py` with its own label, so its record is `logs/<slug>.log` in the devkit
-checkout and a click or the nightly run cannot overwrite it. A start is refused while:
+checkout and a click or the nightly run cannot overwrite it. What is owed is measured
+against `green`, the newest commit whose gate passed, and the release is cut from it,
+so main's tip being red holds no release (on 2026-11-26 it held one for over an hour
+while five projects waited). A start is refused while:
 
-- devkit's own default branch is not green -- the pipeline stops on any red but the
-  release test, so starting would only open a PR it will abandon. A main red on that
-  test alone is a merged bump waiting on its tag, which the start is what delivers
-  (`release_verdict`);
+- there is no `green` and devkit's own default branch is not green -- the release
+  would be main's tip, and the pipeline stops on any red but the release test. A main
+  red on that test alone is a merged bump waiting on its tag, which the start is what
+  delivers (`release_verdict`);
 - a `release/` PR is already open -- one is in flight;
 - this pass started one less than `STARTED_COOLDOWN` ago -- the gap between that PR
   merging and the tag landing has neither a PR nor a tag to see.
@@ -234,6 +237,14 @@ def release_verdict(
     )
 
 
+def base_verdict(devkit_green: bool | str | None, base: str) -> bool | str | None:
+    """The verdict on the commit a release is cut from. Pure. `green`
+    (`release-pipeline.release_base`) is a commit whose gate passed, so main's tip being
+    red holds nothing; only a checkout with no `green` releases main's tip, and that
+    waits for main's own verdict (`release_verdict`)."""
+    return True if base == release_pipeline.release.GREEN else devkit_green
+
+
 def release_refusal(
     owed: list[str],
     tag: str,
@@ -242,7 +253,9 @@ def release_refusal(
     started: _dt.datetime | None,
     now: _dt.datetime,
 ) -> str:
-    """Why no release starts this pass, or "" when one should. Pure."""
+    """Why no release starts this pass, or "" when one should. Pure.
+
+    `devkit_green` is the verdict on what the release is cut from (`base_verdict`)."""
     if not tag:
         return "devkit has no release tag to measure against; cut the first one by hand"
     if not owed:
@@ -395,13 +408,15 @@ def cut_release(
     if not devkit.is_dir():
         return ""
     sweep.git_for(devkit)("fetch", "--quiet", "--tags", "origin")
-    owed = release_pipeline.release_needed(devkit, tag) if tag else []
+    base = release_pipeline.release_base(devkit)
+    owed = release_pipeline.release_needed(devkit, tag, base) if tag else []
     in_flight = release_pr_in_flight(devkit) if owed else 0
-    if why := release_refusal(owed, tag, devkit_green, in_flight, last_started(devkit), now):
+    verdict = base_verdict(devkit_green, base)
+    if why := release_refusal(owed, tag, verdict, in_flight, last_started(devkit), now):
         return f"not started -- {why}"
     if not owed:
         return retry_adoptions(workspace, tag, dispatching, now)
-    what = f"{len(owed)} change(s) {tag} cannot deliver: {', '.join(owed)}"
+    what = f"{len(owed)} change(s) {tag} cannot deliver from {base}: {', '.join(owed)}"
     if not dispatching:
         return f"would start -- {what}"
     if run_id := tag_in_flight(devkit):
