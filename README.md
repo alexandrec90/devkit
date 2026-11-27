@@ -1377,7 +1377,7 @@ older than this ignores the claim.
 
 #### Dashboards that sleep when nobody is looking
 
-`devkit.dashboards` in `workspace.jsonc` declares each project's dashboard. One stdlib
+`devkit.dashboards` in `projects.toml` declares each project's dashboard. One stdlib
 gateway, `scripts/dashboards.py serve` (task `devkit-dashboards`, at logon, resident),
 holds every dashboard's public port on 127.0.0.1. The first request starts that dashboard
 and waits until it answers. After 30 minutes with no traffic (`idleMinutes`), the gateway
@@ -1394,7 +1394,16 @@ python scripts/install-dashboards.py --yes   # register the gateway and start it
 
 A host dashboard is restarted onto merged code once its checkout's default branch moves.
 The gateway's own log is `logs/dashboards.log`, and each dashboard's output from its last
-wake is in `logs/dashboards/<project>.log`.
+wake is in `logs/dashboards/<project>.log`. A wake that dies before serving names the line
+of that output saying why, in the log, the state file and the 503.
+
+A host command runs under the Node its checkout's frontend asks for: `.nvmrc` or
+`.node-version`, else `engines.node` in its `package.json`. Where PATH's `node` falls
+short, `scripts/node_toolchain.py` provides a per-user copy under
+`%LOCALAPPDATA%\devkit\node` (`~/.cache/devkit/node` elsewhere), fetched once from
+nodejs.org and checked against the release's published SHA-256 digests. `worktree.py provision` runs the
+frontend's npm install under the same copy. When no copy can be had, the 503 says
+`node <have> < <need>`.
 
 #### Remote Control servers, and why keeping them up is a job
 
