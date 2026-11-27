@@ -123,6 +123,23 @@ def prepare_plan(version: str, previous: str, existing_tags: set[str]) -> tuple[
     )
 
 
+# --- what a release is cut from, and which commit its tag names -----------------
+#
+# A release is cut from `green` -- the branch `green-ref.py` and the fix trigger move to
+# the newest default-branch commit whose gate passed -- not from main's tip. On 2026-11-26
+# main stayed red for over an hour while merges each added a red, and a release cut from
+# the tip could only carry that red, so none went out and five projects waited on one.
+# The release branch is `green` plus the bump; it merges into main as a merge commit, so
+# that exact commit -- the one `release.yml` tests and tags -- is in main's history and
+# `git describe` there still finds it. Main absent a `green` is the old behaviour.
+#
+# Defined above `tag_plan`, whose default argument reads `MAIN` when the module is
+# executed: below it, importing this module raised NameError and took the fix pass
+# (fix-pass.py -> fix_release -> release-pipeline -> release) down with it.
+GREEN = "origin/green"
+MAIN = "origin/main"
+
+
 def tag_plan(
     version: str, main_fallback: str, existing_tags: set[str], commit: str = MAIN
 ) -> tuple[list[str], str]:
@@ -153,19 +170,6 @@ def tag_plan(
 
 def branch_for(version: str) -> str:
     return f"release/{version}"
-
-
-# --- what a release is cut from, and which commit its tag names -----------------
-#
-# A release is cut from `green` -- the branch `green-ref.py` and the fix trigger move to
-# the newest default-branch commit whose gate passed -- not from main's tip. On 2026-11-26
-# main stayed red for over an hour while merges each added a red, and a release cut from
-# the tip could only carry that red, so none went out and five projects waited on one.
-# The release branch is `green` plus the bump; it merges into main as a merge commit, so
-# that exact commit -- the one `release.yml` tests and tags -- is in main's history and
-# `git describe` there still finds it. Main absent a `green` is the old behaviour.
-GREEN = "origin/green"
-MAIN = "origin/main"
 
 
 def release_base(devkit: Path, run: GitRunner) -> str:
