@@ -42,7 +42,12 @@ the merge.
    - **merges itself once its gate is green** -- it touched a guarded path;
    - **conflicts** -- the scheduled fix pass sends a resolver, and it merges after;
    - **the queue merges it** -- GitHub had not decided mergeability yet;
-   - **held** -- the person asked for `hold`, and it waits for them.
+   - **held** -- the person asked for `hold`, and it waits for them;
+   - **held, waits for the devkit release** -- the change uses a `.devkit.toml` key the
+     project's pinned devkit does not know (version skew, `scripts/land_check.py`). The
+     fix pass releases it once a release that knows the key is adopted. Use only keys
+     the project's own `scripts/hooks/harness_config.py` defines unless that wait is
+     what you want; a key devkit's `main` added is not there until a release.
 
 None of those is a job for the person, so never end with "you need to merge" or "after
 this merges, run ...". Anything that must happen later goes in a task file in the same

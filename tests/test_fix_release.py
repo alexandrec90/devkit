@@ -78,6 +78,64 @@ def test_a_merge_github_failed_on_its_own_side_is_deferred_and_a_refusal_is_not(
     assert fix_release.merge_line(True, "merged PR #5") == "merged PR #5"
 
 
+# --- skew holds ---------------------------------------------------------------------------
+
+OLD_SCHEMA = {"delivery": frozenset({"flow"})}
+NEW_SCHEMA = {"delivery": frozenset({"flow", "e2e"})}
+
+
+def skew_row(number=9, labels=("hold", "devkit-skew", "merge-now"), keys=("[delivery] e2e",)):
+    body = fix_release.land_check.with_skew_line("Why.", list(keys))
+    return {"number": number, "labels": [{"name": n} for n in labels], "body": body}
+
+
+def test_a_skew_hold_is_released_once_the_adopted_schema_knows_its_keys():
+    rows = [skew_row()]
+    assert fix_release.skew_releases(rows, OLD_SCHEMA) == []
+    assert fix_release.skew_releases(rows, NEW_SCHEMA) == rows
+
+
+def test_a_persons_hold_and_a_body_naming_nothing_are_never_released():
+    persons = skew_row(labels=("hold", "merge-now"))
+    unnamed = {**skew_row(), "body": "Why."}
+    assert fix_release.skew_releases([persons, unnamed, "junk"], NEW_SCHEMA) == []
+
+
+def test_unhold_takes_the_hold_off_and_fires_the_routing_label_again():
+    assert fix_release.unhold_steps(skew_row()) == [
+        ("--remove-label", "hold,devkit-skew,merge-now"),
+        ("--add-label", "merge-now"),
+    ]
+    gated = skew_row(labels=("hold", "devkit-skew", "automerge"))
+    assert fix_release.unhold_steps(gated)[1] == ("--add-label", "automerge")
+    bare = skew_row(labels=("hold", "devkit-skew"))
+    assert fix_release.unhold_steps(bare) == [
+        ("--remove-label", "hold,devkit-skew"),
+        ("--add-label", "merge-now"),
+    ]
+
+
+def test_release_skew_holds_edits_the_labels_and_says_so(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(fix_release, "default_branch_schema", lambda _d: NEW_SCHEMA)
+
+    def gh(*a):
+        calls.append(a)
+        return subprocess.CompletedProcess(a, 0, stdout="")
+
+    lines = fix_release.release_skew_holds("roguelike", tmp_path, [skew_row()], gh)
+    assert lines == ["roguelike #9 skew hold -- released, its devkit knows the keys"]
+    assert calls[-1] == ("pr", "edit", "9", "--add-label", "merge-now")
+
+
+def test_release_skew_holds_asks_nothing_when_no_pr_is_skew_held(monkeypatch, tmp_path):
+    def unasked(_d):
+        raise AssertionError("no schema read with no skew-held PR")
+
+    monkeypatch.setattr(fix_release, "default_branch_schema", unasked)
+    assert fix_release.release_skew_holds("p", tmp_path, [{"number": 1, "labels": []}], None) == []
+
+
 # --- when a release starts ----------------------------------------------------------------
 
 

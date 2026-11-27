@@ -790,12 +790,15 @@ default branch does not hold a conflict's resolver, since nothing waits on it be
 green. One red on nothing but formatting or the Codex mirror sends no fixer for
 `fix_plan.TIDY_GRACE`, since the post-merge tidy rewrites both; past that it is a failure
 like any other, because tidy cannot land everything (`.github/workflows` is restored
-before it stages). And one that stays red for two hours from when a pass first saw it
-(`scripts/red_seen.py`, under `logs/red-seen/`) is reverted (`scripts/fix_revert.py`):
+before it stages). And one that stays red for `red_seen.REVERT_GRACE` from when a pass
+first saw it (`scripts/red_seen.py`, under `logs/red-seen/`), or to
+`red_seen.REVERT_CEILING` while a fixer sent at it may still be working
+(`fix_ledger.fixer_at_branch`), is reverted (`scripts/fix_revert.py`; the fix trigger
+starts a pass at each mark, so neither waits for the half-hourly fire):
 every PR commit after `origin/green` up to the oldest whose failing jobs overlap the
 tip's, newest first, each on `agent/revert-<sha7>` with
 `.devkit-queue/reland-<sha7>.toml` beside it, so the reverted work is queued to land again
-with the failure fixed. Tidy's own commit (its exact subject and author), a release and a
+with the failure fixed: the task names the commit, every failing id and the red run. Tidy's own commit (its exact subject and author), a release and a
 revert are never named; a tidy commit that touched the same files goes in the same revert,
 since it rewrote those lines. One revert per sha, ever, and a re-land (`Reland-of: <sha>`)
 that goes red is reverted without another re-land and filed. A revert that conflicts is

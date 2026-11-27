@@ -302,6 +302,50 @@ def test_a_hold_the_person_asked_for_is_neither_labelled_nor_merged(world):
     assert merger.held({"body": github.prs[100]["body"], "labels": []})
 
 
+SCHEMA_SOURCE = (
+    "from dataclasses import dataclass\n\n\n"
+    "@dataclass(frozen=True)\n"
+    "class DeliveryConfig:\n"
+    '    flow: str = "direct"\n'
+    "    guarded: tuple = ()\n"
+)
+
+
+def test_a_key_the_pinned_devkit_does_not_know_is_held_not_merged(world):
+    """2026-11-26: `[delivery] e2e`, known only to devkit's main, merged into five projects
+    and reddened their vendored contract test until a release. Held, it waits for one."""
+    (world.tree / "scripts" / "hooks").mkdir(parents=True)
+    (world.tree / "scripts" / "hooks" / "harness_config.py").write_text(
+        SCHEMA_SOURCE, encoding="utf-8"
+    )
+    (world.tree / ".devkit.toml").write_text(MONEY + 'e2e = "ci"\n', encoding="utf-8")
+    github = FakeGitHub(world)
+    assert run_land(world, github) == land.HELD
+    assert github.labels == {100: ["hold", "devkit-skew", "merge-now"]}
+    body = github.prs[100]["body"]
+    assert "[delivery] e2e" in body and "waits for the devkit release that adds them" in body
+    assert not github.prs[100].get("merged") and not github.merged_by_put()
+
+
+def test_a_key_the_pinned_devkit_knows_lands_as_usual(world):
+    (world.tree / "scripts" / "hooks").mkdir(parents=True)
+    (world.tree / "scripts" / "hooks" / "harness_config.py").write_text(
+        SCHEMA_SOURCE, encoding="utf-8"
+    )
+    (world.tree / ".devkit.toml").write_text('[delivery]\nflow = "direct"\n', encoding="utf-8")
+    assert run_land(world, FakeGitHub(world)) == land.LANDED
+
+
+def test_a_schema_that_cannot_be_read_never_holds(world):
+    """Fail-open: a broken vendored copy is not skew."""
+    (world.tree / "scripts" / "hooks").mkdir(parents=True)
+    (world.tree / "scripts" / "hooks" / "harness_config.py").write_text(
+        "raise RuntimeError('no')\n", encoding="utf-8"
+    )
+    (world.tree / ".devkit.toml").write_text(MONEY + 'e2e = "ci"\n', encoding="utf-8")
+    assert run_land(world, FakeGitHub(world)) == land.LANDED
+
+
 def test_nothing_to_land_says_so(world):
     with pytest.raises(land.LandError, match="nothing to land"):
         run_land(world, FakeGitHub(world))

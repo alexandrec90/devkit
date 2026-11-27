@@ -124,6 +124,28 @@ def test_one_session_at_a_time_works_on_one_branch_failure_whatever_the_commit(t
     assert fix_ledger.open_branch_session(pr, ledger, now) == ""
 
 
+def test_a_fixer_at_a_branch_is_found_whatever_commit_or_signature_it_went_at(tmp_path):
+    """A merge that adds one more failure to a red main changes the signature under the
+    fixer still at the first; a revert must not read that as nobody working it."""
+    path, now = tmp_path / "dispatch.json", _dt.datetime(2026, 11, 26, 12, 0, tzinfo=_dt.UTC)
+    first = _branch_decision("a", "t::x")
+    fix_ledger.record(path, fix_ledger.decision_key(first), "n", now)
+    ledger = fix_ledger.read_ledger(path)
+    wider = failure(kind=fix_plan.BRANCH, number=0, head="", sha="c", signature=("t::x", "t::y"))
+    assert fix_ledger.fixer_at_branch(wider, ledger, now) == now.isoformat()
+    later = now + fix_ledger.BRANCH_SETTLE
+    assert fix_ledger.fixer_at_branch(wider, ledger, later) == "", "past its settle window"
+    elsewhere = failure(kind=fix_plan.BRANCH, number=0, head="", project="roguelike")
+    assert fix_ledger.fixer_at_branch(elsewhere, ledger, now) == "", "another project"
+    for flag in ("dead", "blocked"):
+        flagged = {key: {**entry, flag: "no"} for key, entry in ledger.items()}
+        assert fix_ledger.fixer_at_branch(wider, flagged, now) == "", flag
+    rerun = fix_plan.Decision(fix_plan.RERUN, "n", first.failures)
+    free = {fix_ledger.decision_key(rerun): {"when": now.isoformat(), "sent": 1}}
+    assert fix_ledger.fixer_at_branch(wider, free, now) == "", "a re-run is no session"
+    assert fix_ledger.fixer_at_branch(failure(), ledger, now) == "", "a PR is not a branch"
+
+
 def test_a_local_e2e_red_keeps_its_key_shape():
     key = fix_ledger.failure_key(
         failure(kind=fix_plan.LOCAL, number=0, workflow="Local E2E", sha="s", tip="t")

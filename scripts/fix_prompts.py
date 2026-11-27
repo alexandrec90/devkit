@@ -88,6 +88,20 @@ WAIT_SENTENCE = (
     "still working, not as dead. Never wait in a sleep or until loop. "
 )
 
+# Ledger fixers averaged 45 turns at up to 240k of context (2026-11-21..26): devkit's
+# most-read modules are 95-320 KB, and one whole Read stays in every later turn. Test
+# runs per session reached 66. No quotes or backticks: the prompt crosses a wt command line.
+READ_SENTENCE = (
+    "Find code with Grep before you read it, and read a file over a few hundred lines in "
+    "parts, with offset and limit at the lines Grep named, never whole: a whole read of a "
+    "large module stays in every later turn of this session. "
+)
+TEST_RUNS_SENTENCE = (
+    "Run the failing tests once before you change anything and once after, then the "
+    "checks below once: do not re-run them after each edit, since every run's output also "
+    "stays in every later turn. "
+)
+
 # How every prompt's body ends. The ship intent is the finish line and the blocked file
 # is the only other way out, for the blockers `STOP` names right after it; both are
 # files, so the pass reads the outcome without a session. Nothing to change is still an
@@ -126,6 +140,8 @@ FINISH = (
     "heredoc or a patch script run through Bash: the Bash tool collapses backslashes in "
     "them, and the damage costs a test run to find. An append is an Edit that replaces "
     "the file's last lines with themselves plus the new text. "
+    f"{READ_SENTENCE}"
+    f"{TEST_RUNS_SENTENCE}"
     f"Either way, if the harness cost you turns -- a refusal, a missing tool, evidence "
     f"that was wrong or absent, an instruction that sent you the wrong way -- put one line "
     f"per thing in {FRICTION_FILE.as_posix()}, and quote the harness words you saw, not "

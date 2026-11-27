@@ -131,6 +131,13 @@ def test_manifest_schema_covers_worktree_config() -> None:
     assert _toml_schema()["worktree"] == fields
 
 
+def test_land_reads_the_schema_this_test_enforces():
+    """`land.py` holds a change whose keys this test would fail (`land_check.skew`), so
+    the two must agree on what is legal, or land would merge exactly that red."""
+    land_check = load_module("scripts/land_check.py")
+    assert land_check.schema_of(cfg) == _toml_schema()
+
+
 def test_manifest_has_no_unknown_keys():
     """An unrecognised key silently disables the tier it was meant to configure.
 
