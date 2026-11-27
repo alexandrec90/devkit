@@ -138,10 +138,19 @@ def watched(tmp_path, monkeypatch):
     workspace.write_text('{"settings": {"devkit.fixPass": "dispatch"}}', encoding="utf-8")
     devkit = tmp_path / "devkit"
     devkit.mkdir()
-    seen: dict = {"rescues": [], "updates": 0, "outcome": (0, "fix-pass: mode=dispatch\n")}
+    seen: dict = {
+        "rescues": [],
+        "prompts": [],
+        "updates": 0,
+        "outcome": (0, "fix-pass: mode=dispatch\n"),
+        # git's answer by its argv; anything unlisted reads as the fixed commit.
+        "git": {("symbolic-ref", "--short", "refs/remotes/origin/HEAD"): "origin/main"},
+    }
     monkeypatch.setattr(watchdog, "REPO_ROOT", devkit)
     monkeypatch.setattr(
-        watchdog, "git", lambda root, *a: subprocess.CompletedProcess(a, 0, "abc123\n", "")
+        watchdog,
+        "git",
+        lambda root, *a: subprocess.CompletedProcess(a, 0, seen["git"].get(a, "abc123") + "\n", ""),
     )
     monkeypatch.setattr(watchdog, "run_pass", lambda argv, timeout: seen["outcome"])
 
@@ -153,7 +162,11 @@ def watched(tmp_path, monkeypatch):
     monkeypatch.setattr(
         watchdog,
         "rescue",
-        lambda root, kind, detail, output, now: seen["rescues"].append(kind) or "sent",
+        lambda root, kind, detail, output, now, behind="", base="": (
+            seen["rescues"].append(kind)
+            or seen["prompts"].append(watchdog.rescue_prompt(kind, detail, "b", behind, base))
+            or "sent"
+        ),
     )
     monkeypatch.setattr(watchdog, "ship_rescues", lambda root: [])
     seen["argv"] = ["--scheduled", "--workspace", str(workspace)]
@@ -210,6 +223,56 @@ def test_a_crash_is_filed_and_repaired_once_per_signature(watched):
     record = (watched["devkit"] / watchdog.ARTIFACT).read_text(encoding="utf-8")
     assert "watchdog: the pass failed (pass-crashed)" in record
     assert "Traceback" in (watched["devkit"] / watchdog.FAILURE_LOG).read_text(encoding="utf-8")
+
+
+MAIN_TIP = ("rev-parse", "origin/main")
+BEHIND = ("rev-list", "--count", "HEAD..origin/main")
+
+
+def test_a_crash_that_outlives_its_rescue_is_rescued_again_once_main_moves(watched):
+    """2026-11-27: the pass crashed on a `NameError`, its rescue merged the fix (#870) to a
+    red `main`, `green` -- which the pass follows -- never moved, and with the rescue keyed
+    on the pass's own commit alone every pass for twelve hours crashed with no one sent.
+    The finding stays one row; the rescue is owed again when `origin/main` moves."""
+    watched["outcome"] = (1, TRACE)
+    watched["git"][MAIN_TIP] = "aaa111"
+    watchdog.watch(watched["argv"], NOW)
+    watchdog.watch(watched["argv"], NOW)
+    assert watched["rescues"] == ["pass-crashed"], "the same tip is not rescued twice"
+    watched["git"][MAIN_TIP] = "bbb222"
+    watchdog.watch(watched["argv"], NOW)
+    assert watched["rescues"] == ["pass-crashed", "pass-crashed"]
+    assert len(findings(watched["devkit"])) == 1, "still one finding, not one per rescue"
+
+
+def test_a_rescue_behind_a_red_main_is_told_main_s_gate_is_its_job(watched):
+    watched["outcome"] = (1, TRACE)
+    watched["git"][BEHIND] = "5"
+    watchdog.watch(watched["argv"], NOW)
+    [prompt] = watched["prompts"]
+    assert "5 commit(s) behind origin/main" in prompt
+    assert "make that gate green in the same PR" in prompt
+    assert "--workflow 'PR Gate'" in prompt
+
+
+def test_a_rescue_level_with_main_is_kept_to_the_crash():
+    text = watchdog.rescue_prompt("pass-crashed", "NameError", "b", "", "main")
+    assert "Nothing else is in scope" in text and "PR Gate" not in text
+
+
+def test_behind_base_counts_what_the_checkout_lacks(monkeypatch):
+    answers = iter(["3\n", "0\n", "fatal: bad revision\n"])
+    monkeypatch.setattr(
+        watchdog, "git", lambda root, *a: subprocess.CompletedProcess(a, 0, next(answers), "")
+    )
+    assert [watchdog.behind_base(Path("."), "main") for _ in range(3)] == ["3", "", ""]
+
+
+def test_a_rescue_key_moves_with_either_commit_and_ignores_numbers():
+    one = watchdog.rescue_key("pass-crashed", "KeyError: 'a' at line 1", "head", "tip")
+    assert one == watchdog.rescue_key("pass-crashed", "KeyError: 'b' at line 9", "head", "tip")
+    assert one != watchdog.rescue_key("pass-crashed", "KeyError: 'a' at line 1", "head2", "tip")
+    assert one != watchdog.rescue_key("pass-crashed", "KeyError: 'a' at line 1", "head", "tip2")
 
 
 def test_a_hang_is_repaired_too(watched):
