@@ -103,6 +103,7 @@ import git_policy
 # seam the hooks use, so a box provisions the way its project says to rather than the way
 # this file guesses.
 import harness_config
+import node_toolchain
 import project_registry
 import reconcile_journal
 import sweep
@@ -600,12 +601,17 @@ class ProvisionStep:
 
     `skip_if` is a path, relative to the box, whose presence when the step comes up
     means an earlier step already did its work (`provision_steps` says when).
+
+    `node` is the Node range the step must run under (`node_toolchain.requirement`):
+    `run_provision` puts a satisfying Node first on PATH, fetching a per-user copy when
+    PATH's is older, and fails the step naming `node <have> < <need>` when it cannot.
     """
 
     label: str
     argv: tuple[str, ...] = ()
     shell_command: str = ""
     skip_if: str = ""
+    node: str = ""
 
 
 @dataclass(frozen=True)
@@ -1341,7 +1347,11 @@ def provision_steps(
 
 
 def frontend_step(
-    frontend_dir: str, locked: bool, windows: bool, after_install_command: bool
+    frontend_dir: str,
+    locked: bool,
+    windows: bool,
+    after_install_command: bool,
+    node_need: str = "",
 ) -> ProvisionStep:
     """`provision_steps`' npm install of `frontend_dir`.
 
@@ -1357,6 +1367,9 @@ def frontend_step(
     run PATH's. carameli's did, and the second `npm ci` died on PATH's Node 18 under
     `engine-strict` (e5e65461). npm writes `.package-lock.json` only once an install
     completes.
+
+    `node_need` is the range the frontend asks for, and the step carries it so the install
+    runs under a Node that satisfies it rather than PATH's (`ProvisionStep.node`).
     """
     verb = "ci" if locked else "install"
     done = f"{frontend_dir}/node_modules/.package-lock.json" if after_install_command else ""
@@ -1364,6 +1377,7 @@ def frontend_step(
         f"npm {verb} ({frontend_dir})",
         (npm_executable(windows), verb, "--prefix", frontend_dir, "--no-audit", "--no-fund"),
         skip_if=done,
+        node=node_need,
     )
 
 
@@ -1477,12 +1491,15 @@ def plan_provision(
                 f"override it.",
                 file=sys.stderr,
             )
+    # The Node half of the same pin: read off the frontend's own `.nvmrc` /
+    # `.node-version` / `engines.node` before `npm_target` may point the install elsewhere.
+    node_need = node_toolchain.requirement(source, frontend_dir)[0] if frontend_dir else ""
     # Read off the SOURCE checkout, like every other marker here: the lockfile is
     # tracked, so the box is guaranteed the same answer and the dry run shows the verb
     # that will actually run.
     frontend_dir = npm_target(source, frontend_dir)
     frontend_locked = bool(frontend_dir) and (source / frontend_dir / "package-lock.json").is_file()
-    return provision_steps(
+    steps = provision_steps(
         present,
         install_command,
         frontend_dir,
@@ -1490,6 +1507,10 @@ def plan_provision(
         python_version=python_version,
         frontend_locked=frontend_locked,
     )
+    if frontend_dir and node_need:
+        # The frontend step is always the ladder's last (`provision_steps`).
+        steps = (*steps[:-1], replace(steps[-1], node=node_need))
+    return steps
 
 
 def plan_env_templates(source: Path) -> dict[str, str]:
@@ -3001,8 +3022,34 @@ def install_env(path: Path, environ: Mapping[str, str] | None = None) -> dict[st
     return {**(os.environ if environ is None else environ), UV_ENVIRONMENT_VAR: str(real)}
 
 
+def step_node(
+    step: ProvisionStep,
+    env: dict[str, str] | None,
+    provide: Callable[[str], node_toolchain.Provision] = node_toolchain.provide,
+) -> tuple[ProvisionStep, dict[str, str] | None, str]:
+    """`step` and `env` under the Node `step.node` asks for, or why there is none.
+
+    `(step, env, "")` unchanged for a step that asks for no Node, or whose need PATH's
+    Node meets. Otherwise the provided copy goes first on PATH and an `npm` argv is bound
+    to it, since PATH's `npm.cmd` would run PATH's `node.exe`: ibkr_trader's `>=24`
+    frontend met Node 18 that way on desktop-ml5f3pj (2026-11-27).
+    """
+    if not step.node:
+        return step, env, ""
+    provision = provide(step.node)
+    if not provision.ok:
+        return step, env, provision.problem
+    if provision.bin_dir is None:
+        return step, env, ""
+    bound = replace(step, argv=node_toolchain.rebind(step.argv, provision))
+    return bound, node_toolchain.environ(provision, env), ""
+
+
 def run_provision(
-    path: Path, steps: tuple[ProvisionStep, ...], timeout: float = 900.0
+    path: Path,
+    steps: tuple[ProvisionStep, ...],
+    timeout: float = 900.0,
+    provide_node: Callable[[str], node_toolchain.Provision] = node_toolchain.provide,
 ) -> tuple[bool, list[str]]:
     """Run the install ladder in the box. `(ok, notes)`; stops at the first failure.
 
@@ -3013,11 +3060,15 @@ def run_provision(
     """
     notes: list[str] = []
     worktree_env.mark_provisioned(path, False)
-    env = install_env(path)
+    base_env = install_env(path)
     for step in steps:
         if step.skip_if and (path / step.skip_if).is_file():
             notes.append(f"already provisioned: {step.label}")
             continue
+        step, env, problem = step_node(step, base_env, provide_node)
+        if problem:
+            notes.append(f"FAILED provision: {step.label}: {problem}")
+            return False, notes
         try:
             if step.shell_command:
                 # `[python] install_command` is a shell string by contract, authored in

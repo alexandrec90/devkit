@@ -373,6 +373,89 @@ def test_a_dashboard_that_exits_before_serving_is_a_wake_error(tmp_path):
     assert "exited (3)" in backend.state()["error"]
 
 
+def test_a_wake_that_dies_names_the_cause_its_output_printed(tmp_path):
+    """desktop-ml5f3pj, 2026-11-27: ibkr_trader's `npm run build` under Node 18 died on
+    `styleText`, and the 503 said only `exited (1)`. The cause reaches state and log."""
+    machine = Machine(ready_after=10**6)
+
+    def start(argv, cwd, output):
+        output.write_text(
+            "> vite build\n"
+            "SyntaxError: The requested module 'node:util' does not provide an export "
+            "named 'styleText'\n"
+            "    at ModuleJob._instantiate (node:internal/modules/esm/module_job:123:21)\n"
+            "npm ERR! A complete log of this run can be found in: C:\\npm\\x.log\n",
+            encoding="utf-8",
+        )
+        process = machine.start(argv, cwd, output)
+        process.returncode = 1
+        return process
+
+    backend = machine.backend(HOST_DASHBOARD, tmp_path)
+    backend.start = start
+    with pytest.raises(dashboards.WakeError, match="styleText"):
+        backend.wake()
+    assert "styleText" in backend.state()["error"]
+    assert any("could not wake" in line and "styleText" in line for line in machine.lines)
+
+
+def test_build_cause_prefers_an_engine_refusal(tmp_path):
+    out = tmp_path / "out.log"
+    out.write_text(
+        "npm warn EBADENGINE Unsupported engine { required: { node: '>=24' } }\n"
+        "Error: build failed\n",
+        encoding="utf-8",
+    )
+    assert "EBADENGINE" in dashboards.build_cause(out)
+    out.write_text("serving\nbye\n", encoding="utf-8")
+    assert dashboards.build_cause(out) == "bye"
+    assert dashboards.build_cause(tmp_path / "missing.log") == ""
+
+
+def test_a_node_nothing_can_provide_is_a_503_naming_the_shortfall(tmp_path):
+    machine = Machine()
+    backend = machine.backend(HOST_DASHBOARD, tmp_path)
+    backend.node = lambda _checkout: dashboards.node_toolchain.Provision(
+        ">=24", have="18.15.0", problem="node 18.15.0 < >=24 (frontend/package.json engines.node)"
+    )
+    with pytest.raises(dashboards.WakeError, match=r"node 18\.15\.0 < >=24"):
+        backend.wake()
+    assert machine.started == []
+    assert "node 18.15.0 < >=24" in backend.state()["error"]
+
+
+def test_a_provided_node_goes_first_on_the_dashboards_path(tmp_path):
+    """A `>=24` frontend on a PC whose PATH holds Node 18 runs its build under the
+    per-user copy `node_toolchain` provides."""
+    machine = Machine()
+    seen = {}
+
+    def start(argv, cwd, output, env=None):
+        seen["env"] = env
+        return machine.start(argv, cwd, output)
+
+    copy = tmp_path / "node-v24"
+    backend = machine.backend(HOST_DASHBOARD, tmp_path)
+    backend.start = start
+    backend.node = lambda _checkout: dashboards.node_toolchain.Provision(
+        ">=24", have="18.15.0", version="24.5.0", bin_dir=copy
+    )
+    backend.wake()
+    path = next(value for key, value in seen["env"].items() if key.upper() == "PATH")
+    assert path.split(dashboards.os.pathsep)[0] == str(copy)
+
+
+def test_spawn_passes_the_env_it_is_given(tmp_path, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        dashboards.subprocess, "Popen", lambda argv, **kwargs: calls.update(kwargs) or "p"
+    )
+    assert dashboards.spawn(["x"], tmp_path, tmp_path / "o.log", {"PATH": "n"}) == "p"
+    assert calls["env"] == {"PATH": "n"}
+    dashboards.spawn(["x"], tmp_path, tmp_path / "o.log")
+    assert calls["env"] is None
+
+
 def test_a_dashboard_that_never_answers_is_stopped_at_its_deadline(tmp_path):
     machine = Machine(ready_after=10**6)
     backend = machine.backend(HOST_DASHBOARD, tmp_path)
