@@ -1018,6 +1018,7 @@ def test_a_box_is_told_apart_from_a_checkout_by_the_directory_above_it():
     assert not in_an_ephemeral_box(Path("C:/ws/devkit/.claude/worktrees"))
     assert not in_an_ephemeral_box(codex / "worktrees" / "2e51")
 
+
 # --- the real repos ---------------------------------------------------------
 
 

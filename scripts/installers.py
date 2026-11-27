@@ -409,9 +409,7 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help=(
-            "explicitly do not apply -- the default, and redundant on the command line"
-        ),
+        help=("explicitly do not apply -- the default, and redundant on the command line"),
     )
     parser.add_argument(
         "--only",

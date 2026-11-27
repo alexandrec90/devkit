@@ -718,9 +718,7 @@ def test_the_injected_reporters_default_to_the_real_ones():
     them -- not what they find here."""
     assert ws.codex_context.report_lines is not None
     assert ws.toolchain_lines(which=lambda _n: "/usr/bin/uv", git=lambda *a: "someone") == (
-        ws.codex_context.report_lines()
-        + ws.wt_profile.status_lines()
-        + ws.launcher_lines()
+        ws.codex_context.report_lines() + ws.wt_profile.status_lines() + ws.launcher_lines()
     )
 
 

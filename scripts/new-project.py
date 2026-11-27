@@ -74,6 +74,7 @@ def projects_root() -> Path:
     """
     return project_registry.projects_root(DEVKIT_ROOT)
 
+
 # Path segments starting `dot-` become dotted on output. Templates cannot ship a
 # literal `.gitignore`/`.claude/` because those would take effect on devkit's OWN
 # repo — a nested .gitignore inside templates/ would make git ignore the templates.

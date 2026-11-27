@@ -690,9 +690,7 @@ def test_one_refusal_does_not_hide_the_removals_beside_it(workspace, monkeypatch
 # --- the entry point -----------------------------------------------------------------
 
 
-def test_a_missing_registry_is_a_usage_error_rather_than_a_traceback(
-    tmp_path, monkeypatch, capsys
-):
+def test_a_missing_registry_is_a_usage_error_rather_than_a_traceback(tmp_path, monkeypatch, capsys):
     """The registry is `projects.toml`; a malformed one is named, not a traceback, and a
     workspace file that is not there is no error at all."""
     registry = agent_worktree.devkit_project.project_registry

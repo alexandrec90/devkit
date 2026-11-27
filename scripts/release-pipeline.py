@@ -1144,8 +1144,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--projects",
         default="",
         help=(
-            "comma-delimited consumer names to open adoption PRs in. "
-            "Omitted means every consumer"
+            "comma-delimited consumer names to open adoption PRs in. Omitted means every consumer"
         ),
     )
     parser.add_argument(
