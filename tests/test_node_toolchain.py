@@ -178,6 +178,19 @@ def test_npm_is_bound_to_the_provided_copy(tmp_path):
     assert node.rebind(("npm", "ci"), node.Provision(">=24")) == ("npm", "ci")
 
 
+def test_a_windows_argv0_names_npm_on_any_host(tmp_path):
+    """CI is Linux, where `Path` keeps `C:\\...\\npx.cmd` whole and named no npm."""
+    provided = node.Provision(">=24", version="24.5.0", bin_dir=tmp_path)
+    assert node.rebind((r"C:\Program Files\nodejs\NPX.CMD", "-y"), provided, windows=True) == (
+        str(tmp_path / "npx.cmd"),
+        "-y",
+    )
+    assert node.rebind(("/usr/local/bin/npm", "ci"), provided, windows=False) == (
+        str(tmp_path / "npm"),
+        "ci",
+    )
+
+
 def test_the_cache_is_per_user():
     assert (
         node.cache_root({"LOCALAPPDATA": r"C:\Users\u\AppData\Local"}, windows=True)

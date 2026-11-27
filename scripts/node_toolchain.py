@@ -47,7 +47,7 @@ import urllib.request
 import zipfile
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 DIST = "https://nodejs.org/dist"
 DEFAULT_FRONTEND_DIR = "frontend"
@@ -535,7 +535,9 @@ def rebind(
     """`argv` with an npm/npx program resolved in the provided Node's directory."""
     if not argv or provision is None or provision.bin_dir is None:
         return tuple(argv)
-    program = Path(argv[0]).name.lower()
+    # PureWindowsPath splits on both separators, so a Windows argv[0] such as
+    # `C:\nodejs\npm.cmd` names npm on a POSIX host too, where `Path` keeps it whole.
+    program = PureWindowsPath(argv[0]).name.lower()
     if program not in NPM_NAMES:
         return tuple(argv)
     stem = program.split(".")[0]
