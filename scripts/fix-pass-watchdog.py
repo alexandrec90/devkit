@@ -49,6 +49,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
@@ -554,14 +555,24 @@ def is_elevated() -> bool:
         return False
 
 
+class Lag(NamedTuple):
+    """How far the pass's checkout trails `origin/<base>`: `behind_base`'s count, "" for
+    none, and the base, "" for the rescue tree's own default branch."""
+
+    behind: str = ""
+    base: str = ""
+
+
+NO_LAG = Lag()
+
+
 def rescue(
     root: Path,
     kind: str,
     detail: str,
     output: str,
     now: _dt.datetime,
-    behind: str = "",
-    base: str = "",
+    lag: Lag = NO_LAG,
 ) -> str:
     """Cut a fresh devkit worktree and send one background session at the pass; what happened.
 
@@ -573,7 +584,7 @@ def rescue(
         return "no rescue: claude is not on PATH"
     if is_elevated():
         return "no rescue: this process is elevated; run the watchdog from a shell that is not"
-    base = base or default_branch(root)
+    behind, base = lag.behind, lag.base or default_branch(root)
     stamp = now.strftime("%m%d-%H%M")
     branch = f"{RESCUE_PREFIX}-{stamp}"
     tree = root / ".claude" / "worktrees" / f"fix-pass-rescue-{stamp}"
@@ -695,8 +706,8 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
             rescued = state.setdefault("rescued", {})
             if kind in RESCUED and key not in rescued:
                 rescued[key] = now.isoformat(timespec="seconds")
-                behind = behind_base(REPO_ROOT, base)
-                sent = rescue(home(REPO_ROOT), kind, detail, output, now, behind, base)
+                lag = Lag(behind_base(REPO_ROOT, base), base)
+                sent = rescue(home(REPO_ROOT), kind, detail, output, now, lag)
                 notes.append(f"watchdog: {sent}")
     if state_path:
         state_path.parent.mkdir(parents=True, exist_ok=True)

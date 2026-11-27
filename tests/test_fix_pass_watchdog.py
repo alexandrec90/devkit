@@ -174,9 +174,9 @@ def watched(tmp_path, monkeypatch):
     monkeypatch.setattr(
         watchdog,
         "rescue",
-        lambda root, kind, detail, output, now, behind="", base="": (
+        lambda root, kind, detail, output, now, lag=watchdog.NO_LAG: (
             seen["rescues"].append(kind)
-            or seen["prompts"].append(watchdog.rescue_prompt(kind, detail, "b", behind, base))
+            or seen["prompts"].append(watchdog.rescue_prompt(kind, detail, "b", *lag))
             or "sent"
         ),
     )
@@ -493,6 +493,34 @@ def test_a_rescue_cuts_a_fresh_tree_and_sends_one_background_session(tmp_path, m
     assert argv[argv.index("--disallowedTools") + 1] == "AskUserQuestion"
     assert argv[argv.index("--name") + 1] == f"{tmp_path.name}/fix-pass-rescue-0926-1200"
     assert (tree / watchdog.ORIGIN_FILE).is_file(), "fixer work: its PR merges once green"
+
+
+def test_a_rescue_behind_its_base_is_cut_off_that_base_and_says_how_far_behind(
+    tmp_path, monkeypatch
+):
+    """`Lag` carries the count and the base together: the tree is cut off that base, and
+    the prompt names both, so the session goes at the base's red first."""
+    monkeypatch.setattr(watchdog, "is_elevated", lambda: False)
+    monkeypatch.setattr(watchdog.shutil, "which", lambda _c: "claude")
+    gits = []
+    monkeypatch.setattr(
+        watchdog,
+        "git",
+        lambda root, *a: gits.append(a) or subprocess.CompletedProcess(a, 0, "", ""),
+    )
+    spawned = []
+    monkeypatch.setattr(
+        watchdog.subprocess,
+        "run",
+        lambda argv, **k: spawned.append(argv) or subprocess.CompletedProcess(argv, 0),
+    )
+    lag = watchdog.Lag("5", "trunk")
+    watchdog.rescue(tmp_path, "pass-crashed", "x", "out", NOW, lag)
+    assert ("fetch", "--quiet", "origin", "trunk") in gits
+    assert any(a[:2] == ("worktree", "add") and a[-1] == "origin/trunk" for a in gits)
+    [argv] = spawned
+    assert "5 commit(s) behind origin/trunk" in argv[-1]
+    assert watchdog.NO_LAG == ("", ""), "no lag: the tree's own default branch"
 
 
 def test_a_rescue_is_cut_beside_the_main_checkout_not_inside_a_linked_worktree(tmp_path):
