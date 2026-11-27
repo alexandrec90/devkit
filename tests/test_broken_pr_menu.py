@@ -361,9 +361,9 @@ def test_a_pr_view_that_cannot_be_read_is_empty_rather_than_a_traceback(
 
 
 def test_the_scan_covers_the_registry_not_just_the_stack_projects(monkeypatch, tmp_path):
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(menu.devkit_project, "known_projects", lambda _text: ["a", "b"])
+    """And off the project registry: the workspace file `scan` is handed is not read."""
+    workspace = tmp_path / "missing.code-workspace"
+    monkeypatch.setattr(menu.devkit_project, "known_projects", lambda: ["a", "b"])
     monkeypatch.setattr(menu, "broken_prs", lambda _dir: [])
     assert sorted(menu.scan(workspace)) == ["a", "b"]
 
@@ -374,7 +374,7 @@ def test_the_scan_asks_every_checkout_at_once_and_keeps_the_answers_paired(monke
     checkout if the mapping were built from that."""
     workspace = tmp_path / "alex.code-workspace"
     workspace.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(menu.devkit_project, "known_projects", lambda _text: ["slow", "fast"])
+    monkeypatch.setattr(menu.devkit_project, "known_projects", lambda: ["slow", "fast"])
     monkeypatch.setattr(
         menu,
         "broken_prs",

@@ -97,6 +97,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import box_teardown
 import fix_reports
+import project_registry
 import rc_machine
 import sweep
 import worktree_tiers as wt
@@ -643,9 +644,13 @@ def reap_outcome(path: Path, error: str, reason: str = MERGED_SAID) -> tuple[str
 
 
 def sweep_workspace(workspace: Path, apply: bool, say: Callable[[str], None]) -> int:
-    """Every checkout the workspace file lists. The count of trees that failed to reap."""
+    """Every registered checkout. The count of trees that failed to reap.
+
+    The names are the project registry's; `workspace` is a deprecated alias for the
+    directory the checkouts sit in, and the file it names is not read.
+    """
     try:
-        names = sweep.parse_workspace(workspace.read_text(encoding="utf-8"))
-    except OSError:
+        names = sweep.managed(project_registry.all_projects())
+    except project_registry.RegistryError:
         return 0
     return sum(sweep_checkout(workspace.parent / name, apply, say) for name in names)

@@ -18,6 +18,7 @@ from support import REPO_ROOT, load_script
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import fix_release
+import project_registry
 
 log_wrap = load_script("scripts/log-wrap.py")
 
@@ -298,9 +299,8 @@ def test_a_tag_being_cut_is_a_release_in_flight(devkit):
 def behind(devkit, monkeypatch):
     """Nothing owed, the tag hours old, and one project still pinning the last release."""
     devkit["owed"] = []
-    devkit["workspace"].write_text(
-        '{"folders": [{"path": "devkit"}, {"path": "radio"}, {"path": "carameli"}]}',
-        encoding="utf-8",
+    monkeypatch.setattr(
+        project_registry, "all_projects", lambda *_a, **_k: ["devkit", "radio", "carameli"]
     )
     root = devkit["workspace"].parent
     pins = {"radio": "v0.11.24", "carameli": "v0.11.25"}

@@ -39,6 +39,7 @@ import devkit_project
 import fix_cycle
 import fix_plan
 import gate_evidence
+import project_registry
 import sweep
 import worktree
 from _loader import load_by_path
@@ -277,8 +278,9 @@ def retry_adoptions(workspace: Path, tag: str, dispatching: bool, now: _dt.datet
     if last and now - last < ADOPT_COOLDOWN:
         return ""
     try:
-        projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
-    except OSError:
+        # Off the project registry; `workspace` only names where the checkouts sit.
+        projects = devkit_project.known_projects()
+    except project_registry.RegistryError:
         return ""
     behind = unadopted(workspace.parent, projects, tag)
     if not behind:

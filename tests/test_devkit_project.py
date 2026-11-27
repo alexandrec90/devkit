@@ -11,6 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import project_registry
 import pytest
 import support
 from support import (
@@ -78,6 +79,15 @@ def ledger_dir(tmp_path_factory, monkeypatch):
     return scratch
 
 
+def register(monkeypatch, *names: str) -> None:
+    """Make the project registry list `names`, as `projects.toml` would.
+
+    The dispatcher reads its projects off `project_registry`, not the workspace file a
+    test hands it with `--workspace` -- that flag now only says where the checkouts sit.
+    """
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_args, **_kw: list(names))
+
+
 def ledger_rows(root: Path) -> list[dict[str, str]]:
     """Every event under `root/logs/`, as `{field: value}` with `event` among them."""
     rows = []
@@ -91,13 +101,24 @@ def ledger_rows(root: Path) -> list[dict[str, str]]:
 # --- the registry -----------------------------------------------------------
 
 
-def test_projects_come_from_the_workspace_registry():
-    assert known_projects(WORKSPACE) == ["alpha", "beta"]
+def test_projects_come_from_the_project_registry(monkeypatch):
+    register(monkeypatch, "alpha", "beta")
+    assert known_projects() == ["alpha", "beta"]
 
 
 def test_the_reference_checkout_is_not_a_project(monkeypatch):
     # A NOT_PROJECTS entry ships no harness; nothing in ACTIONS applies to it.
     monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({REFERENCE}))
+    register(monkeypatch, "alpha", "beta", REFERENCE)
+    assert known_projects() == ["alpha", "beta"]
+
+
+def test_workspace_text_still_names_the_projects_it_lists(monkeypatch):
+    """The deprecated argument: the workspace writers verify their own edit with it, so
+    it reads the text it is given, never the registry."""
+    register(monkeypatch, "elsewhere")
+    monkeypatch.setattr(devkit_project, "NOT_PROJECTS", frozenset({REFERENCE}))
+    assert known_projects(WORKSPACE) == ["alpha", "beta"]
     assert known_projects(REFERENCE_WORKSPACE) == ["alpha", "beta"]
 
 
@@ -129,7 +150,7 @@ def test_duplicate_and_empty_multi_pick_values_are_ignored():
 
 def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
     workspace = tmp_path / "projects.code-workspace"
-    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}, {"path": "beta"}]}))
+    register(monkeypatch, "alpha", "beta")
     for name in ("alpha", "beta"):
         scripts = tmp_path / name / "scripts"
         scripts.mkdir(parents=True)
@@ -149,13 +170,13 @@ def test_main_runs_every_selected_project_in_order(tmp_path, monkeypatch):
     assert all(env["PYTHONUTF8"] == "1" for _, _, env in calls)
 
 
-def test_a_dispatched_task_runs_in_utf8_mode_down_to_its_grandchildren(tmp_path):
+def test_a_dispatched_task_runs_in_utf8_mode_down_to_its_grandchildren(tmp_path, monkeypatch):
     """Clicking *Agent: Fix What Is Red* printed `UnicodeDecodeError: 'charmap' codec
     can't decode byte 0x9d` from a reader thread: the pass's runners use `text=True` with
     no encoding, and only the watchdog's path ran it in UTF-8 mode. Asserted through the
     real wrappers, since the variable has to survive log-wrap to reach the script."""
     workspace = tmp_path / "projects.code-workspace"
-    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    register(monkeypatch, "alpha")
     (tmp_path / "alpha" / "scripts").mkdir(parents=True)
     (tmp_path / "alpha" / "scripts" / "run-tests.py").write_text(
         "import pathlib, subprocess, sys\n"
@@ -176,7 +197,7 @@ def test_the_task_env_keeps_the_callers_and_adds_utf8_mode():
 
 
 def test_registered_but_missing_directory_is_distinguished(checkouts):
-    with pytest.raises(ProjectError, match="registered in the workspace but"):
+    with pytest.raises(ProjectError, match="is registered but"):
         resolve_project("ghost", ["alpha", "beta", "ghost"], checkouts)
 
 
@@ -926,7 +947,7 @@ def test_a_pair_the_checkout_cannot_run_is_skipped_by_name_not_refused():
 def menu_run(tmp_path, monkeypatch, kinds, projects=("alpha",), scripts=("run-tests.py",)):
     """Dispatch the test menu over a throwaway workspace, recording what it ran."""
     workspace = tmp_path / "projects.code-workspace"
-    workspace.write_text(json.dumps({"folders": [{"path": name} for name in projects]}))
+    register(monkeypatch, *projects)
     for name in projects:
         (tmp_path / name / "scripts").mkdir(parents=True)
         for script in scripts:
@@ -986,7 +1007,7 @@ def test_a_selection_with_nothing_in_scope_is_a_refusal_not_a_green_run(
 
     monkeypatch.setattr(devkit_project.subprocess, "run", boom)
     workspace = tmp_path / "projects.code-workspace"
-    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    register(monkeypatch, "alpha")
     (tmp_path / "alpha" / "scripts").mkdir(parents=True)
 
     code = devkit_project.main(
@@ -2042,15 +2063,21 @@ def test_render_workspace_bootstraps_a_missing_live_file_instead_of_exiting_2(wo
     assert live.is_file()
 
 
-def test_a_missing_live_file_is_still_an_error_for_every_other_action(workspace_pair):
-    """The tolerance is scoped to the action that creates the file. `--check-workspace`
-    and the dispatcher have nothing to answer without a registry, and saying so is the
-    honest report."""
+def test_a_missing_live_file_is_still_an_error_for_the_other_workspace_verbs(
+    workspace_pair, monkeypatch, capsys
+):
+    """The tolerance is scoped to the action that creates the file: `--check-workspace`
+    has nothing to compare without one, and saying so is the honest report. The
+    dispatcher's own verbs read the project registry instead, so `--list` answers on a
+    machine that has no workspace file at all."""
     _canonical, live = workspace_pair
     live.unlink()
+    register(monkeypatch, "alpha", "beta")
 
     assert _run(live, "--check-workspace") == 2
-    assert _run(live, "--list") == 2
+    capsys.readouterr()
+    assert _run(live, "--list") == 0
+    assert capsys.readouterr().out.split() == ["alpha", "beta"]
 
 
 # --- this machine's view: the registry is global, the checkouts are not ------
@@ -3694,7 +3721,7 @@ def test_generated_actions_get_distinct_branches_and_only_codex_opts_into_autome
 def autofix_run(tmp_path, monkeypatch, argv, dirty=("app/main.py",), returncode=0):
     """Dispatch a lint action over one checkout, recording every command it runs."""
     workspace = tmp_path / "projects.code-workspace"
-    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    register(monkeypatch, "alpha")
     scripts = tmp_path / "alpha" / "scripts"
     scripts.mkdir(parents=True)
     action_name = argv[-1]
@@ -3750,7 +3777,7 @@ def test_no_ship_fixes_leaves_the_churn_in_the_working_tree(tmp_path, monkeypatc
 def test_a_non_autofix_action_is_never_snapshotted(tmp_path, monkeypatch):
     """`autofix_state` shells out to git; a `test` run must not pay for that."""
     workspace = tmp_path / "projects.code-workspace"
-    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    register(monkeypatch, "alpha")
     scripts = tmp_path / "alpha" / "scripts"
     scripts.mkdir(parents=True)
     (scripts / "run-tests.py").write_text("")
@@ -3770,7 +3797,7 @@ def test_a_non_autofix_action_is_never_snapshotted(tmp_path, monkeypatch):
 def failed_sweep_step(tmp_path, monkeypatch):
     """Dispatch `lint` over one checkout whose run passes and whose `--branch` step fails."""
     workspace = tmp_path / "projects.code-workspace"
-    workspace.write_text(json.dumps({"folders": [{"path": "alpha"}]}))
+    register(monkeypatch, "alpha")
     scripts = tmp_path / "alpha" / "scripts"
     scripts.mkdir(parents=True)
     (scripts / "lint-all.py").write_text("")
@@ -3805,19 +3832,29 @@ def test_a_failed_sweep_step_stops_the_chain_and_reports(tmp_path, monkeypatch, 
 # steps after the wrapped run has already exited.
 
 
-def failing_dispatch(tmp_path, *argv, workspace_text=WORKSPACE):
-    """`main` over a throwaway registry listing alpha and beta, neither of which exists."""
+def failing_dispatch(tmp_path, monkeypatch, *argv, registry_text='projects = ["alpha", "beta"]'):
+    """`main` over a throwaway registry listing alpha and beta, neither of which exists.
+
+    `registry_text` is parsed as `projects.toml` would be, so a malformed one raises
+    exactly what the real file would.
+    """
+    monkeypatch.setattr(
+        project_registry,
+        "all_projects",
+        lambda *_args, **_kw: project_registry.parse_registry(registry_text),
+    )
     workspace = tmp_path / "projects.code-workspace"
-    workspace.write_text(workspace_text)
     return devkit_project.main(["--workspace", str(workspace), *argv])
 
 
-def test_a_dispatch_that_cannot_start_is_filed_on_the_ledger(tmp_path, ledger_dir, capsys):
+def test_a_dispatch_that_cannot_start_is_filed_on_the_ledger(
+    tmp_path, monkeypatch, ledger_dir, capsys
+):
     """The owner's rule: every routine task that fails reaches the ledger, because
     failures share causes and are triaged together. A stale picker entry, or a checkout
     that lacks the action's script, is refused before `plan_command` wraps anything --
     so it was a red icon in a terminal, and nothing anywhere said it kept happening."""
-    assert failing_dispatch(tmp_path, "--project", "gamma", "lint") == 2
+    assert failing_dispatch(tmp_path, monkeypatch, "--project", "gamma", "lint") == 2
     assert "unknown project 'gamma'" in capsys.readouterr().err, "the terminal line is unchanged"
 
     [row] = ledger_rows(ledger_dir)
@@ -3829,34 +3866,50 @@ def test_a_dispatch_that_cannot_start_is_filed_on_the_ledger(tmp_path, ledger_di
     assert "unknown project 'gamma'" in kept, "the event names a file holding the reason"
 
 
-@pytest.mark.parametrize("text, said", [("{ not json", "is not valid JSONC"), ("{}", "is empty")])
+@pytest.mark.parametrize(
+    "text, said", [("projects = [", "projects.toml"), ('projects = "x"', "a list of names")]
+)
 def test_an_unreadable_registry_is_filed_under_the_task_it_stopped(
-    tmp_path, ledger_dir, text, said
+    tmp_path, monkeypatch, ledger_dir, text, said
 ):
-    assert (
-        failing_dispatch(tmp_path, "--project", "alpha", "tests", "suite", workspace_text=text) == 2
-    )
+    argv = ("--project", "alpha", "tests", "suite")
+    assert failing_dispatch(tmp_path, monkeypatch, *argv, registry_text=text) == 2
     [row] = ledger_rows(ledger_dir)
     assert row["message"] == "task 'Test: Run Suite' could not start"
+    assert "cannot read the project registry" in row["cause"]
     assert said in row["cause"]
 
 
-def test_the_message_names_the_task_and_nothing_that_varies(tmp_path, ledger_dir):
+def test_a_dispatch_reads_no_workspace_file(tmp_path, monkeypatch):
+    """`--workspace` only says where the checkouts sit: the file it names need not
+    exist, which is what lets the dispatcher outlive the VS Code workspace."""
+    (tmp_path / "alpha" / "scripts").mkdir(parents=True)
+    (tmp_path / "alpha" / "scripts" / "run-tests.py").write_text("")
+    monkeypatch.setattr(
+        devkit_project.subprocess,
+        "run",
+        lambda command, *, cwd, check, env: type("Result", (), {"returncode": 0})(),
+    )
+    assert failing_dispatch(tmp_path, monkeypatch, "--project", "alpha", "test") == 0
+    assert not (tmp_path / "projects.code-workspace").exists()
+
+
+def test_the_message_names_the_task_and_nothing_that_varies(tmp_path, monkeypatch, ledger_dir):
     """`harness_triage.Item.signature` groups by the message, so a refusal that recurs
     has to read as one defect recurring. What differs between two runs rides in
     `cause`, where it splits a different reason into a different group."""
-    failing_dispatch(tmp_path, "--project", "gamma", "lint")
-    failing_dispatch(tmp_path, "--project", "delta", "lint")
+    failing_dispatch(tmp_path, monkeypatch, "--project", "gamma", "lint")
+    failing_dispatch(tmp_path, monkeypatch, "--project", "delta", "lint")
     first, second = ledger_rows(ledger_dir)
     assert first["message"] == second["message"] == "task 'Lint: Run' could not start"
     assert first["cause"] != second["cause"]
 
 
-def test_a_run_that_names_no_action_files_nothing(tmp_path, ledger_dir):
+def test_a_run_that_names_no_action_files_nothing(tmp_path, monkeypatch, ledger_dir):
     """No action is no task to file it under. `--render-workspace` and `--adopt-workspace`
     run inside `log-wrap.py` in their own tasks, which files their failures already --
     a second row here would be two rows for one click -- and `--list` is a picker's."""
-    assert failing_dispatch(tmp_path, "--list", workspace_text="{ not json") == 2
+    assert failing_dispatch(tmp_path, monkeypatch, "--list", registry_text="projects = [") == 2
     assert ledger_rows(ledger_dir) == []
 
 
@@ -3868,7 +3921,7 @@ def test_a_ledger_that_cannot_be_reached_leaves_the_exit_code_alone(tmp_path, mo
         raise ImportError("no log-wrap.py in this checkout")
 
     monkeypatch.setattr(devkit_project, "_log_wrap", missing)
-    assert failing_dispatch(tmp_path, "--project", "gamma", "lint") == 2
+    assert failing_dispatch(tmp_path, monkeypatch, "--project", "gamma", "lint") == 2
 
 
 @pytest.mark.parametrize(

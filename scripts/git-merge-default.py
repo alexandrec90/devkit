@@ -42,6 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_project
 import git_policy
+import project_registry
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -67,16 +68,21 @@ class MergeError(ValueError):
 # --- pure helpers -----------------------------------------------------------
 
 
-def every_checkout(workspace_text: str) -> list[str]:
-    """Every folder in the registry, reference checkouts included.
+def every_checkout(workspace_text: str | None = None) -> list[str]:
+    """Every project in the registry, reference checkouts included.
 
     `devkit_project.known_projects` subtracts `NOT_PROJECTS`, and `sweep` subtracts its
     own `DEFAULT_EXCLUDE`, both for the same good reason: those checkouts ship no
     harness, so every action either tool dispatches would fail in one. This task is the
     exception that proves it -- it runs git and nothing else -- and applying the
     exclusion here would remove the checkout the task was written for.
+
+    The raw `project_registry.all_projects()`. `workspace_text` is deprecated: given, the
+    folders of that workspace text are read instead, with nothing excluded either.
     """
-    return sweep.parse_workspace(workspace_text, frozenset())
+    if workspace_text is not None:
+        return sweep.parse_workspace(workspace_text, frozenset())
+    return project_registry.all_projects()
 
 
 def conflicted_paths(diff_output: str) -> list[str]:
@@ -129,16 +135,16 @@ def target_repo(checkout: str, workspace: Path) -> Path:
 
     Validated against the registry rather than by `is_dir()`, so a stale picker entry
     fails naming the real checkouts instead of running somewhere that happens to exist.
+    `workspace` is a deprecated alias for where the checkouts sit: only its directory
+    is read.
     """
     if not checkout:
         return Path.cwd()
     try:
-        text = workspace.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise MergeError(f"cannot read the workspace registry at {workspace}: {exc}") from exc
-    return devkit_project.resolve_project(
-        checkout, every_checkout(text), workspace.parent, noun="checkout"
-    )
+        names = every_checkout()
+    except project_registry.RegistryError as exc:
+        raise MergeError(f"cannot read the project registry: {exc}") from exc
+    return devkit_project.resolve_project(checkout, names, workspace.parent, noun="checkout")
 
 
 # --- git --------------------------------------------------------------------
@@ -397,7 +403,7 @@ def main(argv: list[str] | None = None, run_factory: Callable[[Path], Runner] = 
     parser.add_argument(
         "--checkout",
         default="",
-        help="a checkout name from the workspace registry; omit to use the current directory",
+        help="a checkout name from the project registry; omit to use the current directory",
     )
     parser.add_argument(
         "--base",
@@ -405,7 +411,12 @@ def main(argv: list[str] | None = None, run_factory: Callable[[Path], Runner] = 
         help=f"branch to merge FROM, or {AUTO!r} (default) to read it off the remote",
     )
     parser.add_argument("--remote", default=DEFAULT_REMOTE)
-    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=DEFAULT_WORKSPACE,
+        help="deprecated: names the projects root (this file's directory) and nothing else",
+    )
     args = parser.parse_args(argv)
 
     try:

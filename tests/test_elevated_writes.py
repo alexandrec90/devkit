@@ -16,9 +16,17 @@ from support import REPO_ROOT
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import elevated_writes as ew
+import project_registry
+import pytest
 
 AFTER = ew.UNELEVATED_SINCE + _dt.timedelta(days=1)
 BEFORE = ew.UNELEVATED_SINCE - _dt.timedelta(days=3)
+
+
+@pytest.fixture(autouse=True)
+def registry(monkeypatch):
+    """The project registry `workspace` stands for: the check reads its checkouts there."""
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: ["devkit", "carameli"])
 
 
 def workspace(tmp_path: Path) -> Path:
@@ -129,5 +137,27 @@ def test_a_sightings_finding_is_stable_and_points_at_the_directory(tmp_path):
     assert finding.evidence == str(tmp_path / "hazy" / ".pytest_cache")
 
 
-def test_an_unreadable_workspace_checks_nothing(tmp_path):
+def test_an_unreadable_registry_checks_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        project_registry,
+        "all_projects",
+        lambda *_a, **_k: project_registry.parse_registry("projects = ["),
+    )
     assert ew.check(tmp_path / "none.code-workspace", tmp_path, True, print) == 0
+
+
+def test_the_checkouts_come_off_the_registry_not_the_workspace_file(tmp_path):
+    """Only the directory a `workspace` path names is read: the file need not exist."""
+    workspace(tmp_path)
+    seen: list = []
+    ew.check(
+        tmp_path / "none.code-workspace",
+        tmp_path,
+        False,
+        print,
+        lambda found: seen.append(found) or [],
+    )
+    assert [(project, tree.name) for project, tree in seen[0]] == [
+        ("devkit", "hazy"),
+        ("carameli", "carameli--fix-0930"),
+    ]

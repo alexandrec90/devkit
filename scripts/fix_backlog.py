@@ -32,6 +32,7 @@ import fix_ledger
 import fix_plan
 import gate_evidence
 import harness_triage as triage
+import project_registry
 import sweep
 import task_branch as tb
 
@@ -107,7 +108,7 @@ def open_prs(
     Only named branches are asked about, so a backlog naming none costs no `gh` call. A
     `gh` that cannot answer names no PR: the group still reaches its session as before.
     """
-    workspace = sweep.default_workspace(devkit_dir).parent
+    workspace = project_registry.projects_root(devkit_dir)
     found: dict[str, str] = {}
     for _, members in grouped:
         homes = [home for home in (devkit_dir, workspace / members[0].project) if home.is_dir()]
@@ -150,7 +151,7 @@ def artifact_path(item: triage.Item, devkit_dir: Path) -> Path | None:
         home = (
             devkit_dir
             if item.project == fix_cycle.DEVKIT
-            else sweep.default_workspace(devkit_dir).parent / item.project
+            else project_registry.projects_root(devkit_dir) / item.project
         )
         path = home / path
     return path if path.is_file() else None

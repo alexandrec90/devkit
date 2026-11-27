@@ -260,6 +260,17 @@ def test_the_parser_accepts_a_single_pass_and_a_faster_interval():
     assert args.interval == 5.0
 
 
-def test_main_refuses_a_workspace_that_is_not_there(tmp_path, capsys):
-    assert follow.main(["--workspace", str(tmp_path / "nope.code-workspace")]) == 2
-    assert "no workspace registry" in capsys.readouterr().out
+def test_main_refuses_a_projects_root_that_is_not_there(tmp_path, capsys):
+    assert follow.main(["--workspace", str(tmp_path / "gone" / "nope.code-workspace")]) == 2
+    assert "no projects root" in capsys.readouterr().out
+
+
+def test_main_needs_only_the_directory_a_workspace_file_would_sit_in(tmp_path, monkeypatch):
+    """The projects come off the registry, so the file `--workspace` names need not exist:
+    only its directory, the projects root, is read."""
+    seen = []
+    monkeypatch.setattr(follow, "copies", lambda root, registry: [])
+    monkeypatch.setattr(follow.host, "read_registry", lambda: {})
+    monkeypatch.setattr(follow, "follow", lambda root, interval, once: seen.append(root) or 0)
+    assert follow.main(["--once", "--workspace", str(tmp_path / "nope.code-workspace")]) == 0
+    assert seen == [tmp_path]

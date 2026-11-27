@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import subprocess
 
+import project_registry
 import pytest
 from support import harness_state, load_script
 
@@ -106,9 +107,9 @@ def test_the_roots_are_the_user_tier_the_workspace_and_every_checkout(tmp_path, 
     workspace = tmp_path / "ws" / "w.code-workspace"
     (tmp_path / "ws" / "proj").mkdir(parents=True)
     (tmp_path / "home" / ".claude").mkdir(parents=True)
-    workspace.write_text('{"folders": []}', encoding="utf-8")
     monkeypatch.setattr(switch.Path, "home", classmethod(lambda _cls: tmp_path / "home"))
-    monkeypatch.setattr(switch.devkit_project, "known_projects", lambda _text: ["proj"])
+    # Off the registry: the workspace file need not exist, only its directory counts.
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: ["proj"])
 
     assert switch.default_roots(workspace) == [
         tmp_path / "home" / ".claude",
@@ -124,7 +125,7 @@ def test_a_registered_checkout_that_is_not_on_disk_is_skipped(tmp_path, monkeypa
     (tmp_path / "ws").mkdir(parents=True)
     workspace.write_text('{"folders": []}', encoding="utf-8")
     monkeypatch.setattr(switch.Path, "home", classmethod(lambda _cls: tmp_path / "absent"))
-    monkeypatch.setattr(switch.devkit_project, "known_projects", lambda _text: ["nope"])
+    monkeypatch.setattr(switch.devkit_project, "known_projects", lambda: ["nope"])
     assert switch.default_roots(workspace) == [tmp_path / "ws"]
 
 

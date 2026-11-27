@@ -50,7 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-import sweep
+import project_registry
 from _loader import load_by_path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -213,7 +213,12 @@ def build_parser() -> argparse.ArgumentParser:
         prog="preview-ui-follow.py",
         description="Keep every open host UI preview on the tip of the branch it shows.",
     )
-    parser.add_argument("--workspace", type=Path, default=None, help="the .code-workspace registry")
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="deprecated: a file beside the checkouts, naming the projects root",
+    )
     parser.add_argument(
         "--interval",
         type=float,
@@ -231,11 +236,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    workspace = args.workspace or sweep.default_workspace(REPO_ROOT)
-    if not workspace.is_file():
-        host.echo(f"no workspace registry at {workspace}")
+    # Only the checkouts' directory is read, so no workspace file is needed: `--workspace`
+    # is a deprecated way to name it, by naming a file beside the checkouts.
+    root = args.workspace.parent if args.workspace else project_registry.projects_root(REPO_ROOT)
+    if not root.is_dir():
+        host.echo(f"no projects root at {root}")
         return 2
-    root = workspace.parent
     open_now = copies(root, host.read_registry())
     if not args.once:
         following = ", ".join(copy.label for copy in open_now) or "nothing yet"

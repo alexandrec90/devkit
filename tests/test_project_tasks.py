@@ -130,12 +130,12 @@ def test_unowned_leaves_out_devkits_jobs_and_every_claimed_task():
 
 
 def test_the_cli_prints_each_claim_then_what_is_unowned(tmp_path, monkeypatch, capsys):
-    import sweep
+    """Off the project registry and the projects root: no workspace file is read."""
+    import project_registry
 
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text('{"folders": [{"path": "data-lake"}]}', encoding="utf-8")
     _project(tmp_path, "data-lake", '[schedule]\ntasks = ["SeaweedFS data-lake pool"]\n')
-    monkeypatch.setattr(sweep, "default_workspace", lambda root: workspace)
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: ["data-lake"])
+    monkeypatch.setattr(project_registry, "projects_root", lambda root: tmp_path)
     monkeypatch.setattr(project_tasks.schedule_health, "scheduler_csv", lambda: MACHINE)
     assert project_tasks.main([]) == 0
     assert capsys.readouterr().out.splitlines() == [
@@ -143,7 +143,7 @@ def test_the_cli_prints_each_claim_then_what_is_unowned(tmp_path, monkeypatch, c
         "UNOWNED: D2R Net Logger",
         "UNOWNED: Hardware Health Check",
     ]
-    monkeypatch.setattr(sweep, "default_workspace", lambda root: tmp_path / "absent")
+    monkeypatch.setattr(project_registry, "projects_root", lambda root: tmp_path / "absent")
     assert project_tasks.main([]) == 2
 
 
