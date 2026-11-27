@@ -1202,10 +1202,8 @@ def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch, 
 def test_registration_lands_in_the_canonical_copy_too(
     tmp_path, capsys, monkeypatch, canonical_copy
 ):
-    """The live file is rendered from `workspace.jsonc`, so registering only there is drift.
-
-    It was (8a1c0927): a freshly generated project left `--check-workspace` saying
-    `folder in the workspace but not in devkit` until someone adopted it by hand.
+    """Registering only in the live file left the committed registry without it
+    (8a1c0927): a freshly generated project existed only in the copy with no history.
     """
     args = make_args(parent=str(tmp_path))
     the_plan = new_project.plan(args, registry())
@@ -1218,13 +1216,9 @@ def test_registration_lands_in_the_canonical_copy_too(
 
     for path in (canonical_copy, live):
         assert the_plan.name in devkit_project.known_projects(path.read_text(encoding="utf-8"))
-    assert (
-        devkit_project.workspace_drift(
-            devkit_jsonc.loads(live.read_text(encoding="utf-8")),
-            devkit_jsonc.loads(canonical_copy.read_text(encoding="utf-8")),
-        )
-        == []
-    )
+    assert devkit_project.known_projects(
+        live.read_text(encoding="utf-8")
+    ) == devkit_project.known_projects(canonical_copy.read_text(encoding="utf-8"))
     out = capsys.readouterr().out
     assert "WARNING" not in out
     assert f"commit devkit's {canonical_copy.name}" in out
@@ -1422,8 +1416,7 @@ def test_a_registration_left_in_place_carries_its_slot_beside_it(
     """radio's registration (PR #779) and tvshell's (#778) were not handed off -- one
     checkout was already on a task branch, the other dirty -- so the slot was only the
     printed hint, the session that committed `workspace.jsonc` skipped it, and each PR
-    went red on `test_every_checkout_either_holds_a_slot_or_says_why_not`. Until it
-    merged, the live file's extra folder made *Publish devkit's Copy* refuse to render."""
+    went red on `test_every_checkout_either_holds_a_slot_or_says_why_not`."""
     canonical = _devkit_checkout(tmp_path / "devkit", ports=True)
     checkout = canonical.parent
     if where == "task-branch":

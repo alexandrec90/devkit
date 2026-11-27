@@ -116,7 +116,6 @@ def test_the_workspace_file_parses():
 
 def test_the_canonical_shared_task_block_parses():
     """devkit owns no `.vscode/tasks.json` of its own any more — this is the block it
-    does own, and the one `--check-tasks` compares the live workspace against. If it
-    stops parsing, the drift gate silently compares against nothing."""
+    does own, and every task test reads it. If it stops parsing, they read nothing."""
     text = devkit_project.canonical_tasks_text()
     assert loads(text)["version"] == "2.0.0"

@@ -153,28 +153,20 @@ def test_only_the_scheduled_run_is_strict():
     assert not e2e.scheduled({})
 
 
-def test_a_box_never_renders_the_workspace_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(e2e.sweep, "source_checkout", lambda _root: tmp_path)
+def test_the_scheduled_run_writes_nothing_before_pytest(monkeypatch, tmp_path, capsys):
+    """The scheduled run used to render the workspace file first; with VS Code retired
+    it runs the tier and nothing else, so the first line it prints is pytest's."""
+    monkeypatch.setattr(e2e, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(e2e, "cases", lambda _report: [PASS])
     monkeypatch.setattr(
-        e2e.devkit_project,
-        "publish_workspace",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError),
+        e2e.sweep,
+        "run_windowless",
+        lambda argv, **_k: subprocess.CompletedProcess(argv, 0, "pytest says\n", ""),
     )
-    assert (
-        e2e.publish(tmp_path / "live.code-workspace")
-        == "e2e: a box never renders the workspace file"
-    )
-
-
-def test_the_static_checkout_publishes_on_publish_workspaces_terms(monkeypatch, tmp_path):
-    live = tmp_path / "live.code-workspace"
-    live.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(e2e.sweep, "source_checkout", lambda root: root)
-    monkeypatch.setattr(
-        e2e.devkit_project, "publish_workspace", lambda path: ("refused", ["a edit"])
-    )
-    assert e2e.publish(live) == "e2e: workspace publish -- refused\n  a edit"
-    assert e2e.publish(tmp_path / "gone") == f"e2e: no live workspace file at {tmp_path / 'gone'}"
+    monkeypatch.setenv(e2e.ENV_FLAG, "1")
+    assert e2e.main([]) == 0
+    assert capsys.readouterr().out == "pytest says\n"
+    assert not hasattr(e2e, "publish")
 
 
 def _decorated(decorator):
@@ -187,9 +179,8 @@ def _decorated(decorator):
 def test_every_test_skipped_for_wanting_this_machine_is_in_the_local_tier():
     """The decorator that skips a test in CI is the one that puts it here, so no test
     can be skipped for wanting this machine without also being run on it."""
-    for decorator in (support.needs_live_workspace, support.needs_the_static_checkout):
-        names = [mark.name for mark in _decorated(decorator).pytestmark]
-        assert sorted(names) == ["local", "skipif"], decorator
+    names = [mark.name for mark in _decorated(support.needs_live_workspace).pytestmark]
+    assert sorted(names) == ["local", "skipif"]
 
 
 def test_the_local_marker_is_registered():

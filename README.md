@@ -82,9 +82,9 @@ It wingets git, uv, the GitHub CLI and VS Code; installs Python with
 `python3.exe` and so leaves every devkit hook on the Microsoft Store alias (uv's bin
 directory goes ahead of `WindowsApps` on the user PATH); clones devkit; persists `DEVKIT_DIR`; runs
 `install-installers-schedule.py --yes` and then `installers.py maintain`, which is the
-step that actually puts every job on the machine rather than waiting for the first logon;
-renders the live workspace file with `devkit_project.py --render-workspace`, since nothing
-else writes it before `devkit-workspace-status`'s first daily pass; installs the two VS Code extensions the workspace tasks resolve their inputs through; and
+step that actually puts every job on the machine rather than waiting for the first logon
+(the project registry is `projects.toml`, committed in the clone, so there is no
+workspace file to render); installs the two VS Code extensions the workspace tasks resolve their inputs through; and
 names anything left that only you can answer, such as an unset git identity, a `gh` that
 is not logged in, or a VS Code that was open during the installs and must be fully
 restarted — its tasks keep the PATH it launched with. Every step
@@ -1805,9 +1805,9 @@ Creating one is not the only way a project enters the workspace, and deleting th
 folder is not how it leaves. The registry is the `folders` list in the workspace
 file, and **every tool here reads it** — `sweep.py`, `worktree.py`,
 `workspace-status.py`, the task dispatcher's project pickers, and the (unwired)
-worktree guard. Editing that list by hand means
-editing the canonical copy, remembering the four pickers that mirror it, and
-republishing; missing any of the three leaves a project half-registered.
+worktree guard. Editing that list by hand means editing `projects.toml` and
+`workspace.jsonc` together and remembering the four pickers that mirror it; missing any
+of them leaves a project half-registered.
 
 `scripts/plug-projects.py` is the whole operation as a checkbox list. The VS Code task
 **"Workspace: Plug / Unplug Projects"** draws that list as a quick-pick with real
@@ -1833,16 +1833,13 @@ not the workspace currently knows about it:
 | on disk | directories beside the workspace file carrying a `.git` or a `.devkit.toml` |
 | on GitHub | `gh repo list --no-archived` |
 
-**The registry is global; the checkouts are per machine.** `workspace.jsonc` is
+**The registry is global; the checkouts are per machine.** The registry is
 committed, so a project plugged in on one PC is registered on every PC that pulls
-devkit — but each PC's live `.code-workspace` is rendered through
-`devkit_project.machine_view`, the registry minus every project with no checkout
-beside the file. So the other PCs see nothing until they choose to: the picker draws
+devkit, and the other PCs hold no checkout of it until they choose to: the picker draws
 the project as *registered, not on this PC*, and ticking that row clones it here and
 leaves the registry alone. Two workstations holding two different subsets of the
 registry is the ordinary state. To drop a project from one PC only, delete its
-checkout — the next render leaves it out — and `--check-workspace` names what a
-machine's render omits.
+checkout.
 
 Ticking an unplugged project clones its repo when only the repo exists, and creates
 the repo when only the folder does — so the checkbox is the whole action in both
@@ -1853,11 +1850,10 @@ experiment with. Before it unplugs, it names anything that would be stranded —
 box on that project, uncommitted files, unpushed commits — and refuses without
 `--force`.
 
-The write path is canonical-then-publish, never a hand edit of the live file, so the
-run refuses from a task branch, from inside a box, and over a live workspace file
-carrying an edit devkit never wrote. Its own edit to `workspace.jsonc` goes onto a task
-branch in a worktree of its own, with a ship intent, for the fix pass to ship
-(`hand_off_registry`). A clone onto this PC edits nothing there. Every run's failures
+The write goes to the committed registry (`projects.toml`, and `workspace.jsonc` beside
+it until that file is deleted), never to the live workspace file, so the run refuses from
+a task branch and from inside a box. Its edit goes onto a task branch in a worktree of
+its own, with a ship intent, for the fix pass to ship (`hand_off_registry`). A clone onto this PC edits nothing there. Every run's failures
 land in `logs/plug-projects.log`, overwritten per run and emptied by a clean one.
 
 ### Retiring a project, and restoring it
@@ -1947,8 +1943,8 @@ ten minutes (an hour, for a tier that opens windows), and a red one reaches the 
 | `scripts/e2e-pass.py status` | Each project's last result. |
 | `devkit.localE2e` in `projects.toml` | **Which PC tests which project.** `hosts` takes `devkit.remoteControl`'s shape: one machine name, or `{"*": "pc-a", "carameli": "pc-b"}`. Every PC registers the job and tests only what this assigns it, so moving the job is editing this value. |
 
-devkit's own `scripts/e2e.py` runs every test marked `local`, and `needs_live_workspace` and
-`needs_the_static_checkout` in `tests/support.py` apply that mark themselves. Under the
+devkit's own `scripts/e2e.py` runs every test marked `local`, and `needs_live_workspace`
+in `tests/support.py` applies that mark itself. Under the
 scheduler a skip there is a failure. That covers the live-workspace checks,
 `tests/test_workspace_tasks_live.py` (every picker run for real, every task cancelled,
 every path and extension present) and `tests/test_vscode_tasks_e2e.py`, which clicks

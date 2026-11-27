@@ -61,8 +61,6 @@ from typing import ClassVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import codex_context
-import devkit_jsonc
-import devkit_project
 import harness_triage as _triage
 import machine_clock
 import machine_role
@@ -70,7 +68,6 @@ import notify as _notify
 import project_registry
 import schedule_health
 import sweep
-import task_branch
 import toolchain
 import vscode_extensions
 import worktree
@@ -133,18 +130,15 @@ POLICY_DRIFTED = "branch policy drifted: "  # the installed hooks are not what w
 RETIRED_HOOKS = "settings wire retired hooks: "  # a hook entry spawning a deleted file
 GATE_UNREAD = "PR gates upload no failure log: "  # a red gate the pass cannot read
 RECONCILE_STOPPED = "unattended pass last ran "  # reconcile stopped, unexplained
-PUBLISH_REFUSED = "the live file carries edits devkit never wrote"  # needs a decision
 FAILURES: tuple[tuple[str, str], ...] = (
     ("branch-policy-drift", POLICY_DRIFTED),
     ("retired-hooks", RETIRED_HOOKS),
     ("gate-uploads-no-log", GATE_UNREAD),
     ("reconcile-stopped", RECONCILE_STOPPED),
-    ("workspace-publish-refused", PUBLISH_REFUSED),
 )
 # Not a failure: stranded work, boxes, previews, a project behind on devkit or a policy
 # installed from an older release (ordinary lag the daily jobs close), a checkout never
-# adopted (a state, not a fault), a publish held while devkit is on a task branch, disk
-# headroom (machine pressure, not a harness defect) and the open-defect count (which IS
+# adopted (a state, not a fault), disk headroom (machine pressure, not a harness defect) and the open-defect count (which IS
 # the ledger). Nor the `schedule:` lines: each is a job the scheduler reports failing,
 # which that job's `log-wrap.py` run and `fix_loop.job_findings` already file -- a third
 # row here would split one failure into three groups.
@@ -942,102 +936,8 @@ def events_line(source: Path = SOURCE_ROOT) -> str:
     return "\n".join(line for line in (*person, backlog, pool) if line)
 
 
-def publish_verdict(branch: str, default: str, canonical_dirty: bool) -> str:
-    """Why devkit's copy may NOT be published from this checkout; "" when it may.
-
-    Pure, so the two conditions that make an automatic render dishonest are testable
-    without a git tree. Both are about *which* copy is about to become every window's:
-    a task branch's `workspace.jsonc` is a proposal, and an uncommitted one is not even
-    that. The third condition -- the live file carrying an edit devkit never wrote --
-    is not checked here because `publish_workspace` already refuses it, and a second
-    implementation of that decision is exactly what the extraction avoided.
-    """
-    if branch != default:
-        return f"devkit is on {branch}, not {default}"
-    if canonical_dirty:
-        return f"{devkit_project.CANONICAL_WORKSPACE.name} has uncommitted changes"
-    return ""
-
-
-def held_line(workspace: Path, payload: dict, problems: list[str]) -> str:
-    """The refusal's line when every live edit is already on a pushed branch; "" else.
-
-    `new-project.py` registers a project in the live file at once and in
-    `workspace.jsonc` through a PR, so between the two every daily publish refused and
-    was filed as `workspace-publish-refused` (4ea2781c, photolab's #704) -- a failure
-    that asked for `--adopt-workspace` or `--force` while all it awaited was a merge.
-    Still a line, naming the branch: a branch that never merges keeps it in the toast,
-    and past `devkit_project.HELD_DAYS` the branch stops counting and the failure returns.
-    """
-    held = devkit_project.awaited_merge(problems, payload, devkit_project.pending_copies(workspace))
-    if not held:
-        return ""
-    return (
-        f"{workspace.name}: {len(problems)} difference(s), not published -- its own edits "
-        f"are on unmerged {', '.join(sorted(set(held.values())))}, so it publishes once "
-        "that merges"
-    )
-
-
-def workspace_sync_line(workspace: Path) -> str:
-    """Publish devkit's canonical copy to the live workspace file, and say what changed.
-
-    Reporting the drift was not enough, and the way it failed is worth keeping: a PR
-    adding three tasks merged, the checkout was synced, and the tasks still were not
-    there -- because a render is a step someone has to remember, and the whole point of
-    putting the file under devkit was to stop that being true. So a session start
-    publishes it, on the same terms `--render-workspace` does.
-
-    That is safe only because it cannot overwrite anyone: `publish_workspace` refuses a
-    live file carrying an edit devkit did not write, and `publish_verdict` refuses a
-    canonical copy that is not what merged. Anything else is reported and left alone.
-
-    Never raises -- a session start is not the place to fail over a workspace file.
-    """
-    try:
-        if not devkit_project.CANONICAL_WORKSPACE.is_file() or not workspace.is_file():
-            return ""
-        # This machine's view, not the whole registry: a project registered from another
-        # workstation and not cloned here is left out of the render, so it is not drift.
-        payload = devkit_jsonc.loads(workspace.read_text(encoding="utf-8"))
-        problems = devkit_project.workspace_drift(
-            payload, devkit_jsonc.loads(devkit_project.canonical_view(workspace)[0])
-        )
-        if not problems:
-            return ""
-        blocked = publish_verdict(
-            _git("rev-parse", "--abbrev-ref", "HEAD"),
-            task_branch.detect_default_branch(_git_run),
-            bool(_git("status", "--porcelain", "--", devkit_project.CANONICAL_WORKSPACE.name)),
-        )
-        if blocked:
-            return (
-                f"{workspace.name}: {len(problems)} difference(s) from devkit's copy, "
-                f"not published ({blocked}) -- "
-                "run `python devkit/scripts/devkit_project.py --check-workspace`"
-            )
-        outcome, published = devkit_project.publish_workspace(workspace)
-        if outcome == devkit_project.RENDER_REFUSED:
-            if held := held_line(workspace, payload, published):
-                return held
-            return (
-                f"{workspace.name}: {len(problems)} difference(s), and {PUBLISH_REFUSED} "
-                "-- `--adopt-workspace` keeps them, `--render-workspace --force` discards them"
-            )
-        if outcome != devkit_project.RENDER_PUBLISHED:
-            return ""
-        return (
-            f"{workspace.name}: published {len(published)} change(s) from devkit -- "
-            "reload the window (File > Reopen Workspace) to pick up new tasks"
-        )
-    except Exception:
-        # Never the reason a session start fails. A malformed or missing canonical copy
-        # is a real problem, but `--check-workspace` is where it should be reported.
-        return ""
-
-
 def _git_run(*args: str) -> subprocess.CompletedProcess[str]:
-    """git in devkit's own checkout, capturing stdout. The shape `task_branch` injects."""
+    """git in devkit's own checkout, capturing stdout."""
     return subprocess.run(
         ["git", "-C", str(REPO_ROOT), *args],
         capture_output=True,
@@ -1064,7 +964,6 @@ def render(
     scheduler: str = "",
     schedule: list[str] | None = None,
     events: str = "",
-    workspace_sync: str = "",
     previews: str = "",
     headroom: str = "",
 ) -> str:
@@ -1087,7 +986,6 @@ def render(
         previews,
         retired,
         events,
-        workspace_sync,
     )
     # Split, so a half that says two things gets the prefix on both.
     lines = [line for half in halves if half for line in half.splitlines() if line]
@@ -1265,7 +1163,6 @@ def main(argv: list[str] | None = None) -> int:
             scheduler,
             schedule,
             events_line(),
-            workspace_sync_line(workspace),
             previews_line(),
             headroom=headroom_line(root),
         )

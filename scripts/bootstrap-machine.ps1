@@ -8,7 +8,7 @@
   That is the whole reason it exists, and the reason it is PowerShell rather than Python
   like everything else under scripts/: it runs before Python is installed.
 
-  It does the seven steps a workstation needed by hand, none of which was written down:
+  It does the six steps a workstation needed by hand, none of which was written down:
 
     1. winget the prerequisites: git, uv, the GitHub CLI, VS Code -- then Python from uv,
        so `python3` is a real interpreter and not the Microsoft Store alias every devkit
@@ -18,13 +18,11 @@
     4. run install-installers-schedule.py --yes -- the ONE installer a machine ever runs
        by hand. It registers devkit-installers, which from then on discovers every other
        scripts/install-*.py by glob and keeps it current, daily and at logon.
-    5. render the live workspace file from workspace.jsonc. Every VS Code task lives in
-       it, and nothing else creates it until devkit-workspace-status's first daily pass.
-    6. install the two VS Code extensions the workspace tasks resolve their inputs
+    5. install the two VS Code extensions the workspace tasks resolve their inputs
        through. Without them roughly twenty tasks fail with
        "command 'extension.commandvariable.pickStringRemember' not found", which names a
        command rather than a package and so cannot be searched for.
-    7. report whatever is left that only a human can answer -- notably the git identity,
+    6. report whatever is left that only a human can answer -- notably the git identity,
        `gh auth login`, and restarting a VS Code that was open during the installs.
 
   Idempotent: every step checks before it acts, so re-running it repairs a machine rather
@@ -32,7 +30,7 @@
   applies. Nothing here is devkit-specific magic -- the same steps by hand are in the
   "New workstation" section of README.md.
 
-  NOTE ON STEP 6. scripts/vscode_extensions.py is emphatic that "a recommendations entry
+  NOTE ON STEP 5. scripts/vscode_extensions.py is emphatic that "a recommendations entry
   is a prompt, never an install", and that stands: a daily *reporter* must never install
   software behind the operator. This is the opposite context -- an explicit,
   operator-invoked provisioning run whose entire purpose is to put the machine in a
@@ -250,34 +248,11 @@ if (-not (Test-Path $installer)) {
     }
 }
 
-# --- 5. the workspace file ----------------------------------------------------
-#
-# The step the summary used to skip while telling you to open its result. The render
-# only ever writes a missing file or one devkit wrote itself, and refuses over a hand
-# edit, so a re-run on a set-up machine is a no-op rather than a clobber.
+# No workspace-file step: the project registry is projects.toml, committed in the clone,
+# so there is nothing to render. The step that rendered the live .code-workspace went
+# with VS Code's retirement.
 
-Step 'Workspace file'
-$render = Join-Path $Path 'scripts\devkit_project.py'
-# Named here only for the summary; the render resolves the path itself
-# (sweep.WORKSPACE_FILE_NAME, beside the checkout), so a stale name here could mislead
-# the note but never the write. tests/test_bootstrap_machine.py pins the two together.
-$workspace = Join-Path (Split-Path -Parent $Path) 'alex-projects.code-workspace'
-if (-not (Test-Path $render)) {
-    if ($Yes) {
-        $script:Problems += "no renderer at $render -- the clone did not land"
-        Warn 'skipped: the clone is not there yet'
-    } else {
-        Note 'would run devkit_project.py --render-workspace (after the clone above)'
-    }
-} else {
-    Would "python $render --render-workspace   # creates $workspace"
-    if ($Yes) {
-        python $render --render-workspace
-        if ($LASTEXITCODE -ne 0) { $script:Problems += "devkit_project.py --render-workspace exited $LASTEXITCODE" }
-    }
-}
-
-# --- 6. VS Code extensions ----------------------------------------------------
+# --- 5. VS Code extensions ----------------------------------------------------
 
 Step 'VS Code extensions'
 if (-not (Test-Command 'code')) {
@@ -297,7 +272,7 @@ if (-not (Test-Command 'code')) {
     }
 }
 
-# --- 7. what only a human can answer ------------------------------------------
+# --- 6. what only a human can answer ------------------------------------------
 
 Step 'Left for you'
 if (Test-Command 'git') {
@@ -324,8 +299,7 @@ if (Test-Command 'gh') {
 if ($script:SoftwareInstalled -and (Get-Process -Name 'Code' -ErrorAction SilentlyContinue)) {
     Warn 'VS Code was running while software was installed -- quit every window and reopen it, or its tasks will not find the new tools.'
 }
-Note "Open the workspace: $workspace"
-Note 'Then run "Workspace: Plug / Unplug Projects" to clone the projects registered from other PCs.'
+Note "Clone the projects registered from other PCs: python $Path\scripts\plug-projects.py --plug <name>"
 Note 'The tray icon reports every scheduled job, and "Machine: Scheduled Jobs" manages them.'
 
 # --- the summary --------------------------------------------------------------

@@ -797,26 +797,21 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     under a temp path into `sweep.py`'s registry, and it survives the `rm -rf` that
     ends the acceptance test.
 
-    **Both copies, canonical first.** The live file is rendered from devkit's
-    `workspace.jsonc` (`.claude/rules/vscode-tasks.md`), so registering in the live file
-    alone left `devkit_project.py --check-workspace` reporting the new project as
-    `folder in the workspace but not in devkit` until someone adopted it by hand on a
-    branch (8a1c0927). The canonical edit is a registry change every machine shares, so
-    it goes through a branch and a review like any other: `hand_off_registration` puts it
-    on a task branch with a ship intent and restores devkit's static checkout, which the
-    fix pass runs from and will not update while it is dirty (851308ef). The live write
-    stays too, because a render only lands on the next scheduled pass and the project
-    should be in the sweep's registry from the moment it exists -- and a render of the
-    canonical copy without it refuses rather than dropping it, the live file carrying an
-    edit no stamp covers.
+    **Both copies, committed first.** Registering in the live file alone left the
+    committed registry without the project (8a1c0927). The committed edit is a registry
+    change every machine shares, so it goes through a branch and a review like any
+    other: `hand_off_registration` puts it on a task branch with a ship intent and
+    restores devkit's static checkout, which the fix pass runs from and will not update
+    while it is dirty (851308ef). The live write stays until the live file's readers
+    are gone, so the project is in the sweep's registry from the moment it exists.
     """
     if not plan.register:
         print("  skip    workspace registration (--no-register)")
         return
     names = [plan.name]
     live = devkit_project.DEFAULT_WORKSPACE
-    # The registry names each folder relative to the live file's directory, and the
-    # canonical copy renders into it. A project generated anywhere else would be
+    # The registry names each folder relative to the live file's directory, the
+    # projects root. A project generated anywhere else would be
     # registered in both as a folder that does not exist, and every reader of the
     # registry -- `rc-servers.py`, the fix pass's collect step -- then fails on it rather
     # than skipping it (b42a921e, 79505f2b).

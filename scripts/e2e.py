@@ -5,8 +5,8 @@ devkit's copy of the contract `scripts/e2e-pass.py` runs in every registered che
 (`e2e_results.py` owns it): exit 0 green, anything else red, each failing test printed as
 pytest's `FAILED <id>` line. What it runs is every test marked `local`, which `addopts`
 deselects from every other run, CI's included: that, not a skip, is what keeps the tier
-off a runner. `tests/support.py`'s `needs_live_workspace` and `needs_the_static_checkout`
-apply the mark themselves, beside a skip for a by-hand run where the test cannot work.
+off a runner. `tests/support.py`'s `needs_live_workspace` applies the mark itself,
+beside a skip for a by-hand run where the test cannot work.
 
 **A skip is a failure when the scheduler runs it.** A by-hand run can skip on purpose: a
 box is not the static checkout, and a second machine has no live workspace. Under the
@@ -24,14 +24,6 @@ skip-as-pass `hook-tests-live.py` exists to refuse.
 holds this machine for over half an hour and opens VS Code; the scheduled pass names
 nothing, and a fixer reproducing one `FAILED` line names that line's id.
 
-**Under the scheduler it publishes the workspace file first.** The live file is rendered
-from the canonical copy once a day (`devkit-workspace-status`), so a task merged in the
-afternoon is unrendered at night and the drift check would send a fixer at the normal
-latency. The pass has just put this checkout on origin's tip with no tracked edit --
-exactly `workspace-status.publish_verdict`'s two conditions -- so it renders on the same
-terms (`devkit_project.publish_workspace`), which still refuses a live edit nobody
-adopted. A box never renders.
-
 Tested in `tests/test_e2e.py`.
 """
 
@@ -46,7 +38,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import devkit_project
 import e2e_results
 import junit_report
 import sweep
@@ -121,16 +112,6 @@ def verdict(code: int, found: list[Case], strict: bool) -> tuple[int, list[str]]
     return code, lines
 
 
-def publish(live: Path = devkit_project.DEFAULT_WORKSPACE) -> str:
-    """Render the canonical workspace over the live file, on `publish_workspace`'s terms."""
-    if sweep.source_checkout(REPO_ROOT) != REPO_ROOT:
-        return "e2e: a box never renders the workspace file"
-    if not live.is_file():
-        return f"e2e: no live workspace file at {live}"
-    outcome, differences = devkit_project.publish_workspace(live)
-    return f"e2e: workspace publish -- {outcome}" + "".join(f"\n  {d}" for d in differences)
-
-
 def pytest_argv(python: str, report: Path, named: Sequence[str] = ()) -> list[str]:
     return [
         python,
@@ -149,8 +130,6 @@ def pytest_argv(python: str, report: Path, named: Sequence[str] = ()) -> list[st
 def main(argv: list[str] | None = None) -> int:
     named = sys.argv[1:] if argv is None else argv
     strict = scheduled()
-    if strict:
-        print(publish(), flush=True)
     report = REPO_ROOT / JUNIT
     report.parent.mkdir(parents=True, exist_ok=True)
     report.unlink(missing_ok=True)

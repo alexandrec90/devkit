@@ -9,8 +9,6 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import devkit_jsonc
-import devkit_project
 import machine_role as mr
 
 LIVE = """{
@@ -152,9 +150,3 @@ def test_migrate_and_say_prints_only_a_move(tmp_path, capsys):
     assert capsys.readouterr().out.startswith("[x] moved devkit.fixPass into")
     mr.migrate_and_say(workspace, "[x] ")
     assert capsys.readouterr().out == ""
-
-
-def test_the_role_is_a_machine_setting_a_render_carries_and_an_adopt_never_records():
-    assert mr.SETTING in devkit_project.MACHINE_SETTINGS
-    declared = devkit_project.machine_settings(devkit_jsonc.loads(devkit_project.canonical_text()))
-    assert declared[mr.SETTING] == mr.UNSET, "a fresh machine starts with no role"

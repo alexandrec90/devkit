@@ -1125,165 +1125,12 @@ def test_the_events_line_reaches_the_rendered_message():
     assert "[workspace] 1 harness defect(s) open" in message
 
 
-# --- the live workspace file vs devkit's canonical copy -----------------------
-
-
-def _live(tmp_path, settings):
-    """A minimal live workspace file with `settings` as its only interesting key."""
-    path = tmp_path / "alex-projects.code-workspace"
-    path.write_text(
-        json.dumps({"folders": [{"path": "devkit"}], "settings": settings}),
-        encoding="utf-8",
-        newline="\n",
-    )
-    return path
-
-
-def _canonical(tmp_path, monkeypatch, folders, settings):
-    """devkit's copy, standing in for the real `workspace.jsonc`."""
-    canonical = tmp_path / "workspace.jsonc"
-    canonical.write_text(
-        json.dumps({"folders": folders, "settings": settings}), encoding="utf-8", newline="\n"
-    )
-    monkeypatch.setattr(ws.devkit_project, "CANONICAL_WORKSPACE", canonical)
-    return canonical
-
-
-def _checkout(monkeypatch, branch="main", dirty=""):
-    """The two git answers `publish_verdict` reads, without spawning git."""
-    monkeypatch.setattr(
-        ws, "_git", lambda *args: branch if args[0] == "rev-parse" else dirty, raising=True
-    )
-    monkeypatch.setattr(ws.task_branch, "detect_default_branch", lambda *_a, **_k: "main")
-
-
-def test_no_workspace_line_when_the_pair_agrees(tmp_path, monkeypatch):
-    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"a": "b"})
-    assert ws.workspace_sync_line(_live(tmp_path, {"a": "b"})) == ""
-
-
-def test_a_publishable_difference_is_published_not_merely_reported(tmp_path, monkeypatch):
-    """The failure this replaced: a merged PR, a synced checkout, and no new tasks."""
-    canonical = _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
-    _checkout(monkeypatch)
-    live = _live(tmp_path, {"a": "b"})
-    ws.devkit_project.write_stamp(live, ws.devkit_project.semantic_digest(live.read_text("utf-8")))
-
-    line = ws.workspace_sync_line(live)
-
-    assert live.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
-    # Two: settings are compared per key, and `a` went while `c` arrived.
-    assert "published 2 change(s) from devkit" in line
-    assert "reload the window" in line
-
-
-def test_a_project_registered_elsewhere_is_left_out_not_reported_as_drift(tmp_path, monkeypatch):
-    """The other workstation's session start, after a project was plugged in on one.
-    The registry is global and the checkout is not, so the render is this machine's
-    view and the pair agrees once it is written -- rather than a line about a folder
-    this machine never asked for, on every session start until someone clones it."""
-    canonical_text = ws.devkit_project.canonical_text()
-    canonical = tmp_path / "workspace.jsonc"
-    canonical.write_text(canonical_text, encoding="utf-8", newline="\n")
-    monkeypatch.setattr(ws.devkit_project, "CANONICAL_WORKSPACE", canonical)
-    names = ws.devkit_project.known_projects(canonical_text)
-    for name in names[1:]:
-        (tmp_path / name).mkdir()
-    _checkout(monkeypatch)
-    live = tmp_path / ws.devkit_project.DEFAULT_WORKSPACE.name
-    live.write_text(canonical_text, encoding="utf-8", newline="\n")
-    ws.devkit_project.write_stamp(live, ws.devkit_project.semantic_digest(canonical_text))
-
-    line = ws.workspace_sync_line(live)
-
-    assert "published" in line
-    assert names[0] not in ws.devkit_project.known_projects(live.read_text(encoding="utf-8"))
-    assert ws.workspace_sync_line(live) == ""
-
-
-def test_a_live_edit_devkit_never_wrote_is_refused_rather_than_overwritten(tmp_path, monkeypatch):
-    """No stamp means someone else's edit. `publish_workspace` owns that refusal."""
-    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
-    _checkout(monkeypatch)
-    live = _live(tmp_path, {"a": "b"})
-    before = live.read_text(encoding="utf-8")
-
-    line = ws.workspace_sync_line(live)
-
-    assert live.read_text(encoding="utf-8") == before
-    assert "carries edits devkit never wrote" in line
-    assert "--adopt-workspace" in line
-
-
-def test_a_live_edit_already_on_a_pushed_branch_is_a_merge_awaited_not_a_failure(
-    tmp_path, monkeypatch
-):
-    """4ea2781c: `new-project.py` registered photolab in the live file and opened #704 for
-    `workspace.jsonc`, and until it merged every daily publish refused and was filed as a
-    failure asking for `--adopt-workspace` or `--force`. git held the edit all along."""
-    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
-    _checkout(monkeypatch)
-    live = _live(tmp_path, {"a": "b", "c": "d"})
-    before = live.read_text(encoding="utf-8")
-    branch = {"folders": [{"path": "devkit"}], "settings": {"a": "b", "c": "d"}}
-    monkeypatch.setattr(
-        ws.devkit_project, "pending_copies", lambda _live: iter([("origin/agent/reg", branch)])
-    )
-
-    line = ws.workspace_sync_line(live)
-
-    assert live.read_text(encoding="utf-8") == before, "the edit is not dropped meanwhile"
-    assert "on unmerged origin/agent/reg, so it publishes once that merges" in line
-    assert ws.failure_kind(line) == ""
-
-
-def test_a_live_edit_no_branch_holds_is_still_the_refusal(tmp_path, monkeypatch):
-    """One held edit beside one nobody holds is still a decision owed."""
-    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
-    _checkout(monkeypatch)
-    live = _live(tmp_path, {"a": "b", "e": "f"})
-    branch = {"folders": [{"path": "devkit"}], "settings": {"a": "b", "c": "d"}}
-    monkeypatch.setattr(
-        ws.devkit_project, "pending_copies", lambda _live: iter([("origin/agent/reg", branch)])
-    )
-
-    line = ws.workspace_sync_line(live)
-
-    assert ws.failure_kind(line) == "workspace-publish-refused"
-    ahead_only = ["setting missing from the workspace: c"]
-    assert ws.held_line(live, branch, ahead_only) == "", "nothing of the live file's to hold"
-
-
-def test_a_task_branch_checkout_reports_the_drift_and_publishes_nothing(tmp_path, monkeypatch):
-    """A branch's copy is a proposal. Publishing it would ship it to every window."""
-    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
-    _checkout(monkeypatch, branch="agent/whatever-0823")
-    live = _live(tmp_path, {"a": "b"})
-    before = live.read_text(encoding="utf-8")
-
-    line = ws.workspace_sync_line(live)
-
-    assert live.read_text(encoding="utf-8") == before
-    assert "not published (devkit is on agent/whatever-0823, not main)" in line
-    assert "--check-workspace" in line
-
-
-def test_publish_verdict_names_each_reason_and_is_empty_when_there_is_none():
-    assert ws.publish_verdict("main", "main", False) == ""
-    assert "not master" in ws.publish_verdict("main", "master", False)
-    assert "uncommitted changes" in ws.publish_verdict("main", "main", True)
-
-
-def test_a_missing_canonical_copy_is_silence_not_a_failed_session(tmp_path, monkeypatch):
-    """This file's whole contract: never the reason a session start goes wrong."""
-    monkeypatch.setattr(ws.devkit_project, "CANONICAL_WORKSPACE", tmp_path / "gone.jsonc")
-    assert ws.workspace_sync_line(_live(tmp_path, {"a": "b"})) == ""
-
-
-def test_the_workspace_sync_line_reaches_the_rendered_message():
-    """A helper nothing calls is a check that reports nothing."""
-    message = ws.render([], {}, "", workspace_sync="alex-projects.code-workspace: published 3")
-    assert "[workspace] alex-projects.code-workspace: published 3" in message
+def test_the_pass_no_longer_publishes_the_workspace_file():
+    """VS Code is retired: nothing renders the live file, so the daily pass carries no
+    sync line and files no refused publish."""
+    for gone in ("workspace_sync_line", "publish_verdict", "held_line", "PUBLISH_REFUSED"):
+        assert not hasattr(ws, gone), gone
+    assert "workspace-publish-refused" not in dict(ws.FAILURES)
 
 
 # --- headroom: the disk nothing else can see ---------------------------------
@@ -1534,18 +1381,6 @@ def test_a_stopped_reconcile_pass_is_a_failure(tmp_path):
     assert ws.failure_kind(ws.scheduler_line(tmp_path, now=NOW)) == "reconcile-stopped"
 
 
-def test_a_refused_publish_is_a_failure_and_a_held_one_is_not(tmp_path, monkeypatch):
-    """Refused: the live file carries edits nobody will reconcile unless told. Held: devkit
-    is on a task branch, and the next pass on the default branch publishes."""
-    _canonical(tmp_path, monkeypatch, [{"path": "devkit"}], {"c": "d"})
-    _checkout(monkeypatch)
-    refused = ws.workspace_sync_line(_live(tmp_path, {"a": "b"}))
-    assert ws.failure_kind(refused) == "workspace-publish-refused"
-    _checkout(monkeypatch, branch="agent/whatever-0823")
-    held = ws.workspace_sync_line(_live(tmp_path, {"a": "b"}))
-    assert held and ws.failure_kind(held) == ""
-
-
 def test_a_report_of_ordinary_state_is_not_a_failure():
     reports = [
         ws.stranded_line([result("carameli", sweep.READY)]),
@@ -1586,14 +1421,14 @@ def test_a_failure_is_filed_once_while_it_stays_open(tmp_path):
 
 def test_a_count_in_the_line_does_not_split_one_failure_into_two(tmp_path):
     """The signature groups by the message, so it has to be stable across recurrences:
-    "3 difference(s)" today and "4" tomorrow is one refused publish, not two."""
-    line = "w.code-workspace: {} difference(s), and the live file carries edits devkit never wrote"
-    ws.record_failures([("workspace-publish-refused", line.format(3))], tmp_path)
-    ws.record_failures([("workspace-publish-refused", line.format(4))], tmp_path)
+    "3 checkout(s)" today and "4" tomorrow is one failure, not two."""
+    line = "PR gates upload no failure log: {} checkout(s)"
+    ws.record_failures([("gate-uploads-no-log", line.format(3))], tmp_path)
+    ws.record_failures([("gate-uploads-no-log", line.format(4))], tmp_path)
     rows = _filed(tmp_path)
     assert len(rows) == 1
-    assert "N difference(s)" in rows[0].fields["message"]
-    assert "3 difference(s)" in rows[0].fields["said"]
+    assert "N checkout(s)" in rows[0].fields["message"]
+    assert "3 checkout(s)" in rows[0].fields["said"]
 
 
 def test_the_fix_pass_reads_these_failures_as_backlog():
