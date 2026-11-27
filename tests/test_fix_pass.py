@@ -546,7 +546,7 @@ def test_a_dispatching_pass_brings_every_installer_current_and_a_plan_does_not(w
     assert fix_pass.run(world["workspace"], fix_cycle.PLAN, "claude-bg", NOW) == 0
     assert world["installers"] == []
     assert fix_pass.run(world["workspace"], fix_cycle.DISPATCH, "claude-bg", NOW) == 0
-    assert world["installers"] == [["maintain", "--workspace", str(world["workspace"])]]
+    assert world["installers"] == [["maintain"]]
 
 
 def dependabot_failure(project: str = "carameli") -> fix_plan.Failure:
@@ -719,7 +719,7 @@ def test_a_failed_installer_is_filed_for_the_devkit_session(world, monkeypatch, 
     artifact.write_text("install-x.py: failed -- Access is denied\n", encoding="utf-8")
     world["installers_code"] = 2
     journal = fix_pass.Journal(tmp_path)
-    assert fix_pass.refresh_installers(world["workspace"], journal) == 2
+    assert fix_pass.refresh_installers(journal) == 2
     (finding,) = journal.findings
     assert finding.kind == "installer-failed" and finding.project == "devkit"
     kept = Path(finding.evidence)
@@ -727,7 +727,7 @@ def test_a_failed_installer_is_filed_for_the_devkit_session(world, monkeypatch, 
     artifact.write_text("rewritten by the next run\n", encoding="utf-8")
     assert "Access is denied" in kept.read_text(encoding="utf-8")
     world["installers_code"] = 1  # stale, and repaired: nothing to file
-    assert fix_pass.refresh_installers(world["workspace"], journal) == 1
+    assert fix_pass.refresh_installers(journal) == 1
     assert len(journal.findings) == 1
 
 
@@ -918,12 +918,13 @@ def test_a_dispatch_from_a_stale_worktree_runs_as_a_plan(monkeypatch, capsys):
 
 
 def test_the_cli_run_from_a_stale_worktree_plans_and_says_why(monkeypatch, tmp_path, capsys):
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text('{"settings": {"devkit.fixPass": "dispatch"}}', encoding="utf-8")
+    (tmp_path / ".devkit-machine.json").write_text(
+        '{"devkit.fixPass": "dispatch"}', encoding="utf-8"
+    )
     seen = []
     monkeypatch.setattr(fix_pass, "run", lambda ws, mode, launch, **k: seen.append(mode) or 0)
     monkeypatch.setattr(fix_pass.fix_send, "stale_tree", lambda root: "aaa..bbb")
-    assert fix_pass.main(["--workspace", str(workspace)]) == 0
+    assert fix_pass.main(["--root", str(tmp_path)]) == 0
     assert seen == [fix_cycle.PLAN]
     assert "aaa..bbb" in capsys.readouterr().err
 
@@ -1970,21 +1971,18 @@ def test_the_release_step_reads_devkits_verdict_and_lands_on_the_record(world):
     assert "release  started -- 1 change(s)" in artifact(world)
 
 
-def test_the_cli_reads_the_switch_from_the_workspace_and_forces_the_background_agent_when_scheduled(
+def test_the_cli_reads_the_switch_from_the_machine_file_and_forces_the_background_agent_when_scheduled(
     monkeypatch, tmp_path
 ):
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text('{"settings": {"devkit.fixPass": "plan"}}', encoding="utf-8")
+    (tmp_path / ".devkit-machine.json").write_text('{"devkit.fixPass": "plan"}', encoding="utf-8")
+    root = str(tmp_path)
     seen = []
     monkeypatch.setattr(
         fix_pass, "run", lambda ws, mode, launch, **k: seen.append((mode, launch.agent)) or 0
     )
-    assert fix_pass.main(["--scheduled", "--agent", "codex", "--workspace", str(workspace)]) == 0
-    assert (
-        fix_pass.main(["--mode", "dispatch", "--agent", "codex", "--workspace", str(workspace)])
-        == 0
-    )
-    assert fix_pass.main(["--workspace", str(workspace)]) == 0
+    assert fix_pass.main(["--scheduled", "--agent", "codex", "--root", root]) == 0
+    assert fix_pass.main(["--mode", "dispatch", "--agent", "codex", "--root", root]) == 0
+    assert fix_pass.main(["--root", root]) == 0
     assert seen == [
         (fix_cycle.PLAN, "claude-bg"),
         (fix_cycle.DISPATCH, "codex"),
@@ -1992,8 +1990,19 @@ def test_the_cli_reads_the_switch_from_the_workspace_and_forces_the_background_a
     ]
 
 
+def test_a_deprecated_workspace_names_the_root_and_need_not_exist(monkeypatch, tmp_path):
+    """A task registered before `--root` passes `--workspace`; only its directory is
+    read, so a PC whose live file is gone runs the pass as before."""
+    (tmp_path / ".devkit-machine.json").write_text('{"devkit.fixPass": "plan"}', encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(fix_pass, "run", lambda ws, mode, launch, **k: seen.append((ws, mode)) or 0)
+    gone = tmp_path / "alex.code-workspace"
+    assert fix_pass.main(["--scheduled", "--workspace", str(gone)]) == 0
+    assert seen == [(gone.resolve(), fix_cycle.PLAN)]
+
+
 def test_the_parser_defaults_to_the_background_agent_and_no_mode():
-    """No mode means the workspace file decides, which is the scheduled job's whole
+    """No mode means the machine file decides, which is the scheduled job's whole
     contract; the agent default is the one a scheduler can open."""
     args = fix_pass.build_parser().parse_args([])
     assert (args.mode, args.agent, args.scheduled) == (None, "claude-bg", False)
@@ -2054,11 +2063,6 @@ def test_the_pass_lock_outlives_no_pass_the_watchdog_lets_run():
     assert fix_pass.RUN_LOCK_STALE + fix_pass.RUN_LOCK_WAIT < 2 * watchdog.TIMEOUT.total_seconds()
     # The fire after one the watchdog killed breaks the lock rather than waiting it out.
     assert fix_pass.RUN_LOCK_STALE < watchdog.TIMEOUT.total_seconds() + 5 * 60
-
-
-def test_a_missing_workspace_is_a_usage_error(tmp_path, capsys):
-    assert fix_pass.main(["--workspace", str(tmp_path / "nope")]) == fix_pass.EXIT_USAGE
-    assert "no workspace file" in capsys.readouterr().err
 
 
 def test_a_crash_is_written_to_the_record_before_the_traceback(world, monkeypatch, tmp_path):
@@ -2436,10 +2440,8 @@ def test_a_project_on_hold_is_read_and_fixed_like_any_other(world, monkeypatch):
     """The pass once skipped `devkit.onHold` checkouts, and three "unwire the agent
     hooks" PRs sat red in them indefinitely: a PR that exists is work in flight, and
     nothing but the pass would ever move it."""
-    world["workspace"].write_text(
-        '{"folders": [{"path": "devkit"}, {"path": "carameli"}, {"path": "paused"}], '
-        '"settings": {"devkit.onHold": ["paused"]}}',
-        encoding="utf-8",
+    (world["workspace"].parent / ".devkit-machine.json").write_text(
+        '{"devkit.onHold": ["paused"]}', encoding="utf-8"
     )
     monkeypatch.setattr(
         fix_pass.devkit_project, "known_projects", lambda: ["devkit", "carameli", "paused"]

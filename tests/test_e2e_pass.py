@@ -447,10 +447,17 @@ def test_a_checkout_someone_is_working_in_never_hides_a_red(tmp_path, monkeypatc
 
 
 def _assigned(workspace: Path, hosts) -> None:
-    """Add `devkit.localE2e` with `hosts` to a `_workspace` file."""
-    text = workspace.read_text(encoding="utf-8").rstrip()[:-1]
-    setting = json.dumps({e2e_pass.SETTING: {"hosts": hosts}})
-    workspace.write_text(f'{text}, "settings": {setting}}}', encoding="utf-8")
+    """Set `devkit.localE2e`'s `hosts` in the `projects.toml` of the devkit checkout
+    beside a `_workspace` -- where the pass reads it, as `Seams.root`."""
+    devkit = workspace.parent / "devkit"
+    devkit.mkdir(exist_ok=True)
+    if isinstance(hosts, str):
+        value = json.dumps(hosts)
+    else:
+        value = "{" + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in hosts.items()) + "}"
+    (devkit / "projects.toml").write_text(
+        f'[settings."{e2e_pass.SETTING}"]\nhosts = {value}\n', encoding="utf-8"
+    )
 
 
 def test_a_machine_hosts_does_not_name_tests_nothing_and_says_who_does(tmp_path, capsys):
@@ -495,12 +502,12 @@ def test_a_missing_tier_is_recorded_only_by_the_machine_assigned_it(tmp_path):
 
 
 def _role(workspace: Path, role: str, hosts=None) -> None:
-    """Give a `_workspace` file `devkit.machineRole`, and `devkit.localE2e` hosts if any."""
-    text = workspace.read_text(encoding="utf-8").rstrip()[:-1]
-    settings: dict[str, object] = {"devkit.machineRole": role}
+    """Give the machine beside a `_workspace` `devkit.machineRole` in its machine file,
+    and `devkit.localE2e` hosts if any."""
+    machine = workspace.parent / ".devkit-machine.json"
+    machine.write_text(json.dumps({"devkit.machineRole": role}), encoding="utf-8")
     if hosts is not None:
-        settings[e2e_pass.SETTING] = {"hosts": hosts}
-    workspace.write_text(f'{text}, "settings": {json.dumps(settings)}}}', encoding="utf-8")
+        _assigned(workspace, hosts)
 
 
 def _role_run(tmp_path, role: str, disk=None, hosts=None):
@@ -529,8 +536,11 @@ def test_a_role_with_no_hosts_claims_each_run_and_a_named_host_stands(tmp_path):
     assert e2e_pass.shared(workspace, seams) == "worker"
     (tmp_path / "b").mkdir()
     _role(_workspace(tmp_path / "b", ["carameli"], opted=[]), "worker", hosts="pc-a")
-    assert e2e_pass.shared(tmp_path / "b" / "w.code-workspace", seams) == ""
-    assert e2e_pass.shared(tmp_path / "missing.code-workspace", seams) == ""
+    seams_b = e2e_pass.Seams(root=tmp_path / "b" / "devkit")
+    assert e2e_pass.shared(tmp_path / "b" / "w.code-workspace", seams_b) == ""
+    (tmp_path / "c").mkdir()
+    seams_c = e2e_pass.Seams(root=tmp_path / "c" / "devkit")
+    assert e2e_pass.shared(tmp_path / "c" / "missing.code-workspace", seams_c) == ""
     assert e2e_pass.job_id("carameli", "b31b60cbbbbbcccc") == "e2e-carameli-b31b60cbbbbb"
 
 
@@ -614,12 +624,15 @@ def test_a_run_s_claim_is_marked_finished_on_the_machine_that_holds_it(tmp_path)
 
 @pytest.mark.parametrize(
     "text",
-    ["{", "[]", '{"settings": []}', '{"settings": {"devkit.localE2e": "pc"}}', "{}"],
+    [None, "", "[settings]\n", '[settings]\n"devkit.localE2e" = "pc"\n'],
+    ids=["no-file", "empty", "no-setting", "not-a-table"],
 )
 def test_an_absent_or_broken_setting_assigns_nobody_so_every_machine_tests_its_own(tmp_path, text):
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text(text, encoding="utf-8")
-    assert e2e_pass.assignment(workspace, tmp_path / "devkit").hosts == ()
+    root = tmp_path / "devkit"
+    root.mkdir()
+    if text is not None:
+        (root / "projects.toml").write_text(text, encoding="utf-8")
+    assert e2e_pass.assignment(tmp_path / "w.code-workspace", root).hosts == ()
 
 
 def test_a_malformed_projects_toml_assigns_nobody(tmp_path):
@@ -629,11 +642,14 @@ def test_a_malformed_projects_toml_assigns_nobody(tmp_path):
     assert e2e_pass.assignment(tmp_path / "none", root).hosts == ()
 
 
-def test_projects_toml_assigns_over_the_workspace_file(tmp_path):
+def test_projects_toml_assigns_and_the_workspace_file_is_never_read(tmp_path):
     workspace = _workspace(tmp_path, ["carameli"], opted=[])
-    _assigned(workspace, "desktop-a")
+    workspace.write_text(
+        json.dumps({"settings": {e2e_pass.SETTING: {"hosts": "desktop-a"}}}), encoding="utf-8"
+    )
     root = tmp_path / "devkit"
     root.mkdir()
+    assert e2e_pass.assignment(workspace, root).hosts == ()
     (root / "projects.toml").write_text(
         '[settings."devkit.localE2e"]\nhosts = "desktop-b"\n', encoding="utf-8"
     )
@@ -662,10 +678,11 @@ def test_run_contract_hands_the_runner_the_timeout_it_was_given(tmp_path):
     assert seen["argv"][-1] == str(tmp_path / "scripts" / "e2e.py")
 
 
-def test_main_reports_each_last_result_and_refuses_a_missing_workspace(
+def test_main_reports_each_last_result_and_needs_no_workspace_file(
     tmp_path, monkeypatch, capsys
 ):
     workspace = _workspace(tmp_path, ["carameli"], opted=["carameli"])
+    workspace.unlink()
     monkeypatch.setattr(e2e_pass.sweep, "default_workspace", lambda _root: workspace)
     results.write(
         results.Result("carameli", results.PASSED, sha="b31b60cbbbbb"), tmp_path / "devkit"
@@ -673,10 +690,9 @@ def test_main_reports_each_last_result_and_refuses_a_missing_workspace(
     read = results.read
     monkeypatch.setattr(results, "read", lambda name: read(name, tmp_path / "devkit"))
     assert e2e_pass.main(["status"]) == 0
-    assert "carameli: passed at b31b60cbb" in capsys.readouterr().out
-    monkeypatch.setattr(e2e_pass.sweep, "default_workspace", lambda _root: tmp_path / "none")
-    assert e2e_pass.main(["status"]) == 2
-    assert "no workspace file at" in capsys.readouterr().err
+    said = capsys.readouterr()
+    assert "carameli: passed at b31b60cbb" in said.out
+    assert "no workspace file" not in said.err
 
 
 def test_a_name_the_workspace_does_not_register_is_refused(tmp_path, capsys):

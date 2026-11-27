@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
 import harness_state
 import installer_cli
+import projects_root
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -76,15 +77,16 @@ def pass_script(root: Path = REPO_ROOT) -> Path:
 windowless = devkit_schtasks.windowless
 
 
-def pass_arguments(script: Path, workspace: Path) -> str:
+def pass_arguments(script: Path, root: Path) -> str:
     """The arguments the scheduled task runs, as one string -- the interpreter excluded.
 
-    `--scheduled` is what makes the pass read its mode from the workspace file and force
-    the background agent; `--workspace` is named rather than left to the default for the
-    reason every installer names it -- a scheduled task starts in `system32`, and a moved
-    checkout should fail loudly rather than reconcile whatever it happens to find.
+    `--scheduled` is what makes the pass read its mode from this PC's machine file and
+    force the background agent; `--root` -- the projects root, where that file sits -- is
+    named rather than left to the default for the reason every installer names it: a
+    scheduled task starts in `system32`, and a moved checkout should fail loudly rather
+    than reconcile whatever it happens to find.
     """
-    return f'"{script}" --scheduled --workspace "{workspace}"'
+    return f'"{script}" --scheduled --root "{root}"'
 
 
 def task_document(python: str, arguments: str, minutes: int) -> str:
@@ -149,7 +151,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--name", default=TASK_NAME)
     parser.add_argument("--minutes", type=int, default=DEFAULT_INTERVAL_MINUTES)
-    parser.add_argument("--workspace", type=Path, default=None)
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
+    )
     parser.add_argument("--yes", dest="apply", action="store_true", help="actually call schtasks")
     return parser
 
@@ -175,9 +180,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    workspace = (args.workspace or sweep.default_workspace(REPO_ROOT)).resolve()
+    root = projects_root.from_flags(args.root, args.workspace, REPO_ROOT).resolve()
     python = windowless(sys.executable)
-    arguments = pass_arguments(pass_script(), workspace)
+    arguments = pass_arguments(pass_script(), root)
     if args.check:
         code, message = devkit_schtasks.run_check(
             args.name, task_document(python, arguments, args.minutes), _run_argv

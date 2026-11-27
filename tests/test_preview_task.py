@@ -1236,9 +1236,14 @@ def test_the_rows_path_prints_the_picker_lines_and_nothing_else(scan, capsys):
     assert printed == ["carameli:master|master|carameli -- default branch|"]
 
 
-def test_a_missing_workspace_registry_is_reported_not_traced(tmp_path, capsys):
-    assert preview_task.main(["--workspace", str(tmp_path / "gone.code-workspace")]) == 2
-    assert "no workspace registry" in capsys.readouterr().out
+def test_no_workspace_file_is_needed(tmp_path, capsys):
+    """Only the deprecated `--workspace`'s directory is read: a run naming one that is
+    gone goes on to its own checks, here the first of them."""
+    gone = str(tmp_path / "gone.code-workspace")
+    assert preview_task.main(["--workspace", gone, "--ui", "--all"]) == 2
+    out = capsys.readouterr().out
+    assert "Drop one" in out and "no workspace registry" not in out
+    assert preview_task.main(["--root", str(tmp_path), "--ui", "--all"]) == 2
 
 
 def test_an_escaped_dropdown_cancels_before_the_scan(stub, capsys):

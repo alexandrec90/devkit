@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What the workspace file asks the Remote Control job to serve, and when.
+"""What devkit's `projects.toml` asks the Remote Control job to serve, and when.
 
 Split out of `rc-servers.py` rather than living in it, along the seam the imports
 already showed: everything here is a decision read off a file, with no process and no
@@ -8,15 +8,14 @@ that drives both.
 
 The opt-in lives in devkit's `projects.toml`, beside the registry every tool in this
 repo reads the checkouts from (`project_registry.setting`), so "which of them get a
-server" belongs there rather than in a second file nothing else knows about. The
-`parse_*` readers take a workspace file's text, as the fallback that file still is;
-`read_config` and `read_hosts` are what the jobs call.
+server" belongs there rather than in a second file nothing else knows about.
+`read_config` and `read_hosts` are what the jobs call; `config_of` and `hosts_of` read
+a value as stored. The retired workspace file is not read.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -24,28 +23,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
-import devkit_jsonc
 import harness_events
 import project_registry
 import sweep
 
-# The workspace-file setting naming the projects that get a server. A list of checkout
-# names, or an object carrying the same list under `projects` plus the knobs below.
+# The shared setting naming the projects that get a server. A list of checkout names,
+# or a table carrying the same list under `projects` plus the knobs below.
 RC_SETTING = "devkit.remoteControl"
 
-# Spelled in place of the list: every checkout in the workspace file, read afresh on every
-# fire. `devkit.onHold` is deliberately not subtracted: the phone matches the machine's
-# workspace, and a hold pauses adoption and box reporting, not reachability. A list is a second copy of the `folders` registry, so a
-# project plugged in later got no server until someone remembered to add it here too.
-# Read off the file the job is handed: the live one, which lists the projects this
-# machine was rendered with before VS Code's retirement stopped the render.
+# Spelled in place of the list: every project in the registry, read afresh on every
+# fire. `devkit.onHold` is deliberately not subtracted: the phone matches the registry,
+# and a hold pauses adoption and box reporting, not reachability. A list is a second
+# copy of the registry, so a project plugged in later got no server until someone
+# remembered to add it here too.
 ALL_PROJECTS = "all"
 
 # The key in the `hosts` knob naming the machine that serves every project not named on
 # its own: `"hosts": {"*": "desktop-a", "data-lake": "desktop-b"}`, or just
 # `"hosts": "desktop-a"` when one machine serves them all.
 #
-# **Why a machine is named at all.** The workspace file is the same on every PC, so
+# **Why a machine is named at all.** The setting is the same on every PC, so
 # `"all"` served each project once *per machine*, and the phone listed `devkit` three
 # times with nothing saying which desk each one was on. A phone needs one server per
 # project, not one per project per PC. `hosts` absent keeps the old reading -- every
@@ -150,7 +147,7 @@ DEFAULT_AWAY_MINUTES = 15
 
 @dataclass(frozen=True)
 class Config:
-    """What the workspace file asks this job to serve."""
+    """What `RC_SETTING` asks this job to serve."""
 
     projects: tuple[str, ...] = ()
     spawn: str = DEFAULT_SPAWN
@@ -176,7 +173,7 @@ def parse_hosts(value: object) -> tuple[tuple[str, str], ...]:
     An entry that names no usable host is dropped, which leaves its project unassigned
     and so served nowhere -- the same direction every other malformed value here falls.
     Public because `devkit.localE2e` assigns its nightly run to a machine the same way
-    (`e2e-pass.py`): one spelling of "which PC does this" across the workspace file.
+    (`e2e-pass.py`): one spelling of "which PC does this" across the shared settings.
     """
     if isinstance(value, str):
         value = {ANY_PROJECT: value}
@@ -208,9 +205,9 @@ def _positive_int(value: object, fallback: int) -> int:
 def every_project() -> list[str]:
     """What `ALL_PROJECTS` expands to: the project registry, every registered checkout.
 
-    Off `project_registry`, not the workspace file's `folders`. A registry that cannot be
-    read expands to nothing, for the reason `parse_config` serves nothing on a broken
-    workspace file: visible in the artifact, rather than a crashed scheduled task.
+    Off `project_registry`. A registry that cannot be read expands to nothing, for the
+    reason `read_config` serves nothing off a broken `projects.toml`: visible in the
+    artifact, rather than a crashed scheduled task.
     """
     try:
         return sweep.managed(project_registry.all_projects())
@@ -218,52 +215,32 @@ def every_project() -> list[str]:
         return []
 
 
-def parse_config(text: str) -> Config:
-    """Read `RC_SETTING` out of a workspace file.
+def read_config(root: Path) -> Config:
+    """`RC_SETTING` off the `projects.toml` of the devkit checkout at `root`, with `all`
+    expanded from the project registry (`every_project`).
 
-    Two accepted shapes, because the list is what almost every machine wants and an
-    object that exists only to hold one key is a tax on the common case:
-
-        "devkit.remoteControl": ["devkit", "carameli"]
-        "devkit.remoteControl": {"projects": ["devkit"], "idleMinutes": 30}
-
-    Either list may be `ALL_PROJECTS` instead, which expands to every registered
-    project (`every_project`).
-
-    Malformed input yields an empty `Config`, matching `sweep.parse_workspace` and
-    `sweep.on_hold`: this job's failure mode for a broken workspace file is to serve
-    nothing, which is visible in the artifact, rather than to crash a scheduled task
-    whose stdout goes nowhere.
+    An empty `Config` for a missing or malformed file: this job's failure mode is to
+    serve nothing, which is visible in the artifact, rather than to crash a scheduled
+    task whose stdout goes nowhere.
     """
     try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return Config()
-    if not isinstance(payload, dict):
-        return Config()
-    settings = payload.get("settings")
-    if not isinstance(settings, dict):
-        return Config()
-    return config_of(settings.get(RC_SETTING))
-
-
-def read_config(workspace: Path, root: Path) -> Config:
-    """`RC_SETTING` as `project_registry.setting` reads it for the devkit checkout at
-    `root` -- its `projects.toml`, else `workspace` -- with `all` expanded from the
-    project registry (`every_project`).
-
-    An empty `Config` for a malformed or unreadable file, as `parse_config` gives one.
-    """
-    try:
-        raw = project_registry.setting(RC_SETTING, repo_root=root, workspace=workspace)
-        workspace.read_text(encoding="utf-8")  # a missing live file serves nothing
+        raw = project_registry.setting(RC_SETTING, repo_root=root)
     except (project_registry.RegistryError, OSError):
         return Config()
     return config_of(raw)
 
 
 def config_of(raw: object) -> Config:
-    """`RC_SETTING`'s value, as stored, as a `Config`; `all` means `every_project`."""
+    """`RC_SETTING`'s value, as stored, as a `Config`; `all` means `every_project`.
+
+    Two accepted shapes, because the list is what almost every machine wants and an
+    object that exists only to hold one key is a tax on the common case:
+
+        "devkit.remoteControl" = ["devkit", "carameli"]
+        [settings."devkit.remoteControl"]  projects = ["devkit"], idleMinutes = 30
+
+    Either list may be `ALL_PROJECTS` instead. Anything else serves nothing.
+    """
     if isinstance(raw, list) or raw == ALL_PROJECTS:
         raw = {"projects": raw}
     if not isinstance(raw, dict):
@@ -296,40 +273,29 @@ def config_of(raw: object) -> Config:
 def selected(config: Config, known: Sequence[str]) -> tuple[list[str], list[str]]:
     """`(serve, notes)` -- the projects to serve, and a line for each one refused.
 
-    A name that is not in the workspace is reported rather than passed over: the setting
-    is hand-edited, and a typo that silently serves nothing looks exactly like a machine
+    A name that is not registered is reported rather than passed over: the setting is
+    hand-edited, and a typo that silently serves nothing looks exactly like a machine
     where the job is working.
 
     `devkit.onHold` refuses nothing here. It used to, and a held project vanished from
-    the phone with no line in the artifact; the phone matches the machine's workspace.
+    the phone with no line in the artifact; the phone matches the registry.
     """
     serve: list[str] = []
     notes: list[str] = []
     for name in config.projects:
         if name not in known:
-            notes.append(f"{name}: not a checkout in the workspace file -- skipped")
+            notes.append(f"{name}: not a project in the registry -- skipped")
         else:
             serve.append(name)
     return serve, notes
 
 
-def setting_hosts(text: str, setting: str) -> Config:
-    """`setting`'s `hosts` off a workspace file, as a `Config` carrying only them. No
-    hosts for anything absent or broken, which reads as "every machine does its own"."""
+def read_hosts(setting: str, root: Path) -> Config:
+    """`setting`'s `hosts` off the `projects.toml` of the devkit checkout at `root`, as a
+    `Config` carrying only them. No hosts for anything absent, missing or malformed,
+    which reads as "every machine does its own"."""
     try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return Config()
-    settings = payload.get("settings") if isinstance(payload, dict) else None
-    return hosts_of(settings.get(setting) if isinstance(settings, dict) else None)
-
-
-def read_hosts(setting: str, workspace: Path, root: Path) -> Config:
-    """`setting`'s `hosts` as `project_registry.setting` reads it for the devkit
-    checkout at `root` (its `projects.toml`, else `workspace`). No hosts for a malformed
-    file, as `setting_hosts` gives none for a broken workspace file."""
-    try:
-        raw = project_registry.setting(setting, repo_root=root, workspace=workspace)
+        raw = project_registry.setting(setting, repo_root=root)
     except (project_registry.RegistryError, OSError):
         return Config()
     return hosts_of(raw)

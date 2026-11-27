@@ -2,10 +2,10 @@
 #
 # `scripts/project_registry.py` reads this file, and owns why it is TOML and why the
 # settings one PC alone decides live elsewhere (`<projects-root>/.devkit-machine.json`).
-# It replaces the `folders` of the VS Code workspace file. Until every caller has moved
-# to the module, that file is still what they read, and `tests/test_project_registry.py`
-# fails this list the moment it disagrees with `workspace.jsonc`'s `folders`: register
-# or retire a project in both.
+# It replaces the `folders` of the VS Code workspace file, which nothing reads for the
+# registry any more. Until `workspace.jsonc` is deleted, `tests/test_project_registry.py`
+# fails this list the moment it disagrees with that file's `folders`: register or retire
+# a project in both.
 #
 # A project counts on a PC when its checkout sits beside devkit's there; one registered
 # here and absent from a machine is simply not that machine's.
@@ -29,8 +29,8 @@ projects = [
 ]
 
 # Settings every PC shares, keyed by their full name, quoted ("devkit.collectors"). Read
-# through `project_registry.setting`; a key absent here is read from the live workspace
-# file. Until `workspace.jsonc` is deleted it carries the same values, and
+# through `project_registry.setting`, and only from here: a key absent here is unset.
+# Until `workspace.jsonc` is deleted it carries the same values, and
 # `tests/test_project_registry.py` fails the two the moment they disagree: change both.
 # The settings one PC alone decides -- devkit.fixPass, devkit.onHold,
 # devkit.machineRole -- are never here.
@@ -122,6 +122,31 @@ handoff = ["uv", "run", "python", "scripts/handoff.py"]
 # An estimate of its `db` and Chrome, which `docker stats` sees only half of. Not
 # `rebalance`: its browser logins belong to one machine.
 memoryGb = 2
+
+# Dashboards the `devkit-dashboards` gateway (scripts/dashboards.py) serves on 127.0.0.1:
+# each sleeps after `idleMinutes` (30 unless set) without a byte and wakes on the next
+# request. `port` is the public one, else the project's `app` port in ports.toml.
+# `{port}` is filled per wake with a free port; `{python}` is the gateway's console
+# interpreter.
+#
+# A compose service: its container stops on sleep, so the VM holds it only while it is in
+# use. `backendPort` is what d2-trader's compose publishes `app` on; the redeploy stays its
+# own `release.py`.
+[settings."devkit.dashboards".d2-trader]
+service = "app"
+backendPort = 18010
+
+# ui-task.py builds a stale frontend before serving, so a first wake after a frontend
+# merge takes a build. It ends itself with its parent, the gateway.
+[settings."devkit.dashboards".ibkr_trader]
+command = ["{python}", "scripts/ui-task.py", "--port", "{port}", "--no-open"]
+startSeconds = 600
+
+# The Mise-o-jeu+ extension's verdict server. Its port is pinned by the extension's
+# manifest, not a slot.
+[settings."devkit.dashboards".sports_betting]
+command = ["uv", "run", "sports-betting", "overlay-serve", "--port", "{port}"]
+port = 8765
 
 # Options an installer should keep, keyed by installer file name. The daily
 # `devkit-installers` pass (`installers.py`) re-registers a scheduled job from what its

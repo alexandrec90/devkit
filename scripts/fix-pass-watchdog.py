@@ -126,17 +126,27 @@ def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return bounded(["git", *GITHUB_AUTH, *args], root)
 
 
-def mode_of(argv: list[str], workspace: Path) -> str:
+def mode_of(argv: list[str], root: Path) -> str:
     """`--mode` when the caller passed one, else this PC's switch (`fix_switch`), else off."""
     if "--mode" in argv and argv.index("--mode") + 1 < len(argv):
         return argv[argv.index("--mode") + 1]
-    return fix_switch.workspace_mode(workspace)
+    return fix_switch.root_mode(root)
 
 
-def workspace_of(argv: list[str]) -> Path | None:
-    if "--workspace" in argv and argv.index("--workspace") + 1 < len(argv):
-        return Path(argv[argv.index("--workspace") + 1])
+def _flag(argv: list[str], name: str) -> Path | None:
+    if name in argv and argv.index(name) + 1 < len(argv):
+        return Path(argv[argv.index(name) + 1])
     return None
+
+
+def root_of(argv: list[str]) -> Path | None:
+    """The projects root the pass was pointed at: `--root`, else the directory of a
+    deprecated `--workspace` (a task registered before `--root` existed), else None."""
+    root = _flag(argv, "--root")
+    if root is not None:
+        return root
+    workspace = _flag(argv, "--workspace")
+    return workspace.parent if workspace is not None else None
 
 
 def default_branch(root: Path) -> str:
@@ -607,12 +617,10 @@ def ship_rescues(root: Path) -> list[str]:
 def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
     began = time.monotonic()
     now = now or _dt.datetime.now(_dt.UTC)
-    workspace = workspace_of(argv)
-    mode = mode_of(argv, workspace) if workspace else "off"
+    root = root_of(argv)
+    mode = mode_of(argv, root) if root else "off"
     notes: list[str] = []
-    state_path = (
-        workspace.parent / worktree_tiers.BOXES_DIR_NAME / STATE_NAME if workspace else None
-    )
+    state_path = root / worktree_tiers.BOXES_DIR_NAME / STATE_NAME if root else None
     state = load_state(state_path) if state_path else {}
     head = git(REPO_ROOT, "rev-parse", "HEAD").stdout.strip()
     if mode != "off":

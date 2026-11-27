@@ -251,16 +251,15 @@ def test_the_ledgers_rows_are_read_off_its_end(tmp_path):
 @pytest.fixture(autouse=True)
 def registry(monkeypatch):
     """The project registry `Machine` stands for: the trigger reads its projects there,
-    and the workspace file only for `devkit.fixPass` and where the checkouts sit."""
+    and the machine file at the root only for `devkit.fixPass`."""
     monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: ["devkit"])
 
 
 class Machine:
     def __init__(self, tmp_path: Path, mode="dispatch", started=0):
         self.root, self.started = tmp_path, started
-        self.workspace = tmp_path / "w.code-workspace"
-        text = {"folders": [{"path": "devkit"}], "settings": {"devkit.fixPass": mode}}
-        self.workspace.write_text(json.dumps(text), encoding="utf-8")
+        machine = tmp_path / project_registry.MACHINE_FILE_NAME
+        machine.write_text(json.dumps({"devkit.fixPass": mode}), encoding="utf-8")
         checkout(tmp_path, "devkit", "https://github.com/me/devkit.git")
         self.repo = repo()
         self.calls: list[list[str]] = []
@@ -277,7 +276,7 @@ class Machine:
         return subprocess.CompletedProcess(argv, self.started, "", "ERROR: no such task")
 
     def fire(self, now=NOW) -> int:
-        return trigger.run_once(self.workspace, self.run, now)
+        return trigger.run_once(self.root, self.run, now)
 
     @property
     def starts(self) -> int:
@@ -426,6 +425,11 @@ def test_the_names_spelled_here_are_their_owners():
     assert trigger.SHIP_STATE == fix_pass.ship_intent.STATE_FILE.name
 
 
-def test_main_refuses_a_missing_workspace(tmp_path, capsys):
-    assert trigger.main(["--workspace", str(tmp_path / "none")]) == 2
-    assert "no workspace file" in capsys.readouterr().err
+def test_main_needs_no_workspace_file_and_takes_a_deprecated_one_as_its_root(
+    tmp_path, monkeypatch
+):
+    fired = []
+    monkeypatch.setattr(trigger, "run_once", lambda root: fired.append(root) or 0)
+    assert trigger.main(["--root", str(tmp_path)]) == 0
+    assert trigger.main(["--workspace", str(tmp_path / "none" / "w.code-workspace")]) == 0
+    assert fired == [tmp_path.resolve(), (tmp_path / "none").resolve()]

@@ -78,16 +78,17 @@ class Schedule:
     python: str
     script: str
     every: int
-    workspace: str = ""
+    root: str = ""
 
     @property
     def command(self) -> list[str]:
         """The argv the scheduler runs. `maintain` is named explicitly: the default mode
         is read-only on purpose, and a task that became a no-op because a default changed
-        is the failure `tests/test_scheduled_jobs.py` is downstream of."""
+        is the failure `tests/test_scheduled_jobs.py` is downstream of. `--root` names
+        the projects root, since a scheduled task has no cwd worth relying on."""
         argv = [self.python, self.script, "maintain"]
-        if self.workspace:
-            argv += ["--workspace", self.workspace]
+        if self.root:
+            argv += ["--root", self.root]
         return argv
 
 
@@ -99,13 +100,12 @@ def windowless_python(executable: str = sys.executable) -> str:
 
 def schedule_for(every: int = DEFAULT_INTERVAL, root: Path = REPO_ROOT) -> Schedule:
     """Resolve the schedule against *this* interpreter and *this* checkout."""
-    workspace = sweep.default_workspace(root)
     return Schedule(
         name=TASK_NAME,
         python=windowless_python(),
         script=str((root / "scripts" / "reap-stale.py").resolve()),
         every=every,
-        workspace=str(workspace) if workspace else "",
+        root=str(sweep.projects_root.projects_root(root)),
     )
 
 

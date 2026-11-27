@@ -1192,33 +1192,31 @@ def test_registration_is_a_warning_not_a_failure(tmp_path, capsys, monkeypatch, 
     """The project is already written by then; a broken registry is fixable by hand."""
     args = make_args(parent=str(tmp_path))
     the_plan = new_project.plan(args, registry())
-    broken = tmp_path / "broken.code-workspace"
-    broken.write_text('{"tasks": {}}', encoding="utf-8")
-    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", broken)
+    canonical_copy.write_text('{"tasks": {}}', encoding="utf-8")
+    monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", tmp_path / "w.code-workspace")
     new_project.register_in_workspace(the_plan, dry_run=False)
     assert "WARNING" in capsys.readouterr().out
 
 
-def test_registration_lands_in_the_canonical_copy_too(
+def test_registration_lands_in_the_canonical_copy_and_never_the_live_file(
     tmp_path, capsys, monkeypatch, canonical_copy
 ):
     """Registering only in the live file left the committed registry without it
-    (8a1c0927): a freshly generated project existed only in the copy with no history.
+    (8a1c0927). The live file is retired and read by nothing, so it is not written at
+    all: the committed copy is the registration.
     """
     args = make_args(parent=str(tmp_path))
     the_plan = new_project.plan(args, registry())
     live = tmp_path / "live.code-workspace"
-    live.write_text(canonical_copy.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    before = canonical_copy.read_text(encoding="utf-8")
+    live.write_text(before, encoding="utf-8", newline="\n")
     monkeypatch.setattr(devkit_project, "DEFAULT_WORKSPACE", live)
     assert the_plan.name not in devkit_project.known_projects(canonical_copy.read_text("utf-8"))
 
     new_project.register_in_workspace(the_plan, dry_run=False)
 
-    for path in (canonical_copy, live):
-        assert the_plan.name in devkit_project.known_projects(path.read_text(encoding="utf-8"))
-    assert devkit_project.known_projects(
-        live.read_text(encoding="utf-8")
-    ) == devkit_project.known_projects(canonical_copy.read_text(encoding="utf-8"))
+    assert the_plan.name in devkit_project.known_projects(canonical_copy.read_text("utf-8"))
+    assert live.read_text(encoding="utf-8") == before, "the live file is not edited"
     out = capsys.readouterr().out
     assert "WARNING" not in out
     assert f"commit devkit's {canonical_copy.name}" in out
@@ -1272,7 +1270,7 @@ def test_registration_leaves_the_static_checkout_clean(tmp_path, capsys, monkeyp
     # What `fix-pass-watchdog.self_update` asks before it fast-forwards.
     assert _git_out(checkout, "status", "--porcelain", "--untracked-files=no") == ""
     assert the_plan.name not in devkit_project.known_projects(canonical.read_text("utf-8"))
-    assert the_plan.name in devkit_project.known_projects(live.read_text(encoding="utf-8"))
+    assert the_plan.name not in devkit_project.known_projects(live.read_text(encoding="utf-8"))
     (tree,) = (checkout / ".claude" / "worktrees").iterdir()
     branch = _git_out(tree, "rev-parse", "--abbrev-ref", "HEAD")
     assert branch.startswith(f"agent/register-{the_plan.name.replace('_', '-')}-")
@@ -1537,6 +1535,20 @@ def test_a_hand_edit_already_in_projects_toml_is_never_carried_off(tmp_path, cap
     )
 
 
+def test_register_in_canonical_writes_the_copy_or_warns_and_a_dry_run_writes_nothing(
+    tmp_path, capsys
+):
+    canonical = tmp_path / "workspace.jsonc"
+    canonical.write_text(devkit_project.canonical_text(), encoding="utf-8", newline="\n")
+    assert new_project.register_in_canonical(canonical, ["fresh"], dry_run=True) is False
+    assert "fresh" not in devkit_project.known_projects(canonical.read_text(encoding="utf-8"))
+    assert new_project.register_in_canonical(canonical, ["fresh"], dry_run=False) is True
+    assert "fresh" in devkit_project.known_projects(canonical.read_text(encoding="utf-8"))
+    missing = tmp_path / "nowhere" / "workspace.jsonc"
+    assert new_project.register_in_canonical(missing, ["fresh"], dry_run=False) is False
+    assert "WARNING could not register in workspace.jsonc" in capsys.readouterr().out
+
+
 def test_register_in_registry_writes_once_and_says_so(tmp_path, capsys):
     toml = tmp_path / project_registry.REGISTRY_NAME
     toml.write_text('projects = [\n    "devkit",\n]\n', encoding="utf-8", newline="\n")
@@ -1573,8 +1585,10 @@ def test_a_projects_toml_it_cannot_edit_is_a_warning(tmp_path, capsys):
     assert "WARNING could not register in projects.toml" in capsys.readouterr().out
 
 
-def test_an_unwritable_canonical_copy_still_registers_the_live_file(tmp_path, capsys, monkeypatch):
-    """Each copy is best-effort on its own: one failing must not skip the other."""
+def test_an_unwritable_canonical_copy_is_a_warning_and_the_live_file_stays_untouched(
+    tmp_path, capsys, monkeypatch
+):
+    """Best-effort: the project is written; the registration is fixable by hand."""
     args = make_args(parent=str(tmp_path))
     the_plan = new_project.plan(args, registry())
     live = tmp_path / "live.code-workspace"
@@ -1584,11 +1598,11 @@ def test_an_unwritable_canonical_copy_still_registers_the_live_file(tmp_path, ca
 
     new_project.register_in_workspace(the_plan, dry_run=False)
 
-    assert the_plan.name in devkit_project.known_projects(live.read_text(encoding="utf-8"))
+    assert the_plan.name not in devkit_project.known_projects(live.read_text(encoding="utf-8"))
     assert "WARNING could not register in ws.jsonc" in capsys.readouterr().out
 
 
-def test_a_dry_run_names_both_copies_and_writes_neither(
+def test_a_dry_run_names_the_canonical_copy_and_writes_nothing(
     tmp_path, capsys, monkeypatch, canonical_copy
 ):
     args = make_args(parent=str(tmp_path))
@@ -1601,7 +1615,7 @@ def test_a_dry_run_names_both_copies_and_writes_neither(
 
     out = capsys.readouterr().out
     assert f"update  {canonical_copy.name}" in out
-    assert f"update  ../{live.name}" in out
+    assert f"../{live.name}" not in out
     assert canonical_copy.read_text(encoding="utf-8") == before
     assert not live.exists()
 
@@ -1653,8 +1667,8 @@ def test_registration_is_still_the_default(tmp_path, monkeypatch, canonical_copy
 
     new_project.register_in_workspace(the_plan, dry_run=False)
 
-    # Once for devkit's canonical copy, once for the live file.
-    assert calls == [[the_plan.name], [the_plan.name]]
+    # Once, for devkit's canonical copy: the live file is retired and never written.
+    assert calls == [[the_plan.name]]
 
 
 def test_the_default_parent_is_the_directory_the_workspace_registers_from(tmp_path, monkeypatch):

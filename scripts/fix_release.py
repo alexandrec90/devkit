@@ -300,6 +300,7 @@ def release_argv(devkit: Path, workspace: Path, python: str) -> list[str]:
 
     `python` is a console interpreter for both hops (`sweep.console_python`), for the
     reason `windowless-jobs.md` gives: `CREATE_NO_WINDOW` is ignored for `pythonw.exe`.
+    Only `workspace`'s directory, the projects root, is passed on, as `--root`.
     """
     return [
         python,
@@ -310,8 +311,8 @@ def release_argv(devkit: Path, workspace: Path, python: str) -> list[str]:
         python,
         str(devkit / "scripts" / "release-pipeline.py"),
         *release_schedule.PIPELINE_ARGS,
-        "--workspace",
-        str(workspace),
+        "--root",
+        str(workspace.parent),
     ]
 
 

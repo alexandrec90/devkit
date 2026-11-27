@@ -87,7 +87,7 @@ class Schedule:
     python: str
     script: str
     every: int
-    workspace: str = ""
+    root: str = ""
 
     @property
     def command(self) -> list[str]:
@@ -98,13 +98,13 @@ class Schedule:
         became a no-op because someone changed a default is the failure this whole file
         is downstream of.
 
-        `--workspace` is passed explicitly, the way the reconcile and upgrade tasks do:
-        a scheduled task has no cwd worth relying on, and the registered command is the
-        only record of what it operates on.
+        `--root`, the projects root, is passed explicitly, the way the reconcile and
+        upgrade tasks do: a scheduled task has no cwd worth relying on, and the
+        registered command is the only record of what it operates on.
         """
         argv = [self.python, self.script, "maintain"]
-        if self.workspace:
-            argv += ["--workspace", self.workspace]
+        if self.root:
+            argv += ["--root", self.root]
         return argv
 
 
@@ -129,13 +129,12 @@ def schedule_for(every: int = DEFAULT_INTERVAL, root: Path = REPO_ROOT) -> Sched
     with no activated virtualenv and often a different PATH, and `rc-servers.py` imports
     `agent_clis` and `sweep` from beside it.
     """
-    workspace = sweep.default_workspace(root)
     return Schedule(
         name=TASK_NAME,
         python=windowless_python(),
         script=str((root / "scripts" / "rc-servers.py").resolve()),
         every=every,
-        workspace=str(workspace) if workspace else "",
+        root=str(sweep.projects_root.projects_root(root)),
     )
 
 

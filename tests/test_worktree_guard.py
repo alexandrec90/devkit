@@ -41,8 +41,8 @@ def reference(monkeypatch):
 PROJECTS = ["carameli", "carameli-b", "ibkr_trader", "apt-finder", "apt-finder-b", "devkit"]
 
 # The project registry the hook reads, as `_workspace` last set it. The workspace file
-# itself only has to exist -- the hook is silent on a machine with none -- and to sit
-# where the checkouts are.
+# is never read: only its directory, where the checkouts are -- the hook is silent on a
+# root holding none of them.
 REGISTERED: list[str] = []
 
 
@@ -820,11 +820,39 @@ def test_session_slug_survives_a_missing_session_id():
 # --- the shell --------------------------------------------------------------
 
 
-def test_absent_workspace_file_allows_everything(tmp_path, monkeypatch):
-    """CI, a fresh clone, anyone else's machine: no multi-root registry means no
-    cross-checkout edit is possible, so silence is correct rather than an error."""
-    monkeypatch.setattr("sys.stdin", _stdin(payload(path="/anything")))
+def test_a_root_holding_no_registered_checkout_allows_everything(tmp_path, monkeypatch):
+    """CI, a fresh clone, anyone else's machine: no registered checkout beside this one
+    means no cross-checkout edit is possible, so silence is correct rather than an error.
+    Whether a workspace file is there no longer enters into it."""
+    monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(tmp_path / "carameli" / "a.py"))))
     assert guard.main(["--workspace", str(tmp_path / "nope.code-workspace")]) == guard.EXIT_ALLOW
+    assert guard.main(["--root", str(tmp_path)]) == guard.EXIT_ALLOW
+
+
+def test_workspace_arg_reads_root_or_the_deprecated_workspace_off_the_raw_argv(tmp_path):
+    given = tmp_path / "w.code-workspace"
+    assert guard.workspace_arg(["--workspace", str(given)]) == given.resolve()
+    assert guard.workspace_arg(["--root", str(tmp_path)]).parent == tmp_path.resolve()
+    assert guard.workspace_arg(["--root"]) == guard.worktree.DEFAULT_WORKSPACE.resolve()
+
+
+def test_holds_a_checkout_is_any_registered_directory_under_the_root(tmp_path):
+    assert not guard.holds_a_checkout(tmp_path, ["carameli"])
+    (tmp_path / "carameli").write_text("", encoding="utf-8")
+    assert not guard.holds_a_checkout(tmp_path, ["carameli"]), "a file is no checkout"
+    (tmp_path / "devkit").mkdir()
+    assert guard.holds_a_checkout(tmp_path, ["carameli", "devkit"])
+
+
+def test_no_workspace_file_is_needed_to_guard_a_registered_root(root, monkeypatch):
+    """The check that used to stop at a missing file: the same block as with one."""
+    _workspace(root).unlink()
+    monkeypatch.setattr(
+        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py")))
+    )
+    assert guard.main(["--root", str(root)]) == guard.main(
+        ["--workspace", str(root / guard.worktree.sweep.WORKSPACE_FILE_NAME)]
+    )
 
 
 def test_a_non_mutating_tool_is_allowed(tmp_path, root, monkeypatch):

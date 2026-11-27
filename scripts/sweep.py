@@ -2,7 +2,7 @@
 """Cross-project ship sweep: find work stranded across the workspace's checkouts.
 
 One `/ship` run takes one checkout from "task finished" to "PR open". This walks
-every checkout in a VS Code multi-root workspace and reports which ones still have
+every checkout in the project registry (`projects.toml`) and reports which ones still have
 work in them, so nothing sits forgotten on a branch (or, more often, forgotten on
 the default branch) while attention is elsewhere.
 
@@ -76,6 +76,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))  # the vendored tier
 import devkit_jsonc
+import project_registry
+import projects_root
 import task_branch as tb
 import worktree_tiers
 
@@ -84,17 +86,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # the one checkout `follows` holds on `green`. It is the watchdog that holds it there.
 DEVKIT_ONLY = Path("scripts") / "fix-pass-watchdog.py"
 
-WORKSPACE_FILE_NAME = "alex-projects.code-workspace"
-# Where the ephemeral tier keeps its boxes, relative to the workspace root, re-exported
+# Where the ephemeral tier keeps its boxes, relative to the projects root, re-exported
 # off the tier list so `worktree.py` and the rest of this module's callers keep reading
 # `sweep.BOXES_DIR_NAME` while only one file spells the directory. It moved to
 # `worktree_tiers` because the copies that needed it could not reach here: that module is
 # vendored and stdlib-only, and a Stop hook in a consuming project has no `sweep.py`.
 BOXES_DIR_NAME = worktree_tiers.BOXES_DIR_NAME
-# The separator between project and topic in a box name (`devkit--fix-thing-0810`).
-# Defined here rather than in `worktree.py` because the two resolvers below need it and
-# worktree.py imports this module, never the other way round.
-NAME_SEP = "--"
 
 # The OTHER worktree tiers, and they are not the boxes: no lease, no port, and they are
 # where a `--worktree` session -- Claude's or Codex's -- and a remote Claude session put
@@ -104,75 +101,14 @@ NAME_SEP = "--"
 # levels under its checkout, Codex's sits outside it entirely.
 CLI_WORKTREE_TIERS = worktree_tiers.TIERS
 
-
-def default_workspace(repo_root: Path, name: str = WORKSPACE_FILE_NAME) -> Path:
-    """The workspace registry for a checkout at `repo_root`, box or not.
-
-    The file lives beside the checkouts it lists, one level above a static checkout --
-    but a **box** sits one level deeper, under `<workspace>/.worktrees/`, so the naive
-    answer from inside one is `<workspace>/.worktrees/alex-projects.code-workspace`,
-    which nobody ever wrote.
-
-    That mattered because a box is exactly where an agent runs these scripts. Every
-    workspace-aware script had its own copy of the naive line, and five of them broke
-    there in different ways: `devkit_project.py --adopt-tasks` -- then the documented way
-    to record an intentional task-block edit -- exited 2 naming a path that does not exist,
-    while `workspace-status.py` degraded to silence, which is the same failure with no
-    symptom at all. `worktree.py` was alone in resolving both, so this is its logic
-    moved down to where everything else can reach it.
-
-    An agent CLI's worktree is the same failure again, by a different route: nothing here
-    cuts those, so the first were made by a `--worktree` session and by remote sessions,
-    and every script below resolved its workspace to `<checkout>/.claude/worktrees/<file>`
-    -- or, once `codex --worktree` existed, to a path under `$CODEX_HOME`. That is the
-    directory an agent handed one of these is *running in*, so the naive answer is wrong
-    exactly where it is most often asked.
-    """
-    inside = cli_worktree_checkout(repo_root)
-    if inside is not None:
-        return inside.parent / name
-    parent = repo_root.parent
-    return (parent.parent if parent.name == BOXES_DIR_NAME else parent) / name
-
-
-def cli_worktree_checkout(repo_root: Path) -> Path | None:
-    """The checkout an agent CLI's worktree belongs to; None when `repo_root` is not one.
-
-    A **nested** tier is matched on the directory names above `repo_root` rather than on
-    anything git reports, so it stays pure and answers for a path that no longer exists.
-    A **detached** one cannot: `codex --worktree` cuts `<CODEX_HOME>/worktrees/<hash>/`,
-    where the digest names no checkout, so `worktree_tiers.owning_checkout` reads the
-    worktree's own `.git` pointer instead. That is what stops this being total -- a Codex
-    worktree already removed answers None and the caller treats it as an ordinary
-    checkout, which by then it is. Every caller asks from a directory it is standing in,
-    """
-    return worktree_tiers.owning_checkout(repo_root)
-
-
-def source_checkout(repo_root: Path) -> Path:
-    """The permanent checkout `repo_root` belongs to -- itself, unless it is a box.
-
-    The other half of the same problem `default_workspace` solves. A script that asks
-    "which registered checkout am I?" gets the box's name (`devkit--topic-0810`), which
-    matches nothing in the registry, and the answer is wrong in the direction that is
-    hardest to notice: `workspace-status.py` exempts devkit from its adoption check by
-    comparing each registered checkout against its own root, so from a box the
-    comparison failed and the status line at every session start reported **devkit
-    itself** as "never vendored devkit".
-
-    The project name is read off the box name rather than assumed, so this holds for a
-    box cut from any project, not just devkit's.
-    """
-    inside = cli_worktree_checkout(repo_root)
-    if inside is not None:
-        return inside
-    parent = repo_root.parent
-    if parent.name != BOXES_DIR_NAME:
-        return repo_root
-    return parent.parent / repo_root.name.split(NAME_SEP, 1)[0]
-
-
-DEFAULT_WORKSPACE = default_workspace(REPO_ROOT)
+# The checkout resolvers, re-exported: they moved to `projects_root` so that
+# `project_registry` -- which this module reads the registry through -- need not import
+# this one. Callers keep spelling them `sweep.source_checkout` and the rest.
+cli_worktree_checkout = projects_root.cli_worktree_checkout
+default_workspace = projects_root.default_workspace
+source_checkout = projects_root.source_checkout
+WORKSPACE_FILE_NAME = projects_root.WORKSPACE_FILE_NAME
+NAME_SEP = projects_root.NAME_SEP
 
 # Checkouts this sweep does not manage. Empty since 2026-09-02, kept as a mechanism.
 DEFAULT_EXCLUDE: frozenset[str] = frozenset()
@@ -625,42 +561,19 @@ class Plan:
 # --- pure helpers -----------------------------------------------------------
 
 
-# The workspace-file setting that names the projects nothing should be in flight for.
-# A list of checkout names under `"settings"`, beside VS Code's own -- the workspace file
-# is already the registry every tool reads the checkouts from, so it is where "which of
-# them are paused" belongs rather than a second file. Read by `on_hold`.
+# The machine setting that names the projects nothing should be in flight for: a list of
+# checkout names in this PC's `.devkit-machine.json` (`project_registry.MACHINE_KEYS`).
+# A project on hold gets no scheduled work -- `upgrade-project.py --all` passes over it,
+# and a box that exists for it at all is reported stranded by `worktree.py` at any age.
+# The 2026-08-30 audit found the nightly upgrade sweep had cut boxes for two paused
+# projects and left them holding a vendored-tier bump nobody was going to ship.
 ON_HOLD_SETTING = "devkit.onHold"
-
-
-def on_hold(text: str) -> frozenset[str]:
-    """Checkout names the workspace file marks as paused, via `ON_HOLD_SETTING`.
-
-    A project on hold gets no scheduled work: `upgrade-project.py --all` passes over it,
-    and a box that exists for it at all is reported stranded by `worktree.py` at any
-    age, since nothing is meant to be in flight there. The 2026-08-30 audit found the
-    nightly upgrade sweep had cut boxes for two paused projects and left them holding
-    a vendored-tier bump nobody was going to ship.
-
-    Same parsing and the same silence on malformed input as `parse_workspace`, for the
-    same reason -- and an absent or misshapen setting is simply "nothing on hold",
-    because that is the state of every workspace that predates it.
-    """
-    try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return frozenset()
-    if not isinstance(payload, dict):
-        return frozenset()
-    settings = payload.get("settings")
-    if not isinstance(settings, dict):
-        return frozenset()
-    return held(settings.get(ON_HOLD_SETTING))
 
 
 def held(names: object) -> frozenset[str]:
     """`ON_HOLD_SETTING`'s value, as stored, as checkout names; nothing for any other
-    shape. Read off this PC's machine file by `worktree.on_hold_projects`, which cannot
-    live here: `project_registry` imports this module."""
+    shape -- an absent or misshapen setting is "nothing on hold", never an error. Read
+    off this PC's machine file by `worktree.on_hold_projects`."""
     if not isinstance(names, list):
         return frozenset()
     return frozenset(name for name in names if isinstance(name, str) and name)
@@ -705,8 +618,7 @@ def managed(names: list[str], exclude: frozenset[str] | None = None) -> list[str
 
     The half of `parse_workspace` a reader still needs once the names come from the
     project registry rather than a workspace file: the same `DEFAULT_EXCLUDE`, resolved
-    at call time for the same reason. Here rather than in `project_registry` because
-    that module imports this one.
+    at call time for the same reason.
     """
     exclude = DEFAULT_EXCLUDE if exclude is None else exclude
     return [name for name in names if name not in exclude]
@@ -2243,12 +2155,7 @@ def run_mode(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--workspace",
-        type=Path,
-        default=DEFAULT_WORKSPACE,
-        help=f"the .code-workspace file listing the checkouts (default: {DEFAULT_WORKSPACE.name})",
-    )
+    projects_root.add_flags(parser)
     parser.add_argument(
         "--exclude",
         action="append",
@@ -2359,29 +2266,31 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run and not (args.branch or args.ship or args.sync):
         parser.error("--yes has no effect without --branch, --ship or --sync")
 
-    if not args.workspace.is_file():
-        print(f"sweep: no workspace file at {args.workspace}", file=sys.stderr)
-        return 2
+    root = projects_root.from_flags(args.root, args.workspace)
     exclude = frozenset(args.exclude) if args.exclude is not None else DEFAULT_EXCLUDE
-    names = parse_workspace(args.workspace.read_text(encoding="utf-8"), exclude)
+    try:
+        names = managed(project_registry.all_projects(), exclude)
+    except (project_registry.RegistryError, OSError) as exc:
+        print(f"sweep: {exc}", file=sys.stderr)
+        return 2
     if not names:
-        print(f"sweep: no checkouts listed in {args.workspace.name}", file=sys.stderr)
+        print(f"sweep: no checkouts registered in {project_registry.REGISTRY_NAME}", file=sys.stderr)
         return 2
     known = ", ".join(names)
     names, unknown = select(names, args.only)
     if unknown:
         print(
-            f"sweep: --only named {', '.join(unknown)}, which is not in "
-            f"{args.workspace.name}. Known checkouts: {known}",
+            f"sweep: --only named {', '.join(unknown)}, which is not registered. "
+            f"Known checkouts: {known}",
             file=sys.stderr,
         )
         return 2
 
-    results = sweep(args.workspace.parent, names, fetch=args.fetch)
+    results = sweep(root, names, fetch=args.fetch)
 
     if args.branch or args.ship or args.sync:
         report, code = run_mode(
-            args.workspace.parent,
+            root,
             results,
             "branch" if args.branch else "ship" if args.ship else "sync",
             apply=not args.dry_run,

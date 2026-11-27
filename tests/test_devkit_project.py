@@ -2611,7 +2611,8 @@ def test_a_green_autofix_run_on_a_clean_home_branch_is_branched_then_shipped():
     for step in outcome.commands:
         assert step[1].endswith("sweep.py")
         assert "--only" in step and "alpha" in step
-        assert str(Path(WORKSPACE_FILE)) in step
+        assert step[step.index("--root") + 1] == str(Path(WORKSPACE_FILE).parent)
+        assert "--workspace" not in step
 
 
 def test_the_branch_step_comes_first():

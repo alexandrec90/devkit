@@ -202,7 +202,7 @@ class Seams:
     provision: Callable[[Path], list[str]] = fix_trees.provision_tree
     spool: Path = Path(after_merge.ELEVATED_SPOOL)
     disk: Callable[[], int | None] = job_claims.disk_here
-    # Read off the workspace file beside `root`, so a test's root is never the live one.
+    # Read off the machine file beside `root`, so a test's root is never the live one.
     role: Callable[[Path], str] = machine_role.role_beside
     # This PC published for SSH and its peers configured here (`fleet_ssh.scheduled`). A
     # seam because the real one writes `~/.ssh` and may make a key.

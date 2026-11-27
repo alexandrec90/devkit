@@ -250,13 +250,16 @@ def write_artifact(text: str, root: Path = REPO_ROOT) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def build_plan(workspace: Path, root: Path, report: Pass, host: str | None = None) -> Plan | None:
-    """Resolve the workspace file into a `Plan`, or `None` with the reason reported.
+def build_plan(
+    checkouts: Path, root: Path, report: Pass, host: str | None = None
+) -> Plan | None:
+    """Resolve the setting in the devkit checkout at `root` into a `Plan` serving the
+    checkouts under the projects root `checkouts`, or `None` with the reason reported.
 
     A machine `hosts` assigns nothing still gets a `Plan`, with no names in it: that is
     what lets `retire` stop the servers it was running before the assignment moved.
     """
-    config = rc_config.read_config(workspace, root)
+    config = rc_config.read_config(root)
     if not config.projects:
         report.say(f"nothing to serve -- no `{rc_config.RC_SETTING}` in projects.toml")
         return None
@@ -272,7 +275,7 @@ def build_plan(workspace: Path, root: Path, report: Pass, host: str | None = Non
         return None
     return Plan(
         names=names,
-        root=workspace.parent,
+        root=checkouts,
         state=rc_machine.State.load(root / STATE),
         claude="",
         config=config,
@@ -294,7 +297,10 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "once a day. down: stop everything."
         ),
     )
-    parser.add_argument("--workspace", type=Path, default=None)
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
+    )
     parser.add_argument(
         "--devkit",
         type=Path,
@@ -338,7 +344,7 @@ def run_mode(mode: str, plan: Plan, report: Pass, now: _dt.datetime) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     root = args.devkit.expanduser().resolve()
-    workspace = args.workspace or sweep.default_workspace(root)
+    checkouts = sweep.projects_root.from_flags(args.root, args.workspace, root)
     now = _dt.datetime.now()
     report = Pass()
 
@@ -349,11 +355,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(text, end="")
         return code
 
-    if workspace is None or not Path(workspace).is_file():
-        report.fail(f"no workspace file at {workspace}")
-        return finish(2)
-
-    plan = build_plan(Path(workspace), root, report)
+    plan = build_plan(checkouts, root, report)
     if plan is None:
         return finish(2 if report.failures else 0)
 

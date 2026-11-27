@@ -3,8 +3,8 @@
 The command string is what matters, because nothing re-reads it: once `schtasks` has
 it, it runs every half hour for as long as the workstation exists. The one property this
 job has that the others do not is that the registered command carries no switch at all
--- `--scheduled` reads it from the workspace file on every fire, so turning the pass on
-is a setting rather than a re-install.
+-- `--scheduled` reads it from this PC's machine file on every fire, so turning the pass
+on is a setting rather than a re-install.
 """
 
 from __future__ import annotations
@@ -20,24 +20,33 @@ installer = load_script("scripts/install-fix-pass-task.py")
 
 PY = r"C:\py\python.exe"
 SCRIPT = Path(r"C:\ws\devkit\scripts\fix-pass.py")
-WORKSPACE = Path(r"C:\ws\alex-projects.code-workspace")
+ROOT = Path(r"C:\ws")
 
 
-def test_the_scheduled_run_reads_its_switch_from_the_workspace_file():
-    """No `--mode` in the registered command: the switch lives in the workspace file,
+def test_the_scheduled_run_reads_its_switch_from_the_machine_file():
+    """No `--mode` in the registered command: the switch lives in the machine file,
     so flipping it is one setting and the task never needs re-registering."""
-    command = installer.pass_arguments(SCRIPT, WORKSPACE)
+    command = installer.pass_arguments(SCRIPT, ROOT)
     assert "--scheduled" in command
     assert "--mode" not in command and "--agent" not in command
 
 
-def test_the_workspace_is_named_not_inferred():
-    command = installer.pass_arguments(SCRIPT, WORKSPACE)
-    assert "--workspace" in command and str(WORKSPACE) in command
+def test_the_root_is_named_not_inferred_and_no_workspace_file_is():
+    command = installer.pass_arguments(SCRIPT, ROOT)
+    assert f'--root "{ROOT}"' in command
+    assert "--workspace" not in command and "code-workspace" not in command
+
+
+def test_a_deprecated_workspace_flag_still_names_the_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(installer, "WINDOWS", True)
+    assert installer.main(["--workspace", str(tmp_path / "x.code-workspace")]) == 0
+    assert f'--root "{tmp_path.resolve()}"' in capsys.readouterr().out
+    assert installer.main(["--root", str(tmp_path / "r")]) == 0
+    assert f'--root "{(tmp_path / "r").resolve()}"' in capsys.readouterr().out
 
 
 def test_paths_are_quoted_for_a_profile_name_with_spaces():
-    quoted = installer.pass_arguments(Path(r"C:\Program Files\ws\fix-pass.py"), WORKSPACE)
+    quoted = installer.pass_arguments(Path(r"C:\Program Files\ws\fix-pass.py"), ROOT)
     assert '"C:\\Program Files\\ws\\fix-pass.py"' in quoted
 
 
@@ -103,8 +112,8 @@ def test_status_and_uninstall_are_answered_before_any_document_is_built(monkeypa
 
 def _the_document_main_would_register() -> str:
     python = installer.windowless(sys.executable)
-    workspace = sweep.default_workspace(REPO_ROOT).resolve()
-    arguments = installer.pass_arguments(installer.pass_script(), workspace)
+    root = sweep.default_workspace(REPO_ROOT).parent.resolve()
+    arguments = installer.pass_arguments(installer.pass_script(), root)
     return installer.task_document(python, arguments, installer.DEFAULT_INTERVAL_MINUTES)
 
 

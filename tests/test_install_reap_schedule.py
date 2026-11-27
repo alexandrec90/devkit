@@ -28,20 +28,25 @@ def schedule(every: int = 15) -> object:
         python=r"C:\py\pythonw.exe",
         script=r"C:\ws\devkit\scripts\reap-stale.py",
         every=every,
-        workspace=r"C:\ws\alex-projects.code-workspace",
+        root=r"C:\ws",
     )
 
 
 # --- the argv ---------------------------------------------------------------
 
 
-def test_the_command_names_the_mode_and_the_workspace():
+def test_the_command_names_the_mode_and_the_root():
     argv = schedule().command
     assert argv[:3] == [r"C:\py\pythonw.exe", r"C:\ws\devkit\scripts\reap-stale.py", "maintain"]
-    assert argv[argv.index("--workspace") + 1] == r"C:\ws\alex-projects.code-workspace"
+    assert argv[argv.index("--root") + 1] == r"C:\ws"
+    assert "--workspace" not in argv
 
 
-def test_a_machine_with_no_workspace_file_still_produces_a_runnable_command():
+def test_the_resolved_root_is_the_checkouts_parent(tmp_path):
+    assert installer.schedule_for(root=tmp_path / "devkit").root == str(tmp_path)
+
+
+def test_a_schedule_with_no_root_still_produces_a_runnable_command():
     bare = installer.Schedule(installer.TASK_NAME, "py", "reap.py", 15, "")
     assert bare.command == ["py", "reap.py", "maintain"]
 

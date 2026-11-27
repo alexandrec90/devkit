@@ -4,7 +4,7 @@ What matters here is the *command string*, because nothing re-reads it: once
 `schtasks` has it, it runs every 15 minutes with `--yes` for as long as the
 workstation exists. A wrong flag baked in at install time is a wrong flag forever, and
 the two that decide blast radius are `--merge` (does it touch PRs at all) and
-`--workspace` (which set of boxes is it reconciling).
+`--root` (which set of boxes is it reconciling).
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ installer = load_script("scripts/install-reconcile-task.py")
 
 PY = r"C:\py\python.exe"
 SCRIPT = Path(r"C:\ws\devkit\scripts\worktree.py")
-WORKSPACE = Path(r"C:\ws\alex-projects.code-workspace")
+ROOT = Path(r"C:\ws")
 
 
 def command(**kwargs) -> str:
-    return installer.reconcile_arguments(SCRIPT, WORKSPACE, **kwargs)
+    return installer.reconcile_arguments(SCRIPT, ROOT, **kwargs)
 
 
 def test_the_scheduled_run_applies_rather_than_dry_running():
@@ -62,12 +62,12 @@ def test_no_merge_label_is_passed_when_merging_is_off():
     assert "--merge-label" not in command()
 
 
-def test_the_workspace_is_named_not_inferred():
+def test_the_root_is_named_not_inferred():
     """A scheduled task starts in system32; leaving the default relies on the checkout
     never moving, and a moved checkout should fail loudly rather than reconcile
-    whatever it happens to find."""
-    assert "--workspace" in command()
-    assert str(WORKSPACE) in command()
+    whatever it happens to find. No workspace file is named: none need exist."""
+    assert f'--root "{ROOT}"' in command()
+    assert "--workspace" not in command()
 
 
 @pytest.mark.parametrize(
@@ -98,7 +98,7 @@ def test_the_scheduled_pass_is_registered_with_its_intervals_budget(monkeypatch,
 
 
 def test_paths_are_quoted_for_a_profile_name_with_spaces():
-    quoted = installer.reconcile_arguments(Path(r"C:\Program Files\ws\worktree.py"), WORKSPACE)
+    quoted = installer.reconcile_arguments(Path(r"C:\Program Files\ws\worktree.py"), ROOT)
     assert '"C:\\Program Files\\ws\\worktree.py"' in quoted
 
 
@@ -199,10 +199,10 @@ def test_status_and_uninstall_are_answered_before_any_document_is_built(monkeypa
 def _the_document_main_would_register() -> str:
     """Built the way `main` builds it: this interpreter, this checkout, the defaults."""
     python = installer.windowless(sys.executable)
-    workspace = sweep.default_workspace(REPO_ROOT).resolve()
+    root = sweep.projects_root.projects_root(REPO_ROOT).resolve()
     minutes = installer.DEFAULT_INTERVAL_MINUTES
     arguments = installer.with_budget(
-        installer.reconcile_arguments(installer.worktree_script(), workspace), minutes
+        installer.reconcile_arguments(installer.worktree_script(), root), minutes
     )
     return installer.task_document(python, arguments, minutes)
 

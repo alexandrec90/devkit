@@ -68,19 +68,18 @@ def test_a_layout_without_pythonw_falls_back_rather_than_failing(tmp_path):
     assert sched.windowless_python(str(real)) == str(real)
 
 
-def test_the_schedule_names_the_workspace_it_operates_on():
+def test_the_schedule_names_the_root_it_operates_on():
     """The registered command is the only record of the blast radius; a reader of
     `schtasks /Query` should not have to know the script's default to know it."""
     resolved = sched.schedule_for()
-    assert "--workspace" in resolved.command
-    assert resolved.command.index("--workspace") == len(resolved.command) - 2
+    assert "--root" in resolved.command and "--workspace" not in resolved.command
+    assert resolved.command.index("--root") == len(resolved.command) - 2
 
 
-def test_a_schedule_with_no_workspace_resolved_still_runs():
-    """`--workspace` is omitted rather than passed empty: an empty string reaches
-    argparse as a stray positional, which is the failure the picker convention exists
-    to avoid."""
-    assert "--workspace" not in a_schedule(workspace="").command
+def test_a_schedule_with_no_root_resolved_still_runs():
+    """`--root` is omitted rather than passed empty: an empty string reaches argparse
+    as a stray positional, which is the failure the picker convention exists to avoid."""
+    assert "--root" not in a_schedule(root="").command
 
 
 def test_the_script_path_is_absolute_and_points_at_this_checkout():

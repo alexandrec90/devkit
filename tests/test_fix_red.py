@@ -35,10 +35,19 @@ def _regate_world(monkeypatch, code: int, err: str = "", answers: list | None = 
 
 
 def _e2e_workspace(tmp_path: Path, hosts=None) -> Path:
-    settings = {} if hosts is None else {"devkit.localE2e": {"hosts": hosts}}
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text(json.dumps({"folders": [], "settings": settings}), encoding="utf-8")
-    return workspace
+    """The devkit checkout under `tmp_path` assigning `hosts` in its `projects.toml`; the
+    returned path is the deprecated workspace argument, which is never read."""
+    root = tmp_path / "devkit"
+    root.mkdir(exist_ok=True)
+    if hosts is not None:
+        if isinstance(hosts, str):
+            value = json.dumps(hosts)
+        else:
+            value = "{" + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in hosts.items()) + "}"
+        (root / "projects.toml").write_text(
+            f'[settings."devkit.localE2e"]\nhosts = {value}\n', encoding="utf-8"
+        )
+    return tmp_path / "w.code-workspace"
 
 
 def test_a_project_another_machine_tests_has_no_local_result_here(tmp_path):
@@ -50,21 +59,25 @@ def test_a_project_another_machine_tests_has_no_local_result_here(tmp_path):
     assert fix_red.e2e_here(workspace, ["carameli", "devkit"], "desktop-c", root) == []
 
 
-def test_with_no_assignment_or_no_workspace_every_project_is_read_here(tmp_path):
+def test_with_no_assignment_or_no_registry_every_project_is_read_here(tmp_path):
     projects = ["carameli", "devkit"]
     root = tmp_path / "devkit"
     assert fix_red.e2e_here(_e2e_workspace(tmp_path), projects, "desktop-a", root) == projects
-    assert fix_red.e2e_here(tmp_path / "absent", projects, "desktop-a", root) == projects
+    assert fix_red.e2e_here(tmp_path / "absent", projects, "desktop-a", tmp_path / "x") == projects
 
 
-def test_the_assignment_is_read_from_projects_toml_first(tmp_path):
+def test_the_assignment_is_read_from_projects_toml_and_never_the_workspace_file(tmp_path):
     root = tmp_path / "devkit"
     root.mkdir()
+    workspace = tmp_path / "w.code-workspace"
+    workspace.write_text(
+        json.dumps({"settings": {"devkit.localE2e": {"hosts": "desktop-a"}}}), encoding="utf-8"
+    )
+    assert fix_red.e2e_here(workspace, ["carameli"], "desktop-b", root) == ["carameli"]
     (root / "projects.toml").write_text(
         '[settings."devkit.localE2e"]\nhosts = "desktop-b"\n', encoding="utf-8"
     )
-    workspace = _e2e_workspace(tmp_path, "desktop-a")
-    assert fix_red.e2e_here(workspace, ["carameli"], "desktop-b", root) == ["carameli"]
+    assert fix_red.e2e_here(workspace, ["carameli"], "desktop-c", root) == []
 
 
 def test_collect_red_reads_only_this_machines_heavy_tier_and_every_medium_one(

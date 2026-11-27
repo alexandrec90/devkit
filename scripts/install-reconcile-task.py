@@ -111,7 +111,7 @@ windowless = devkit_schtasks.windowless
 
 def reconcile_arguments(
     script: Path,
-    workspace: Path,
+    root: Path,
     automerge: bool = False,
     min_free_gb: float = 0.0,
     checkouts: bool = True,
@@ -127,16 +127,16 @@ def reconcile_arguments(
     Paths are wrapped in double quotes because `Desktop\\vs_code` sits under a user
     profile whose name can, and on other machines does, contain spaces.
 
-    `--workspace` is passed explicitly rather than left to the default. A scheduled
-    task starts in `system32`, and `worktree.py` resolves its default workspace
+    `--root`, the projects root, is passed explicitly rather than left to the default. A
+    scheduled task starts in `system32`, and `worktree.py` resolves its default root
     relative to its own location — which works, but silently depends on the checkout
     never moving. Naming it makes a moved checkout fail loudly instead.
     """
     parts = [
         f'"{script}"',
         "reconcile",
-        "--workspace",
-        f'"{workspace}"',
+        "--root",
+        f'"{root}"',
         "--merge" if automerge else "--no-merge",
         # Named rather than left to the default, like every other knob here: the
         # command string is what `schtasks /query` shows, and this half of the pass
@@ -265,7 +265,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--min-free-gb", type=float, default=0.0)
-    parser.add_argument("--workspace", type=Path, default=None)
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
+    )
     parser.add_argument("--yes", dest="apply", action="store_true", help="actually call schtasks")
     return parser
 
@@ -284,9 +287,9 @@ def main(argv: list[str] | None = None) -> int:
     # `sys.executable` is whichever interpreter installed this, which is the one that
     # will still be there in an hour. A bare `python` would resolve against a PATH the
     # scheduler does not necessarily share.
-    # Box-aware (see `sweep.default_workspace`): the installed task carries this path
+    # Box-aware (see `projects_root.projects_root`): the installed task carries this path
     # verbatim, so installing from a box would have scheduled a reconcile pass pointed
-    # at a registry that does not exist -- every fifteen minutes, silently.
+    # at a directory holding no checkouts -- every fifteen minutes, silently.
     if args.apply and sweep.source_checkout(REPO_ROOT) != REPO_ROOT:
         # The registered command carries this checkout's path verbatim, and a box is
         # destroyed by the very pass being scheduled -- so this installs a task that
@@ -306,12 +309,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    workspace = (args.workspace or sweep.default_workspace(REPO_ROOT)).resolve()
+    root = sweep.projects_root.from_flags(args.root, args.workspace, REPO_ROOT).resolve()
     python = windowless(sys.executable)
     arguments = with_budget(
         reconcile_arguments(
             worktree_script(),
-            workspace,
+            root,
             args.automerge,
             args.min_free_gb,
             args.checkouts,

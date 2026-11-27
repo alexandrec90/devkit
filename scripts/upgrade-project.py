@@ -110,8 +110,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # devkit's own `scripts/`, resolved from this file rather than from `REPO_ROOT`:
 # that one is the artifact root, and the tests point it at a temporary directory.
 SCRIPTS_DIR = Path(__file__).resolve().parent
-# Box-aware (see `sweep.default_workspace`).
-DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 SYNC_SCRIPT = "scripts/sync-devkit.py"
 
 # Where this run's refusals and failures are written, relative to the devkit checkout
@@ -1246,7 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
             "a repo already upgraded in this run"
         ),
     )
-    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    sweep.projects_root.add_flags(parser)
     parser.add_argument(
         "--devkit", type=Path, default=REPO_ROOT, help="devkit checkout to pull from"
     )
@@ -1282,8 +1280,8 @@ def main(argv: list[str] | None = None) -> int:
         outcomes = [*preflight, Outcome(RUN_SCOPED, code, message)]
         return _finish(tag, args.dry_run, outcomes, args.every)
 
-    if not args.workspace.is_file():
-        return stopped(2, f"upgrade: no workspace file at {args.workspace}")
+    # The internals thread a workspace path and read only its directory.
+    args.workspace = sweep.projects_root.legacy_workspace(args.root, args.workspace)
     names = sweep.managed(project_registry.all_projects())
     unknown = [name for name in requested if name not in names]
     if unknown:

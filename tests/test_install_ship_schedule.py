@@ -20,7 +20,7 @@ def schedule(every: int = installer.DEFAULT_INTERVAL):
         python=r"C:\py\pythonw.exe",
         script=r"C:\ws\devkit\scripts\ship-pass.py",
         every=every,
-        workspace=r"C:\ws\alex-projects.code-workspace",
+        root=r"C:\ws",
     )
 
 
@@ -35,13 +35,20 @@ def test_the_artifact_is_the_one_the_runner_writes():
     assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
 
 
-def test_it_runs_in_utf8_mode_and_names_its_workspace():
+def test_it_runs_in_utf8_mode_and_names_its_root():
     """A `”` in a commit subject is a byte the locale cannot decode, and every git call
     here reads text (`fix-pass.in_utf8_mode`)."""
     assert schedule().arguments[:3] == ["-X", "utf8", r"C:\ws\devkit\scripts\ship-pass.py"]
     arguments = schedule().arguments
-    assert arguments[arguments.index("--workspace") + 1] == r"C:\ws\alex-projects.code-workspace"
-    assert "--workspace" not in installer.Schedule("n", "py", "s.py", 2).arguments
+    assert arguments[arguments.index("--root") + 1] == r"C:\ws"
+    assert "--workspace" not in arguments
+    assert "--root" not in installer.Schedule("n", "py", "s.py", 2).arguments
+
+
+def test_the_root_is_the_checkouts_parent_and_names_no_workspace_file(tmp_path):
+    found = installer.schedule_for(2, tmp_path / "devkit")
+    assert found.root == str(tmp_path)
+    assert "code-workspace" not in " ".join(found.arguments)
 
 
 def test_the_task_limit_outlasts_a_run_and_the_lock_outlasts_the_limit():

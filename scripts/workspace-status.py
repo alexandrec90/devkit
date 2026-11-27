@@ -87,10 +87,11 @@ NOTIFY_TITLE = "devkit workspace"
 # Windows hands a brand new console window to every console child of a console-less
 # parent, and the scheduled pass runs under `pythonw.exe`. See `scripts/windowless-jobs.md`.
 NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-# Box-aware (see `sweep.default_workspace`). This one had the quietest version of the
-# bug: a session started inside a box resolved a registry that does not exist, and this
-# hook's whole design is to stay silent when it cannot tell -- so it reported nothing,
-# in exactly the checkouts an agent works in.
+# Box-aware (see `projects_root.py`). This one had the quietest version of the bug: a
+# session started inside a box resolved a root holding no checkouts, and this hook's
+# whole design is to stay silent when it cannot tell -- so it reported nothing, in
+# exactly the checkouts an agent works in. Its directory is the projects root; the file
+# is read only by `machine_role.migrate_and_say`, if it is still there.
 DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 # devkit's PERMANENT checkout, which is this one unless the session is in a box. The
 # adoption and retired-hook checks below exempt the source of those files by comparing
@@ -1133,9 +1134,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
+    # Its directory is the projects root; the file itself is read only by the one-shot
+    # machine-settings migration at the end, and need not exist.
     workspace = DEFAULT_WORKSPACE
-    if not workspace.is_file():
-        return 0
     resumed = machine_clock.awake_since()
     if args.notify:
         # The unattended run only: a person at a terminal is not made to wait.

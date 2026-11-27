@@ -15,7 +15,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from support import task_slug, worktree
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch):
+    """The project registry the hook reads: one project, `carameli`."""
+    registry = worktree.sweep.project_registry
+    monkeypatch.setattr(registry, "all_projects", lambda *_a, **_k: ["carameli"])
 
 
 def test_a_slug_written_by_the_prompt_hook_is_read_back_by_the_guard(tmp_path):
@@ -82,9 +90,10 @@ def _stdin(text: str):
 
 
 def _workspace(tmp_path):
-    path = tmp_path / "alex-projects.code-workspace"
-    path.write_text(json.dumps({"folders": [{"path": "carameli"}]}), encoding="utf-8")
-    return path
+    """A projects root holding the registered checkout; the returned path names it the
+    deprecated way, and is never written -- only its directory is read."""
+    (tmp_path / "carameli").mkdir(exist_ok=True)
+    return tmp_path / "alex-projects.code-workspace"
 
 
 def test_main_records_the_prompts_topic_for_the_session(tmp_path, monkeypatch):
@@ -117,10 +126,39 @@ def test_main_does_not_replace_the_task_with_a_task_notification(tmp_path, monke
     assert task_slug.read(tmp_path, "sess-9") == "serialize-auth-skin-load"
 
 
-def test_main_is_silent_without_a_workspace_file(tmp_path, monkeypatch):
+def test_main_is_silent_on_a_root_holding_no_registered_checkout(tmp_path, monkeypatch):
     """A CI runner, a fresh clone, anyone else's machine: there is no box tier."""
     monkeypatch.setattr("sys.stdin", _stdin(json.dumps({"session_id": "s", "prompt": "x"})))
     assert task_slug.main(["--workspace", str(tmp_path / "nope.code-workspace")]) == 0
+    assert task_slug.read(tmp_path, "s") == ""
+    assert not task_slug.serves_checkouts(tmp_path)
+
+
+def test_main_names_the_root_with_root_too(tmp_path, monkeypatch):
+    _workspace(tmp_path)
+    assert task_slug.serves_checkouts(tmp_path)
+    payload = json.dumps({"session_id": "sess-r", "prompt": "Add a retry to the poller"})
+    monkeypatch.setattr("sys.stdin", _stdin(payload))
+    assert task_slug.main(["--root", str(tmp_path)]) == 0
+    assert task_slug.read(tmp_path, "sess-r")
+
+
+def test_workspace_arg_reads_root_or_the_deprecated_workspace(tmp_path):
+    given = tmp_path / "w.code-workspace"
+    assert task_slug.workspace_arg(["--workspace", str(given)]) == given.resolve()
+    assert task_slug.workspace_arg(["--root", str(tmp_path)]).parent == tmp_path.resolve()
+    assert task_slug.workspace_arg([]) == worktree.DEFAULT_WORKSPACE.resolve()
+
+
+def test_an_unreadable_registry_serves_nothing(tmp_path, monkeypatch):
+    registry = worktree.sweep.project_registry
+
+    def broken(*_a, **_k):
+        raise registry.RegistryError("no projects.toml")
+
+    monkeypatch.setattr(registry, "all_projects", broken)
+    _workspace(tmp_path)
+    assert not task_slug.serves_checkouts(tmp_path)
 
 
 def test_main_never_fails_a_prompt_on_malformed_input(tmp_path, monkeypatch):

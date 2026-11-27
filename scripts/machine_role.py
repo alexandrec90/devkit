@@ -26,12 +26,12 @@ the local end-to-end tier, a fixer session, and a queue `run` or `agent` task. E
 cheap -- the fix trigger, ship, an elevated request, the reconcile -- ignores the role.
 
 **The setting is this machine's, in `<projects-root>/.devkit-machine.json`**, beside
-`devkit.fixPass` (`project_registry.MACHINE_KEYS`): `"devkit.machineRole"`. Read through
-`project_registry.setting`, which falls back to the live workspace file's `settings`
-where the machine file does not set it, so a PC that has not migrated keeps its role.
-`--set` writes the machine file; `--migrate` copies all three machine settings the live
-file holds and the machine file lacks (`project_registry.migrate_machine_settings`),
-which the daily `devkit-workspace-status` pass also does on every PC.
+`devkit.fixPass` (`project_registry.MACHINE_KEYS`): `"devkit.machineRole"`, read through
+`project_registry.setting` and nowhere else. `--set` writes the machine file;
+`--migrate` copies all three machine settings the retired live workspace file still
+holds and the machine file lacks (`project_registry.migrate_machine_settings`), which
+the daily `devkit-workspace-status` pass also does on every PC -- so a PC that had not
+migrated keeps its role from that pass on.
 
 Tested in `tests/test_machine_role.py`.
 """
@@ -39,14 +39,12 @@ Tested in `tests/test_machine_role.py`.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import devkit_jsonc
 import project_registry
-import sweep
+import projects_root
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -74,24 +72,13 @@ def role_value(value: object) -> str:
     return value if isinstance(value, str) and value in ROLES else UNSET
 
 
-def role_of(text: str) -> str:
-    """The role a workspace file's text gives this machine; `UNSET` for anything absent,
-    unparsable or misspelt."""
+def role_here(root: Path | None = None) -> str:
+    """This machine's role, off the machine file at the projects root `root` (default:
+    the one this checkout resolves). `UNSET` when it cannot be read, a malformed machine
+    file included."""
+    where = projects_root.projects_root(REPO_ROOT) if root is None else root
     try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return UNSET
-    settings = payload.get("settings") if isinstance(payload, dict) else None
-    return role_value(settings.get(SETTING) if isinstance(settings, dict) else None)
-
-
-def role_here(workspace: Path | None = None) -> str:
-    """This machine's role: the machine file beside `workspace` (default: the live
-    workspace file), else that file's `settings`. `UNSET` when neither can be read,
-    a malformed machine file included."""
-    path = workspace or sweep.default_workspace(REPO_ROOT)
-    try:
-        return role_value(project_registry.setting(SETTING, workspace=path))
+        return role_value(project_registry.setting(SETTING, root=where))
     except (project_registry.RegistryError, OSError):
         return UNSET
 
@@ -99,7 +86,7 @@ def role_here(workspace: Path | None = None) -> str:
 def role_beside(devkit_root: Path) -> str:
     """The role the machine beside the devkit checkout at `devkit_root` has, so a pass
     handed a root in a test reads that root's files and never the live ones."""
-    return role_here(sweep.default_workspace(devkit_root))
+    return role_here(projects_root.projects_root(devkit_root))
 
 
 def migrate_line(workspace: Path) -> str:
@@ -140,25 +127,30 @@ def main(argv: list[str] | None = None) -> int:
         help="copy the machine settings the live workspace file holds into the machine file",
     )
     parser.add_argument(
+        "--root", type=Path, default=None, help="the projects root the machine file is in"
+    )
+    parser.add_argument(
         "--workspace",
         type=Path,
         default=None,
-        help="the live workspace file; the machine file is the one beside it",
+        help="deprecated: names the root; also the live file `--migrate` reads",
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    workspace = args.workspace or sweep.default_workspace(REPO_ROOT)
-    machine = workspace.parent / project_registry.MACHINE_FILE_NAME
+    root = projects_root.from_flags(args.root, args.workspace, REPO_ROOT)
+    machine = root / project_registry.MACHINE_FILE_NAME
     try:
         if args.migrate:
-            copied = project_registry.migrate_machine_settings(workspace=workspace)
+            copied = project_registry.migrate_machine_settings(
+                root=root, workspace=args.workspace
+            )
             print(f"machine_role: copied {', '.join(copied) or 'nothing'} into {machine}")
         if args.role is not None:
             wanted = UNSET if args.role == UNSET_WORD else args.role
-            project_registry.set_machine_setting(SETTING, wanted, workspace=workspace)
+            project_registry.set_machine_setting(SETTING, wanted, root=root)
     except (project_registry.RegistryError, OSError) as exc:
         print(f"machine_role: cannot write {machine}: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    print(describe(role_here(workspace), machine))
+    print(describe(role_here(root), machine))
     return EXIT_OK
 
 

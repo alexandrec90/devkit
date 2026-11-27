@@ -181,7 +181,8 @@ def totals_line(snap: reclaim.Snapshot) -> str:
 def reap_status(
     root: Path, workspace: Path | None, run: Runner = run_command, python: str = ""
 ) -> list[str]:
-    """`reap-stale.py status`'s own verdict lines, so this never paraphrases them."""
+    """`reap-stale.py status`'s own verdict lines, so this never paraphrases them. Only
+    `workspace`'s directory, the projects root, is passed on."""
     argv = [
         python or sweep.console_python(),
         str(REPO_ROOT / "scripts" / "reap-stale.py"),
@@ -189,7 +190,7 @@ def reap_status(
     ]
     argv += ["--devkit", str(root)]
     if workspace:
-        argv += ["--workspace", str(workspace)]
+        argv += ["--root", str(workspace.parent)]
     try:
         result = run(argv)
     except (OSError, subprocess.SubprocessError) as error:

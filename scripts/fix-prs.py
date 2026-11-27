@@ -491,7 +491,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--redo", action="store_true", help="send again what the ledger says was already sent"
     )
     parser.add_argument("--list", action="store_true", help="print the broken PRs and stop")
-    parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument("--workspace", type=Path, default=None, help=worktree.WORKSPACE_HELP)
     agent_models.add_arguments(parser)
     return parser
 
@@ -507,10 +508,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
 
     args = build_parser().parse_args(raw)
-    workspace = args.workspace.resolve()
-    if not workspace.is_file():
-        print(f"fix-prs: no workspace file at {workspace}", file=sys.stderr)
-        return EXIT_USAGE
+    # Only its directory is read; no workspace file need exist.
+    workspace = worktree.workspace_from(args.root, args.workspace)
 
     try:
         if args.list:

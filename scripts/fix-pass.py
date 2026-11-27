@@ -92,6 +92,7 @@ import gate_evidence
 import git_trust
 import installers
 import precommit_store
+import projects_root
 import ship_intent
 import ship_step
 import sweep
@@ -311,7 +312,7 @@ def ship_intents(
         return step()
 
 
-def refresh_installers(workspace: Path, journal: Journal | None = None) -> int:
+def refresh_installers(journal: Journal | None = None) -> int:
     """`installers.py maintain`, in-process: every installer's `--check`, `--yes` where
     stale. Its exit code; a failed installer is filed, with that job's artifact.
 
@@ -322,7 +323,7 @@ def refresh_installers(workspace: Path, journal: Journal | None = None) -> int:
     so a dispatching one applies it. After the send, so a re-registration of the pass's
     own task cannot come between a decision and its dispatch.
     """
-    code = installers.main(["maintain", "--workspace", str(workspace)])
+    code = installers.main(["maintain"])
     if code == 2 and journal is not None:
         artifact = installers.sweep.source_checkout(REPO_ROOT) / installers.ARTIFACT
         fix_loop.fix_findings.file(
@@ -571,7 +572,7 @@ def run(
         "send", send_all, go, ctx, launch, journal, closed, items, default=UNSENT, always=True
     )
     if mode == fix_cycle.DISPATCH:
-        step("installers", refresh_installers, workspace, journal, default=2)
+        step("installers", refresh_installers, journal, default=2)
     drift, issues, migrated, reverted = tend(workspace, ctx, journal, failures)
     filed += fix_loop.record(ctx, journal)
     account = fix_cycle.Account(
@@ -646,7 +647,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="the scheduled job: mode from this PC's machine file, agent forced to claude-bg",
     )
-    parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
+    parser.add_argument(
+        "--root", type=Path, default=None, help="the projects root (default: this checkout's)"
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="deprecated: its directory is the projects root; the file is never read",
+    )
     # Carried, never interpreted: the pair reaches `fix-prs.open_session` unchanged. A
     # scheduled pass passes neither and so opens at whatever the CLI is configured with,
     # except where `fix_budget.budget` climbs the ladder.
@@ -745,14 +754,12 @@ def main(argv: list[str] | None = None) -> int:
     deadline = send_deadline(time.monotonic())
     fix_send.pin_loaded(REPO_ROOT)  # before anything can fast-forward the checkout
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
-    workspace = args.workspace.resolve()
-    if not workspace.is_file():
-        print(f"fix-pass: no workspace file at {workspace}", file=sys.stderr)
-        return EXIT_USAGE
-    mode = args.mode or fix_cycle.mode_here(workspace)
+    # The internals still thread a `workspace` and read only its directory.
+    workspace = projects_root.legacy_workspace(args.root, args.workspace, REPO_ROOT).resolve()
+    mode = args.mode or fix_cycle.mode_here(workspace.parent)
     agent = SCHEDULED_AGENT if args.scheduled else args.agent
     if args.scheduled:
-        mode = fix_cycle.mode_here(workspace)
+        mode = fix_cycle.mode_here(workspace.parent)
     mode = fix_send.dispatch_mode(mode, REPO_ROOT)
     if mode == fix_cycle.DISPATCH and not args.scheduled and agent_tabs.is_elevated():
         return hand_to_scheduled_task()

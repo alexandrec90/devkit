@@ -312,17 +312,18 @@ def record_missing(
 
 
 def registered(workspace: Path) -> list[str]:
-    """The project registry. `workspace` is deprecated and not read: it still carries the
-    settings this pass reads, and only names where the checkouts sit."""
+    """The project registry. `workspace` is deprecated and not read: it only names where
+    the checkouts sit."""
     del workspace
     return devkit_project.known_projects()
 
 
 def assignment(workspace: Path, root: Path) -> rc_config.Config:
-    """`SETTING`'s `hosts` for the devkit checkout at `root` (its `projects.toml`, else
-    `workspace`); no hosts for anything absent or broken, which reads as "every machine
-    tests its own"."""
-    return rc_config.read_hosts(SETTING, workspace, root)
+    """`SETTING`'s `hosts` off the `projects.toml` of the devkit checkout at `root`; no
+    hosts for anything absent or broken, which reads as "every machine tests its own".
+    `workspace` is deprecated and not read."""
+    del workspace
+    return rc_config.read_hosts(SETTING, root)
 
 
 def tested_here(workspace: Path, names: list[str], host: str, root: Path = REPO_ROOT) -> list[str]:
@@ -500,7 +501,9 @@ def shared(workspace: Path, seams: Seams) -> str:
     """This machine's role when it claims each run, else "": it has one
     (`machine_role.py`) and `SETTING` names no `hosts`. Named hosts are a person's
     assignment and stand; no role is today's behaviour, every machine testing its own."""
-    return "" if assignment(workspace, seams.root).hosts else machine_role.role_here(workspace)
+    if assignment(workspace, seams.root).hosts:
+        return ""
+    return machine_role.role_here(workspace.parent)
 
 
 def not_ours(name: str, project_dir: Path, job: str, role: str, seams: Seams) -> str:
@@ -553,10 +556,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    # Only its directory -- the projects root -- is read; no file need be there.
     workspace = sweep.default_workspace(REPO_ROOT)
-    if not workspace.is_file():
-        print(f"e2e-pass: no workspace file at {workspace}", file=sys.stderr)
-        return 2
     if args.verb == "status":
         return status(workspace)
     low_priority.lower()

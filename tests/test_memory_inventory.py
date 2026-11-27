@@ -174,7 +174,8 @@ def test_reap_status_hands_back_the_reapers_own_lines(tmp_path):
     lines = inventory.reap_status(tmp_path, tmp_path / "w.code-workspace", run, python="py")
     assert lines == ["  session a: idle 9 min -- kept"]
     assert calls[0][:3] == ["py", str(inventory.REPO_ROOT / "scripts" / "reap-stale.py"), "status"]
-    assert "--workspace" in calls[0] and "--devkit" in calls[0]
+    assert "--workspace" not in calls[0] and "--devkit" in calls[0]
+    assert calls[0][calls[0].index("--root") + 1] == str(tmp_path)
 
 
 def test_reap_status_reports_a_reaper_that_failed_or_could_not_run(tmp_path):

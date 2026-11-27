@@ -3,14 +3,14 @@
 
 Standard library and nothing else, because `fix-pass-watchdog.py` reads it and that file
 imports nothing the pass does: it has to run when the pass cannot be imported. So the
-setting is found by pattern in the text, with no JSON or JSONC parser.
+setting is found by pattern in the text, with no JSON parser.
 `fix_cycle.mode_here` is the pass's own reading, which also refuses a misspelt value;
 `tests/test_fix_switch.py` pins the spellings the two share.
 
-The switch is this PC's, in the machine file beside the live workspace file
-(`project_registry.MACHINE_FILE_NAME`, spelled here rather than imported). A machine
-file that does not set it -- or is not there -- leaves the workspace file to answer, as
-`project_registry.setting` does.
+The switch is this PC's, in the machine file at the projects root
+(`project_registry.MACHINE_FILE_NAME`, spelled here rather than imported), and nowhere
+else: a machine file that does not set it -- or is not there -- is `OFF`, as
+`project_registry.setting` reads it. The retired live workspace file is not consulted.
 
 Tested in `tests/test_fix_switch.py`.
 """
@@ -35,10 +35,7 @@ def _found(path: Path) -> str | None:
     return found.group(1) if found else None
 
 
-def workspace_mode(workspace: Path) -> str:
-    """The switch for the machine whose live workspace file is `workspace`: the machine
-    file beside it, else `workspace` itself, else `OFF`."""
-    for path in (workspace.parent / MACHINE_FILE_NAME, workspace):
-        if (mode := _found(path)) is not None:
-            return mode
-    return OFF
+def root_mode(root: Path) -> str:
+    """The switch for the machine whose projects root is `root`: its machine file's
+    value, else `OFF`."""
+    return _found(root / MACHINE_FILE_NAME) or OFF

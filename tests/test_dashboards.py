@@ -25,8 +25,9 @@ def no_port(_project):
     return None
 
 
-def setting(entries) -> str:
-    return json.dumps({"settings": {dashboards.SETTING: entries}})
+def setting(entries):
+    """`SETTING`'s value as `project_registry.setting` hands it over: the entries."""
+    return entries
 
 
 # --- the setting -----------------------------------------------------------------------
@@ -138,23 +139,22 @@ def test_the_defaults_are_thirty_minutes_and_the_root():
 
 
 @pytest.mark.parametrize(
-    ("text", "notes"),
+    ("value", "notes"),
     [
-        ("{", ["the workspace file does not parse"]),
-        (json.dumps({"settings": {}}), []),
-        (json.dumps({"settings": {dashboards.SETTING: []}}), ["object keyed by project"]),
+        (None, []),
+        ([], ["object keyed by project"]),
+        ("p", ["object keyed by project"]),
     ],
 )
-def test_the_setting_itself(text, notes):
-    found, said = dashboards.parse_setting(text, no_port)
+def test_the_setting_itself(value, notes):
+    found, said = dashboards.parse_setting(value, no_port)
     assert found == []
     assert len(said) == len(notes)
     assert all(want in got for want, got in zip(notes, said, strict=True))
 
 
-def test_the_canonical_workspace_declares_the_three_dashboards_cleanly():
-    text = (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
-    found, notes = dashboards.parse_setting(text, dashboards.registry_port(REPO_ROOT))
+def test_the_committed_registry_declares_the_three_dashboards_cleanly():
+    found, notes = dashboards.declared(REPO_ROOT)
     assert notes == []
     by_project = {d.project: d for d in found}
     assert set(by_project) == {"d2-trader", "ibkr_trader", "sports_betting"}
@@ -736,23 +736,29 @@ def test_the_gateway_run_ticks_until_closed(tmp_path):
     assert state.is_file()
 
 
-# A workspace file under `tmp_path`, never the live one: these run in CI.
-WORKSPACE = "projects.code-workspace"
-
-
 def workspace_with(tmp_path, entries) -> Path:
-    """A devkit checkout beside a workspace file declaring `entries`."""
+    """A devkit checkout under `tmp_path` whose `projects.toml` declares `entries`, each
+    a command dashboard on an explicit port -- never the live registry: these run in CI."""
     devkit = tmp_path / "devkit"
     (devkit / "logs").mkdir(parents=True)
-    (tmp_path / WORKSPACE).write_text(setting(entries), encoding="utf-8")
+    text = ""
+    for project, entry in entries.items():
+        command = ", ".join(json.dumps(part) for part in entry["command"])
+        text += f'[settings."{dashboards.SETTING}".{project}]\ncommand = [{command}]\n'
+        text += f"port = {entry['port']}\n"
+    (devkit / "projects.toml").write_text(text, encoding="utf-8")
     return devkit
 
 
-def test_declared_reads_the_workspace_beside_the_checkout(tmp_path, monkeypatch):
+def test_declared_reads_the_registry_of_the_checkout_and_never_a_workspace_file(tmp_path):
+    missing = tmp_path / "nowhere"
+    found, notes = dashboards.declared(missing)
+    assert found == [] and len(notes) == 1 and "no projects.toml" in notes[0]
+    (tmp_path / dashboards.sweep.WORKSPACE_FILE_NAME).write_text(
+        json.dumps({"settings": {dashboards.SETTING: {"q": {"command": ["s", "{port}"]}}}}),
+        encoding="utf-8",
+    )
     devkit = workspace_with(tmp_path, {"p": {"command": ["s", "{port}"], "port": 9100}})
-    monkeypatch.setattr(dashboards.sweep, "default_workspace", lambda _root: tmp_path / "w")
-    assert dashboards.declared(devkit) == ([], [f"no workspace file at {tmp_path / 'w'}"])
-    monkeypatch.setattr(dashboards.sweep, "default_workspace", lambda _root: tmp_path / WORKSPACE)
     found, notes = dashboards.declared(devkit)
     assert [d.project for d in found] == ["p"] and notes == []
     assert dashboards.checkout_of("p", devkit) == tmp_path / "p"
@@ -777,7 +783,6 @@ def test_serve_with_no_checkout_on_this_pc_serves_nothing(tmp_path, monkeypatch)
 def test_main_status_and_open(tmp_path, monkeypatch, capsys):
     devkit = workspace_with(tmp_path, {"p": {"command": ["s", "{port}"], "port": 9100}})
     monkeypatch.setenv("DEVKIT_DIR", str(devkit))
-    monkeypatch.setattr(dashboards.sweep, "default_workspace", lambda _root: tmp_path / WORKSPACE)
     opened: list[str] = []
     monkeypatch.setattr(dashboards.webbrowser, "open", opened.append)
     assert dashboards.main([]) == 0

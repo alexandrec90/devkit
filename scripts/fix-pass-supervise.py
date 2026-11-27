@@ -49,10 +49,10 @@ import fix_reports
 import fix_send
 import fix_stall
 import harness_triage as triage
+import projects_root
 import session_friction
 import session_transcripts as st
-import worktree
-import worktree_tiers as wt  # on the path `worktree` put `scripts/hooks/` on
+import worktree_tiers as wt  # on the path `projects_root` put `scripts/hooks/` on
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WATCHDOG = REPO_ROOT / "scripts" / "fix-pass-watchdog.py"
@@ -376,7 +376,7 @@ def _render(transcript: Path | None, out: Path | None, tree: Path) -> str:
 
 
 def run_pass(workspace: Path, mode: str) -> tuple[int | None, str]:
-    argv = [sys.executable, str(WATCHDOG), "--mode", mode, "--workspace", str(workspace)]
+    argv = [sys.executable, str(WATCHDOG), "--mode", mode, "--root", str(workspace.parent)]
     done = subprocess.run(
         argv,
         capture_output=True,
@@ -493,7 +493,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--mode", choices=("plan", "dispatch"), default="dispatch")
-    parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
+    )
     parser.add_argument(
         "--min-gap", type=float, default=MIN_GAP.total_seconds() / 60, help="minutes"
     )
@@ -513,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     if why := stale_dispatch(args.mode, REPO_ROOT):
         print(f"fix-pass-supervise: {why}", file=sys.stderr)
         return EXIT_REFUSED
+    workspace = projects_root.legacy_workspace(args.root, args.workspace, REPO_ROOT).resolve()
     iterations: list[Iteration] = []
     since: _dt.datetime | None = None
     for number in range(1, args.iterations + 1):
@@ -520,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
             # Origin moved during the run: every iteration from here would be a plan.
             iterations[-1].violations.append(f"stopped before iteration {number}: {why}")
             break
-        iteration = iterate(args.workspace.resolve(), number, args.mode, utc_now, since)
+        iteration = iterate(workspace, number, args.mode, utc_now, since)
         since = utc_now()
         iterations.append(iteration)
         iteration.violations += check_progress(iterations)

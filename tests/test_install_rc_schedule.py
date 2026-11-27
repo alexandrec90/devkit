@@ -29,23 +29,23 @@ def schedule(every: int = 15) -> object:
         python=r"C:\py\pythonw.exe",
         script=r"C:\ws\devkit\scripts\rc-servers.py",
         every=every,
-        workspace=r"C:\ws\alex-projects.code-workspace",
+        root=r"C:\ws",
     )
 
 
 # --- the argv ---------------------------------------------------------------
 
 
-def test_the_command_names_the_mode_and_the_workspace():
+def test_the_command_names_the_mode_and_the_root():
     argv = schedule().command
     assert argv[:3] == [r"C:\py\pythonw.exe", r"C:\ws\devkit\scripts\rc-servers.py", "maintain"]
-    assert argv[argv.index("--workspace") + 1] == r"C:\ws\alex-projects.code-workspace"
+    assert argv[argv.index("--root") + 1] == r"C:\ws"
+    assert "--workspace" not in argv
 
 
-def test_a_machine_with_no_workspace_file_still_produces_a_runnable_command():
-    """`sweep.default_workspace` can come back empty on a checkout that is not inside
-    one. The task should still be registrable; the runner reports the missing file into
-    its artifact, which is a diagnosable state, unlike a task that would not install."""
+def test_a_schedule_with_no_root_still_produces_a_runnable_command():
+    """The runner then resolves the root from its own checkout; the task is still
+    registrable, unlike one that would not install."""
     bare = installer.Schedule(installer.TASK_NAME, "py", "rc.py", 15, "")
     assert bare.command == ["py", "rc.py", "maintain"]
 
