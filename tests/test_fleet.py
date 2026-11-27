@@ -142,11 +142,37 @@ def test_remote_script_uses_the_same_place_under_the_other_machine_s_home(here: 
     assert argv[len(fleet.SSH) :] == [FAR, "python", "vs-code/devkit/scripts/fleet.py", "probe"]
 
 
-def test_ask_gives_the_last_line_of_a_refusal_as_the_reason(here: Path):
-    answer = "banner\nalexa@far: Permission denied (publickey)\n"
+def test_remote_script_follows_the_checkout_a_peer_published(here: Path):
+    """The logins differ, so the homes do: the peer's record says where its devkit is."""
+    argv = fleet.remote_script(FAR, here, "fleet.py", "probe", devkit="src/devkit")
+    assert argv[len(fleet.SSH) :] == [FAR, "python", "src/devkit/scripts/fleet.py", "probe"]
+
+
+def test_ask_gives_the_last_line_of_a_refusal_it_has_no_words_for(here: Path):
+    answer = "banner\nkex_exchange_identification: read: Connection reset\n"
     assert fleet.ask(FAR, HERE, here, lambda argv, timeout: (255, answer)) == fleet.Machine(
-        FAR, error="alexa@far: Permission denied (publickey)"
+        FAR, error="kex_exchange_identification: read: Connection reset"
     )
+
+
+def test_ask_says_why_a_refused_login_was_refused(here: Path):
+    """`Permission denied` for weeks was a user name nothing published."""
+    answer = "alexa@far: Permission denied (publickey)\n"
+    error = fleet.ask(FAR, HERE, here, lambda argv, timeout: (255, answer)).error
+    assert error.startswith("wrong user") and "fleet.py join" in error
+
+
+def test_ask_runs_the_probe_where_the_peer_s_record_puts_devkit(here: Path):
+    record = fleet.fleet_ssh.Record(FAR, "administrator", "ssh-ed25519 AAAA", devkit="dk")
+    facts = fleet.fleet_ssh.Known({FAR: record}, frozenset({FAR}))
+    asked: list[Sequence[str]] = []
+
+    def run(argv: Sequence[str], timeout: int) -> tuple[int, str]:
+        asked.append(argv)
+        return 255, "administrator@far: Permission denied (publickey)"
+
+    assert fleet.ask(FAR, HERE, here, run, facts).error.startswith("key not authorized")
+    assert "dk/scripts/fleet.py" in asked[0]
 
 
 def task_document(enabled: bool) -> str:
@@ -237,9 +263,13 @@ def test_survey_asks_the_online_and_reports_the_offline_without_trying_them(
             return 0, json.dumps(status)
         return 0, json.dumps(payload)
 
-    machines = fleet.survey(here, run)
+    machines = fleet.survey(here, run, fleet.fleet_ssh.Known())
 
-    assert [(m.host, m.error) for m in machines] == [(FAR, ""), (HERE, ""), (THIRD, "offline")]
+    assert [(m.host, m.error) for m in machines] == [
+        (FAR, ""),
+        (HERE, ""),
+        (THIRD, fleet.OFFLINE),
+    ]
     assert not any(THIRD in argv for argv in calls)
 
 
@@ -531,8 +561,48 @@ def test_render_adds_what_is_wrong():
     assert fleet.render([machine(HERE, 8)], [collector()])[-1] == "problem: cheap runs nowhere"
 
 
+def test_report_prints_what_was_done(capsys):
+    assert fleet.report(fleet.fleet_ssh.Joined(["wrote 1 peer(s)"])) == 0
+    assert "wrote 1 peer(s)" in capsys.readouterr().out
+
+
+def test_known_here_is_nothing_when_devkit_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    facts = fleet.fleet_ssh.Known(configured=frozenset({FAR}))
+    monkeypatch.setattr(fleet.config, "home", lambda root: tmp_path)
+    monkeypatch.setattr(fleet.sweep, "git_for", lambda path: path)
+    monkeypatch.setattr(fleet.fleet_ssh, "known", lambda git: facts)
+    assert fleet.known_here(tmp_path) is facts
+
+    def unreadable(git: object) -> object:
+        raise OSError("gone")
+
+    monkeypatch.setattr(fleet.fleet_ssh, "known", unreadable)
+    assert fleet.known_here(tmp_path) == fleet.fleet_ssh.Known()
+
+
+def test_main_dispatches_join(monkeypatch: pytest.MonkeyPatch, here: Path):
+    ran: list[Path] = []
+
+    def join(devkit: Path, git: object) -> object:
+        ran.append(devkit)
+        return fleet.fleet_ssh.Joined()
+
+    monkeypatch.setattr(fleet.fleet_ssh, "join", join)
+    assert fleet.main(["join"]) == 0
+    assert ran == [here]
+
+
+def test_there_is_no_verb_a_person_has_to_run_elevated():
+    """Keys for an administrator login are the elevated worker's (`fleet-authorize`)."""
+    with pytest.raises(SystemExit):
+        fleet.parse_args(["authorize"])
+
+
 def test_parse_args_reads_each_verb():
     assert fleet.parse_args([]).verb is None
+    assert fleet.parse_args(["join"]).verb == "join"
     assert fleet.parse_args(["rebalance", "--apply"]).apply is True
     moving = fleet.parse_args(["move", "cheap", "--to", FAR])
     assert (moving.project, moving.to) == ("cheap", FAR)

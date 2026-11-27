@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The one thing devkit runs as an administrator: one verb, taking no input.
+"""The one thing devkit runs as an administrator: two verbs, taking no input.
 
 Merged code here is unreviewed, so a dispatcher that ran tasks as admin would hand one bad
 merge the machine. This is the opposite shape. Task Scheduler runs a *copy* of this file
@@ -22,10 +22,11 @@ What a change here has to keep, each held by a test in `tests/test_elevated_work
   Nothing is deleted recursively, for the same reason. `SENTINEL` is why the junction
   cannot appear in the first place: Windows only lets an empty directory become a mount
   point, and the user may not delete that file.
-- **Everything this file writes is under `ROOT`.** No tree of the user's is touched, which
-  is what keeps this out of `elevated_writes.py`'s findings. `wsl --update` installs WSL
-  itself, as `docker-maint.py recover-wsl` does, with `TEMP` inside `ROOT` so the installer
-  it downloads is never in a folder the user can write.
+- **Everything this file writes is under `ROOT`**, with one exception, appended to and
+  never rewritten: sshd's `administrators_authorized_keys` (`fleet-authorize`). No tree of
+  the user's is touched, which is what keeps this out of `elevated_writes.py`'s findings.
+  `wsl --update` installs WSL itself, as `docker-maint.py recover-wsl` does, with `TEMP`
+  inside `ROOT` so the installer it downloads is never in a folder the user can write.
 - **A healthy service is left alone.** Ending `WSLService` ends every distro and Docker's
   VM, so a request is not an instruction: `unhealthy` has to find the service stuck, with
   queries that need no elevation and a bound on each.
@@ -53,6 +54,36 @@ Bringing Docker Desktop back afterwards is deliberately not here: from here it w
 the backend elevated, the failure `docker-maint.desktop_launch` exists to avoid. That is
 `collectors.py`'s, unelevated.
 
+## The second verb, `fleet-authorize`, and what it trusts
+
+Windows OpenSSH reads an administrator's keys from
+`C:\\ProgramData\\ssh\\administrators_authorized_keys`, which only an administrator may
+write, and a PC whose only SSH login is an administrator (`AllowUsers administrator`) is
+unreachable to the fleet until each peer's key is there. `fleet_ssh.py join` asks for
+this verb by name when one is missing; the request still carries nothing.
+
+What it adds is decided here, from sources no unelevated process on this PC controls:
+
+- **The records come from devkit's origin, not the checkout.** `refs/devkit/fleet/*` is
+  fetched from `FLEET_ORIGIN`, a literal URL, into a bare repository under `HOME`, by the
+  literal `GIT` with `GIT_ENV`: no user config, no prompt, no code of the checkout's.
+- **A peer is who Tailscale says it is.** A record counts only for a host that is a peer
+  in `tailscale status --json` (literal `TAILSCALE`) with the very tailnet address the
+  record claims.
+- **A key is one bare ed25519 key.** `ssh-ed25519 <base64> [comment]`, no options prefix,
+  one line, its blob decoding to an ed25519 public key; the line written carries this
+  file's own comment, never the record's.
+- **Keys are only ever added**, and a new file gets the ACL sshd insists on (`ICACLS`).
+  What the file then holds is written to `FLEET_SEEN` under `HOME`, readable by the user,
+  since an unelevated `join` cannot read the keys file to see that its request was met.
+
+**The trade-off, which this cannot close: whoever can push refs to devkit's origin AND is
+a peer on this tailnet can add an SSH key that logs in to this PC as an administrator.**
+Either alone cannot: a ref from someone off the tailnet names a host Tailscale does not
+list or an address it does not give that host, and a tailnet peer without push rights has
+no record to publish. Both are the operator's own accounts today; a collaborator with push
+access, or a shared tailnet, makes this the line to revisit.
+
 Windows-only by nature; on any other platform `main` says so and exits 0.
 
 Tested in `tests/test_elevated_worker.py`.
@@ -60,6 +91,8 @@ Tested in `tests/test_elevated_worker.py`.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import ctypes
 import json
 import os
@@ -143,6 +176,42 @@ SPAWN_FAILED = -1
 NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 FILE_ATTRIBUTE_NORMAL = 0x80
 
+# `fleet-authorize` (see the module docstring). Programs by literal path, as above.
+PROGRAM_DATA = r"C:\ProgramData"
+PROGRAM_FILES = r"C:\Program Files"
+GIT = PROGRAM_FILES + r"\Git\cmd\git.exe"
+TAILSCALE = PROGRAM_FILES + r"\Tailscale\tailscale.exe"
+ICACLS = SYSTEM32 + r"\icacls.exe"
+SSH_DIR = PROGRAM_DATA + r"\ssh"
+ADMIN_KEYS_NAME = "administrators_authorized_keys"
+# `sync-devkit.DEVKIT_REPO`, which this cannot import; a test holds them equal. Public, so
+# the fetch needs no credential, and none is offered.
+FLEET_ORIGIN = "https://github.com/alexandrec90/devkit.git"
+FLEET_REFS = "refs/devkit/fleet/"
+FLEET_REPO_NAME = "fleet.git"
+# What the keys file held after the last look, for the unelevated `join`:
+# `elevated_request.FLEET_SEEN`.
+FLEET_SEEN_NAME = "fleet-authorized.json"
+FLEET_EVERY = 15 * 60
+FETCH_TIMEOUT = 120
+ADMINS_SID = "S-1-5-32-544"
+SYSTEM_SID = "S-1-5-18"
+# git's environment: `CHILD_ENV`, a `HOME` in the admin-only folder so no user config is
+# read, and no prompt for a credential nobody may give.
+GIT_ENV = {
+    **CHILD_ENV,
+    "HOME": SCRATCH,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GCM_INTERACTIVE": "never",
+}
+TAILSCALE_STATUS = (TAILSCALE, "status", "--json")
+# The blob of an ed25519 public key: its type, length-prefixed, then 32 bytes.
+ED25519_BLOB = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
+ED25519_BLOB_BYTES = len(ED25519_BLOB) + 32
+HOST_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+KEY_COMMENT = re.compile(r"^[\x21-\x7e]{1,128}$")
+
 
 @dataclass(frozen=True)
 class Layout:
@@ -151,6 +220,19 @@ class Layout:
     root: str = ROOT
     spool: str = SPOOL
     home: str = HOME
+    ssh: str = SSH_DIR
+
+    @property
+    def admin_keys(self) -> str:
+        return os.path.join(self.ssh, ADMIN_KEYS_NAME)
+
+    @property
+    def fleet_repo(self) -> str:
+        return os.path.join(self.home, FLEET_REPO_NAME)
+
+    @property
+    def fleet_seen(self) -> str:
+        return os.path.join(self.home, FLEET_SEEN_NAME)
 
     @property
     def limits(self) -> str:
@@ -173,6 +255,9 @@ class Machine:
     query: Callable[[Sequence[str], int], str]
     now: Callable[[], float] = time.time
     sleep: Callable[[float], None] = time.sleep
+    # git under `GIT_ENV`: its stdout, None when it failed. None here is no git at all,
+    # which fails `fleet-authorize` closed.
+    git: Callable[[Sequence[str], int], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -251,14 +336,245 @@ def wsl_recover(machine: Machine) -> tuple[bool, list[str]]:
     return answered not in (TIMED_OUT, SPAWN_FAILED), lines
 
 
+# --- the second verb: peers' SSH keys ---------------------------------------------
+
+
+def ed25519_key(text: object) -> str:
+    """`ssh-ed25519 <base64>` of `text` when it is exactly one bare ed25519 public key --
+    one line, no options prefix, at most a comment after it, the blob decoding to that
+    key type -- and "" for anything else."""
+    if not isinstance(text, str) or any(c in text for c in "\r\n\t\0"):
+        return ""
+    parts = text.split(" ")
+    if len(parts) not in (2, 3) or parts[0] != "ssh-ed25519":
+        return ""
+    if len(parts) == 3 and not KEY_COMMENT.match(parts[2]):
+        return ""
+    try:
+        blob = base64.b64decode(parts[1], validate=True)
+    except (binascii.Error, ValueError):
+        return ""
+    if len(blob) != ED25519_BLOB_BYTES or not blob.startswith(ED25519_BLOB):
+        return ""
+    return f"ssh-ed25519 {parts[1]}"
+
+
+def fleet_records(listing: str) -> dict[str, tuple[str, str]]:
+    """`{host: (key, address)}` from `for-each-ref` output of `fleet_list`: each ref's
+    first JSON line, kept only when it names its own ref's host. The key and address are
+    still claims here; `admitted` decides."""
+    parts = listing.split("\0")
+    found: dict[str, tuple[str, str]] = {}
+    for at in range(0, len(parts) - 1, 2):
+        name, body = parts[at].strip(), parts[at + 1]
+        host = name.removeprefix(FLEET_REFS)
+        if host == name or not HOST_NAME.match(host):
+            continue
+        line = next((ln for ln in body.splitlines() if ln.strip().startswith("{")), "")
+        try:
+            raw = json.loads(line) if line else None
+        except ValueError:
+            continue
+        if isinstance(raw, dict) and raw.get("host") == host:
+            key, address = raw.get("key"), raw.get("address")
+            if isinstance(key, str) and isinstance(address, str):
+                found[host] = (key, address)
+    return found
+
+
+def tailnet_peers(status: str) -> dict[str, frozenset[str]]:
+    """`{host: its tailnet addresses}` for each peer in `tailscale status --json`, this
+    machine (`Self`) left out, the host spelled as `fleet_ssh` publishes it."""
+    try:
+        loaded = json.loads(status)
+    except ValueError:
+        return {}
+    peers = loaded.get("Peer") if isinstance(loaded, dict) else None
+    found: dict[str, frozenset[str]] = {}
+    for peer in peers.values() if isinstance(peers, dict) else ():
+        if not isinstance(peer, dict) or not isinstance(peer.get("HostName"), str):
+            continue
+        host = peer["HostName"].strip().lower().split(".")[0]
+        addresses = peer.get("TailscaleIPs")
+        if HOST_NAME.match(host) and isinstance(addresses, list):
+            found[host] = frozenset(a for a in addresses if isinstance(a, str))
+    return found
+
+
+def admitted(
+    records: dict[str, tuple[str, str]], peers: dict[str, frozenset[str]]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """`({host: key}, {host: why refused})`: a record counts only for a current tailnet
+    peer at the address it claims, with a bare ed25519 key."""
+    keys: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    for host, (claimed, address) in sorted(records.items()):
+        if host not in peers:
+            refused[host] = "not a peer on this tailnet"
+        elif not address or address not in peers[host]:
+            refused[host] = "claims an address Tailscale does not give it"
+        elif not (key := ed25519_key(claimed)):
+            refused[host] = "its key is not one bare ssh-ed25519 key"
+        else:
+            keys[host] = key
+    return keys, refused
+
+
+def held_keys(text: str) -> frozenset[str]:
+    """`type base64` of every key line in an authorized_keys file, options or not."""
+    found = set()
+    for line in text.splitlines():
+        tokens = line.split()
+        for at, token in enumerate(tokens[:-1]):
+            if token.startswith(("ssh-", "ecdsa-", "sk-")):
+                found.add(f"{token} {tokens[at + 1]}")
+                break
+    return frozenset(found)
+
+
+def read_text(path: str) -> str:
+    """The file's text, "" when it does not exist; any other failure raises."""
+    try:
+        with open(path, encoding="utf-8", errors="replace", newline="") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return ""
+
+
+@dataclass(frozen=True)
+class FleetPlan:
+    """What `fleet-authorize` would add, what it refused, and what stopped it looking."""
+
+    missing: dict[str, str] = field(default_factory=dict)
+    refused: dict[str, str] = field(default_factory=dict)
+    held: frozenset[str] = frozenset()
+    error: str = ""
+    records: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+
+def fleet_plan(machine: Machine, layout: Layout) -> FleetPlan:
+    """Fetch the records, ask Tailscale, read the keys file: `FleetPlan`. Writes nothing
+    but the bare repository under `HOME` the fetch fills."""
+    git = machine.git
+    if git is None:
+        return FleetPlan(error="no git to fetch the fleet's records with")
+    repo = layout.fleet_repo
+    if (
+        not os.path.isdir(repo)
+        and git((GIT, "init", "--quiet", "--bare", repo), QUERY_TIMEOUT) is None
+    ):
+        return FleetPlan(error="its record store could not be made")
+    spec = f"+{FLEET_REFS}*:{FLEET_REFS}*"
+    fetch = (GIT, "--git-dir", repo, "fetch", "--quiet", "--prune", "--no-tags", FLEET_ORIGIN, spec)
+    if git(fetch, FETCH_TIMEOUT) is None:
+        return FleetPlan(error="devkit's origin could not be fetched")
+    form = "--format=%(refname)%00%(contents:body)%00"
+    listing = git((GIT, "--git-dir", repo, "for-each-ref", form, FLEET_REFS), QUERY_TIMEOUT)
+    if listing is None:
+        return FleetPlan(error="the fetched records could not be listed")
+    peers = tailnet_peers(machine.query(TAILSCALE_STATUS, QUERY_TIMEOUT))
+    if not peers:
+        return FleetPlan(error="Tailscale names no peer")
+    records = fleet_records(listing)
+    keys, refused = admitted(records, peers)
+    try:
+        held = held_keys(read_text(layout.admin_keys))
+    except OSError:
+        return FleetPlan(error=f"{ADMIN_KEYS_NAME} could not be read")
+    missing = {host: key for host, key in keys.items() if key not in held}
+    return FleetPlan(missing, refused, held, records=records)
+
+
+def write_seen(layout: Layout, plan: FleetPlan, held: frozenset[str]) -> None:
+    """What the keys file holds and which records were refused, the record as claimed, so
+    the unelevated `join` asks again only once a refused record has changed."""
+    refused = {
+        host: {
+            "key": plan.records.get(host, ("", ""))[0][:200],
+            "address": plan.records.get(host, ("", ""))[1][:64],
+            "why": why,
+        }
+        for host, why in plan.refused.items()
+    }
+    write_json(layout.fleet_seen, {"keys": sorted(held), "refused": refused})
+
+
+def fleet_unhealthy(machine: Machine, layout: Layout) -> str:
+    """Why keys are owed, or "" when every admitted peer's key is there. Stable words: the
+    pass files a failure by them. A refused record alone owes nothing: it is logged when a
+    key is added, and `admitted` will not change its mind for another request."""
+    plan = fleet_plan(machine, layout)
+    if plan.error:
+        return f"the fleet's keys could not be checked: {plan.error}"
+    if plan.missing:
+        return f"a fleet peer's SSH key is missing from {ADMIN_KEYS_NAME}"
+    write_seen(layout, plan, plan.held)
+    return ""
+
+
+def fleet_recover(machine: Machine, layout: Layout) -> tuple[bool, list[str]]:
+    """Append each admitted peer's missing key, never removing one; `(all added, lines)`.
+    A file this makes gets sshd's ACL, Administrators and SYSTEM alone."""
+    plan = fleet_plan(machine, layout)
+    lines = [f"refused {host}: {why}" for host, why in plan.refused.items()]
+    if plan.error:
+        return False, [*lines, plan.error]
+    if not plan.missing:
+        write_seen(layout, plan, plan.held)
+        return True, [*lines, "nothing to add"]
+    path = layout.admin_keys
+    existed = os.path.isfile(path)
+    try:
+        text = read_text(path)
+        head = "" if not text or text.endswith("\n") else "\r\n"
+        added = "".join(f"{key} devkit-fleet:{host}\r\n" for host, key in plan.missing.items())
+        with open(path, "a", encoding="utf-8", newline="") as handle:
+            handle.write(head + added)
+    except OSError as exc:
+        return False, [*lines, f"{ADMIN_KEYS_NAME} could not be appended to: {exc}"]
+    lines.append(f"added {', '.join(plan.missing)}")
+    secured = True
+    if not existed:
+        acl = (
+            ICACLS,
+            path,
+            "/inheritance:r",
+            "/grant",
+            f"*{ADMINS_SID}:F",
+            "/grant",
+            f"*{SYSTEM_SID}:F",
+        )
+        code = machine.run(acl, QUERY_TIMEOUT)
+        secured = code == 0
+        lines.append(f"icacls exited {code}")
+    write_seen(layout, plan, plan.held | frozenset(plan.missing.values()))
+    return secured, lines
+
+
 @dataclass(frozen=True)
 class Verb:
-    unhealthy: Callable[[Machine], str]
-    recover: Callable[[Machine], tuple[bool, list[str]]]
+    unhealthy: Callable[[Machine, Layout], str]
+    recover: Callable[[Machine, Layout], tuple[bool, list[str]]]
     every: int
+    # How a result says it went: `{why}, and {unfixed}` when it did not.
+    fixed: str = "answers again"
+    unfixed: str = "a restart did not bring it back"
 
 
-VERBS: dict[str, Verb] = {"restart-wsl-service": Verb(wsl_unhealthy, wsl_recover, RESTART_EVERY)}
+VERBS: dict[str, Verb] = {
+    "restart-wsl-service": Verb(
+        lambda machine, _layout: wsl_unhealthy(machine),
+        lambda machine, _layout: wsl_recover(machine),
+        RESTART_EVERY,
+    ),
+    "fleet-authorize": Verb(
+        fleet_unhealthy,
+        fleet_recover,
+        FLEET_EVERY,
+        fixed="every admitted peer's key is there",
+        unfixed="not every key could be added; worker.log says which and why",
+    ),
+}
 
 REQUEST_NAMES: dict[str, str] = {f"{verb}{REQUEST_SUFFIX}": verb for verb in VERBS}
 
@@ -347,6 +663,11 @@ def shown(name: str) -> str:
     return ascii(name)[:120]
 
 
+def shown_line(line: str) -> str:
+    """A recovery's line, one log line whatever it carries: a host name is a record's."""
+    return " ".join(line.split())[:300]
+
+
 # --- what is kept across runs -----------------------------------------------------
 
 
@@ -359,6 +680,13 @@ def write_json(path: str, data: dict) -> None:
 
 def write_limits(path: str, limits: dict[str, float]) -> None:
     write_json(path, limits)
+
+
+def window(every: int) -> str:
+    """A rate limit as a result says it: `6-hour`, `15-minute`."""
+    if every >= 3600 and every % 3600 == 0:
+        return f"{every // 3600}-hour"
+    return f"{max(every // 60, 1)}-minute"
 
 
 def limited(last: float | None, every: int, now: float) -> bool:
@@ -431,7 +759,7 @@ def serve(
     verb that did not run rather than one that runs again."""
     report = Report()
     spec = VERBS[verb]
-    why = spec.unhealthy(machine)
+    why = spec.unhealthy(machine, layout)
     gone = remove(entry)
     if not why:
         report.say(f"{verb}: healthy; left alone", failed=not gone)
@@ -442,7 +770,7 @@ def serve(
         # Dropped, not held: a restart run hours late, on a stale request, ends whatever
         # is running by then. A caller that still needs it asks again.
         report.say(f"{verb}: {why}; inside its rate limit; request dropped", failed=not gone)
-        report.result(verb, REFUSED, f"{why}, inside its {spec.every // 3600}-hour rate limit")
+        report.result(verb, REFUSED, f"{why}, inside its {window(spec.every)} rate limit")
         return report
     if not gone:
         report.say(f"{verb}: the request could not be deleted; not run", failed=True)
@@ -455,13 +783,13 @@ def serve(
         report.say(f"{verb}: the rate limit could not be saved ({exc}); not run", failed=True)
         report.result(verb, REFUSED, "its rate limit could not be saved")
         return report
-    recovered, lines = spec.recover(machine)
-    report.lines += [f"{verb}: {why}", *(f"{verb}: {line}" for line in lines)]
+    recovered, lines = spec.recover(machine, layout)
+    report.lines += [f"{verb}: {why}", *(f"{verb}: {shown_line(line)}" for line in lines)]
     report.failed = report.failed or not recovered
     report.result(
         verb,
         RECOVERED if recovered else FAILED,
-        "answers again" if recovered else f"{why}, and a restart did not bring it back",
+        spec.fixed if recovered else f"{why}, and {spec.unfixed}",
     )
     return report
 
@@ -533,6 +861,27 @@ def query_step(argv: Sequence[str], timeout: int) -> str:
     return done.stdout if done.returncode == 0 else ""
 
 
+def git_step(argv: Sequence[str], timeout: int) -> str | None:
+    """`query_step` for git, under `GIT_ENV`: its stdout, None when it failed, since an
+    empty listing is an answer and a failed fetch is not."""
+    try:
+        done = subprocess.run(
+            list(argv),
+            capture_output=True,
+            text=True,
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+            cwd=SYSTEM32,
+            env=dict(GIT_ENV),
+            creationflags=NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
 def guarded(layout: Layout, machine: Machine) -> int:
     """`cycle`, its log and its results. Non-zero is what `schedule_health` reads off the
     scheduler, and the next fire overwrites it, so `RESULTS` is what lasts. A crash is
@@ -558,7 +907,7 @@ def main() -> int:
     if os.name != "nt":
         print("elevated_worker: Windows-only; nothing to do here.")
         return 0
-    return guarded(Layout(), Machine(run_step, query_step))
+    return guarded(Layout(), Machine(run_step, query_step, git=git_step))
 
 
 if __name__ == "__main__":

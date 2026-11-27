@@ -27,6 +27,7 @@ SOURCE = (REPO_ROOT / "scripts" / "elevated_worker.py").read_text(encoding="utf-
 TREE = ast.parse(SOURCE)
 NOW = 1_800_000_000.0
 RESTART = "restart-wsl-service"
+FLEET = "fleet-authorize"
 RECOVERY = [worker.WSL_KILL, worker.WSL_UPDATE, worker.WSL_LIST]
 # Real NTFS and Win32: the local tier, which CI deselects and `scripts/e2e.py` runs nightly.
 windows_only = pytest.mark.local
@@ -101,8 +102,8 @@ def rig(tmp_path):
     return Rig(tmp_path)
 
 
-def test_there_is_one_verb_and_it_is_the_request_modules():
-    assert list(worker.VERBS) == [RESTART]
+def test_there_are_two_verbs_and_they_are_the_request_modules():
+    assert list(worker.VERBS) == [RESTART, FLEET]
     assert worker.VERBS.keys() == set(request.VERBS)
 
 
@@ -1023,8 +1024,10 @@ def test_no_limits_record_is_no_window_spent(tmp_path):
 def test_a_limits_record_that_will_not_read_is_every_verb_just_run(tmp_path):
     path = tmp_path / worker.LIMITS_NAME
     path.write_text("not json", encoding="utf-8")
-    assert worker.read_limits(str(path), NOW) == {RESTART: NOW}
-    assert json.loads(path.read_text(encoding="utf-8")) == {RESTART: NOW}, "and rewritten"
+    every = {RESTART: NOW, FLEET: NOW}
+    assert set(worker.VERBS) == set(every)
+    assert worker.read_limits(str(path), NOW) == every
+    assert json.loads(path.read_text(encoding="utf-8")) == every, "and rewritten"
 
 
 def test_results_are_written_only_for_a_subject_that_changed(tmp_path):
@@ -1093,11 +1096,11 @@ def test_serving_a_verb_runs_its_own_recovery_and_reports_its_failure(rig, monke
     """Whatever the verb: the order is the same, and a recovery that did not take fails."""
     tried = []
 
-    def recover(machine):
+    def recover(machine, layout):
         tried.append(machine)
         return False, ["tried once"]
 
-    verb = worker.Verb(lambda _machine: "it is sick", recover, 60)
+    verb = worker.Verb(lambda _machine, _layout: "it is sick", recover, 60)
     monkeypatch.setitem(worker.VERBS, "probe", verb)
     limits: dict[str, float] = {}
     request_file = rig.spool / "probe.request"
@@ -1111,3 +1114,283 @@ def test_serving_a_verb_runs_its_own_recovery_and_reports_its_failure(rig, monke
     }
     assert limits == {"probe": NOW}
     assert verb.every == 60
+
+
+# --- the second verb: fleet-authorize --------------------------------------------------
+
+PEER, OTHER = "desktop-far", "desktop-other"
+PEER_IP = "100.64.0.2"
+
+
+def ed_key(fill: int = 1) -> str:
+    import base64
+
+    blob = worker.ED25519_BLOB + bytes([fill]) * 32
+    return f"ssh-ed25519 {base64.b64encode(blob).decode()}"
+
+
+def record_body(host: str, key: str, address: str = PEER_IP) -> str:
+    payload = json.dumps({"host": host, "user": "alexa", "key": key, "address": address})
+    return f"{payload}\n\nnonce abc\n"
+
+
+class FleetRig(Rig):
+    """A `Rig` whose git serves `records` and whose Tailscale lists `peers`."""
+
+    def __init__(self, tmp_path: Path):
+        super().__init__(tmp_path)
+        self.ssh = tmp_path / "ssh"
+        self.ssh.mkdir()
+        self.layout = worker.Layout(str(self.root), str(self.spool), str(self.home), str(self.ssh))
+        self.records: dict[str, str] = {PEER: record_body(PEER, ed_key())}
+        self.peers: dict[str, list[str]] = {PEER: [PEER_IP, "fd7a::2"]}
+        self.git_calls: list[tuple[str, ...]] = []
+        self.fetch_fails = False
+
+    def git(self, argv, timeout):
+        argv = tuple(argv)
+        self.git_calls.append(argv)
+        assert argv[0] == worker.GIT
+        if "init" in argv:
+            Path(argv[-1]).mkdir()
+            return ""
+        if "fetch" in argv:
+            assert worker.FLEET_ORIGIN in argv
+            return None if self.fetch_fails else ""
+        return "".join(f"{worker.FLEET_REFS}{h}\0{body}\0\n" for h, body in self.records.items())
+
+    def query(self, argv, timeout):
+        if tuple(argv) == worker.TAILSCALE_STATUS:
+            peers = {
+                f"n{i}": {"HostName": host.upper(), "TailscaleIPs": ips}
+                for i, (host, ips) in enumerate(self.peers.items())
+            }
+            return json.dumps({"Self": {"HostName": "HERE"}, "Peer": peers})
+        return super().query(argv, timeout)
+
+    @property
+    def machine(self):
+        return worker.Machine(self.run, self.query, lambda: self.clock, lambda _s: None, self.git)
+
+    @property
+    def keys(self) -> str:
+        path = self.ssh / worker.ADMIN_KEYS_NAME
+        return path.read_bytes().decode("utf-8") if path.exists() else ""
+
+    @property
+    def seen(self) -> dict:
+        return json.loads((self.home / worker.FLEET_SEEN_NAME).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def fleet(tmp_path):
+    return FleetRig(tmp_path)
+
+
+def test_fleet_programs_are_literal_paths_and_the_origin_is_devkits():
+    assert worker.GIT == r"C:\Program Files\Git\cmd\git.exe"
+    assert worker.TAILSCALE == r"C:\Program Files\Tailscale\tailscale.exe"
+    assert worker.ICACLS == r"C:\Windows\System32\icacls.exe"
+    assert worker.SSH_DIR == r"C:\ProgramData\ssh"
+    sync = load_script("scripts/sync-devkit.py")
+    assert worker.FLEET_ORIGIN == f"{sync.DEVKIT_REPO}.git"
+    fleet_ssh = load_script("scripts/fleet_ssh.py")
+    assert worker.FLEET_REFS == fleet_ssh.FLEET
+    assert worker.ADMIN_KEYS_NAME == fleet_ssh.ADMIN_KEYS
+
+
+def test_git_runs_with_no_user_config_and_no_prompt(monkeypatch):
+    monkeypatch.setenv("HOME", r"C:\evil")
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "out", "")
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    assert worker.git_step((worker.GIT, "--version"), 5) == "out"
+    assert seen["env"] == worker.GIT_ENV and seen["env"]["HOME"] == worker.SCRATCH
+    assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0" and seen["cwd"] == worker.SYSTEM32
+    monkeypatch.setattr(
+        worker.subprocess, "run", lambda argv, **k: subprocess.CompletedProcess(argv, 1, "", "")
+    )
+    assert worker.git_step((worker.GIT, "fetch"), 5) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        f'command="evil" {ed_key()}',
+        f"{ed_key()}\nssh-ed25519 AAAA",
+        f"{ed_key()} two words",
+        "ssh-rsa " + ed_key().split()[1],
+        "ssh-ed25519 notbase64!!",
+        "ssh-ed25519 " + __import__("base64").b64encode(b"\0\0\0\x07ssh-rsa" + bytes(40)).decode(),
+        3,
+    ],
+)
+def test_only_one_bare_ed25519_key_is_a_key(bad):
+    assert worker.ed25519_key(bad) == ""
+
+
+def test_a_bare_key_with_or_without_a_comment_is_one():
+    assert worker.ed25519_key(ed_key()) == ed_key()
+    assert worker.ed25519_key(f"{ed_key()} me@far") == ed_key()
+
+
+def test_a_record_counts_only_for_a_peer_at_the_address_it_claims():
+    records = {
+        PEER: (ed_key(1), PEER_IP),
+        OTHER: (ed_key(2), "100.64.0.3"),
+        "desktop-moved": (ed_key(3), "100.64.0.9"),
+        "desktop-badkey": (f"from=x {ed_key(4)}", "100.64.0.4"),
+    }
+    peers = {
+        PEER: frozenset({PEER_IP}),
+        "desktop-moved": frozenset({"100.64.0.8"}),
+        "desktop-badkey": frozenset({"100.64.0.4"}),
+    }
+    keys, refused = worker.admitted(records, peers)
+    assert keys == {PEER: ed_key(1)}
+    assert refused[OTHER] == "not a peer on this tailnet"
+    assert "address" in refused["desktop-moved"] and "key" in refused["desktop-badkey"]
+
+
+def test_a_record_naming_another_host_than_its_ref_is_dropped():
+    listing = (
+        f"{worker.FLEET_REFS}{PEER}\0{record_body(OTHER, ed_key())}\0\n"
+        f"refs/heads/main\0{record_body(PEER, ed_key())}\0\n"
+        f"{worker.FLEET_REFS}{OTHER}\0{record_body(OTHER, ed_key(2), '100.64.0.3')}\0\n"
+    )
+    assert worker.fleet_records(listing) == {OTHER: (ed_key(2), "100.64.0.3")}
+
+
+def test_tailnet_peers_leaves_this_machine_out():
+    status = json.dumps(
+        {
+            "Self": {"HostName": "HERE", "TailscaleIPs": ["100.64.0.1"]},
+            "Peer": {"a": {"HostName": "Desktop-Far", "TailscaleIPs": [PEER_IP]}},
+        }
+    )
+    assert worker.tailnet_peers(status) == {PEER: frozenset({PEER_IP})}
+    assert worker.tailnet_peers("not json") == {}
+
+
+def test_a_missing_key_is_added_with_its_acl_and_the_receipt_written(fleet):
+    fleet.ask(FLEET)
+    assert fleet.fire() == 0
+    assert f"{ed_key()} devkit-fleet:{PEER}\r\n" == fleet.keys
+    acl = [argv for argv in fleet.ran if argv[0] == worker.ICACLS]
+    assert acl and acl[0][1] == fleet.layout.admin_keys and "/inheritance:r" in acl[0]
+    assert fleet.results[FLEET]["result"] == worker.RECOVERED
+    assert fleet.seen["keys"] == [ed_key()]
+    assert fleet.left == []
+
+
+def test_keys_are_only_added_never_removed_or_rewritten(fleet):
+    held = "ssh-rsa AAAAB3old someone\r\n# a note\r\nssh-ed25519 AAAAothers"
+    (fleet.ssh / worker.ADMIN_KEYS_NAME).write_text(held, encoding="utf-8", newline="")
+    fleet.ask(FLEET)
+    fleet.fire()
+    assert fleet.keys.startswith(held + "\r\n")
+    assert fleet.keys.endswith(f"{ed_key()} devkit-fleet:{PEER}\r\n")
+    assert not [argv for argv in fleet.ran if argv[0] == worker.ICACLS], "an existing file's ACL"
+
+
+def test_a_key_already_there_is_healthy_and_spends_no_window(fleet):
+    (fleet.ssh / worker.ADMIN_KEYS_NAME).write_text(f"{ed_key()} mine\n", encoding="utf-8")
+    fleet.ask(FLEET)
+    assert fleet.fire() == 0
+    assert fleet.results[FLEET]["result"] == worker.HEALTHY
+    assert not (fleet.home / worker.LIMITS_NAME).exists()
+    assert fleet.seen["keys"] == [ed_key()]
+
+
+def test_a_refused_record_adds_nothing_and_is_named_in_the_receipt(fleet):
+    fleet.peers = {PEER: ["100.64.0.99"]}
+    fleet.ask(FLEET)
+    assert fleet.fire() == 0
+    assert fleet.keys == ""
+    assert fleet.seen["refused"][PEER]["address"] == PEER_IP
+
+
+def test_an_unreachable_origin_fails_and_reaches_the_pass(fleet):
+    fleet.fetch_fails = True
+    fleet.ask(FLEET)
+    assert fleet.fire() == 1
+    held = fleet.results[FLEET]
+    assert held["result"] == worker.FAILED and "origin could not be fetched" in held["detail"]
+    assert fleet.keys == ""
+
+
+def test_no_git_fails_closed(fleet):
+    machine = worker.Machine(fleet.run, fleet.query, lambda: NOW, lambda _s: None)
+    assert "no git" in worker.fleet_unhealthy(machine, fleet.layout)
+    assert fleet.keys == ""
+
+
+def test_a_second_request_inside_the_window_is_refused(fleet):
+    fleet.ask(FLEET)
+    fleet.fire()
+    fleet.records[OTHER] = record_body(OTHER, ed_key(2), "100.64.0.3")
+    fleet.peers[OTHER] = ["100.64.0.3"]
+    fleet.ask(FLEET)
+    fleet.clock += 60
+    fleet.fire()
+    assert fleet.results[FLEET]["result"] == worker.REFUSED
+    assert ed_key(2) not in fleet.keys
+    assert "15-minute rate limit" in fleet.results[FLEET]["detail"]
+    fleet.clock += worker.FLEET_EVERY
+    fleet.ask(FLEET)
+    fleet.fire()
+    assert ed_key(2) in fleet.keys and fleet.keys.count(ed_key()) == 1
+
+
+def test_held_keys_reads_every_key_line_with_or_without_options():
+    text = f'# note\nfrom="1.2.3.4" {ed_key()} x\r\n{ed_key(2)}\nssh-rsa\n'
+    assert worker.held_keys(text) == {ed_key(), ed_key(2)}
+    assert worker.held_keys("") == frozenset()
+
+
+def test_fleet_plan_names_what_is_missing_and_what_is_refused(fleet):
+    fleet.records[OTHER] = record_body(OTHER, ed_key(2), "100.64.0.3")
+    (fleet.ssh / worker.ADMIN_KEYS_NAME).write_text(f"{ed_key(3)} old\n", encoding="utf-8")
+    plan = worker.fleet_plan(fleet.machine, fleet.layout)
+    assert isinstance(plan, worker.FleetPlan) and plan.error == ""
+    assert plan.missing == {PEER: ed_key()}
+    assert OTHER in plan.refused, "not a Tailscale peer"
+    assert plan.held == {ed_key(3)}
+
+
+def test_fleet_plan_stops_at_the_first_thing_it_cannot_read(fleet):
+    fleet.peers = {}
+    assert worker.fleet_plan(fleet.machine, fleet.layout).error == "Tailscale names no peer"
+
+
+def test_write_seen_keeps_the_refused_record_as_it_was_claimed(fleet):
+    plan = worker.FleetPlan(
+        refused={PEER: "not a peer"}, records={PEER: (ed_key(), PEER_IP)}, held=frozenset()
+    )
+    worker.write_seen(fleet.layout, plan, frozenset({ed_key(2)}))
+    assert fleet.seen == {
+        "keys": [ed_key(2)],
+        "refused": {PEER: {"key": ed_key(), "address": PEER_IP, "why": "not a peer"}},
+    }
+
+
+def test_fleet_recover_adds_nothing_when_nothing_is_missing(fleet):
+    (fleet.ssh / worker.ADMIN_KEYS_NAME).write_text(f"{ed_key()} mine\n", encoding="utf-8")
+    assert worker.fleet_recover(fleet.machine, fleet.layout) == (True, ["nothing to add"])
+    fleet.fetch_fails = True
+    done, lines = worker.fleet_recover(fleet.machine, fleet.layout)
+    assert not done and lines[-1] == "devkit's origin could not be fetched"
+
+
+def test_shown_line_is_one_bounded_log_line():
+    assert worker.shown_line("refused a\r\nb\tc") == "refused a b c"
+    assert len(worker.shown_line("x" * 1000)) == 300
+
+
+def test_a_window_is_said_in_hours_or_minutes():
+    assert worker.window(worker.RESTART_EVERY) == "6-hour"
+    assert worker.window(worker.FLEET_EVERY) == "15-minute"

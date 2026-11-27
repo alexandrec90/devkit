@@ -525,6 +525,11 @@ def test_a_live_worker_is_one_whose_beat_is_fresh_and_is_not_this_machine():
     assert jc.live_workers([], NOW, "desk") == {}
 
 
+def test_a_fleet_record_lives_under_its_own_prefix_beside_the_claims():
+    assert jc.fleet_ref("pc-a") == f"{jc.FLEET}pc-a"
+    assert jc.FLEET.startswith("refs/devkit/") and jc.fleet_ref("pc-a") != jc.worker_ref("pc-a")
+
+
 def test_a_worker_beat_is_pushed_at_most_every_few_minutes(pcs):
     a, _, remote = pcs
     ref = jc.worker_ref("pc-a")

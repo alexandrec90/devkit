@@ -86,6 +86,31 @@ def test_a_current_worker_says_nothing_at_all(tmp_path):
     assert open_rows(ctx) == []
 
 
+FLEET = elevated_request.FLEET_AUTHORIZE
+
+
+def test_a_request_an_outdated_worker_cannot_serve_is_the_install_step(tmp_path):
+    """It would delete the request as junk, so it is the same need as no worker at all."""
+    ctx = _ctx(tmp_path)
+    elevated_request.note_waiting(
+        ctx.devkit_dir, FLEET, NOW.timestamp() - 60, elevated_request.PREDATES
+    )
+    assert len(run_pass(ctx, OUTDATED)) == 1
+    [row] = open_rows(ctx)
+    assert FLEET in row.fields["detail"] and "predates it" in row.fields["detail"]
+    assert "install-elevated-worker.py" in triage.person_step(row)
+
+
+def test_a_current_worker_retires_the_predates_note(tmp_path):
+    ctx = _ctx(tmp_path)
+    elevated_request.note_waiting(
+        ctx.devkit_dir, FLEET, NOW.timestamp() - 60, elevated_request.PREDATES
+    )
+    run_pass(ctx, CURRENT)
+    assert not (ctx.devkit_dir / elevated_request.PREDATES).exists()
+    assert open_rows(ctx) == []
+
+
 # --- the one person's step -----------------------------------------------------------
 
 

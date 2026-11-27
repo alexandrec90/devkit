@@ -70,7 +70,7 @@ queue rather than costing a session per retry: for a recurring window, `when = "
 `when = "after:2026-11-12T16:05-05:00"`, ISO 8601. Both take a UTC offset, never a zone
 name. `run` executes in that project's checkout, and a failure goes to an agent on that
 machine with the output. `agent` starts a fresh session. `elevated` takes
-`restart-wsl-service` and nothing else. A task is its path and the commit that added it:
+`restart-wsl-service` or `fleet-authorize` and nothing else. A task is its path and the commit that added it:
 a revert removes it, an edit never runs a finished one again, so **to run something
 again, add a new file**. A malformed file becomes an agent task saying so.
 
