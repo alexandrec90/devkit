@@ -347,9 +347,9 @@ def scan(
     half comes back as an empty list per checkout; `LISTED` in place of `"trees"` lists
     the worktrees without reading them.
     """
-    text = workspace.read_text(encoding="utf-8")
+    # The registry names the projects; `workspace` only says where they sit (deprecated).
     root = workspace.parent
-    names = [name for name in devkit_project.known_projects(text) if (root / name).is_dir()]
+    names = [name for name in devkit_project.known_projects() if (root / name).is_dir()]
     if projects is not None:
         wanted = set(projects)
         names = [name for name in names if name in wanted]
@@ -383,9 +383,7 @@ def create(
     branch, and a base that was not fetched is however stale this checkout last was.
     """
     root = workspace.parent
-    source = devkit_project.resolve_project(
-        project, devkit_project.known_projects(workspace.read_text(encoding="utf-8")), root
-    )
+    source = devkit_project.resolve_project(project, devkit_project.known_projects(), root)
     git = sweep.git_for(source)
     runner(["git", "-C", str(source), "fetch", "--quiet", "origin"], check=False)
     ref = base or tb.detect_default_branch(git)
@@ -464,7 +462,7 @@ def remove_one(project: str, source: Path, tree: aw.Tree, forced: bool, runner) 
 def remove(picks: list[tuple[str, str]], workspace: Path, forced: bool, runner) -> int:
     """Every ticked worktree in turn. The worst exit code, so one refusal is still reported."""
     root = workspace.parent
-    projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    projects = devkit_project.known_projects()
     worst = EXIT_OK
     for project, name in picks:
         source = devkit_project.resolve_project(project, projects, root)

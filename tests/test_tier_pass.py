@@ -9,6 +9,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+import project_registry
 import pytest
 from support import generate, load_script
 
@@ -98,7 +99,19 @@ def _seams(tmp_path: Path, runs=None, **fields):
     return tier_pass.Seams(**(base | fields))
 
 
+REGISTERED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch):
+    """The project registry, as `_workspace` last set it: the pass reads its projects
+    there, and the workspace file only for `devkit.fixPass`."""
+    REGISTERED.clear()
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
+
+
 def _workspace(tmp_path: Path, names: list[str], mode: str = "dispatch") -> Path:
+    REGISTERED[:] = names
     folders = ",".join(f'{{"path": "{name}"}}' for name in names)
     workspace = tmp_path / "w.code-workspace"
     switch = f'"devkit.fixPass": "{mode}"' if mode else ""
@@ -601,8 +614,10 @@ def test_not_applicable_is_decided_before_memory_so_a_short_pc_can_say_it(tmp_pa
 # --- the pass -----------------------------------------------------------------------------
 
 
-def test_the_registered_projects_are_the_workspace_file_s(tmp_path):
-    assert tier_pass.registered(_workspace(tmp_path, ["a", "b"])) == ["a", "b"]
+def test_the_registered_projects_are_the_registry_s(tmp_path):
+    workspace = _workspace(tmp_path, ["a", "b"])
+    workspace.write_text('{"folders": [{"path": "not-the-registry"}]}', encoding="utf-8")
+    assert tier_pass.registered(workspace) == ["a", "b"], "the workspace file's folders were read"
 
 
 def test_origin_is_fetched_before_its_tip_is_read(monkeypatch):
@@ -916,7 +931,7 @@ def test_a_second_pass_on_this_machine_runs_nothing(tmp_path, capsys):
 def test_an_unregistered_project_is_refused_before_anything_runs(tmp_path, capsys):
     workspace = _workspace(tmp_path, ["a"])
     assert tier_pass.run_pass(workspace, ["typo"], _args(), _seams(tmp_path)) == 2
-    assert "not registered in the workspace: typo" in capsys.readouterr().err
+    assert "not in the project registry: typo" in capsys.readouterr().err
 
 
 def test_status_lists_each_last_result(tmp_path, capsys):
@@ -994,6 +1009,7 @@ def test_a_real_run_at_origin_s_tip_leaves_the_static_checkout_as_it_was(tmp_pat
         '{"folders": [{"path": "carameli"}], "settings": {"devkit.fixPass": "dispatch"}}',
         encoding="utf-8",
     )
+    REGISTERED[:] = ["carameli"]
     head_before = _git(checkout, "rev-parse", "HEAD")
     seams = tier_pass.Seams(
         root=tmp_path / "devkit",

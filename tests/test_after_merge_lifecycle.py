@@ -234,9 +234,9 @@ def test_a_failed_task_is_visible_in_status_and_stays_in_the_repo(world, capsys)
     for _cycle in range(2 * am.MAX_ATTEMPTS + 2):
         world.run()
     capsys.readouterr()
-    after_merge_pass.status(world.workspace, [], world.seams())
+    after_merge_pass.status(world.ws,[], world.seams())
     assert f"[{task}]: failed" in capsys.readouterr().out
-    boards = after_merge_pass._read_boards(world.workspace, ["carameli"], world.seams())
+    boards = after_merge_pass._read_boards(world.ws,["carameli"], world.seams())
     assert am.removable(boards["carameli"].tasks, boards["carameli"].done) == []
 
 
@@ -297,7 +297,7 @@ def test_an_elevated_request_is_not_done_until_the_worker_takes_it(world):
 def test_only_done_is_removable_in_the_tidy(world):
     world.queue('agent = "x"\nwhen = "merged"\n')
     world.run()
-    boards = after_merge_pass._read_boards(world.workspace, ["carameli"], world.seams())
+    boards = after_merge_pass._read_boards(world.ws,["carameli"], world.seams())
     assert am.removable(boards["carameli"].tasks, boards["carameli"].done) == []
 
 
@@ -327,7 +327,7 @@ def test_a_dependency_on_an_every_machine_task_means_this_hosts_own_run(world):
     world.run()
     world.queue('when = "task:a"\non = "pc-b"\nrun = "echo ran>> ran.txt"\n', name="b")
     world.host = "pc-b"
-    facts_board = after_merge_pass._read_boards(world.workspace, ["carameli"], world.seams())
+    facts_board = after_merge_pass._read_boards(world.ws,["carameli"], world.seams())
     board = facts_board["carameli"]
     assert not am.named_done("a", board.tasks, board.successes, board.done_names, "pc-b")
     assert am.named_done("a", board.tasks, board.successes, board.done_names, "pc-a")
@@ -602,7 +602,7 @@ def test_an_every_machine_task_stays_until_each_counted_host_ran_it(world):
     world.run(free_mb=lambda: 1000)
     world.host = "pc-a"
     world.run()
-    boards = after_merge_pass._read_boards(world.workspace, ["carameli", "devkit"], world.seams())
+    boards = after_merge_pass._read_boards(world.ws,["carameli", "devkit"], world.seams())
     board = boards["carameli"]
     hosts = jc.live_hosts(boards["devkit"].refs, world.now())
     assert hosts == {"pc-a", "pc-b"}

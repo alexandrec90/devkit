@@ -8,6 +8,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import project_registry
 import pytest
 from support import load_script
 
@@ -245,6 +246,13 @@ def test_the_ledgers_rows_are_read_off_its_end(tmp_path):
 
 
 # --- what is new, and starting the pass ------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def registry(monkeypatch):
+    """The project registry `Machine` stands for: the trigger reads its projects there,
+    and the workspace file only for `devkit.fixPass` and where the checkouts sit."""
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: ["devkit"])
 
 
 class Machine:

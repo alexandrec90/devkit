@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import fix_findings
 import harness_triage as triage
+import project_registry
 import sweep
 import worktree_tiers as wt
 
@@ -155,9 +156,10 @@ def check(
     A path stays in `SEEN` while it exists, so a tree cleared and cut again under the
     same name is flagged afresh.
     """
+    # The registry names the checkouts; `workspace` (deprecated) only says where they sit.
     try:
-        names = sweep.parse_workspace(workspace.read_text(encoding="utf-8"))
-    except OSError:
+        names = sweep.managed(project_registry.all_projects())
+    except project_registry.RegistryError:
         return 0
     found = scan(trees(workspace.parent, names))
     seen_path = devkit / SEEN

@@ -694,6 +694,18 @@ def parse_workspace(text: str, exclude: frozenset[str] | None = None) -> list[st
     return names
 
 
+def managed(names: list[str], exclude: frozenset[str] | None = None) -> list[str]:
+    """`names` -- the registry, `project_registry.all_projects()` -- minus `exclude`.
+
+    The half of `parse_workspace` a reader still needs once the names come from the
+    project registry rather than a workspace file: the same `DEFAULT_EXCLUDE`, resolved
+    at call time for the same reason. Here rather than in `project_registry` because
+    that module imports this one.
+    """
+    exclude = DEFAULT_EXCLUDE if exclude is None else exclude
+    return [name for name in names if name not in exclude]
+
+
 def select(names: list[str], only: list[str] | None) -> tuple[list[str], list[str]]:
     """`(kept, unknown)` -- the checkouts to sweep, and any `--only` name that is not one.
 

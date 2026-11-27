@@ -511,7 +511,7 @@ def run_once(
     now = now or _dt.datetime.now(_dt.UTC)
     mode = fix_switch.workspace_mode(workspace)
     root = workspace.parent
-    projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    projects = devkit_project.known_projects()  # the registry, not the workspace file
     path = state_path(root)
     seen, follow = read_state(path)
     repos = repositories(root, projects, run)

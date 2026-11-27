@@ -22,6 +22,7 @@ import sys
 import types
 from pathlib import Path
 
+import project_registry
 import pytest
 from support import box_teardown, devkit_ports, sweep, worktree
 
@@ -2524,7 +2525,7 @@ def test_git_refusal_names_why_git_will_not_read_the_checkout():
 
 def test_a_checkout_git_refuses_is_named_in_the_no_base_branch_error(tmp_path, monkeypatch):
     workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text('{"folders": [{"path": "social-scraper"}]}', encoding="utf-8")
+    register(monkeypatch, "social-scraper")
     (tmp_path / "social-scraper").mkdir()
     monkeypatch.setattr(worktree.sweep, "git_for", lambda path: _probe(128, DUBIOUS))
     with pytest.raises(worktree.WorktreeError, match="dubious ownership"):
@@ -2868,13 +2869,21 @@ def docker_engine_up(monkeypatch):
     monkeypatch.setattr(worktree, "docker_engine_down", str)
 
 
+def register(monkeypatch, *names: str) -> None:
+    """Make the project registry list `names`, as `projects.toml` would: the tool reads
+    its projects there, and a `--workspace` path only says where the checkouts sit."""
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_args, **_kw: list(names))
+
+
 @pytest.fixture
-def workspace(tmp_path):
-    """A workspace file whose parent holds the checkouts, as on a real workstation."""
+def workspace(tmp_path, monkeypatch):
+    """A workspace file whose parent holds the checkouts, as on a real workstation, and a
+    registry listing the one checkout there."""
     root = tmp_path / "ws"
     (root / "demo").mkdir(parents=True)
     path = root / "registry.code-workspace"
     path.write_text(json.dumps({"folders": [{"path": "demo"}]}), encoding="utf-8")
+    register(monkeypatch, "demo")
     return path
 
 
@@ -4769,18 +4778,15 @@ def test_sync_checkouts_asks_sweep_for_the_sync_mode_and_applies_it(workspace, m
 
 def test_the_reference_checkout_is_never_swept(tmp_path, monkeypatch):
     """A reference checkout is registered to be read, not shipped from. Reading the
-    exclusion off `sweep.parse_workspace` rather than re-listing it here is what keeps
-    the scheduled pass and the hand-run sweep agreeing about which checkouts exist.
+    exclusion off `sweep.managed` rather than re-listing it here is what keeps the
+    scheduled pass and the hand-run sweep agreeing about which checkouts exist.
 
     `DEFAULT_EXCLUDE` is empty today, so the name is put in it here; without that the
     test would pass whatever `sync_checkouts` did with the exclusion.
     """
     monkeypatch.setattr(sweep, "DEFAULT_EXCLUDE", frozenset({"reference-checkout"}))
     registry = tmp_path / "registry.code-workspace"
-    registry.write_text(
-        json.dumps({"folders": [{"path": "carameli"}, {"path": "reference-checkout"}]}),
-        encoding="utf-8",
-    )
+    register(monkeypatch, "carameli", "reference-checkout")
     swept: list[list[str]] = []
     monkeypatch.setattr(
         sweep, "sweep", lambda root, names, fetch=True: (swept.append(names), [])[1]
@@ -4792,12 +4798,40 @@ def test_the_reference_checkout_is_never_swept(tmp_path, monkeypatch):
     assert swept == [["carameli"]]
 
 
-def test_sync_checkouts_reports_a_registry_it_could_not_read(tmp_path):
+def test_sync_checkouts_reports_a_registry_it_could_not_read(tmp_path, monkeypatch):
     """Reporting a clean sweep of checkouts it never looked at is the one wrong answer
     -- it is indistinguishable from four checkouts that are genuinely current."""
+    monkeypatch.setattr(
+        project_registry,
+        "all_projects",
+        lambda *_a, **_k: project_registry.parse_registry("projects = ["),
+    )
     code, summary = worktree.sync_checkouts(tmp_path / "missing.code-workspace", apply=True)
     assert code == 1
     assert summary["failed"] is True
+    assert "cannot read the registry" in summary["report"]
+
+
+def test_sync_checkouts_needs_no_workspace_file(tmp_path, monkeypatch):
+    """The checkouts come off the project registry: the `workspace` argument only says
+    where they sit, so the file it names need not exist."""
+    register(monkeypatch, "carameli")
+    swept: list[tuple[Path, list[str]]] = []
+    monkeypatch.setattr(
+        sweep, "sweep", lambda root, names, fetch=True: (swept.append((root, names)), [])[1]
+    )
+    monkeypatch.setattr(sweep, "run_mode", lambda *a, **k: ("", 0))
+
+    code, _summary = worktree.sync_checkouts(tmp_path / "missing.code-workspace", apply=True)
+
+    assert code == 0
+    assert swept == [(tmp_path, ["carameli"])]
+
+
+def test_known_projects_reads_the_registry_not_the_workspace_file(tmp_path, monkeypatch):
+    register(monkeypatch, "carameli")
+    assert worktree.known_projects(tmp_path / "missing.code-workspace") == ["carameli"]
+    assert worktree.known_projects() == ["carameli"]
 
 
 def test_reconcile_syncs_the_checkouts_by_default(workspace, monkeypatch):
@@ -5082,7 +5116,7 @@ def test_artifact_root_is_the_checkout_a_tree_was_cut_from(tmp_path):
     assert worktree.artifact_root(tmp_path, repo_root=tree) == checkout
 
 
-def test_the_reconcile_cli_writes_the_log_of_the_workspace_it_acted_on(tmp_path):
+def test_the_reconcile_cli_writes_the_log_of_the_workspace_it_acted_on(tmp_path, monkeypatch):
     """The regression, and it is not cosmetic: `workspace-status.scheduler_line` reads
     this file's timestamp as its evidence that the job is alive, *because* `schtasks`
     reports a disabled task as healthy. A `pytest tests/ -q` run overwrote the real one
@@ -5099,6 +5133,7 @@ def test_the_reconcile_cli_writes_the_log_of_the_workspace_it_acted_on(tmp_path)
     workspace = tmp_path / "ws" / "probe.code-workspace"
     workspace.parent.mkdir()
     workspace.write_text('{"folders": []}', encoding="utf-8")
+    register(monkeypatch)
 
     assert worktree.main(["reconcile", "--yes", "--no-fetch", "--workspace", str(workspace)]) == 0
 
@@ -5116,7 +5151,7 @@ def test_a_dry_run_writes_no_log_and_says_so_by_returning_none(tmp_path):
     assert not (tmp_path / worktree.RECONCILE_LOG).exists()
 
 
-def test_a_dry_run_leaves_the_scheduled_passs_log_untouched(tmp_path):
+def test_a_dry_run_leaves_the_scheduled_passs_log_untouched(tmp_path, monkeypatch):
     """The same regression as above, reached with the right workspace and the wrong verb.
 
     `/triage-boxes` opens with `reconcile --dry-run --json` against the real workspace, so
@@ -5127,6 +5162,7 @@ def test_a_dry_run_leaves_the_scheduled_passs_log_untouched(tmp_path):
     workspace = tmp_path / "ws" / "probe.code-workspace"
     workspace.parent.mkdir()
     workspace.write_text('{"folders": []}', encoding="utf-8")
+    register(monkeypatch)
     log = workspace.parent / worktree.RECONCILE_LOG
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text("# devkit worktree reconcile\n# 2026-09-03T00:30:00+00:00  exit=1\n", "utf-8")

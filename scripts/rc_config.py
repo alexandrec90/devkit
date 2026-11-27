@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import devkit_jsonc
 import harness_events
+import project_registry
 import sweep
 
 # The workspace-file setting naming the projects that get a server. A list of checkout
@@ -203,6 +204,19 @@ def _positive_int(value: object, fallback: int) -> int:
     return value
 
 
+def every_project() -> list[str]:
+    """What `ALL_PROJECTS` expands to: the project registry, every registered checkout.
+
+    Off `project_registry`, not the workspace file's `folders`. A registry that cannot be
+    read expands to nothing, for the reason `parse_config` serves nothing on a broken
+    workspace file: visible in the artifact, rather than a crashed scheduled task.
+    """
+    try:
+        return sweep.managed(project_registry.all_projects())
+    except project_registry.RegistryError:
+        return []
+
+
 def parse_config(text: str) -> Config:
     """Read `RC_SETTING` out of a workspace file.
 
@@ -212,8 +226,8 @@ def parse_config(text: str) -> Config:
         "devkit.remoteControl": ["devkit", "carameli"]
         "devkit.remoteControl": {"projects": ["devkit"], "idleMinutes": 30}
 
-    Either list may be `ALL_PROJECTS` instead, which expands to every one of the
-    workspace's folders.
+    Either list may be `ALL_PROJECTS` instead, which expands to every registered
+    project (`every_project`).
 
     Malformed input yields an empty `Config`, matching `sweep.parse_workspace` and
     `sweep.on_hold`: this job's failure mode for a broken workspace file is to serve
@@ -237,7 +251,7 @@ def parse_config(text: str) -> Config:
 
     names = raw.get("projects")
     if names == ALL_PROJECTS:
-        names = sweep.parse_workspace(text)
+        names = every_project()
     projects = (
         tuple(name for name in names if isinstance(name, str) and name)
         if isinstance(names, list)

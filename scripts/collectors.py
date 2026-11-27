@@ -88,6 +88,7 @@ import collector_tasks
 import collectors_config as config
 import docker_memory
 import machine_clock
+import project_registry
 import sweep
 import worktree_env
 
@@ -2052,7 +2053,7 @@ def assigned(root: Path = REPO_ROOT) -> tuple[list[config.Collector], list[Targe
         return [], []
     collectors, _notes = config.declared(base)
     acted = lease.effective(collectors, assignment, lease.load(base / lease.RECORD))
-    return collectors, targets(collectors, acted, sweep.default_workspace(base).parent)
+    return collectors, targets(collectors, acted, project_registry.projects_root(base))
 
 
 def scheduled_tasks(root: Path = REPO_ROOT) -> dict[str, str]:
@@ -2249,7 +2250,7 @@ def fire(
     elif moving:
         code, lines = 0, [f"{moving} is handing it to another machine -- nothing run"]
     else:
-        checkout = sweep.default_workspace(base).parent / collector.project
+        checkout = project_registry.projects_root(base) / collector.project
         start = now.astimezone().isoformat(timespec="seconds")
         write_file(base / collector_tasks.start_path(name), start + "\n")
         code, lines = collector_tasks.fire(
@@ -2294,7 +2295,7 @@ def run_once(
             f"share its browser profile. Wait for it, or end it with `schtasks /End /TN {task}`."
         )
         return 2
-    checkout = sweep.default_workspace(base).parent / collector.project
+    checkout = project_registry.projects_root(base) / collector.project
     code = collector_tasks.run_once(collector, checkout, streamer or collector_tasks.stream)
     print(f"collectors: {name} exited {code}")
     return code
@@ -2373,7 +2374,7 @@ def main(
     for note in notes:
         report.fail(note)
     assignment = config.load_assignment(base / config.ASSIGNMENT)
-    workspace = sweep.default_workspace(base).parent
+    workspace = project_registry.projects_root(base)
 
     def in_flight() -> list[str]:
         """The scheduled runs a restart would cut short, by the assignment as it stands."""

@@ -89,6 +89,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
 import harness_events
 import policy_runtime
 import precommit_store
+import project_registry
 from adoption_prs import (
     UPGRADE_SLUG,
     close_superseded,
@@ -1281,12 +1282,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.workspace.is_file():
         return stopped(2, f"upgrade: no workspace file at {args.workspace}")
-    names = sweep.parse_workspace(args.workspace.read_text(encoding="utf-8"))
+    names = sweep.managed(project_registry.all_projects())
     unknown = [name for name in requested if name not in names]
     if unknown:
         return stopped(
             2,
-            f"upgrade: {', '.join(unknown)} not in {args.workspace.name}. "
+            f"upgrade: {', '.join(unknown)} not in the project registry. "
             f"Known checkouts: {', '.join(names)}",
         )
 

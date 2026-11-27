@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
 import fix_cycle
 import machine_role
+import project_registry
 import sweep
 import task_input
 
@@ -519,14 +520,20 @@ FAILURE_ROOT = REPO_ROOT
 # --- pure helpers -----------------------------------------------------------
 
 
-def known_projects(workspace_text: str) -> list[str]:
-    """Checkout names from the workspace registry, minus the non-projects.
+def known_projects(workspace_text: str | None = None) -> list[str]:
+    """Registered project names, minus the non-projects.
 
-    Reuses `sweep.parse_workspace` rather than re-reading the file: one parser for
-    the registry means the sweep and the task dispatcher can never disagree about
-    which checkouts exist.
+    Read through `project_registry.all_projects`, so every caller asks the one registry
+    and none can disagree with another about which checkouts exist.
+
+    `workspace_text` is **deprecated**. Given, the names come from that workspace text
+    instead -- kept only for the writers that verify their own edit of a workspace file
+    (`register`, `unregister`, `machine_view`) until the file is retired. A reader passes
+    nothing.
     """
-    return sweep.parse_workspace(workspace_text, NOT_PROJECTS)
+    if workspace_text is not None:
+        return sweep.parse_workspace(workspace_text, NOT_PROJECTS)
+    return [name for name in project_registry.all_projects() if name not in NOT_PROJECTS]
 
 
 def project_selection(value: str) -> list[str]:
@@ -571,14 +578,18 @@ def resolve_project(name: str, projects: list[str], root: Path, noun: str = "pro
     included, since merging a trunk needs git and no harness — and calling such a folder
     an unknown *project*, when `NOT_PROJECTS` is exactly what excludes it from that word,
     would send the reader to fix the wrong list.
+
+    `projects` is the registry as the caller read it -- `known_projects()`, or
+    `project_registry.all_projects()` for the raw one -- and `root` is
+    `project_registry.projects_root()`, or the directory of a deprecated `--workspace`.
     """
     if not name:
         raise ProjectError(f"no {noun} given; expected one of: {', '.join(projects)}")
     if name not in projects:
-        raise ProjectError(f"unknown {noun} {name!r}; the workspace lists: {', '.join(projects)}")
+        raise ProjectError(f"unknown {noun} {name!r}; the registry lists: {', '.join(projects)}")
     path = root / name
     if not path.is_dir():
-        raise ProjectError(f"{name} is registered in the workspace but {path} does not exist")
+        raise ProjectError(f"{name} is registered but {path} does not exist")
     return path
 
 
@@ -2083,6 +2094,23 @@ def _load_workspace(path: Path, may_create: bool = False) -> str:
     return text
 
 
+def _registry_for(args: argparse.Namespace) -> tuple[str, list[str]]:
+    """`(workspace text, projects)` for `main`: the projects always off the registry.
+
+    The workspace text is read only for the verbs that publish, check or adopt that file
+    -- `""` otherwise -- so a dispatch, `--list` and `--check` run on a machine with no
+    workspace file. A malformed registry is a `ProjectError`, so `refuse_dispatch` files
+    it under the task it stopped, as it did an unreadable workspace file.
+    """
+    text = ""
+    if args.render_workspace or args.check_workspace or args.adopt_workspace:
+        text = _load_workspace(args.workspace, may_create=bool(args.render_workspace))
+    try:
+        return text, known_projects()
+    except project_registry.RegistryError as exc:
+        raise ProjectError(f"cannot read the project registry: {exc}") from exc
+
+
 def main(argv: list[str] | None = None) -> int:
     # Task labels carry en-dashes and arrows; a Windows console is cp1252 and would
     # raise UnicodeEncodeError mid-report rather than printing the drift it found.
@@ -2164,11 +2192,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        text = _load_workspace(args.workspace, may_create=bool(args.render_workspace))
+        text, projects = _registry_for(args)
     except ProjectError as exc:
         return refuse_dispatch(exc, args.action, raw_argv)
 
-    projects = known_projects(text)
+    # `--workspace` is a deprecated alias for the projects root: only its directory counts.
     root = args.workspace.parent
 
     if args.list:

@@ -11,15 +11,27 @@ from __future__ import annotations
 import datetime as _dt
 import json
 
+import project_registry
 import pytest
 from support import REPO_ROOT, TEMPLATES, load_script
 
 rc_config = load_script("scripts/rc_config.py")
 
+# The project registry `ALL_PROJECTS` expands to, as the last `workspace_text` set it:
+# `folders` stands for the machine's registered projects.
+REGISTERED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch):
+    REGISTERED.clear()
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
+
 
 def workspace_text(
     setting: object = None, folders: tuple[str, ...] = ("devkit", "carameli")
 ) -> str:
+    REGISTERED[:] = folders
     payload: dict = {"folders": [{"path": name} for name in folders], "settings": {}}
     if setting is not None:
         payload["settings"][rc_config.RC_SETTING] = setting
@@ -84,11 +96,22 @@ def held_text(setting: object, folders: tuple[str, ...], held: list[str]) -> str
     [rc_config.ALL_PROJECTS, {"projects": rc_config.ALL_PROJECTS, "spawn": "worktree"}],
     ids=["bare", "object"],
 )
-def test_all_serves_every_folder_in_the_workspace(setting):
+def test_all_serves_every_registered_project(setting):
     """A list is a second copy of the registry, and a project plugged in after it was
-    written got no server. `all` reads the folders on every fire instead."""
-    text = workspace_text(setting, ("devkit", "carameli", "freshly-plugged"))
+    written got no server. `all` reads the registry on every fire instead -- the project
+    registry, not the workspace file's folders."""
+    text = workspace_text(setting, ("devkit", "carameli"))
+    REGISTERED[:] = ["devkit", "carameli", "freshly-plugged"]
     assert rc_config.parse_config(text).projects == ("devkit", "carameli", "freshly-plugged")
+
+
+def test_all_serves_nothing_off_a_registry_that_cannot_be_read(monkeypatch):
+    monkeypatch.setattr(
+        project_registry,
+        "all_projects",
+        lambda *_a, **_k: project_registry.parse_registry("projects = ["),
+    )
+    assert rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS)).projects == ()
 
 
 def test_all_keeps_the_object_form_s_knobs():

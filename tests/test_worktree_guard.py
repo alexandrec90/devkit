@@ -14,6 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import project_registry
 import pytest
 from support import REPO_ROOT, devkit_project, load_script
 
@@ -38,6 +39,17 @@ def reference(monkeypatch):
 
 
 PROJECTS = ["carameli", "carameli-b", "ibkr_trader", "apt-finder", "apt-finder-b", "devkit"]
+
+# The project registry the hook reads, as `_workspace` last set it. The workspace file
+# itself only has to exist -- the hook is silent on a machine with none -- and to sit
+# where the checkouts are.
+REGISTERED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch):
+    REGISTERED[:] = PROJECTS
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
 
 
 @pytest.fixture
@@ -1308,6 +1320,7 @@ class _stdin:
 
 
 def _workspace(root, extra=()):
+    REGISTERED[:] = [*PROJECTS, *extra]
     path = root / "alex-projects.code-workspace"
     path.write_text(
         json.dumps({"folders": [{"path": name} for name in [*PROJECTS, *extra]]}),

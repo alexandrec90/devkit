@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 
+import project_registry
 import pytest
 from support import load_script
 
@@ -35,7 +36,19 @@ def plan_for(tmp_path, names=("devkit",), servers=None, config=None):
     )
 
 
+# The project registry the plan validates against, as the last `workspace` set it:
+# `folders` stands for the machine's registered projects.
+REGISTERED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _registry(monkeypatch):
+    REGISTERED.clear()
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
+
+
 def workspace(tmp_path, setting=None, folders=("devkit", "carameli")):
+    REGISTERED[:] = folders
     payload: dict = {"folders": [{"path": name} for name in folders], "settings": {}}
     if setting is not None:
         payload["settings"][rc_config.RC_SETTING] = setting

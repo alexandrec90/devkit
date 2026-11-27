@@ -329,7 +329,9 @@ def send_all(
         room,
         closed.harness_busy,
         left,
-        role=machine_role.role_here(ctx.root / sweep.WORKSPACE_FILE_NAME),
+        # Asked of the devkit checkout, not of a workspace path built here: `machine_role`
+        # owns where this machine's role is kept.
+        role=machine_role.role_beside(ctx.devkit_dir),
         free_disk_mb=job_claims.free_disk_mb(ctx.root) if ctx.writes else None,
     )
     for decision in go:

@@ -844,11 +844,21 @@ def test_idle_seconds_reads_the_transcript_store(tmp_path):
     assert st.idle_seconds(target, tmp_path / "missing") is None
 
 
-def test_sweep_workspace_walks_each_listed_checkout_and_survives_a_missing_file(tmp_path):
+def test_sweep_workspace_walks_each_registered_checkout_and_survives_a_bad_registry(
+    tmp_path, monkeypatch
+):
+    import project_registry
+
     workspace = tmp_path / "w.code-workspace"
+    monkeypatch.setattr(
+        project_registry,
+        "all_projects",
+        lambda *_a, **_k: project_registry.parse_registry("projects = ["),
+    )
     assert st.sweep_workspace(workspace, False, print) == 0
-    workspace.write_text('{"folders": [{"path": "not-a-repo"}]}', "utf-8")
+    monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: ["not-a-repo"])
     (tmp_path / "not-a-repo").mkdir()
-    said: list[str] = []
-    assert st.sweep_workspace(workspace, True, said.append) == 0
-    assert said == []
+    walked: list[Path] = []
+    monkeypatch.setattr(st, "sweep_checkout", lambda path, apply, say: walked.append(path) or 0)
+    assert st.sweep_workspace(workspace, True, print) == 0
+    assert walked == [tmp_path / "not-a-repo"], "the workspace file need not exist"

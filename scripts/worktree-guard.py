@@ -2222,8 +2222,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ALLOW
 
     try:
-        projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
-    except OSError:
+        projects = devkit_project.known_projects()
+    except devkit_project.project_registry.RegistryError:
         return EXIT_ALLOW
 
     cwd = str(payload.get("cwd") or "")

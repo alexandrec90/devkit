@@ -139,15 +139,14 @@ def unowned_on_machine(claimed: Iterable[str]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     del argv
-    import devkit_project  # the workspace parser; heavy, and only the CLI needs it
-    import sweep
+    import devkit_project  # the registry reader; heavy, and only the CLI needs it
+    import project_registry
 
-    workspace = sweep.default_workspace(Path(__file__).resolve().parents[1])
-    if not workspace.is_file():
-        print(f"no workspace file at {workspace}", file=sys.stderr)
+    root = project_registry.projects_root(Path(__file__).resolve().parents[1])
+    if not root.is_dir():
+        print(f"no projects root at {root}", file=sys.stderr)
         return 2
-    root = workspace.parent
-    projects = devkit_project.known_projects(workspace.read_text(encoding="utf-8"))
+    projects = devkit_project.known_projects()
     owners = declared(root, projects)
     for task, project in sorted(owners.items()):
         print(f"{project}: {task}")
