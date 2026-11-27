@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Docker stack lifecycle and daemon maintenance, callable from any workspace.
 
-Backs every "Docker: ..." task in `alex-projects.code-workspace`. They reach this
-script through `devkit_project.py`, which sets cwd to the checkout picked in the task's
-project prompt.
+Backs every `docker-*` action in `devkit_project.ACTIONS`. They reach this script
+through `devkit_project.py --project <name>`, which sets cwd to that checkout.
 
 Two scopes live here, and the difference is worth keeping straight:
 

@@ -23,9 +23,9 @@ Steps, in order:
   2. render `templates/` into the new directory
   3. `git init` + initial commit
   4. vendor the harness (`sync-devkit.py --pull`) and stamp `DEVKIT_VERSION`
-  5. register the project in the shared `alex-projects.code-workspace` and, on a task
-     branch with a ship intent, in devkit's `projects.toml` and `workspace.jsonc` (the
-     one step that writes OUTSIDE the new directory; `--no-register` skips it)
+  5. register the project in devkit's `projects.toml`, on a task branch with a ship
+     intent (the one step that writes OUTSIDE the new directory; `--no-register` skips
+     it)
   6. create the public GitHub repo and push           <- outward-facing
 """
 
@@ -62,6 +62,17 @@ from project_env import (
 
 DEVKIT_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = DEVKIT_ROOT / "templates"
+# devkit's committed project registry, the one file a registration writes.
+REGISTRY = DEVKIT_ROOT / project_registry.REGISTRY_NAME
+
+
+def projects_root() -> Path:
+    """Where every registered checkout sits, and so where a kept project is generated.
+
+    Through `project_registry` because this script runs from inside an ephemeral box as
+    a matter of course, where the naive `DEVKIT_ROOT.parent` names `.worktrees/`.
+    """
+    return project_registry.projects_root(DEVKIT_ROOT)
 
 # Path segments starting `dot-` become dotted on output. Templates cannot ship a
 # literal `.gitignore`/`.claude/` because those would take effect on devkit's OWN
@@ -499,9 +510,9 @@ def build_context(
 def plan(args: argparse.Namespace, registry: devkit_ports.Registry) -> Plan:
     """Decide everything. Touches nothing."""
     validate_name(args.name)
-    # Beside the workspace file by default: it registers a project by bare name, so a
+    # In the projects root by default: the registry names a project by bare name, so a
     # project anywhere else is registered as a folder that does not exist (8448080a).
-    parent = args.parent or devkit_project.DEFAULT_WORKSPACE.parent
+    parent = args.parent or projects_root()
     root = Path(parent).expanduser().resolve() / args.name
     if root.exists() and any(root.iterdir()):
         raise GeneratorError(
@@ -650,11 +661,11 @@ def run(cmd: list[str], cwd: Path, dry_run: bool, check: bool = True) -> int:
 
 
 def lands_in_the_workspace(plan: Plan) -> bool:
-    """A project being made to be kept, not a rehearsal: beside the live workspace file.
+    """A project being made to be kept, not a rehearsal: in the projects root.
 
     The generated-project gate and every test render under a temporary parent, and there
     vendoring this tree is the point: it is the change under test."""
-    return plan.root.parent == devkit_project.DEFAULT_WORKSPACE.parent.resolve()
+    return plan.root.parent == projects_root().resolve()
 
 
 @contextlib.contextmanager
@@ -773,44 +784,34 @@ def git_init(plan: Plan, dry_run: bool) -> None:
 
 
 def register_in_workspace(plan: Plan, dry_run: bool) -> None:
-    """Add the project to `projects.toml` and `workspace.jsonc`, devkit's two registries.
+    """Add the project to devkit's `projects.toml`, the one project registry.
 
-    This used to write a *new* `<name>.code-workspace` per project, to keep the task
-    quick-pick free of every other repo's tasks. Two things made that wrong. The task
-    noise it avoided is gone — the generic tasks are defined once at workspace level
-    now and the per-project files hold only their own — and, more seriously, the new
-    project was never added to the shared workspace at all. `sweep.py` reads that one
-    file's `folders` as its registry, so a freshly scaffolded project was invisible to
-    every sweep and could strand work with nothing reporting it. That matters more
-    now than it did then: the sweep has no workspace task left, so the only readers
-    are automatic ones -- the daily `devkit-workspace-status` pass and reconcile's
-    checkout pass -- and an unregistered project is invisible to both.
+    An unregistered project is invisible to every reader of the registry -- the daily
+    `devkit-workspace-status` pass, reconcile's checkout pass, the fix pass -- and could
+    strand work with nothing reporting it.
 
     Registration is best-effort by design: the project itself is already written and
-    usable at this point, so a workspace file that has been restructured out of
-    recognition is a warning to fix by hand, not a reason to fail the run.
+    usable at this point, so a registry that cannot be edited is a warning to fix by
+    hand, not a reason to fail the run.
 
     `--no-register` is for a project that is generated to be *thrown away* — the
     RELEASING.md acceptance test renders one per release purely to prove the tag can
-    serve its pre-commit hook ids. Registering that probe edits the real workspace
-    file: it lands in `folders` and in every scope picker, which puts a directory
-    under a temp path into `sweep.py`'s registry, and it survives the `rm -rf` that
-    ends the acceptance test.
+    serve its pre-commit hook ids. Registering that probe would put a directory under a
+    temp path into the registry, and it survives the `rm -rf` that ends the test.
 
-    **Committed, and nowhere else.** Registering in the live file alone once left the
-    committed registry without the project (8a1c0927); the live file is retired now and
-    read by nothing, so it is not written. The committed edit is a registry change every
-    machine shares, so it goes through a branch and a review like any other:
-    `hand_off_registration` puts it on a task branch with a ship intent and restores
-    devkit's static checkout, which the fix pass runs from and will not update while it
-    is dirty (851308ef). The registry is read from the checkout that holds the edit, so
-    the project is registered here from the moment it exists.
+    **Committed, and nowhere else.** The registry is a change every machine shares, so
+    it goes through a branch and a review like any other: `hand_off_registration` puts
+    it on a task branch with a ship intent and restores devkit's static checkout, which
+    the fix pass runs from and will not update while it is dirty (851308ef). The
+    registry is read from the checkout that holds the edit, so the project is
+    registered here from the moment it exists. The retired live `.code-workspace` is
+    read by nothing and never written.
     """
     if not plan.register:
-        print("  skip    workspace registration (--no-register)")
+        print("  skip    registration (--no-register)")
         return
     names = [plan.name]
-    root = devkit_project.DEFAULT_WORKSPACE.parent
+    root = projects_root()
     # The registry names each project by its directory under the projects root. A project
     # generated anywhere else would be registered as a checkout that does not exist, and
     # every reader of the registry -- `rc-servers.py`, the fix pass's collect step -- then
@@ -819,52 +820,27 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
         print(f"  WARNING {plan.root} is not in the projects root {root}: not registered")
         print(f"          move it to {root} and add {plan.name} to projects.toml by hand")
         return
-    canonical = devkit_project.CANONICAL_WORKSPACE
-    toml = canonical.parent / project_registry.REGISTRY_NAME
+    registry = REGISTRY
     # Asked before the write, so a hand edit already sitting there is never carried off
     # onto a branch under this project's name.
-    clean_before = not dry_run and not any(canonical_handoff.dirty(p) for p in (canonical, toml))
-    registered: set[Path] = set()
-    if register_in_registry(toml, names, dry_run):
-        registered.add(toml)
-    if register_in_canonical(canonical, names, dry_run):
-        registered.add(canonical)
-    if not dry_run:
-        _hand_off_or_carry_slot(plan, canonical, registered, clean_before=clean_before)
-
-
-def register_in_canonical(canonical: Path, names: list[str], dry_run: bool) -> bool:
-    """Add `names` to the canonical `workspace.jsonc`'s folders and project picker;
-    whether the file was written. Kept, beside `projects.toml`, until that file is
-    deleted: `tests/test_project_registry.py` fails the two the moment they disagree."""
-    if dry_run:
-        print(f"  update  {canonical.name} (folders + project picker: {', '.join(names)})")
-        return False
-    try:
-        text = canonical.read_text(encoding="utf-8")
-        canonical.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
-    except (OSError, devkit_project.RegistryEditError) as exc:
-        print(f"  WARNING could not register in {canonical.name}: {exc}")
-        print(f"          add {', '.join(names)} to its folders list and project picker by hand")
-        return False
-    print(f"  update  {canonical.name} (folders + project picker)")
-    return True
+    clean_before = not dry_run and not canonical_handoff.dirty(registry)
+    written = register_in_registry(registry, names, dry_run)
+    if written:
+        _hand_off_or_carry_slot(plan, registry, clean_before=clean_before)
 
 
 def register_in_registry(registry: Path, names: list[str], dry_run: bool) -> bool:
     """Add `names` to devkit's `projects.toml`; whether the file was written.
 
-    The registry's new home (`scripts/project_registry.py`), written beside the
-    canonical `workspace.jsonc` until that file is deleted: `tests/test_project_registry.py`
-    fails the two the moment they disagree, so a registration in one alone is a red PR.
-    No file there is no write and no warning -- a checkout from before the file existed,
-    where the workspace file is still the whole registry and a fresh `projects.toml`
-    holding one name would shadow the rest.
+    A missing file is a warning, not a silent skip: `projects.toml` is the whole
+    registry now, so a project not written there is a project nothing reads.
     """
-    if not registry.is_file():
-        return False
     if dry_run:
         print(f"  update  {registry.name} (projects: {', '.join(names)})")
+        return False
+    if not registry.is_file():
+        print(f"  WARNING no {registry.name} at {registry}: not registered")
+        print(f"          add {', '.join(names)} to devkit's projects list by hand")
         return False
     try:
         written = project_registry.register_file(
@@ -884,25 +860,15 @@ def _and_list(items: list[str]) -> str:
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
-def _hand_off_or_carry_slot(
-    plan: Plan, canonical: Path, registered: set[Path], *, clean_before: bool
-) -> None:
-    """Put the canonical registration on a task branch, or leave the slot beside it.
+def _hand_off_or_carry_slot(plan: Plan, registry: Path, *, clean_before: bool) -> None:
+    """Put the registration on a task branch, or leave the slot beside it.
 
-    `clean_before` says devkit's checkout was clean before this run wrote to it, so the
-    edit on it is this project's alone and may be carried onto a branch. `registered`
-    holds every devkit-side file this run wrote: `projects.toml` among them moves with
-    `workspace.jsonc`, onto the same branch and into the same commit.
+    Called only once `projects.toml` holds the new name -- the slot is keyed on that
+    write. `clean_before` says devkit's checkout was clean before this run wrote to it,
+    so the edit on it is this project's alone and may be carried onto a branch.
     """
     slot = plan.context.get("slot")
-    also = tuple(
-        p.name for p in sorted(registered) if p != canonical and p.parent == canonical.parent
-    )
-    handed = (
-        hand_off_registration(plan.name, canonical, slot=slot, also=also)
-        if clean_before
-        else Handoff()
-    )
+    handed = hand_off_registration(plan.name, registry, slot=slot) if clean_before else Handoff()
     plan.slot_on_branch = handed.slot
     if handed.said and not handed.said.lstrip().startswith("WARNING"):
         print(handed.said)
@@ -910,24 +876,22 @@ def _hand_off_or_carry_slot(
     # Not handed off -- the checkout was already on a task branch, already dirty, or the
     # cut failed -- so the registration stays where it was written, and the slot goes
     # beside it. As a printed hint alone it was skipped twice: tvshell (#778) and radio
-    # (#779) each reached a PR with `workspace.jsonc` and no slot, red on
-    # `test_every_checkout_either_holds_a_slot_or_says_why_not`. Only with the folder entry,
-    # though: a slot for a checkout no picker names is a number spent on nothing.
-    registry = canonical.parent / devkit_ports.REGISTRY_NAME
-    beside = canonical in registered and _carry_slot(registry, plan.name, slot)
+    # (#779) each reached a PR with the registration and no slot, red on
+    # `test_every_checkout_either_holds_a_slot_or_says_why_not`.
+    ports = registry.parent / devkit_ports.REGISTRY_NAME
+    beside = _carry_slot(ports, plan.name, slot)
     plan.slot_on_branch = beside
-    files = _and_list([canonical.name, *also, *([registry.name] if beside else [])])
+    files = _and_list([registry.name, *([ports.name] if beside else [])])
     if handed.said:
-        print(handed.said.replace(f"devkit's {canonical.name}", f"devkit's {files}"))
+        print(handed.said.replace(f"devkit's {registry.name}", f"devkit's {files}"))
     else:
         print(f"          commit devkit's {files} on a branch and ship it")
 
 
-REGISTRATION_INTENT = """Register {name} in the workspace registry
+REGISTRATION_INTENT = """Register {name} in the project registry
 
-`scripts/new-project.py` generated `{name}` and registered it in devkit's `projects.toml`
-and canonical `workspace.jsonc`. Every machine shares that registry, so the change goes
-through a PR.
+`scripts/new-project.py` generated `{name}` and registered it in devkit's `projects.toml`.
+Every machine shares that registry, so the change goes through a PR.
 
 The generator cut this branch itself rather than leave the edit uncommitted in devkit's
 static checkout: the fix pass runs from that checkout and will not fast-forward a dirty
@@ -936,8 +900,8 @@ one, so the uncommitted registration held the pass on stale code (851308ef).
 
 SLOT_INTENT = """
 It also registers `{name} = {slot}` in `ports.toml`'s `[slots]`: the slot the generated
-`.env` and compose defaults already publish. A workspace folder with neither a slot nor a
-`SLOTLESS` reason fails `tests/test_devkit_ports.py`, so the two halves ship together.
+`.env` and compose defaults already publish. A registered project with neither a slot nor
+a `SLOTLESS` reason fails `tests/test_devkit_ports.py`, so the two halves ship together.
 """
 
 
@@ -982,15 +946,14 @@ def register_slot(text: str, name: str, slot: int) -> str | None:
 
 def hand_off_registration(
     name: str,
-    canonical: Path,
+    registry: Path,
     runner=subprocess.run,
     slot: object = None,
-    also: tuple[str, ...] = (),
 ) -> Handoff:
     """Move the registry edit off devkit's static checkout onto a task branch: what was done.
 
-    The canonical edit used to be left uncommitted where it was written, for someone to
-    commit on a branch -- in the checkout the scheduled fix pass runs from. Its watchdog
+    The edit used to be left uncommitted where it was written, for someone to commit on a
+    branch -- in the checkout the scheduled fix pass runs from. Its watchdog
     fast-forwards that checkout before every fire and refuses a dirty one, so skinamp's
     registration, left there on 2026-11-02, held the pass on stale code and filed a
     `pass-stale` finding (851308ef). Here the edit goes onto `agent/register-<name>-<mmdd>`
@@ -1007,8 +970,6 @@ def hand_off_registration(
     hand: a linked worktree or a task branch (the edit is already on a branch), a checkout
     git cannot read, or a cut that failed (said as a WARNING, with the file left as it was).
     The cut itself is `canonical_handoff.hand_off`, which `plug-projects.py` shares.
-    `also` names the other registry files this run wrote beside `canonical` --
-    `projects.toml` -- which go onto the same branch with it.
     """
     carried: list[bool] = []
 
@@ -1017,17 +978,15 @@ def hand_off_registration(
         return SLOT_INTENT.format(name=name, slot=slot) if carried[-1] else ""
 
     intent = REGISTRATION_INTENT.format(name=name)
-    cut = canonical_handoff.hand_off(
-        canonical, f"register-{name}", intent, runner, carry, also=also
-    )
+    cut = canonical_handoff.hand_off(registry, f"register-{name}", intent, runner, carry)
     if cut.said:
         return Handoff(
-            f"  WARNING {cut.said}\n          commit devkit's {canonical.name} on a branch and ship it"
+            f"  WARNING {cut.said}\n          commit devkit's {registry.name} on a branch and ship it"
         )
     if cut.tree is None:
         return Handoff()
     went = any(carried)
-    what = f"{_and_list([canonical.name, *also])} registration" + (
+    what = f"{registry.name} registration" + (
         f" and {devkit_ports.REGISTRY_NAME} slot {slot}" if went else ""
     )
     return Handoff(
@@ -1215,7 +1174,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--parent",
         default="",
-        help="directory to create the project in (default: the shared workspace file's)",
+        help="directory to create the project in (default: the projects root)",
     )
     parser.add_argument("--github-owner", default="alexandrec90")
     parser.add_argument("--python-version", default="3.12")
@@ -1243,7 +1202,7 @@ def main(argv: list[str] | None = None) -> int:
             help=help_text,
         )
 
-    # Same reason as --dry-run below: a VS Code picker must supply one real token.
+    # Same reason as --dry-run below: a caller passes one real token in every branch.
     remote = parser.add_mutually_exclusive_group()
     remote.add_argument(
         "--remote",
@@ -1258,25 +1217,25 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         help="skip creating and pushing to the GitHub repo",
     )
-    # Same picker rule again, and the same reason `--remote` exists alongside its
-    # negation: one real token in every branch.
+    # The same reason `--remote` exists alongside its negation: one real token in every
+    # branch.
     register = parser.add_mutually_exclusive_group()
     register.add_argument(
         "--register",
         dest="register",
         action="store_true",
         default=True,
-        help="add the project to the shared workspace file (the default)",
+        help="add the project to devkit's projects.toml (the default)",
     )
     register.add_argument(
         "--no-register",
         dest="register",
         action="store_false",
-        help="leave the shared workspace file alone (for a throwaway probe)",
+        help="leave the project registry alone (for a throwaway probe)",
     )
-    # `--dry-run` is redundant with the default, and exists anyway: the VS Code task
-    # picks one of these two strings, and passing "" as an argument instead would
-    # make argparse reject it as a stray positional.
+    # `--dry-run` is redundant with the default, and exists anyway: a caller may pick
+    # one of these two strings, and passing "" as an argument instead would make
+    # argparse reject it as a stray positional.
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--dry-run",

@@ -43,8 +43,8 @@ checkout it runs from; `maintain` is what the scheduler runs. The static checkou
 `logs/installers.log` is rewritten by every `maintain`, on a clean one too, so its mtime
 says the job is alive -- and by nothing else (`artifact_root`).
 
-**`uninstall` is the way back off a machine**, and it is the mode the workspace's
-*Machine: Scheduled Jobs* task drives. Dry until `--yes`, and safe to run twice: every
+**`uninstall` is the way back off a machine**, and it is the mode
+`devkit_project.py --project devkit installers uninstall` drives. Dry until `--yes`, and safe to run twice: every
 installer reports a thing that was already gone as removed rather than as a failure, so
 a second pass over a decommissioned machine is a clean run. It takes `MAINTAINER` off
 first, for the reason recorded there. What it does **not** touch is the checkout, the
@@ -288,7 +288,7 @@ def reconcile(
     `runner` is resolved here rather than as a default argument, so a test that replaces
     `run_command` on the module replaces what `main` actually spawns with.
 
-    `only` narrows the set to what a checklist ticked; empty is everything, which is what
+    `only` narrows the set to the installers named; empty is everything, which is what
     the scheduled pass always wants.
     """
     interpreter = sweep.console_python()
@@ -410,9 +410,7 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help=(
-            "explicitly do not apply -- the default, and redundant on the command line. "
-            "It exists so the workspace picker's safe branch emits a real token; "
-            "`installer_picker.DRY_RUN` is that branch and records why"
+            "explicitly do not apply -- the default, and redundant on the command line"
         ),
     )
     parser.add_argument(
@@ -421,7 +419,7 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help=(
             "comma-separated installer names to act on, `install-` and `.py` optional "
             "(e.g. `tray,reap-schedule`). Empty means all, which is what the scheduled "
-            "pass wants; the workspace checklist is what fills it"
+            "pass wants"
         ),
     )
     # Both accepted and ignored, for one reason: a job was registered passing it, and a
@@ -461,7 +459,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     options = read_options(root)
     only = parse_only(args.only)
     if args.mode == "uninstall":
-        # `--dry-run` wins over `--yes`, which only matters if a picker ever sends both:
+        # `--dry-run` wins over `--yes`, which only matters if a caller ever sends both:
         # the safe reading of a contradictory instruction is the one that changes nothing.
         outcomes = decommission(root, args.yes and not args.dry_run, options, only=only)
     else:

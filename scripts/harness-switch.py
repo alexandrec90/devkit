@@ -322,8 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--off", action="store_true", help="stand the selected groups down")
     action.add_argument("--on", action="store_true", help="put the selected groups back")
-    # Accepted rather than inferred from "no verb", so the workspace task's picker can
-    # offer three literal values instead of one option that is the absence of the others.
+    # Accepted rather than inferred from "no verb", so each of the three is spellable.
     action.add_argument("--status", action="store_true", help="report and change nothing")
     parser.add_argument(
         "--group",
@@ -348,15 +347,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import worktree
 
-    workspace = (args.workspace or worktree.DEFAULT_WORKSPACE).resolve()
-
-    # A dismissed quick-pick leaves the literal `${input:harnessGroups}` in the argument:
-    # VS Code aborts a run itself only for its own input types, never for a `command` one.
-    # Treated as a cancel here, which is where it has to be -- `log-wrap.py` passes its
-    # tail through untouched, so a check in the wrapper would prove nothing about this.
-    if args.group is not None and "${input:" in args.group:
-        print("harness-switch: no groups picked; nothing done")
-        return EXIT_OK
+    workspace = worktree.workspace_from(None, args.workspace)
 
     # `--job` alone means that job alone; a `--group` beside it means both.
     groups = [] if args.group is None and args.job else selected_groups(args.group or "all")

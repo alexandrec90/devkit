@@ -517,18 +517,18 @@ def test_a_data_file_names_the_tests_that_read_it(tmp_path, monkeypatch):
     )
 
 
-def test_ports_and_the_workspace_file_name_the_test_that_gates_them():
+def test_ports_and_the_registry_name_the_test_that_gates_them():
     gate = "tests/test_devkit_ports.py"
-    for path in ("ports.toml", "workspace.jsonc"):
+    for path in ("ports.toml", "projects.toml"):
         tests, unnamed = run_tests.tests_for([path], REPO_ROOT)
         assert gate in tests and not unnamed, path
 
 
-def test_the_project_registry_and_the_workspace_file_name_the_test_holding_them_together():
+def test_the_project_registry_names_the_test_holding_it():
     gate = "tests/test_project_registry.py"
-    for path in ("projects.toml", "workspace.jsonc"):
-        tests, unnamed = run_tests.tests_for([path], REPO_ROOT)
-        assert gate in tests and not unnamed, path
+    tests, unnamed = run_tests.tests_for(["projects.toml"], REPO_ROOT)
+    assert gate in tests and not unnamed
+    assert "workspace.jsonc" not in run_tests.READ_BY, "the workspace file is retired"
 
 
 def test_every_read_by_entry_names_a_tracked_file_and_existing_tests():
@@ -816,18 +816,6 @@ def test_named_test_files_run_with_the_contract_tests_in_runs_of_their_own(
     assert all("-k" not in run for run in rest)
     assert run_tests.by_test_root(list(run_tests.CONTRACT_TESTS)) == rest
     assert "--only skips them" in capsys.readouterr().out
-
-
-def test_a_new_installer_or_a_workspace_edit_runs_the_installers_picker_test(tmp_path):
-    """83db1c30: adding `scripts/install-codex-context.py` and its `workspace.jsonc` entry
-    ran green bare and met the picker test, which reads both, first on the gate."""
-    hold_contracts(tmp_path)
-    picker = (
-        "tests/test_installers.py::test_the_scheduled_jobs_picker_offers_every_installer_on_disk"
-    )
-    for changed in ("scripts/install-codex-context.py", "workspace.jsonc"):
-        tests, _ = run_tests.tests_for([changed], tmp_path)
-        assert picker in run_tests.with_contracts(tests, tmp_path), changed
 
 
 def test_only_runs_just_the_named_tests(artifact, monkeypatch, tmp_path):

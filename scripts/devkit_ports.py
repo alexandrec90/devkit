@@ -22,7 +22,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))
-import task_input
 import worktree_tiers
 
 REGISTRY_NAME = "ports.toml"
@@ -244,13 +243,6 @@ def checkout_of(name: str, registry: Registry, workspace: Path) -> str:
 def main(argv: list[str] | None = None) -> int:
     """Print the registry, or env blocks for comma-delimited checkout selections."""
     args = list(sys.argv[1:] if argv is None else argv)
-    # *Ports: Show Checkout Allocations* passes the `project` quick-pick straight in, and
-    # a dismissed one arrives as the literal `${input:project}` -- which would otherwise
-    # be read as a checkout name and reported as unknown. See `task_input`.
-    dismissed = task_input.cancelled_inputs(args)
-    if dismissed:
-        print(task_input.cancel_report("devkit_ports", dismissed))
-        return 0
     root = Path(__file__).resolve().parent.parent
     try:
         registry = load(root)

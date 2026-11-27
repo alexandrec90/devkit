@@ -75,7 +75,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "hooks"))  # the vendored tier
-import devkit_jsonc
 import project_registry
 import projects_root
 import task_branch as tb
@@ -579,46 +578,10 @@ def held(names: object) -> frozenset[str]:
     return frozenset(name for name in names if isinstance(name, str) and name)
 
 
-def parse_workspace(text: str, exclude: frozenset[str] | None = None) -> list[str]:
-    """Folder names from a `.code-workspace` file, minus `exclude`, in file order.
-
-    Parsed through `devkit_jsonc`, not `json`: the workspace file is hand-edited,
-    carries comments, and now also holds the shared task block — under the stdlib
-    parser every one of those is a decode error, and the `except` below would turn
-    it into a silent "no checkouts" instead of a visible failure.
-
-    Still returns [] for text that is malformed for any other reason, rather than
-    raising: a broken workspace file should make the sweep report nothing, not
-    crash a root-level task.
-    """
-    # Resolved here: a default argument would bind the empty set at import time.
-    exclude = DEFAULT_EXCLUDE if exclude is None else exclude
-    try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return []
-    if not isinstance(payload, dict):
-        return []
-    names: list[str] = []
-    for folder in payload.get("folders", []):
-        if not isinstance(folder, dict):
-            continue
-        path = folder.get("path")
-        if not isinstance(path, str) or not path:
-            continue
-        # `path` is workspace-relative; its last segment is the checkout name.
-        name = path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-        if name and name not in exclude and name not in names:
-            names.append(name)
-    return names
-
-
 def managed(names: list[str], exclude: frozenset[str] | None = None) -> list[str]:
-    """`names` -- the registry, `project_registry.all_projects()` -- minus `exclude`.
-
-    The half of `parse_workspace` a reader still needs once the names come from the
-    project registry rather than a workspace file: the same `DEFAULT_EXCLUDE`, resolved
-    at call time for the same reason.
+    """`names` -- the registry, `project_registry.all_projects()` -- minus `exclude`,
+    `DEFAULT_EXCLUDE` unless given. Resolved at call time: a default argument would bind
+    the set at import time.
     """
     exclude = DEFAULT_EXCLUDE if exclude is None else exclude
     return [name for name in names if name not in exclude]
@@ -633,9 +596,7 @@ def select(names: list[str], only: list[str] | None) -> tuple[list[str], list[st
     """
     if not only:
         return names, []
-    # VS Code command inputs must resolve to one string, so the workspace's
-    # multi-pick passes `--only=a,b`. The CLI's repeatable `--only a --only b`
-    # remains supported; both forms normalize here.
+    # Both `--only=a,b` and the repeatable `--only a --only b` normalize here.
     wanted = {name.strip() for value in only for name in value.split(",") if name.strip()}
     return [name for name in names if name in wanted], sorted(wanted - set(names))
 
@@ -2162,9 +2123,9 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="checkout name to skip; repeatable (default: skip nothing)",
     )
-    # Paired for the same reason as --dry-run/--yes: the VS Code picker has to emit
-    # a real token on the "every checkout" branch too, and an empty string would
-    # reach argparse as a stray positional and be rejected.
+    # Paired for the same reason as --dry-run/--yes: spelling the default makes the
+    # narrower choice read as one on the command line, and lets a scheduled task's argv
+    # say "every checkout" outright rather than by omission.
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument(
         "--all",
@@ -2188,8 +2149,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="exit 1 when any checkout needs action, 2 when any is blocked",
     )
-    # Paired for the same reason as --dry-run/--yes below: the VS Code picker has
-    # to emit a real token on both branches.
+    # Paired for the same reason as --dry-run/--yes below: both halves are spellable,
+    # so a caller's argv says which one it meant.
     fetch_mode = parser.add_mutually_exclusive_group()
     fetch_mode.add_argument(
         "--fetch",
@@ -2224,10 +2185,10 @@ def main(argv: list[str] | None = None) -> int:
         help="park each worktree on its home branch, fast-forward, drop merged branches",
     )
     # `--dry-run` is redundant with the default and exists anyway. It was written for
-    # a VS Code task whose picker had to emit one real token in every branch -- an
-    # empty string reaches argparse as a stray positional and is rejected -- and it
-    # outlived that task because spelling the safe half is what makes `--yes` read as
-    # a choice on the command line. Same reason new-project.py carries it.
+    # a picker that had to emit one real token in every branch, and it outlived that
+    # picker because spelling the safe half is what makes `--yes` read as a choice on
+    # the command line. Same reason new-project.py carries it, and a scheduled task's
+    # argv can name either.
     apply_mode = parser.add_mutually_exclusive_group()
     apply_mode.add_argument(
         "--dry-run",

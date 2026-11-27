@@ -1,4 +1,4 @@
-"""`scripts/agent_worktrees.py`: what git's output means, and what the dropdowns draw.
+"""`scripts/agent_worktrees.py`: what git's output means, and what may be removed.
 
 Every decision in that module is pure, so this suite drives the shapes `git worktree
 list` and `git status` actually return and never a repository.
@@ -6,7 +6,6 @@ list` and `git status` actually return and never a repository.
 
 from __future__ import annotations
 
-import datetime as _dt
 from pathlib import Path
 
 import pytest
@@ -16,10 +15,7 @@ from support import load_script
 # bootstrap of its own. The name it registers is the one `agent-worktree.py` imports, so
 # both suites and the script under test share one copy.
 aw = load_script("scripts/agent_worktrees.py")
-picker_rows = load_script("scripts/picker_rows.py")
-picker_scan = load_script("scripts/picker_scan.py")
 
-NOW = _dt.datetime(2026, 9, 5, 12, 0, tzinfo=_dt.UTC)
 CHECKOUT = Path("C:/ws/devkit")
 
 # Codex reads its state directory from `CODEX_HOME`. Passed explicitly rather than
@@ -84,7 +80,7 @@ def test_only_the_immediate_children_of_the_worktrees_directory_count():
 
     The box case is the one worth pinning: `<workspace>/.worktrees/` and
     `<checkout>/.claude/worktrees/` are different tiers with different lifecycles, and a
-    delete menu that offered a box would be offering to strand a port lease.
+    `remove` that took a box would be stranding a port lease.
     """
     text = porcelain(
         ("C:/ws/devkit", "main"),
@@ -141,9 +137,9 @@ def test_a_codex_worktree_of_this_checkout_is_listed_and_labelled_by_its_agent()
 
 
 def test_two_tiers_holding_one_directory_name_are_still_two_rows():
-    """The delete dropdown resolves a ticked row back to a worktree by its name, so a
-    collision would remove whichever the scan happened to list first -- which is not a
-    failure anybody would report, because both rows look right."""
+    """`remove` resolves a named token back to a worktree by its name, so a collision
+    would remove whichever the scan happened to list first -- which is not a failure
+    anybody would report, because both entries look right."""
     home = CODEX_ENV["CODEX_HOME"]
     text = porcelain(
         ("C:/ws/devkit/.claude/worktrees/fix-320", "agent/fix-320"),
@@ -155,7 +151,7 @@ def test_two_tiers_holding_one_directory_name_are_still_two_rows():
 
 def test_a_codex_shaped_path_under_some_other_directory_is_not_a_worktree_of_the_tier():
     """A project that happens to keep `worktrees/<x>/<y>` is not Codex's home, and a
-    delete menu that offered its contents would be offering somebody else's directories.
+    `remove` that took its contents would be removing somebody else's directories.
     """
     text = porcelain(("C:/ws/scratch/worktrees/2e51/thing", "agent/x"))
     assert aw.nested(CHECKOUT, text, CODEX_ENV) == []
@@ -299,182 +295,17 @@ def test_a_clean_tree_says_so_rather_than_saying_nothing():
     assert aw.Tree("t", "C:/w", "b").state() == "clean and pushed"
 
 
-def test_a_pick_survives_a_round_trip_through_the_dropdown():
-    """The value is one token because a VS Code input resolves to one string, and the
-    tail may contain slashes — a base branch is `agent/topic-0905` more often than not."""
-    token = aw.pick_value("devkit", "agent/topic-0905")
-    assert aw.parse_pick(token) == ("devkit", "agent/topic-0905")
+def test_a_pick_keeps_a_tail_that_contains_slashes():
+    """The tail may contain slashes -- a base branch is `agent/topic-0905` more often
+    than not -- so only the first separator splits."""
+    assert aw.parse_pick("devkit:agent/topic-0905") == ("devkit", "agent/topic-0905")
 
 
-@pytest.mark.parametrize("token", ["", "devkit", ":topic", "devkit:", f"devkit:{aw.NOTHING}"])
-def test_the_sentinel_and_the_malformed_pick_both_read_as_nothing(token):
-    """One `None` for both, because the caller does the same thing with either: report
-    that nothing was chosen and run nothing."""
+@pytest.mark.parametrize("token", ["", "devkit", ":topic", "devkit:"])
+def test_a_malformed_pick_reads_as_nothing(token):
+    """The caller reports that nothing was named and runs nothing."""
     assert aw.parse_pick(token) is None
 
 
-def test_ticked_rows_split_on_the_separator_and_lose_duplicates():
+def test_named_tokens_split_on_the_separator_and_lose_duplicates():
     assert aw.split_picks("devkit:a  carameli:b devkit:a") == ["devkit:a", "carameli:b"]
-
-
-def fields(line: str) -> list[str]:
-    return line.split(picker_rows.FIELD_SEP)
-
-
-def test_a_worktree_row_leads_with_the_name_and_the_cost_of_ticking_it():
-    """The label is what the checkbox shows; the description is the whole reason the row
-    exists rather than a bare list of directories, and it names the checkout because the
-    list is flat."""
-    row = aw.tree_row("devkit", aw.Tree("topic", "C:/w/topic", "agent/topic-0905", 1, 2))
-    assert fields(row) == [
-        "devkit:topic",
-        "topic",
-        "devkit -- 1 uncommitted path(s), 2 unpushed commit(s)",
-        "agent/topic-0905 -- C:/w/topic",
-    ]
-
-
-def test_a_detached_worktree_says_so_where_its_branch_would_be():
-    """`detail` is the only field that names the branch, so an empty one there would be a
-    row that looks like it lost half its text."""
-    assert "detached HEAD" in fields(aw.tree_row("devkit", aw.Tree("loose", "C:/w", "")))[3]
-
-
-def test_a_base_row_carries_the_branch_name_not_the_remote_ref():
-    """The CLI takes a branch and resolves which ref it means, so the same string works
-    whether it was ticked here or typed. `detail` is where the resolution is shown."""
-    row = aw.base_row("devkit", "agent/topic-0905", "last commit 2 hours ago")
-    assert fields(row) == [
-        "devkit:agent/topic-0905",
-        "agent/topic-0905",
-        "devkit -- last commit 2 hours ago",
-        "cut the new branch from origin/agent/topic-0905",
-    ]
-
-
-def test_a_machine_with_no_worktrees_draws_the_sentinel_rather_than_no_rows():
-    """An empty quick-pick cannot be told apart from a command that failed to run, so
-    "there are none" is stated as a row -- and `parse_pick` answers it with nothing."""
-    drawn = aw.tree_rows({"devkit": [], "carameli": []})
-    assert len(drawn) == 1
-    assert aw.parse_pick(fields(drawn[0])[0]) is None
-    assert fields(drawn[0])[3] == "picking this runs nothing"
-
-
-def test_no_branches_anywhere_draws_the_sentinel_too():
-    drawn = aw.base_rows({"devkit": []})
-    assert len(drawn) == 1
-    assert aw.parse_pick(fields(drawn[0])[0]) is None
-
-
-def test_the_checkout_with_the_most_worktrees_is_offered_first():
-    """Whoever opened the delete list wants to delete something, so the rows of the
-    checkout that has several belong above the one that has none. Alphabetical order gets
-    that right only by luck."""
-    trees = {
-        "alpha": [],
-        "zulu": [aw.Tree("a", "C:/a", "b"), aw.Tree("c", "C:/c", "d")],
-        "mike": [aw.Tree("e", "C:/e", "f")],
-    }
-    drawn = [fields(line)[0] for line in aw.tree_rows(trees)]
-    assert drawn == ["zulu:a", "zulu:c", "mike:e"]
-
-
-def test_the_base_rows_are_alphabetical_by_checkout():
-    """Where `tree_rows` sorts by count, and the difference is the question: this list is
-    read to find a branch whose name you already know, so a stable position is worth more
-    than putting the busiest checkout on top."""
-    bases = {"zulu": [("main", "the default branch")], "alpha": [("main", "the default branch")]}
-    assert [fields(line)[0] for line in aw.base_rows(bases)] == ["alpha:main", "zulu:main"]
-
-
-def test_every_row_of_either_list_carries_four_fields():
-    """The extension reads by position, so a row one field short makes the next reader
-    take a description for a detail. `tests/test_picker_rows.py` owns what `cell` does to
-    each field; this asserts both builders hand it four."""
-    trees = {"devkit": [aw.Tree("topic", "C:/w", "agent/topic-0905", 1, 0)], "carameli": []}
-    bases = {"devkit": [("main", "the default branch")], "carameli": []}
-    for line in [*aw.tree_rows(trees), *aw.base_rows(bases)]:
-        assert len(fields(line)) == 4
-
-
-# --- the checkout stage, and the order it has to record -----------------------
-
-
-def tree(name: str):
-    return aw.Tree(name, f"C:/ws/devkit/.claude/worktrees/{name}", f"agent/{name}", 0, 0)
-
-
-TREES = {"devkit": [tree("a"), tree("b")], "carameli": [tree("c")], "roguelike": []}
-
-
-def test_the_delete_checkout_rows_count_what_each_one_holds():
-    drawn = aw.tree_project_rows(TREES, "tok")
-    assert [fields(line)[1] for line in drawn] == ["devkit", "carameli", "roguelike"]
-    assert [fields(line)[2] for line in drawn] == ["2 worktrees", "1 worktree", "no worktrees"]
-
-
-def test_a_checkout_with_no_worktrees_is_offered_and_says_so():
-    """ "Where are my worktrees" is a question about the machine, so a checkout that
-    silently drops out of the answer cannot be told apart from one the scan could not
-    reach -- which is the same argument the row list itself makes."""
-    assert fields(aw.tree_project_rows(TREES, "tok")[2])[2] == "no worktrees"
-
-
-def test_the_base_checkout_rows_are_alphabetical_and_counted():
-    bases = {"zulu": [("main", "the default branch")], "alpha": [("main", "x"), ("dev", "y")]}
-    drawn = aw.base_project_rows(bases, "tok")
-    assert [fields(line)[1] for line in drawn] == ["alpha", "zulu"]
-    assert fields(drawn[0])[2] == "2 branches to cut from"
-    assert fields(drawn[1])[2] == "1 branch to cut from"
-
-
-def test_a_checkout_whose_origin_could_not_be_read_says_that_rather_than_nothing():
-    """Every checkout contributes at least its default branch, so a count of zero here
-    means `recent_bases` could not read its origin refs at all -- worth saying in the
-    row rather than leaving as an unexplained short list one stage later."""
-    assert fields(aw.base_project_rows({"alpha": []}, "tok")[0])[2] == "origin could not be read"
-
-
-def test_a_checkout_row_carries_the_token_the_second_stage_reads():
-    for line in (
-        aw.tree_project_rows(TREES, "tok9")[0],
-        aw.base_project_rows({"a": []}, "tok9")[0],
-    ):
-        assert picker_scan.parse_projects(fields(line)[0])[1] == "tok9"
-
-
-def test_no_checkouts_at_all_draws_a_sentinel_rather_than_an_empty_menu():
-    for drawn in (aw.tree_project_rows({}, "tok"), aw.base_project_rows({}, "tok")):
-        assert len(drawn) == 1
-        assert fields(drawn[0])[0] == picker_rows.NOTHING
-
-
-def test_the_entries_carry_the_checkout_and_the_row_list_carries_the_same_order():
-    """The pair the second stage depends on: it filters what `tree_entries` recorded, so
-    a row list ordered differently from the entries would draw the right worktrees in
-    the wrong order -- which nobody would report."""
-    entries = aw.tree_entries(TREES)
-    assert [project for project, _line in entries] == ["devkit", "devkit", "carameli"]
-    assert [line for _project, line in entries] == aw.tree_rows(TREES)
-
-
-def test_the_base_entries_match_their_row_list_too():
-    bases = {"zulu": [("main", "x")], "alpha": [("main", "y")]}
-    entries = aw.base_entries(bases)
-    assert [project for project, _line in entries] == ["alpha", "zulu"]
-    assert [line for _project, line in entries] == aw.base_rows(bases)
-
-
-def test_selecting_one_checkout_out_of_the_entries_keeps_the_scans_order():
-    entries = aw.tree_entries(TREES)
-    assert picker_scan.select(entries, ["devkit"]) == aw.tree_rows({"devkit": TREES["devkit"]})
-
-
-def test_empty_rows_draws_each_halfs_own_sentinel():
-    """An empty quick-pick cannot be told apart from a command that failed to run, and
-    the two halves have different reasons for being empty."""
-    assert aw.empty_rows("trees") == aw.tree_rows({})
-    assert aw.empty_rows("bases") == aw.base_rows({})
-    assert "no worktrees" in aw.empty_rows("trees")[0]
-    assert "origin could not be read" in aw.empty_rows("bases")[0]

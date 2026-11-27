@@ -49,13 +49,8 @@ one PR each -- the release is one upstream revision, so adopting it everywhere i
 one operation. Each project is still upgraded on its own terms: a refusal in one
 does not stop the others, and the exit code reports the worst outcome.
 
-**Which consumers is a click, not an argument.** `Devkit: Upgrade Projects` asks with a
-checkbox quick-pick and passes the ticked names in as the positional -- so choosing four
-of five is a gesture rather than a comma-delimited string somebody has to spell from
-memory, in a terminal, correctly. `--all` remains what the unattended callers use, and
-escaping the checklist means *never mind*: `main` recognises the unresolved literal ahead
-of `argparse` (see `task_input`), and `picked_nothing` is the same reading for a caller
-that hands the positional in itself.
+Which consumers is the positional, comma-delimited; `--all` is what the unattended
+callers use.
 
 Safe to run unattended, which is the point: `scripts/install-upgrade-schedule.py`
 registers exactly that.
@@ -100,7 +95,6 @@ from adoption_prs import (
 import release
 import sweep
 import task_branch as tb
-import task_input
 import template_refresh
 import temproot_wiring
 import worktree
@@ -157,7 +151,7 @@ RELEASE_COMMAND = "python scripts/release-pipeline.py patch --yes"
 # `main()` reports it once for the whole run rather than once per project.
 NO_TAG = (
     f"devkit has no release tags -- there is nothing to adopt. Cut one first: "
-    f'the VS Code task "{RELEASE_TASK}", or `{RELEASE_COMMAND}` (RELEASING.md)'
+    f'the dispatcher\'s "{RELEASE_TASK}", or `{RELEASE_COMMAND}` (RELEASING.md)'
 )
 
 # The pseudo-name a run-level outcome carries in place of a checkout's. Parenthesised
@@ -169,30 +163,10 @@ RELEASE_SCOPED = "(release)"
 
 
 def project_selection(value: str | None) -> list[str]:
-    """Comma-delimited checkout selection returned by the VS Code multi-pick."""
+    """A comma-delimited checkout selection, in order, duplicates dropped."""
     if not value:
         return []
     return list(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
-
-
-def picked_nothing(value: str | None) -> bool:
-    """Did the VS Code checklist never open at all?
-
-    Escape leaves the input unresolved and VS Code passes the literal
-    `${input:adoptProjects}` straight through to the task, so what reaches argv is a
-    placeholder rather than a selection. Read as a checkout name it lands on "not in
-    workspace.code-workspace" with exit 2 -- an operator error reported for the one
-    gesture that means *never mind*, and written to `logs/upgrade.log` where the next
-    reader finds it as a failure. `plug-projects.picked_nothing` reads an escaped pick
-    the same way and for the same reason.
-
-    The task itself no longer arrives here: `main` recognises the literal in the raw argv
-    ahead of `argparse`, because the checklist is not the only input the task passes and
-    a dismissed `${input:sweepApply}` reached argparse as a stray positional -- a usage
-    error, exit 2, for the same gesture. This stays for callers that build the positional
-    themselves; `release-pipeline.py` is the one that does.
-    """
-    return "${input:" in value if value else False
 
 
 @dataclass(frozen=True)
@@ -561,7 +535,7 @@ def unreleased_line(files: list[str], tag: str) -> str:
     return (
         f"upgrade: devkit main carries {len(files)} vendored change(s) {tag} does not, "
         f"so this run cannot deliver them: {', '.join(files)}\n"
-        f"        Cut a release to deliver them -- the VS Code task "
+        f"        Cut a release to deliver them -- the dispatcher's "
         f'"{RELEASE_TASK}", or `{RELEASE_COMMAND}`. This run adopts {tag}.'
     )
 
@@ -1155,8 +1129,8 @@ def _finish(tag: str, dry_run: bool, outcomes: list[Outcome], unattended: bool =
     """Write the artifact, then return the run's code -- `run_code` says which.
 
     Every exit from `main` goes through here, including the ones that never reach a
-    project: "devkit has no tags" and "that checkout is not in the workspace" are the
-    two failures most likely to be read hours later out of a task terminal. The one
+    project: "devkit has no tags" and "that checkout is not in the registry" are the
+    two failures most likely to be read hours later, out of a scheduled run. The one
     exit that cannot -- argparse's own, raised from inside `parse_args` before `main`
     has anything to finish -- writes the same artifact through
     `_ReportingParser.error` instead.
@@ -1206,33 +1180,12 @@ class _ReportingParser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Before argparse, and before `_ReportingParser` can write a failure artifact: a
-    # dismissed quick-pick is not a usage error, and `${input:adoptProjects}` reaching
-    # the positional would be reported as one -- red icon, toast, `logs/upgrade.log` --
-    # for a run the user called off. *Devkit: Upgrade Projects* is wrapped by
-    # `notify-wrap.py`, which recognises the literal too, but the guard belongs here as
-    # well: this script is also the innermost command, and a wrapper's check protects
-    # nothing when the script is invoked directly. See `task_input`.
-    dismissed = task_input.cancelled_inputs(sys.argv[1:] if argv is None else argv)
-    if dismissed:
-        print(task_input.cancel_report("upgrade-project", dismissed))
-        # Emptied for the same reason the "nothing was picked" branch below empties it:
-        # a cancel that leaves the previous run's artifact in place is indistinguishable
-        # from a run that broke.
-        write_artifact(REPO_ROOT, "")
-        return 0
-
     parser = _ReportingParser(description=__doc__.splitlines()[0])
-    # Optional, and paired with --all for the same reason --dry-run is paired with
-    # --yes: the VS Code picker has to emit one real token on the "every project"
-    # branch too, and an empty string would reach argparse as a stray positional.
+    # Optional, because `--all` names the set instead.
     parser.add_argument(
         "project",
         nargs="?",
-        help=(
-            "checkout name(s) to upgrade, comma-delimited, as listed in the workspace. "
-            "This is what the `Devkit: Upgrade Projects` checklist emits"
-        ),
+        help="checkout name(s) to upgrade, comma-delimited, as listed in the registry",
     )
     parser.add_argument(
         "--all",
@@ -1253,13 +1206,6 @@ def main(argv: list[str] | None = None) -> int:
     apply_mode.add_argument("--yes", dest="dry_run", action="store_false")
     parser.raw_argv = tuple(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(list(parser.raw_argv))
-    if picked_nothing(args.project):
-        # Backing out of the checklist is a decision, not a failure. Said out loud and
-        # the artifact emptied, because the alternative -- leaving the previous run's
-        # log in place -- makes "I cancelled it" indistinguishable from "it broke".
-        print("upgrade: nothing was picked -- no checkout was upgraded.")
-        write_artifact(REPO_ROOT, "")
-        return 0
     requested = project_selection(args.project)
     if args.every and requested:
         parser.error(f"--all upgrades every project; drop {args.project} or drop --all")

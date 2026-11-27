@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """Reopen the most recently active Claude and/or Codex sessions, one tab each.
 
-Backs the workspace-level VS Code task "Agents: Resume Recent Sessions".
-
-**Scope-blind on purpose.** Every other agent task in this workspace starts from a
-checkout: it asks which project, and the answer bounds what it can touch. Picking up
-yesterday's work is the opposite shape — what you want back is the last few *sessions*,
-wherever they happened to run, and a session's directory is a fact about it rather than
-a question to answer. Three of the last few may be in one repo and another in an
-ephemeral box that no picker lists (boxes are absent from the workspace file by design,
-so `${input:project}` could not offer one). So this reads the selected agents' transcript
+**Scope-blind on purpose.** Every other agent command here starts from a checkout: it
+takes which project, and the answer bounds what it can touch. Picking up yesterday's
+work is the opposite shape — what you want back is the last few *sessions*, wherever
+they happened to run, and a session's directory is a fact about it rather than a
+question to answer. Three of the last few may be in one repo and another in an
+ephemeral box the project registry never lists (boxes are absent from it by design,
+so `--project` could not name one). So this reads the selected agents' transcript
 stores, which know every session's directory, and takes no project argument at all. When
 both agents are selected, they are merged before the recency limit is applied: "last 10"
 means ten sessions total, regardless of which agent owns them.
@@ -74,7 +72,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import agent_clis
 import agent_tabs
-import task_input
 import wt_profile
 from agent_models import NOTHING_PICKED, Launch, add_arguments
 from fix_prompts import ROLE
@@ -386,13 +383,13 @@ def shell_lines(
 
 
 def _parse_agents(value: str) -> tuple[str, ...]:
-    """A CLI agent name or the checkbox picker's comma-separated selection."""
+    """A CLI agent name, `any`, or a comma-separated list of both."""
     selected = SUPPORTED_AGENTS if value == "any" else tuple(value.split(","))
     if not selected or any(agent not in SUPPORTED_AGENTS for agent in selected):
         choices = ", ".join((*SUPPORTED_AGENTS, "any"))
-        raise argparse.ArgumentTypeError(f"choose one of {choices}, or select both agents")
-    # The checkbox extension can return either click order. Canonical order makes the
-    # report stable; the global mtime sort, not this order, decides which sessions win.
+        raise argparse.ArgumentTypeError(f"choose one of {choices}, or list both agents")
+    # A list may come in either order. Canonical order makes the report stable; the
+    # global mtime sort, not this order, decides which sessions win.
     return tuple(agent for agent in SUPPORTED_AGENTS if agent in selected)
 
 
@@ -431,7 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_parse_agents,
         default=("claude",),
         metavar="AGENT",
-        help="claude, codex, any, or a comma-separated checkbox selection (default claude)",
+        help="claude, codex, any, or a comma-separated list (default claude)",
     )
     parser.add_argument(
         "--list", action="store_true", help="print what would be reopened, launch nothing"
@@ -455,15 +452,6 @@ def main(argv: list[str] | None = None, agent_pass: AgentPass | None = None) -> 
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
-
-    # Before argparse: `--agent` has a `type=` that would reject the literal
-    # `${input:resumeAgents}` a dismissed checkbox list leaves behind, turning a cancel
-    # into a usage error. Nothing in front of it would catch it: the task carries no
-    # `notify-wrap.py`, and `log-wrap.py` passes the literal through untouched.
-    dismissed = task_input.cancelled_inputs(sys.argv[1:] if argv is None else argv)
-    if dismissed:
-        print(task_input.cancel_report("resume-sessions", dismissed))
-        return 0
 
     parser = build_parser()
     args = parser.parse_args(argv)

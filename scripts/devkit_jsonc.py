@@ -2,14 +2,11 @@
 """Loader for VS Code's JSON-with-comments dialect (`.code-workspace`, `tasks.json`).
 
 VS Code accepts `//` and `/* */` comments and trailing commas; `json.loads` does not.
-Every one of those files in this workspace is hand-edited and commented, so reading
-them with the stdlib parser fails on contact — and the failure is *quiet* where it
-matters: `sweep.parse_workspace` catches `JSONDecodeError` and reports no checkouts,
-which reads as "nothing to ship" rather than "I could not read the file".
-
-That is why this exists as a module rather than a regex at each call site: the
-workspace file is the project registry (`sweep.py`) *and* the home of the shared task
-block, so the same text is parsed by the sweep, the generator, and the drift check.
+Those files are hand-edited and commented, so reading them with the stdlib parser fails
+on contact. VS Code is retired and the registry is `projects.toml` now; what still reads
+this dialect is `project_registry.migrate_machine_settings`'s one-shot read of a
+machine's retired workspace file, and `wt_profile.py`, whose Windows Terminal
+`settings.json` is the same dialect.
 
 The strippers are **offset-preserving** — comments and trailing commas are blanked to
 spaces, never deleted — so line/column numbers in a `JSONDecodeError` still point at

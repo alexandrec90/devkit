@@ -1,5 +1,5 @@
-"""Move an edit of devkit's canonical `workspace.jsonc` off the static checkout onto a
-task branch, with a ship intent for the fix pass to ship.
+"""Move an edit of devkit's committed registry (`projects.toml`) off the static checkout
+onto a task branch, with a ship intent for the fix pass to ship.
 
 The static checkout is the one the scheduled fix pass runs from. Its watchdog
 fast-forwards it before every fire and refuses a dirty one, and a checkout someone moved
@@ -7,7 +7,8 @@ onto a branch to commit the edit there runs that branch's code instead of `main`
 held the pass and filed `pass-stale`: `new-project.py`'s registration left uncommitted
 (851308ef), and an unplug committed on `agent/unplug-carameli-1111` in the checkout
 itself, the branch `plug-projects.py` told the person to make (a5ec492b). So each tool
-that writes the canonical copy from the static checkout hands its edit off here.
+that writes the registry from the static checkout hands its edit off here. (The module
+name is from when the registry was the canonical `workspace.jsonc`, since deleted.)
 """
 
 from __future__ import annotations
@@ -61,30 +62,29 @@ def dirty(path: Path, runner=subprocess.run) -> bool:
 
 
 def hand_off(
-    canonical: Path,
+    edited_file: Path,
     slug: str,
     intent: str,
     runner=subprocess.run,
     carry: Callable[[Path], str] | None = None,
     also: tuple[str, ...] = (),
 ) -> Cut:
-    """Put the uncommitted edit of `canonical` on `agent/<slug>-<mmdd>`, in a
+    """Put the uncommitted edit of `edited_file` on `agent/<slug>-<mmdd>`, in a
     `.claude/worktrees/` tree off the checkout's `HEAD` -- the commit the edit was made
     against -- with `intent` as its ship intent, and put the static checkout's copy back.
 
-    `also` names other files beside `canonical` that the same edit wrote -- the registry
-    is written to `projects.toml` and `workspace.jsonc` both until the latter is gone --
-    and each moves with it the same way; one that is absent or unedited is skipped.
+    `also` names other files beside `edited_file` that the same edit wrote, and each
+    moves with it the same way; one that is absent or unedited is skipped.
     `carry(tree)` writes whatever else the branch takes and returns the text to add to
     the intent. An empty `Cut` when there is nothing to hand off: a linked worktree or
     a task branch (the edit is on a branch already), a checkout git cannot read, or no
     edit. A cut that failed says so in `said`, with the files left as they were.
     """
-    checkout = canonical.parent
+    checkout = edited_file.parent
     git = git_in(checkout, runner)
     if not (checkout / ".git").is_dir():
         return Cut()
-    edited = [p for p in (canonical, *(checkout / n for n in also)) if dirty(p, runner)]
+    edited = [p for p in (edited_file, *(checkout / n for n in also)) if dirty(p, runner)]
     if not edited:
         return Cut()
     branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()

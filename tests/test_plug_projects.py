@@ -13,12 +13,9 @@ And `edit_verdict` is the gate on where the registry is edited from. Its two ref
 are the ones that would otherwise build a registry branch on an unmerged proposal, so
 they are tested without a git tree at all.
 
-A fourth since the checkboxes moved into VS Code, and it changed shape when the list
-stopped being a cached file: `toggled_selection` reads a pick as a set of rows to
-*flip*, so what is pinned is that a row nobody ticked is left exactly as it is and that
-the same pick applied twice is a no-op. The two functions this replaced,
-`selection_from_ticks` and `guarded_selection`, existed only to tell "unticked" from
-"never offered" in an answer made against options some earlier pass had written down.
+A fourth: `toggled_selection` reads `--picks` as a set of rows to *flip*, so what is
+pinned is that a row nobody ticked is left exactly as it is and that the same pick
+applied twice is a no-op.
 """
 
 import json
@@ -29,14 +26,12 @@ from support import REPO_ROOT, devkit_project, load_script, worktree
 
 import project_registry  # on sys.path once `support` is imported
 
-picker_rows = load_script("scripts/picker_rows.py")
-
 plug_projects = load_script("scripts/plug-projects.py")
 
 Candidate = plug_projects.Candidate
 PlugError = plug_projects.PlugError
 Step = plug_projects.Step
-apply_registry = plug_projects.apply_registry
+apply_projects = plug_projects.apply_projects
 clone_repo = plug_projects.clone_repo
 create_repo = plug_projects.create_repo
 describe = plug_projects.describe
@@ -48,11 +43,8 @@ in_ephemeral_box = plug_projects.in_ephemeral_box
 interactive = plug_projects.interactive
 inventory = plug_projects.inventory
 main = plug_projects.main
-toggle_detail = plug_projects.toggle_detail
-rows = plug_projects.rows
 parse_command = plug_projects.parse_command
 parse_ticks = plug_projects.parse_ticks
-picked_nothing = plug_projects.picked_nothing
 toggled_selection = plug_projects.toggled_selection
 plan = plug_projects.plan
 render = plug_projects.render
@@ -60,15 +52,14 @@ scripted_env = plug_projects.scripted_env
 unplug_hazards = plug_projects.unplug_hazards
 write_artifact = plug_projects.write_artifact
 
-REGISTRY = '{"folders": [{"path": "alpha"}, {"path": "beta"}]}'
+REGISTRY = ["alpha", "beta"]
+REGISTRY_TOML = 'projects = [\n    "alpha",\n    "beta",\n]\n'
 
 # The same registry plus a reference checkout. Only the exclusion test below uses it,
 # and only with `NOT_PROJECTS` monkeypatched: the set is empty today, so a registry that
 # carried this name unconditionally would just add a candidate everywhere else.
 REFERENCE = "reference-checkout"
-REFERENCE_REGISTRY = (
-    '{"folders": [{"path": "alpha"}, {"path": "beta"}, {"path": "reference-checkout"}]}'
-)
+REFERENCE_REGISTRY = ["alpha", "beta", REFERENCE]
 
 
 def done(stdout: str = "", code: int = 0, stderr: str = "") -> subprocess.CompletedProcess:
@@ -140,7 +131,6 @@ def test_plugging_an_archived_repo_unarchives_it_and_never_creates_one():
     assert step == Step(plug_projects.PLUG, "r", unarchive=True)
     assert "unarchive the GitHub repo" in describe(step)
     assert "CREATE" not in describe(step)
-    assert "unarchives acme/r" in toggle_detail(candidates[-1], "acme")
 
 
 def test_a_failed_repo_listing_raises_rather_than_returning_nothing():
@@ -160,7 +150,7 @@ def test_unreadable_gh_output_raises():
 
 def test_registered_projects_keep_the_registry_order():
     """That array is hand-arranged, and reordering it would make the checkbox numbers
-    disagree with the workspace tree everyone reads."""
+    disagree with the file everyone reads."""
     found = inventory(REGISTRY, ["beta", "alpha"], ["alpha", "beta"])
     assert [c.name for c in found] == ["alpha", "beta"]
     assert all(c.plugged for c in found)
@@ -174,8 +164,8 @@ def test_a_project_in_only_one_source_is_still_offered():
 
 
 def test_the_reference_checkout_is_never_a_candidate(monkeypatch):
-    """It is in `folders` on purpose and every consumer of the registry excludes it by
-    name; a checkbox that could retire it would break the one task that resolves
+    """It is registered on purpose and every consumer of the registry excludes it by
+    name; a checkbox that could retire it would break the one script that resolves
     against the raw registry.
 
     `NOT_PROJECTS` is empty today, so the name has to be put in it for the exclusion to
@@ -291,77 +281,7 @@ def test_an_error_does_not_end_the_loop():
     assert interactive(candidates, set(), lambda _: next(answers), lambda *a: None) == {"beta"}
 
 
-# --- the same list, drawn by VS Code ----------------------------------------
-
-
-@pytest.mark.parametrize(
-    "candidate, expected",
-    [
-        (Candidate("alpha", plugged=True, on_disk=True, on_github=True), "ticking retires it"),
-        (
-            Candidate("zeta", plugged=True, on_disk=False, on_github=True),
-            "ticking clones acme/zeta here",
-        ),
-        (Candidate("gamma", plugged=False, on_disk=False, on_github=True), "clones acme/gamma"),
-        (Candidate("delta", plugged=False, on_disk=True, on_github=False), "CREATES the public"),
-        (
-            Candidate("eps", plugged=False, on_disk=True, on_github=True),
-            "registers it, and nothing",
-        ),
-    ],
-)
-def test_each_row_says_what_its_own_tick_costs(candidate, expected):
-    """The task runs `--picks ... --yes`, so the quick-pick *is* the confirmation and
-    this line is the last thing anyone reads before a public GitHub repo is created.
-    A tick flips the row, so the two directions cost wildly different things and the
-    sentence has to name the one THIS row is offering."""
-    assert expected in toggle_detail(candidate, "acme")
-
-
-def test_every_row_carries_the_four_fields_the_quick_pick_splits_on():
-    """`shellCommand.execute` is positional: `value|label|description|detail`, and a
-    field carrying the separator silently becomes two. `picker_rows.row` is what
-    contains that, so this asserts the shape reaches it rather than re-testing it."""
-    candidates = inventory(REGISTRY, ["alpha", "beta"], ["alpha", "beta", "gamma"])
-    drawn = rows(candidates, "acme")
-    assert len(drawn) == len(candidates)
-    for line in drawn:
-        assert len(line.split(picker_rows.FIELD_SEP)) == 4
-
-
-def test_the_row_value_is_the_bare_project_name():
-    """The value is the only field that comes back, and it reaches `--picks` as a name
-    `main` looks up in the live candidate set."""
-    candidates = inventory(REGISTRY, ["alpha", "beta"], ["alpha", "beta", "gamma"])
-    assert [line.split(picker_rows.FIELD_SEP)[0] for line in rows(candidates, "acme")] == [
-        "alpha",
-        "beta",
-        "gamma",
-    ]
-
-
-def test_a_folder_with_no_harness_says_so_in_the_row():
-    """The same flag the terminal listing carries, in the only column a quick-pick has
-    room for: plugging an unharnessed folder registers a checkout no task can run."""
-    candidates = inventory('{"folders": []}', ["delta"], [])
-    (line,) = rows(candidates, "acme")
-    assert line.split(picker_rows.FIELD_SEP)[2] == "folder only (no .devkit.toml)"
-
-
-def test_a_scan_that_found_nothing_draws_a_row_saying_so():
-    """An empty stdout is indistinguishable in the quick-pick from a command that failed
-    or a wrong path, so "nothing to do" is stated as an unpickable-in-effect row whose
-    value `main` recognises."""
-    (line,) = rows([], "acme")
-    assert line.split(picker_rows.FIELD_SEP)[0] == picker_rows.NOTHING
-
-
-def test_the_rows_carry_no_timestamp_because_they_are_not_a_cache():
-    """The file-backed checklist had to say how stale it was, in a group label. A list
-    built when the picker opens has no such claim to make, and a leftover "as of" line
-    would be the most misleading thing on it."""
-    candidates = inventory(REGISTRY, ["alpha"], ["alpha"])
-    assert not any("as of" in line for line in rows(candidates, "acme"))
+# --- the scripted answer ------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -375,18 +295,8 @@ def test_the_rows_carry_no_timestamp_because_they_are_not_a_cache():
     ],
 )
 def test_the_one_string_answer_splits_back_into_names(answer, expected):
-    """A VS Code input resolves to exactly one string, so `separator` joins the ticked
-    values on the way out and this is the other half of that."""
+    """`--picks` is one string, comma- or space-separated."""
     assert parse_ticks(answer) == expected
-
-
-def test_escaping_the_quick_pick_is_recognised_rather_than_parsed():
-    """Escape leaves the input unresolved and VS Code passes the literal through. Read
-    as a name it would be a tick for a project called `${input:plugSelection}`, every
-    other row unticked -- which is a plan to retire the entire registry."""
-    assert picked_nothing("${input:plugSelection}")
-    assert not picked_nothing("alpha,beta")
-    assert not picked_nothing("")
 
 
 def test_ticking_a_registered_row_retires_it():
@@ -453,23 +363,23 @@ def test_scripted_selection_reads_the_three_meanings_of_a_registered_elsewhere_r
 
 
 def test_after_apply_notes_send_nobody_to_commit_after_a_clone_only_run():
-    """A clone edits nothing in the registry, so there is no `workspace.jsonc` to ship."""
+    """A clone edits nothing in the registry, so there is no `projects.toml` to ship."""
     notes = plug_projects.after_apply_notes
     assert notes([Step(plug_projects.CLONE, "beta", clone=True)]) == []
     assert any(
-        "ship workspace.jsonc from a worktree" in line
+        "ship projects.toml from a worktree" in line
         for line in notes([Step(plug_projects.UNPLUG, "a")])
     )
     plugged = notes([Step(plug_projects.PLUG, "a")])
-    assert any("ship workspace.jsonc from a worktree" in line for line in plugged)
+    assert any("ship projects.toml from a worktree" in line for line in plugged)
     assert any("ports.toml" in line for line in plugged)
 
 
 def test_a_handed_off_edit_sends_nobody_to_commit_it():
-    """a5ec492b: "commit workspace.jsonc on a task branch" was done in devkit's own
+    """a5ec492b: "commit the registry on a task branch" was done in devkit's own
     checkout, which the fix pass runs from, so the pass ran that branch."""
     notes = plug_projects.after_apply_notes([Step(plug_projects.UNPLUG, "a")], handed=True)
-    assert not any("workspace.jsonc" in line for line in notes)
+    assert not any("projects.toml" in line for line in notes)
     assert not any(
         "task branch" in line
         for line in plug_projects.after_apply_notes([Step(plug_projects.UNPLUG, "a")])
@@ -483,8 +393,9 @@ def test_the_registry_change_names_every_flip_and_merges_once_green():
         [Step(plug_projects.UNPLUG, "carameli"), Step(plug_projects.PLUG, "skinamp")]
     )
     assert slug == "plug-skinamp-unplug-carameli"
-    assert intent.startswith("Plug skinamp and unplug carameli in the workspace registry\n\n")
+    assert intent.startswith("Plug skinamp and unplug carameli in the project registry\n\n")
     assert "plugged skinamp and unplugged carameli" in intent
+    assert "workspace.jsonc" not in intent
     assert "Hold: yes" not in intent, "the pick was the decision: it merges once green"
 
 
@@ -493,8 +404,8 @@ def test_an_unplug_leaves_the_static_checkout_on_main_and_clean(tmp_path):
     worktree with its intent, and the checkout the pass runs from is left as it was."""
     path = tmp_path / "devkit"
     path.mkdir()
-    canonical = path / "workspace.jsonc"
-    canonical.write_text(REGISTRY, encoding="utf-8", newline="\n")
+    toml = path / "projects.toml"
+    toml.write_text(REGISTRY_TOML, encoding="utf-8", newline="\n")
     for args in (
         ("init", "--quiet", "-b", "main"),
         ("config", "core.hooksPath", str(path / ".nohooks")),
@@ -505,9 +416,9 @@ def test_an_unplug_leaves_the_static_checkout_on_main_and_clean(tmp_path):
     ):
         subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
     steps = [Step(plug_projects.UNPLUG, "alpha")]
-    canonical.write_text('{"folders": [{"path": "beta"}]}', encoding="utf-8", newline="\n")
+    assert plug_projects.write_registry(toml, steps) is True
 
-    said = plug_projects.hand_off_registry(steps, canonical)
+    said = plug_projects.hand_off_registry(steps, toml)
 
     # What `fix-pass-watchdog.self_update` asks before it fast-forwards.
     status = subprocess.run(
@@ -515,46 +426,19 @@ def test_an_unplug_leaves_the_static_checkout_on_main_and_clean(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert status.stdout == "" and canonical.read_text(encoding="utf-8") == REGISTRY
+    assert status.stdout == "" and toml.read_text(encoding="utf-8") == REGISTRY_TOML
     assert said.startswith("  branch  agent/unplug-alpha-")
-    (tree,) = (path / ".claude" / "worktrees").iterdir()
-    assert "alpha" not in devkit_project.known_projects(
-        (tree / "workspace.jsonc").read_text(encoding="utf-8")
-    )
-    intent = (tree / "logs" / "ship-intent.md").read_text(encoding="utf-8")
-    assert intent.startswith("Unplug alpha in the workspace registry\n")
-
-
-def test_an_unplug_hands_off_projects_toml_on_the_same_branch(tmp_path):
-    path = tmp_path / "devkit"
-    path.mkdir()
-    canonical = path / "workspace.jsonc"
-    canonical.write_text(REGISTRY, encoding="utf-8", newline="\n")
-    toml = path / "projects.toml"
-    toml.write_text('projects = [\n    "alpha",\n    "beta",\n]\n', encoding="utf-8", newline="\n")
-    for args in (
-        ("init", "--quiet", "-b", "main"),
-        ("config", "core.hooksPath", str(path / ".nohooks")),
-        ("config", "user.email", "t@e.st"),
-        ("config", "user.name", "t"),
-        ("add", "-A"),
-        ("commit", "--quiet", "-m", "init"),
-    ):
-        subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True)
-    steps = [Step(plug_projects.UNPLUG, "alpha")]
-    canonical.write_text('{"folders": [{"path": "beta"}]}', encoding="utf-8", newline="\n")
-    toml.write_text('projects = [\n    "beta",\n]\n', encoding="utf-8", newline="\n")
-
-    said = plug_projects.hand_off_registry(steps, canonical, also=("projects.toml",))
-
-    assert said.startswith("  branch  agent/unplug-alpha-")
-    assert "workspace.jsonc and projects.toml, for the fix pass" in said
+    assert "projects.toml, for the fix pass" in said
     (tree,) = (path / ".claude" / "worktrees").iterdir()
     changed = subprocess.run(
         ["git", "-C", str(tree), "diff", "--name-only"], capture_output=True, text=True
     ).stdout.split()
-    assert sorted(changed) == ["projects.toml", "workspace.jsonc"]
-    assert project_registry.parse_registry(toml.read_text(encoding="utf-8")) == ["alpha", "beta"]
+    assert changed == ["projects.toml"]
+    assert project_registry.parse_registry(
+        (tree / "projects.toml").read_text(encoding="utf-8")
+    ) == ["beta"]
+    intent = (tree / "logs" / "ship-intent.md").read_text(encoding="utf-8")
+    assert intent.startswith("Unplug alpha in the project registry\n")
 
 
 def test_toggling_is_its_own_inverse():
@@ -618,7 +502,7 @@ def test_a_registered_project_missing_from_disk_is_planned_as_a_clone():
 def test_a_clone_happens_only_for_the_rows_named_as_clones():
     """The registry is global and the checkout is per PC, so a registered project with
     no checkout here is the ordinary state of every other workstation -- not a request.
-    The quick-pick's answer names only what was ticked, and `--unplug beta` says nothing
+    `--picks` names only what was ticked, and `--unplug beta` says nothing
     about alpha; both used to clone every such row as a side effect."""
     candidates = inventory(REGISTRY, [], ["alpha", "beta"])
     assert plan(candidates, {"alpha", "beta"}) == []
@@ -627,10 +511,10 @@ def test_a_clone_happens_only_for_the_rows_named_as_clones():
 
 def test_the_clone_step_leaves_the_registry_alone():
     """It is already registered. Re-registering would be a no-op edit to the file every
-    window on the machine reads, and `apply_registry` is the one place that says so."""
+    reader on the machine reads, and `apply_projects` is the one place that says so."""
     candidates = inventory(REGISTRY, [], ["alpha", "beta"])
     steps = plan(candidates, {"alpha", "beta"}, clone={"alpha", "beta"})
-    assert apply_registry(REGISTRY, steps) == REGISTRY
+    assert apply_projects(REGISTRY_TOML, steps) == REGISTRY_TOML
 
 
 def test_a_registered_project_with_no_repo_to_clone_from_is_left_alone():
@@ -643,7 +527,7 @@ def test_a_registered_project_with_no_repo_to_clone_from_is_left_alone():
 
 
 def test_needs_clone_is_only_true_for_a_registered_row_absent_from_disk():
-    """The predicate the three surfaces share -- the plan, the listing and the quick-pick
+    """The predicate the three surfaces share -- the plan, the listing and `--picks`
     detail -- so it is asserted once here rather than three times through them."""
     assert plug_projects.needs_clone(Candidate("a", plugged=True, on_disk=False, on_github=True))
     assert not plug_projects.needs_clone(Candidate("a", plugged=True, on_disk=True, on_github=True))
@@ -774,81 +658,76 @@ def test_a_folder_that_is_not_a_checkout_is_not_asked_about_its_commits(tmp_path
 # --- carrying it out --------------------------------------------------------
 
 
-def test_the_registry_halves_are_applied_in_one_pass_each_way():
-    text = """{
-        "folders": [{"path": "alpha"}, {"path": "beta"}],
-        "tasks": {"inputs": [{"id": "project", "options": ["alpha", "beta"], "default": "beta"}]}
-    }"""
-    steps = [Step(plug_projects.UNPLUG, "alpha"), Step(plug_projects.PLUG, "gamma")]
-    assert devkit_project.known_projects(apply_registry(text, steps)) == ["beta", "gamma"]
-
-
-def test_applying_no_steps_changes_nothing():
-    assert apply_registry(REGISTRY, []) == REGISTRY
-
-
 PROJECTS_TOML = '# kept\nprojects = [\n    "alpha",\n    "beta",\n]\n\n[settings]\n'
 
 
-def test_the_projects_toml_halves_are_applied_the_same_way():
+def test_the_registry_halves_are_applied_in_one_pass_each_way():
     steps = [Step(plug_projects.UNPLUG, "alpha"), Step(plug_projects.PLUG, "gamma")]
-    edited = plug_projects.apply_projects(PROJECTS_TOML, steps)
+    edited = apply_projects(PROJECTS_TOML, steps)
     assert project_registry.parse_registry(edited) == ["beta", "gamma"]
     assert edited.startswith("# kept\n")
-    assert plug_projects.apply_projects(PROJECTS_TOML, []) == PROJECTS_TOML
+
+
+def test_applying_no_steps_changes_nothing():
+    assert apply_projects(PROJECTS_TOML, []) == PROJECTS_TOML
     clone_only = [Step(plug_projects.CLONE, "beta", clone=True)]
-    assert plug_projects.apply_projects(PROJECTS_TOML, clone_only) == PROJECTS_TOML
+    assert apply_projects(PROJECTS_TOML, clone_only) == PROJECTS_TOML
 
 
-PICKED = """{
-    "folders": [{"path": "alpha"}, {"path": "beta"}],
-    "tasks": {"inputs": [{"id": "project", "options": ["alpha", "beta"], "default": "beta"}]}
-}"""
-
-
-def _registry_pair(tmp_path, toml: str | None = PROJECTS_TOML):
-    canonical = tmp_path / "workspace.jsonc"
-    canonical.write_text(PICKED, encoding="utf-8", newline="\n")
-    if toml is not None:
-        (tmp_path / "projects.toml").write_text(toml, encoding="utf-8", newline="\n")
-    return canonical, tmp_path / "projects.toml"
-
-
-def test_a_registry_write_lands_in_both_files(tmp_path):
-    """`tests/test_project_registry.py` fails `projects.toml` the moment it disagrees
-    with `workspace.jsonc`, so an unplug that edits one is a red PR."""
-    canonical, toml = _registry_pair(tmp_path)
+def test_a_registry_write_lands_in_projects_toml_alone(tmp_path):
+    """`projects.toml` is the whole registry: no `workspace.jsonc` is written beside it."""
+    toml = tmp_path / "projects.toml"
+    toml.write_text(PROJECTS_TOML, encoding="utf-8", newline="\n")
     steps = [Step(plug_projects.UNPLUG, "alpha"), Step(plug_projects.PLUG, "gamma")]
 
-    written = plug_projects.write_registry(canonical, steps)
+    assert plug_projects.write_registry(toml, steps) is True
 
-    assert written == [canonical, toml]
-    assert devkit_project.known_projects(canonical.read_text(encoding="utf-8")) == [
-        "beta",
-        "gamma",
-    ]
     assert project_registry.parse_registry(toml.read_text(encoding="utf-8")) == ["beta", "gamma"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["projects.toml"]
 
 
-def test_a_registry_write_with_no_projects_toml_writes_the_workspace_file_alone(tmp_path):
-    canonical, toml = _registry_pair(tmp_path, toml=None)
-    written = plug_projects.write_registry(canonical, [Step(plug_projects.UNPLUG, "alpha")])
-    assert written == [canonical] and not toml.exists()
-    assert devkit_project.known_projects(canonical.read_text(encoding="utf-8")) == ["beta"]
+def test_a_registry_that_already_agrees_is_not_rewritten(tmp_path):
+    toml = tmp_path / "projects.toml"
+    toml.write_text('projects = [\n    "beta",\n]\n', encoding="utf-8", newline="\n")
+    assert plug_projects.write_registry(toml, [Step(plug_projects.UNPLUG, "alpha")]) is False
 
 
-def test_a_projects_toml_that_already_agrees_is_not_rewritten(tmp_path):
-    canonical, _toml = _registry_pair(tmp_path, toml='projects = [\n    "beta",\n]\n')
-    written = plug_projects.write_registry(canonical, [Step(plug_projects.UNPLUG, "alpha")])
-    assert written == [canonical]
-
-
-def test_a_projects_toml_it_cannot_edit_writes_neither_file(tmp_path):
-    """Both edits are made before either is written: one written alone is the drift."""
-    canonical, _toml = _registry_pair(tmp_path, toml='projects = [\n    "alpha", "beta",\n]\n')
+def test_a_registry_it_cannot_edit_is_refused_and_left_alone(tmp_path):
+    toml = tmp_path / "projects.toml"
+    text = 'projects = [\n    "alpha", "beta",\n]\n'
+    toml.write_text(text, encoding="utf-8", newline="\n")
     with pytest.raises(PlugError, match="nothing was written"):
-        plug_projects.write_registry(canonical, [Step(plug_projects.UNPLUG, "alpha")])
-    assert canonical.read_text(encoding="utf-8") == PICKED
+        plug_projects.write_registry(toml, [Step(plug_projects.UNPLUG, "alpha")])
+    assert toml.read_text(encoding="utf-8") == text
+
+
+def test_a_missing_registry_is_refused_rather_than_created(tmp_path):
+    """A file conjured holding one name would read as a registry of one."""
+    toml = tmp_path / "projects.toml"
+    with pytest.raises(PlugError, match="cannot read"):
+        plug_projects.write_registry(toml, [Step(plug_projects.PLUG, "alpha")])
+    assert not toml.exists()
+
+
+def test_gather_reads_the_committed_registry(tmp_path, monkeypatch):
+    toml = tmp_path / "projects.toml"
+    toml.write_text(REGISTRY_TOML, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(plug_projects, "REGISTRY", toml)
+    monkeypatch.setattr(plug_projects, "WORKSPACE_ROOT", tmp_path / "root")
+    (tmp_path / "root").mkdir()
+    monkeypatch.setattr(plug_projects, "github_repos", lambda _run: (["alpha"], frozenset()))
+    found, warnings = gather()
+    assert warnings == []
+    assert [c.name for c in found if c.plugged] == ["alpha", "beta"]
+
+
+def test_a_malformed_registry_is_an_error_not_an_empty_list(tmp_path, monkeypatch):
+    """Read as empty, every registered project would be offered to plug back in."""
+    toml = tmp_path / "projects.toml"
+    toml.write_text('projects = "x"\n', encoding="utf-8", newline="\n")
+    monkeypatch.setattr(plug_projects, "REGISTRY", toml)
+    with pytest.raises(OSError):
+        gather()
 
 
 def test_a_clone_targets_the_workspace_root(tmp_path):
@@ -979,7 +858,7 @@ def test_a_warning_from_a_missing_gh_does_not_stop_the_listing(monkeypatch, tmp_
     assert "gh could not list repos" in capsys.readouterr().out
 
 
-# --- the shell, driven by the quick-pick ------------------------------------
+# --- the shell, driven by --picks ---------------------------------------------
 
 
 @pytest.fixture
@@ -998,29 +877,6 @@ def ticking(listed, monkeypatch):
     applied: list = []
     monkeypatch.setattr(plug_projects, "_apply", lambda steps, owner, out: applied.extend(steps))
     return applied
-
-
-def test_the_rows_are_printed_for_the_quick_pick_to_read(listed, capsys):
-    assert main(["--rows"]) == 0
-    printed = capsys.readouterr().out.splitlines()
-    assert [line.split(picker_rows.FIELD_SEP)[0] for line in printed] == ["alpha", "beta", "gamma"]
-
-
-def test_nothing_but_rows_reaches_stdout_on_the_rows_path(monkeypatch, capsys):
-    """stdout *is* the quick-pick, so a `NOTE` line becomes an option somebody can tick.
-
-    A degraded `gh` listing is the case that would produce one, and it draws the refusal
-    as a row instead: `gather` falls back to the folder half alone, which makes every
-    repo that exists read as one to CREATE.
-    """
-    candidates = inventory(REGISTRY, ["alpha", "beta"], [])
-    monkeypatch.setattr(plug_projects, "gather", lambda: (candidates, ["gh could not list repos"]))
-
-    assert main(["--rows"]) == 0
-    printed = capsys.readouterr().out.splitlines()
-    assert len(printed) == 1
-    assert printed[0].split(picker_rows.FIELD_SEP)[0] == picker_rows.NOTHING
-    assert "GitHub listing failed" in printed[0]
 
 
 def test_the_picks_are_read_as_toggles_of_the_live_registry(ticking, capsys):
@@ -1060,7 +916,7 @@ def test_ticking_a_project_registered_elsewhere_clones_it_here(listed, ticking, 
     assert ticking == [Step(plug_projects.CLONE, "beta", clone=True)]
     out = capsys.readouterr().out
     assert "clone   beta" in out
-    assert "commit workspace.jsonc" not in out, "a clone edits nothing in the registry"
+    assert "commit projects.toml" not in out, "a clone edits nothing in the registry"
 
 
 def test_unplugging_one_project_does_not_clone_the_others_absent_here(listed, ticking):
@@ -1097,31 +953,10 @@ def test_a_name_that_is_no_longer_a_candidate_is_dropped_with_a_note(ticking, ca
 
 
 def test_ticking_nothing_changes_nothing_rather_than_retiring_everything(ticking, capsys):
-    """A quick-pick with every box cleared resolves to the empty string. Under the
-    checklist that read as a plan to unplug the whole workspace and needed an error of
-    its own; a tick is a toggle now, so no ticks is simply no change."""
+    """An empty `--picks` names nothing. Under the old checklist that read as a plan to
+    unplug the whole registry; a tick is a toggle, so no ticks is simply no change."""
     assert main(["--picks", "", "--yes"]) == 0
     assert ticking == []
-    assert "nothing was picked" in capsys.readouterr().out
-
-
-def test_the_nothing_row_is_recognised_rather_than_looked_up(ticking, capsys):
-    """A scan with nothing to offer draws `picker_rows.NOTHING`, which is a real value
-    the quick-pick can return. Read as a name it would be a project nobody has."""
-    assert main(["--picks", picker_rows.NOTHING, "--yes"]) == 0
-    assert ticking == []
-    assert "nothing was picked" in capsys.readouterr().out
-
-
-def test_escaping_the_quick_pick_costs_a_line_even_where_the_gate_would_refuse(
-    listed, monkeypatch, capsys
-):
-    """Escape leaves the literal `${input:...}` in the argument, and that is resolved
-    before `edit_verdict` on purpose: nothing was picked, so nothing is being edited
-    and neither of the gate's reasons is about to be true. Move the check below the
-    gate and cancelling from a box reports a branch error for a run that did nothing."""
-    monkeypatch.setattr(plug_projects, "edit_verdict", lambda **kwargs: "a box may not publish")
-    assert main(["--picks", "${input:plugSelection}", "--yes"]) == 0
     assert "nothing was picked" in capsys.readouterr().out
 
 
@@ -1134,14 +969,13 @@ def _halves(steps, candidates, **kwargs):
 
 
 def test_no_names_means_no_local_halves():
-    """The quick-pick and the terminal loop name nothing, and their rows promise the
-    registry alone."""
+    """`--picks` and the terminal loop name nothing, and a tick is the registry alone."""
     steps = [Step(plug_projects.UNPLUG, "alpha")]
     assert _halves(steps, inventory(REGISTRY, ["alpha"], ["alpha"])) == steps
 
 
 def test_a_second_pc_retires_a_project_already_out_of_the_registry():
-    candidates = inventory('{"folders": []}', ["geo"], ["geo"])
+    candidates = inventory([], ["geo"], ["geo"])
     assert _halves([], candidates, unplug=["geo", "geo"]) == [
         Step(plug_projects.RETIRE_HERE, "geo", local=True)
     ]
@@ -1149,13 +983,13 @@ def test_a_second_pc_retires_a_project_already_out_of_the_registry():
 
 
 def test_a_name_not_on_disk_here_has_no_local_half_to_run():
-    candidates = inventory('{"folders": []}', [], ["geo"])
+    candidates = inventory([], [], ["geo"])
     assert _halves([], candidates, unplug=["geo"]) == []
 
 
 def test_a_plug_only_restores_what_was_retired_or_archived():
     """A project plugged for the first time has nothing of this PC's to put back."""
-    candidates = inventory('{"folders": []}', ["new"], ["new"], git_dirs=frozenset({"new"}))
+    candidates = inventory([], ["new"], ["new"], git_dirs=frozenset({"new"}))
     steps = plan(candidates, {"new"})
     assert _halves(steps, candidates, plug=["new"]) == steps
     assert _halves(steps, candidates, plug=["new"], retired=frozenset({"new"})) == [

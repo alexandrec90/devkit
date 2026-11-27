@@ -6,8 +6,6 @@
 #
 # Regenerate only when adopting the gate: python scripts/hooks/untested_symbols.py --seed
 scripts/devkit_project.py::autofix_state
-scripts/devkit_project.py::extract_tasks_text
-scripts/devkit_project.py::insert_folder
 scripts/docker-maint.py::banner
 scripts/docker-maint.py::docker_info_ok
 scripts/docker-maint.py::find_delegate
@@ -66,7 +64,6 @@ scripts/new-project.py::scripted_setup_env
 scripts/precommit/check_harness_drift.py::is_same_repo
 scripts/precommit/check_stdlib_only.py::imported_roots
 scripts/preview-task.py::describe
-scripts/preview-task.py::menu_row
 scripts/preview-task.py::read_choice
 scripts/preview-task.py::stack_projects
 scripts/reclaim.py::banner

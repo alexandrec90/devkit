@@ -14,7 +14,7 @@ So this is not "sweep, but faster". It is the other half of the model:
 | | Static checkout | Ephemeral box |
 | --- | --- | --- |
 | Lives in | `<workspace>/<project>` | `<workspace>/.worktrees/<box>` |
-| Listed in the workspace file | yes | **no** — invisible to `sweep.py` by design |
+| Listed in `projects.toml` | yes | **no** — invisible to `sweep.py` by design |
 | Port slot | pinned in `ports.toml` `[slots]` | leased on spawn, released on reap |
 | Ends by | `sweep --sync` parking it home | `reap` deleting it |
 | Stranded work is | found afterwards | **impossible**: reap refuses until it ships |
@@ -158,10 +158,6 @@ REAP_LOCK_STALE = 900.0
 # `sweep.source_checkout` parses a box name and this module imports that one.
 NAME_SEP = sweep.NAME_SEP
 
-# A path whose directory is the projects root, for the code here and in the CLIs beside
-# it that still thread a `workspace` and read only its `.parent` -- never a file anything
-# opens (`projects_root.legacy_workspace`). Goes once those take the root itself.
-DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 # `--workspace` survives as a deprecated spelling of the projects root: the registry is
 # `project_registry`'s, and installed scheduled tasks still pass the flag. `--root` is
 # the spelling new registrations carry.
@@ -173,11 +169,10 @@ WORKSPACE_HELP = (
 
 def workspace_from(root: Path | None, workspace: Path | None) -> Path:
     """The workspace path a CLI handed `--root` and/or the deprecated `--workspace`
-    threads, resolved: `--workspace` as given, else a path in `--root`, else
-    `DEFAULT_WORKSPACE`. Only its directory is ever read; no file need be there."""
-    if root is None and workspace is None:
-        workspace = DEFAULT_WORKSPACE
-    return sweep.projects_root.legacy_workspace(root, workspace).resolve()
+    threads, resolved: `--workspace` as given, else a path in `--root`, else one in
+    this checkout's projects root. The code here and the CLIs beside it still thread a
+    `workspace` and read only its `.parent`; no file need be there."""
+    return sweep.projects_root.legacy_workspace(root, workspace, REPO_ROOT).resolve()
 
 # Verdicts that mean the work has left the box, so the box is free to destroy.
 #   spent-branch  nothing beyond the base — nothing to lose
@@ -3276,8 +3271,7 @@ def load_registry(root: Path) -> devkit_ports.Registry | None:
 def known_projects(workspace: Path | None = None) -> list[str]:
     """Registered projects, off `project_registry` as the dispatcher reads them.
 
-    `workspace` is **deprecated** and not read: the registry is `projects.toml`, and the
-    workspace file's only remaining job for a caller is where the checkouts sit. It stays
+    `workspace` is **deprecated** and not read: the registry is `projects.toml`. It stays
     in the signature until the callers that still pass it are rewritten.
     """
     del workspace
@@ -6512,10 +6506,10 @@ def main(argv: list[str] | None = None) -> int:
         "reconcile",
         help="unattended pass: reap boxes whose PR merged, reclaim disk, report the rest",
     )
-    # `--no-merge` is the default and looks redundant, and is not: the workspace picker
-    # feeding this must supply one real token in every branch, because an empty string
-    # reaches argparse as a stray positional and is rejected. Same reason
-    # `new-project.py` carries `--dry-run` alongside `--yes`.
+    # `--no-merge` is the default and looks redundant, and is not: spelling it lets an
+    # installed task's argv say which it chose, and a reader of `schtasks /query` see it
+    # without knowing the default. Same reason `new-project.py` carries `--dry-run`
+    # alongside `--yes`.
     merging = fix.add_mutually_exclusive_group()
     merging.add_argument(
         "--merge",

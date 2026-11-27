@@ -109,8 +109,8 @@ import git_policy
 import guard_probes
 import harness_config
 import harness_state
+import project_registry
 import sweep
-import task_input
 import task_slug
 import worktree
 import worktree_tiers
@@ -121,30 +121,24 @@ import wt_profile
 # it has to be the same module object the code under test holds.
 box_teardown = worktree.box_teardown
 
-# The live multi-root registry: a workstation file that sits *beside* the checkout, so
-# it exists on the desktop this harness drives and never in a CI clone. The handful of
-# tests that assert against the real file (rather than a fixture) carry the marker
-# below: `local` keeps them off a runner, where `addopts` deselects it, and the skip is
-# for a by-hand `-m local` on a machine without the file. The coverage they add is "the
-# registry on *this* machine is intact", which is exactly the thing CI has no opinion about.
-LIVE_WORKSPACE = devkit_project.DEFAULT_WORKSPACE
-
-_live_workspace_skip = pytest.mark.skipif(
-    not LIVE_WORKSPACE.exists(),
-    reason=f"{LIVE_WORKSPACE.name} is a workstation-local registry, not part of the checkout",
-)
-
-# What the two markers below add beside their skip: the test is in the end-to-end tier
-# `scripts/e2e.py` runs nightly on this workstation, and `addopts` deselects it from every
-# other run. Before it each such test ran only when a person happened to run the suite on
-# `main`; the marker is what gives it a runner, and putting it inside the same decorator
-# means no test can be skipped for wanting this machine without also being run on it.
+# The end-to-end tier `scripts/e2e.py` runs nightly on this workstation; `addopts`
+# deselects it from every other run. A test that needs the checkouts beside this one --
+# rather than a fixture -- carries it and reads them through `live_checkouts`.
 local = pytest.mark.local
 
 
-def needs_live_workspace(test):
-    """Skip without the live registry, and run in the nightly local tier (`local`)."""
-    return local(_live_workspace_skip(test))
+def live_checkouts() -> list[tuple[str, Path]]:
+    """Every registered project with a checkout on this machine, as (name, path).
+
+    For a `local` test, which asserts "the projects on *this* machine are intact" --
+    exactly what CI has no opinion about. None found is a failure, never an empty pass:
+    the tier runs on the workstation that holds them, so nothing has a reason to skip.
+    """
+    root = project_registry.projects_root()
+    names = project_registry.projects(root)
+    if not names:
+        pytest.fail(f"no registered checkout under {root}")
+    return [(name, root / name) for name in names]
 
 
 def in_an_ephemeral_box(root: Path) -> bool:
@@ -160,7 +154,6 @@ def in_an_ephemeral_box(root: Path) -> bool:
 
 
 __all__ = [
-    "LIVE_WORKSPACE",
     "REPO_ROOT",
     "TEMPLATES",
     "box_teardown",
@@ -174,11 +167,11 @@ __all__ = [
     "harness_config",
     "harness_state",
     "in_an_ephemeral_box",
+    "live_checkouts",
     "load_script",
     "local",
-    "needs_live_workspace",
+    "project_registry",
     "sweep",
-    "task_input",
     "task_slug",
     "vendor_manifest",
     "worktree",

@@ -33,7 +33,6 @@ import pytest
 from support import load_script, worktree
 
 preview_task = load_script("scripts/preview-task.py")
-picker_rows = load_script("scripts/picker_rows.py")
 
 NOW = _dt.datetime(2026, 8, 21, 18, 0, tzinfo=_dt.UTC)
 
@@ -779,21 +778,7 @@ def _raise_or(outcome):
     return outcome
 
 
-# --- the rows the dropdown draws ------------------------------------------------
-#
-# The picker runs `--rows` when it opens, so these lines ARE the quick-pick. Every
-# failure here is silent in the UI -- a shifted field draws a row whose description is
-# its detail, a split line draws a row whose value is somebody's prose -- so the shapes
-# are asserted positionally. `tests/test_picker_rows.py` owns what `cell` does to a
-# field; these assert this module hands it the right four.
-
-
-def _rows(rows, now=NOW):
-    return preview_task.rows(list(rows), now)
-
-
-def _fields(line):
-    return line.split(picker_rows.FIELD_SEP)
+# --- resolving a pick ---------------------------------------------------------
 
 
 def _branch(ref, *, project="carameli", updated=""):
@@ -808,55 +793,8 @@ def _trunk(ref="master", *, project="carameli", updated=""):
     )
 
 
-def test_a_row_is_picked_by_project_and_ref_in_one_token():
-    """A VS Code input resolves to one string, so the checkout travels inside the value."""
-    line = _rows([_branch("agent/x")])[0]
-    assert _fields(line)[0] == "carameli:agent/x"
-    assert _fields(line)[1] == "agent/x"
-
-
-def test_the_checkout_is_on_every_row_because_the_list_is_flat():
-    """One input runs one command, so there is no `which checkout` stage to carry it."""
-    line = _rows([_branch("agent/x", project="ibkr_trader")])[0]
-    assert _fields(line)[2].startswith("ibkr_trader -- ")
-
-
-def test_a_row_with_no_pr_title_still_carries_four_fields():
-    """Every branch with no PR has an empty detail, and a row three fields long would
-    make the next row's reader take the description for one."""
-    assert len(_fields(_rows([_branch("agent/x")])[0])) == 4
-
-
-def test_no_row_is_a_control_row():
-    """Every row is servable, which is what removing `Rescan` bought: a value that
-    survives to the resolver always names something that can be brought up."""
-    for line in _rows([_trunk(), _branch("agent/x")]):
-        assert "__" not in _fields(line)[0]
-
-
-def test_a_scan_that_found_nothing_draws_the_sentinel_rather_than_no_rows():
-    """An empty quick-pick cannot be told apart from a command that failed to run."""
-    drawn = _rows([])
-    assert len(drawn) == 1
-    assert _fields(drawn[0])[0] == picker_rows.NOTHING
-    assert "nothing to preview" in drawn[0]
-
-
-def test_the_rows_keep_the_scans_ranking():
-    """`collect` already ranks trunk first and then by recency; re-sorting here would
-    give the dropdown and `--list` two different orders for the same machine."""
-    rows = [_trunk(), _branch("agent/new", updated="2026-08-21T17:00:00Z")]
-    assert [_fields(line)[1] for line in _rows(rows)] == ["master", "agent/new"]
-
-
-def test_every_row_the_scan_found_is_drawn_even_past_the_terminal_limit():
-    """A quick-pick has no screen to run out of, so the row `--limit` drops from a
-    terminal menu is exactly the row only this list can offer."""
-    rows = [_branch(f"agent/{n}") for n in range(preview_task.MENU_LIMIT + 5)]
-    assert len(_rows(rows)) == len(rows)
-
-
-# --- resolving what the dropdown sent back -------------------------------------
+def test_a_pick_value_is_project_and_ref_in_one_token():
+    assert preview_task.pick_value(_branch("agent/x")) == "carameli:agent/x"
 
 
 def test_a_pick_resolves_back_to_the_row_it_was_drawn_from():
@@ -891,19 +829,6 @@ def test_a_pick_for_a_row_that_has_gone_is_served_as_a_plain_branch():
 def test_a_bare_ref_that_matches_nothing_names_no_checkout_to_serve_it_from():
     with pytest.raises(ValueError, match="names no checkout"):
         preview_task.resolve_pick("agent/gone", [])
-
-
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("${input:previewRow}", True),
-        ("  ${input:previewRow}", True),
-        ("carameli:agent/x", False),
-        ("agent/x", False),
-    ],
-)
-def test_an_unsubstituted_input_token_reads_as_a_cancel(text, expected):
-    assert preview_task.unresolved(text) is expected
 
 
 def test_a_trunk_row_resolves_back_to_a_plain_branch_preview():
@@ -1131,16 +1056,15 @@ def test_frontend_dir_for_is_empty_when_the_manifest_cannot_be_read(tmp_path, ma
     assert preview_task.frontend_dir_for(tmp_path / "carameli") == ""
 
 
-def test_the_dropdown_offers_only_checkouts_that_declare_a_frontend(tmp_path, monkeypatch):
-    """`ui_projects` is what stops the task offering a checkout it would then refuse.
+def test_the_host_scan_covers_only_checkouts_that_declare_a_frontend(tmp_path, monkeypatch):
+    """`ui_projects` is what stops `preview-ui-host.py` scanning a checkout it would then
+    refuse.
 
     The three cases are the three real ones on this machine: a frontend project, a
     backend-only service that switches the tier off, and a registered checkout that is
     not on this disk at all.
     """
-    # Not named for the live registry: `known_projects` is stubbed, so the name is
-    # arbitrary here -- and a test that *spells* the live one is required to carry
-    # `@needs_live_workspace`, which this does not need and CI would then skip.
+    # `known_projects` is stubbed, so the file name is arbitrary and never read.
     workspace = tmp_path / "scratch.code-workspace"
     workspace.write_text("{}", encoding="utf-8")
     _checkout(tmp_path, "carameli", '[frontend]\nenabled = true\ndir = "frontend"\n')
@@ -1155,8 +1079,8 @@ def test_the_dropdown_offers_only_checkouts_that_declare_a_frontend(tmp_path, mo
 
 def test_collect_scans_only_the_checkouts_it_is_given(scan, monkeypatch):
     """The narrowing is a parameter, not a filter on the result: each checkout in the list
-    costs a `git fetch` and a `gh pr list`, and this runs when a person opens the
-    dropdown -- a discarded row is a second they spent watching an empty quick-pick."""
+    costs a `git fetch` and a `gh pr list`, and `preview-ui-host.py` runs this while a
+    person waits -- a discarded row is a second they spent waiting for nothing."""
     scanned = []
     monkeypatch.setattr(preview_task, "open_prs", lambda d: scanned.append(d.name) or [])
     preview_task.collect(scan.workspace, fetch=False, projects=["ibkr_trader"])
@@ -1187,16 +1111,13 @@ def test_one_checkouts_network_reads_run_at_once(scan, monkeypatch):
     ]
 
 
-def test_the_rows_path_scans_only_the_servable_checkouts(scan, monkeypatch, capsys):
-    """The dropdown feeds `preview-ui-host.py`, which can only serve a checkout declaring
-    `[frontend] dir`, so a row from anywhere else is an option that refuses when picked.
-    Narrowed at the scan rather than after it -- see `collect`."""
-    scanned = []
-    monkeypatch.setattr(preview_task, "open_prs", lambda d: scanned.append(d.name) or [])
-    monkeypatch.setattr(preview_task, "ui_projects", lambda ws: ["carameli"])
-    assert preview_task.main(["--workspace", str(scan.workspace), "--rows", "--no-fetch"]) == 0
-    assert scanned == ["carameli"]
-    assert capsys.readouterr().out.strip()
+def test_the_dropdown_modes_are_gone():
+    """`--rows`, `--project-rows` and `--checkouts` drew a VS Code quick-pick; with the
+    task layer retired they are usage errors."""
+    for flag in ("--rows", "--project-rows", "--checkouts=x"):
+        with pytest.raises(SystemExit) as exc:
+            preview_task.build_parser().parse_args([flag])
+        assert exc.value.code == 2
 
 
 def test_every_checkout_contributes_its_trunk_row(scan):
@@ -1229,13 +1150,6 @@ def test_a_richer_row_for_the_default_branch_is_not_duplicated_by_the_trunk_row(
     assert rows[0].title == "a release PR"
 
 
-def test_the_rows_path_prints_the_picker_lines_and_nothing_else(scan, capsys):
-    """This stdout IS the quick-pick: a progress line here is a row a person can tick."""
-    assert preview_task.main(["--workspace", str(scan.workspace), "--rows", "--no-fetch"]) == 0
-    printed = capsys.readouterr().out.splitlines()
-    assert printed == ["carameli:master|master|carameli -- default branch|"]
-
-
 def test_no_workspace_file_is_needed(tmp_path, capsys):
     """Only the deprecated `--workspace`'s directory is read: a run naming one that is
     gone goes on to its own checks, here the first of them."""
@@ -1244,22 +1158,6 @@ def test_no_workspace_file_is_needed(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Drop one" in out and "no workspace registry" not in out
     assert preview_task.main(["--root", str(tmp_path), "--ui", "--all"]) == 2
-
-
-def test_an_escaped_dropdown_cancels_before_the_scan(stub, capsys):
-    """Esc at either dropdown runs the task with `${input:previewRow}` as literal text.
-
-    That is a cancel, so it must exit 0 without fetching, scanning, or serving --
-    the first version split the token on its colon and sent project `"${input"` into
-    `worktree.py`, which traced out of `resolve_project`.
-    """
-    stub.monkeypatch.setattr(
-        preview_task, "collect", lambda *a, **k: pytest.fail("a cancelled run must not scan")
-    )
-    argv = ["--workspace", str(stub.workspace), "--pick-ref", "${input:previewRow}"]
-    assert preview_task.main(argv) == 0
-    assert stub.served == []
-    assert "cancelled" in capsys.readouterr().out
 
 
 def test_a_pick_naming_an_unknown_checkout_is_reported_not_traced(monkeypatch, tmp_path, capsys):
@@ -1428,17 +1326,6 @@ def test_serving_a_pick_writes_no_options_anywhere(stub, monkeypatch, tmp_path):
     assert not list(tmp_path.rglob("*menu*.json"))
 
 
-def test_rows_picks_nothing_and_serves_nothing(stub, capsys, monkeypatch):
-    """It is the picker's own read of the machine: it must not act on what it finds."""
-    monkeypatch.setattr(preview_task, "ui_projects", lambda w: ["carameli"])
-    _menu(stub, [_branch("agent/x")])
-    assert preview_task.main(["--workspace", str(stub.workspace), "--rows"]) == 0
-    assert stub.served == []
-    assert capsys.readouterr().out.splitlines() == [
-        "carameli:agent/x|agent/x|carameli -- branch on origin|"
-    ]
-
-
 def test_pick_ref_serves_that_row_without_asking(stub, monkeypatch):
     monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: ""))
     _menu(stub, [_branch("agent/x"), _branch("agent/y")])
@@ -1448,7 +1335,7 @@ def test_pick_ref_serves_that_row_without_asking(stub, monkeypatch):
 
 
 def test_pick_ref_reaches_a_row_the_terminal_menu_would_have_trimmed(stub):
-    """`--limit` is a screenful, not a scope: the dropdown offers rows past the end."""
+    """`--limit` is a screenful, not a scope: `--pick-ref` reaches rows past the end."""
     rows = [_branch(f"agent/{n}") for n in range(preview_task.MENU_LIMIT + 3)]
     _menu(stub, rows)
     last = rows[-1].ref
@@ -1468,7 +1355,7 @@ def test_pick_ref_on_an_empty_machine_still_serves_the_ref(stub):
 
 
 def test_several_ticked_rows_are_all_served_in_one_run(stub, monkeypatch):
-    """The whole point of the checkbox list: two branches on screen from one click."""
+    """Two branches on screen from one run."""
     monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: ""))
     _menu(stub, [_branch("agent/x"), _branch("agent/y"), _branch("agent/z")])
     value = "carameli:agent/z carameli:agent/x"
@@ -1497,8 +1384,7 @@ def test_the_trunk_row_is_served_like_any_other_pick(stub):
 
 
 def test_the_terminal_menu_takes_several_numbers_too(stub, monkeypatch):
-    """The terminal menu is the dropdown's fallback, so a single-select one would
-    dead-end the caller who reached it wanting two rows."""
+    """A single-select menu would dead-end the caller who wanted two rows."""
     monkeypatch.setattr(preview_task.sys, "stdin", types.SimpleNamespace(readline=lambda: "2 1\n"))
     _menu(stub, [_branch("agent/x"), _branch("agent/y")])
     assert preview_task.main(["--workspace", str(stub.workspace)]) == 0
@@ -2200,205 +2086,5 @@ def test_echo_prints_a_whole_flushed_line(capsys):
 def test_build_parser_defaults_to_an_interactive_fetching_run():
     args = preview_task.build_parser().parse_args([])
     assert args.pick == 0 and args.pick_ref == ""
-    assert args.fetch and not args.rows and not args.all and not args.down and not args.ui
+    assert args.fetch and not args.all and not args.down and not args.ui
     assert args.limit == preview_task.MENU_LIMIT and args.workspace is None
-
-
-# --- the checkout stage, and the scan it hands on -----------------------------
-
-picker_scan = load_script("scripts/picker_scan.py")
-
-
-@pytest.fixture(autouse=True)
-def scans_in_tmp(tmp_path, monkeypatch):
-    """Keep every scan write inside the test, out of the repo's `logs/`."""
-    monkeypatch.setattr(preview_task.picker_scan, "SCANS_DIR", tmp_path / "scans")
-
-
-def ref_of(line: str) -> str:
-    return line.split(preview_task.picker_rows.FIELD_SEP)[0]
-
-
-def field(line: str, index: int) -> str:
-    return line.split(preview_task.picker_rows.FIELD_SEP)[index]
-
-
-PREVIEW_SCAN = [
-    preview_task.Candidate(project="carameli", ref="main", kind=preview_task.KIND_TRUNK),
-    preview_task.Candidate(project="devkit", ref="main", kind=preview_task.KIND_TRUNK),
-    preview_task.Candidate(project="carameli", ref="agent/ui-0905", kind=preview_task.KIND_PR),
-]
-
-
-def test_the_checkout_rows_count_refs_and_say_how_many_are_under_review():
-    drawn = preview_task.project_rows(PREVIEW_SCAN, ["carameli", "devkit"], "tok")
-    assert [field(line, 1) for line in drawn] == ["carameli", "devkit"]
-    assert field(drawn[0], 2) == "2 refs, 1 under review"
-    assert field(drawn[1], 2) == "1 ref, nothing under review"
-
-
-def test_the_checkout_list_is_what_can_be_SERVED_not_what_the_scan_found():
-    """A checkout is on this list because `npm run dev` could serve it, which is a
-    property of the checkout rather than of what happens to be open in it today. A
-    checkout with only its trunk still gets a row, because its trunk is servable."""
-    drawn = preview_task.project_rows([], ["carameli"], "tok")
-    assert field(drawn[0], 1) == "carameli"
-    assert field(drawn[0], 2) == "0 refs, nothing under review"
-
-
-def test_no_servable_checkout_draws_a_sentinel_rather_than_an_empty_menu():
-    drawn = preview_task.project_rows(PREVIEW_SCAN, [], "tok")
-    assert len(drawn) == 1
-    assert ref_of(drawn[0]) == preview_task.picker_rows.NOTHING
-
-
-def test_a_checkout_row_carries_the_token_the_second_stage_reads():
-    row = preview_task.project_rows(PREVIEW_SCAN, ["carameli"], "tok7")[0]
-    assert picker_scan.parse_projects(ref_of(row)) == (["carameli"], "tok7")
-
-
-def test_the_second_stage_serves_the_first_stages_scan_without_rescanning(tmp_path, monkeypatch):
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    token = picker_scan.write(preview_task.SCAN_NAME, preview_task.scan_entries(PREVIEW_SCAN))
-    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
-    monkeypatch.setattr(
-        preview_task, "collect", lambda *_a, **_k: pytest.fail("the cached scan should do")
-    )
-    drawn = preview_task.picked_rows(workspace, f"carameli@{token}")
-    assert [ref_of(line) for line in drawn] == ["carameli:main", "carameli:agent/ui-0905"]
-
-
-def test_the_second_stage_keeps_the_scans_ranking_across_ticked_checkouts(tmp_path, monkeypatch):
-    """Trunks first, then everything else -- across both checkouts, not one list after
-    the other. That is the ordering a mapping payload would have lost."""
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    token = picker_scan.write(preview_task.SCAN_NAME, preview_task.scan_entries(PREVIEW_SCAN))
-    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
-    monkeypatch.setattr(preview_task, "collect", lambda *_a, **_k: pytest.fail("should not scan"))
-    drawn = preview_task.picked_rows(workspace, f"carameli@{token},devkit@{token}")
-    assert [ref_of(line) for line in drawn] == [
-        "carameli:main",
-        "devkit:main",
-        "carameli:agent/ui-0905",
-    ]
-
-
-def test_a_token_that_names_no_scan_rescans_only_the_ticked_checkouts(tmp_path, monkeypatch):
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    asked = []
-
-    def fake(_ws, fetch=True, projects=None):
-        asked.append(projects)
-        return [
-            preview_task.Candidate(project="carameli", ref="main", kind=preview_task.KIND_TRUNK)
-        ]
-
-    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
-    monkeypatch.setattr(preview_task, "collect", fake)
-    drawn = preview_task.picked_rows(workspace, "carameli@stale")
-    assert asked == [["carameli"]]
-    assert [ref_of(line) for line in drawn] == ["carameli:main"]
-
-
-def test_a_rescan_still_refuses_a_checkout_that_cannot_be_served(tmp_path, monkeypatch):
-    """A checkout reaching the miss path any other way could only draw rows
-    `preview-ui-host.py` would refuse by name."""
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    asked = []
-
-    def fake(_ws, fetch=True, projects=None):
-        asked.append(projects)
-        return []
-
-    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli"])
-    monkeypatch.setattr(preview_task, "collect", fake)
-    preview_task.picked_rows(workspace, "carameli@stale,ibkr_trader@stale")
-    assert asked == [["carameli"]]
-
-
-def test_no_checkout_stage_at_all_lists_every_servable_checkout(tmp_path, monkeypatch):
-    """`--rows` typed by hand has no first stage, and answers the way it did before
-    there was one."""
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    asked = []
-
-    def fake(_ws, fetch=True, projects=None):
-        asked.append(projects)
-        return PREVIEW_SCAN
-
-    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
-    monkeypatch.setattr(preview_task, "collect", fake)
-    preview_task.picked_rows(workspace, "")
-    assert asked == [["carameli", "devkit"]]
-
-
-# --- the guard on the two stages disagreeing ----------------------------------
-
-
-def test_a_pick_from_a_ticked_checkout_is_not_a_stray():
-    assert preview_task.strayed_picks(PREVIEW_SCAN, "carameli@tok,devkit@tok") == []
-
-
-def test_a_pick_from_a_checkout_the_first_stage_did_not_return_is_named():
-    """Nothing in the two stages can produce this: stage two draws only the checkouts
-    stage one returned. So it is evidence the chain misfired -- the extension resolves
-    `${input:...}` from the value it recorded when that input LAST ran, so an input
-    order that stopped putting the checkout stage first would filter by the previous
-    click's checkouts."""
-    assert preview_task.strayed_picks(PREVIEW_SCAN, "carameli@tok") == ["devkit"]
-
-
-def test_no_checkout_stage_means_nothing_to_disagree_with():
-    """A hand-typed `--pick-ref` has no first stage, and must not be refused for it."""
-    assert preview_task.strayed_picks(PREVIEW_SCAN, "") == []
-
-
-def test_draw_pays_for_the_fan_out_on_stage_one_and_filters_it_on_stage_two(tmp_path, monkeypatch):
-    """One function for both stages, because they differ in whether the scan is run or
-    read -- and stage one is the only place the whole fan-out is paid for."""
-    workspace = tmp_path / "alex.code-workspace"
-    workspace.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(preview_task, "ui_projects", lambda _ws: ["carameli", "devkit"])
-    monkeypatch.setattr(preview_task, "collect", lambda *_a, **_k: PREVIEW_SCAN)
-
-    stage_one = preview_task.draw(workspace, stage_one=True, checkouts="")
-    assert [field(line, 1) for line in stage_one] == ["carameli", "devkit"]
-
-    token = picker_scan.parse_projects(ref_of(stage_one[0]))[1]
-    monkeypatch.setattr(preview_task, "collect", lambda *_a, **_k: pytest.fail("no rescan"))
-    stage_two = preview_task.draw(workspace, stage_one=False, checkouts=f"carameli@{token}")
-    assert [ref_of(line) for line in stage_two] == ["carameli:main", "carameli:agent/ui-0905"]
-
-
-def test_refuse_strays_raises_so_a_stray_leaves_by_the_unresolvable_pick_route():
-    """A stray pick is an unusable pick, so it takes the route an unresolvable one
-    already takes rather than growing each caller's `main` a second refusal branch."""
-    with pytest.raises(ValueError, match="devkit"):
-        preview_task.refuse_strays(PREVIEW_SCAN, "carameli@tok")
-    preview_task.refuse_strays(PREVIEW_SCAN, "carameli@tok,devkit@tok")
-    preview_task.refuse_strays(PREVIEW_SCAN, "")
-
-
-def test_stray_report_names_every_checkout_and_says_nothing_was_served():
-    one = preview_task.stray_report(["devkit"])
-    many = preview_task.stray_report(["carameli", "devkit"])
-    assert "a ref from devkit" in one
-    assert "refs from carameli, devkit" in many
-    for text in (one, many):
-        assert "nothing was served" in text
-        assert "vscode-tasks.md" in text
-
-
-def test_drawing_is_true_for_either_dropdown_stage_and_nothing_else():
-    class Args:
-        def __init__(self, rows=False, project_rows=False):
-            self.rows, self.project_rows = rows, project_rows
-
-    assert preview_task.drawing(Args(rows=True))
-    assert preview_task.drawing(Args(project_rows=True))
-    assert not preview_task.drawing(Args())

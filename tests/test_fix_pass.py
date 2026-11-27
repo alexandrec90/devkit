@@ -2079,15 +2079,18 @@ def test_a_crash_is_written_to_the_record_before_the_traceback(world, monkeypatc
 
 
 def test_a_cli_missing_from_path_is_named_before_the_pass_starts(world, monkeypatch, capsys):
-    """`gh` installed after VS Code started is absent from every task's PATH; the pass
-    died on a `FileNotFoundError` naming no program. It now names it and never starts."""
+    """`gh` installed after a terminal opened is absent from that terminal's PATH; the
+    pass died on a `FileNotFoundError` naming no program. It now names it and never
+    starts, and tells the reader to open a new terminal -- not to restart a VS Code
+    nothing runs in any more."""
     monkeypatch.setattr(fix_pass, "missing_tools", lambda: ["gh"])
     monkeypatch.setattr(fix_pass, "run", lambda *a, **k: pytest.fail("the pass started"))
     code = fix_pass.main(["--mode", "dispatch", "--workspace", str(world["workspace"])])
     assert code == fix_pass.EXIT_USAGE
     assert "not usable from this PATH: gh" in capsys.readouterr().err
     assert artifact(world).startswith("fix-pass: FAILED -- not usable from this PATH: gh")
-    assert "restart VS Code" in artifact(world)
+    assert "open a new terminal" in artifact(world)
+    assert "VS Code" not in artifact(world)
 
 
 def test_missing_tools_counts_a_store_alias_and_a_missing_binary_alike(monkeypatch):

@@ -1611,13 +1611,12 @@ def workspace(tmp_path):
     return path
 
 
-def test_a_dismissed_picker_runs_nothing_and_is_not_a_failure(workspace, capsys):
-    """Ahead of argparse: a cancel reported as a usage error is a red icon, a toast and
-    a `logs/` artifact for a run the user called off. `--agent` carries `choices=`, which
-    would turn the literal into a usage error on its own."""
-    code = fix_prs.main(["--agent", "${input:fixAgent}", "--workspace", str(workspace)])
-    assert code == 0
-    assert "cancelled" in capsys.readouterr().out
+def test_an_unknown_agent_is_a_usage_error(workspace):
+    """No picker literal is read as a cancel any more: an agent `choices=` does not
+    know is argparse's usage error, exit 2, whatever it looks like."""
+    with pytest.raises(SystemExit) as exc:
+        fix_prs.main(["--agent", "${input:fixAgent}", "--workspace", str(workspace)])
+    assert exc.value.code == 2
 
 
 def test_no_picks_is_the_planned_path(workspace, monkeypatch):

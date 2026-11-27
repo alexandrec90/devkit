@@ -1652,13 +1652,11 @@ def test_branch_delete_defers_to_git_when_there_is_no_upstream():
 
 
 def test_boxes_are_invisible_to_the_sweep():
-    """A box is not a folder in the workspace file, so `sweep.py` never sees it. That
+    """A box is never registered in `projects.toml`, so `sweep.py` never sees it. That
     separation is what lets the two tiers keep different lifecycles."""
-    workspace = json.dumps({"folders": [{"path": "carameli"}, {"path": ".worktrees"}]})
-    # Even a hand-added `.worktrees` entry is a directory of boxes, not a checkout:
-    # nothing in the sweep would know what to do with it, which is why `new` never
-    # registers one.
-    assert "carameli--voicemail-0806" not in sweep.parse_workspace(workspace)
+    registered = sweep.project_registry.all_projects()
+    assert registered, "the committed registry lists no projects"
+    assert not [n for n in registered if sweep.NAME_SEP in n or n == sweep.BOXES_DIR_NAME]
 
 
 def test_a_failed_teardown_removes_the_box_but_does_not_report_success(tmp_path, monkeypatch):
@@ -1855,11 +1853,12 @@ def test_flags_are_accepted_after_the_subcommand(args, tmp_path, monkeypatch):
 
 
 def test_workspace_from_takes_a_workspace_then_a_root_then_the_default(tmp_path, monkeypatch):
-    monkeypatch.setattr(worktree, "DEFAULT_WORKSPACE", tmp_path / "d" / "w.code-workspace")
+    monkeypatch.setattr(worktree, "REPO_ROOT", tmp_path / "d" / "devkit")
     given = tmp_path / "g" / "w.code-workspace"
     assert worktree.workspace_from(tmp_path / "r", given) == given.resolve()
     assert worktree.workspace_from(tmp_path / "r", None).parent == (tmp_path / "r").resolve()
-    assert worktree.workspace_from(None, None) == (tmp_path / "d" / "w.code-workspace").resolve()
+    assert worktree.workspace_from(None, None).parent == (tmp_path / "d").resolve()
+    assert not hasattr(worktree, "DEFAULT_WORKSPACE")
 
 
 def test_no_workspace_file_is_needed_and_a_deprecated_one_names_the_root(tmp_path, monkeypatch):

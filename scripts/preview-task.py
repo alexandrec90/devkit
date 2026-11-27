@@ -41,32 +41,27 @@ Usage:
     python preview-task.py --pick 3        # take row 3 without asking
     python preview-task.py --all           # re-serve every standing preview (post-reboot)
     python preview-task.py --down          # menu, then STOP the picked row's stack
-    python preview-task.py --pick-ref carameli:agent/comic-book-ui-0820  # what the task sends
+    python preview-task.py --pick-ref carameli:agent/comic-book-ui-0820
     python preview-task.py --pick-ref "carameli:agent/a-0824 carameli:agent/b-0824"  # several
-    python preview-task.py --rows          # the dropdown's rows, live, and exit
     python preview-task.py --pick 3 --no-wait  # return when the containers start, not
                                                # when what they serve answers
 
-**No VS Code task dispatches this any more, and the rows it draws are why it still
-matters.**
-Until 2026-08-25 the clickable `Preview: Open a UI Branch` dispatched this script, so a
-click on "show me that branch" cut a box, built images and brought a whole compose stack
-up -- minutes of Docker to look at a button. That label now belongs to
-`preview-ui-host.py`, which runs `npm run dev` on the frontend and nothing else; this
-stays as the terminal verb for the times the *stack* is the thing under review, and as
-the `--rows` the clickable task's dropdown is drawn from. `worktree.py preview` is the
-layer under both.
+Until 2026-08-25 the dispatcher's `Preview: Open a UI Branch` ran this script, so "show
+me that branch" cut a box, built images and brought a whole compose stack up -- minutes
+of Docker to look at a button. That label now belongs to `preview-ui-host.py`, which runs
+`npm run dev` on the frontend and nothing else, and reads its refs from this module's
+scan; this stays as the terminal verb for the times the *stack* is the thing under
+review. `worktree.py preview` is the layer under both.
 
-The pick still arrives as `--pick-ref <project>:<ref>` whoever sends it, and the colon is
-a safe separator rather than a hopeful one: `git check-ref-format` refuses a ref that
-contains one.
+A pick arrives as `--pick-ref <project>:<ref>`, and the colon is a safe separator rather
+than a hopeful one: `git check-ref-format` refuses a ref that contains one.
 
-**The row list is a checkbox list, and several rows are one run.** Comparing two branches
-side by side is the ordinary way to use this task, so `previewRow` is a `multiPick` and
-the ticked rows arrive joined by `PICK_LIST_SEP` -- a space, refused inside a ref for the
-same reason the colon is, so neither separator can fall inside the half that varies.
-`serve_all` starts the boxes **in turn** and then waits on all of them **at once**: one
-git repo, one port registry and one image builder say the starts must not overlap, while
+**Several picks are one run.** Comparing two branches side by side is the ordinary way to
+use this, so `--pick-ref` takes tokens joined by `PICK_LIST_SEP` -- a space, refused
+inside a ref for the same reason the colon is, so neither separator can fall inside the
+half that varies. `serve_all` starts the boxes **in turn** and then waits on all of them
+**at once**: one git repo, one port registry and one image builder say the starts must
+not overlap, while
 the wait is a cold container running `npm install` and has nothing to serialise. So N
 boxes cost roughly the slowest one rather than the sum, and no tab opens on a refused
 connection because each row is still reported only once its own URL has answered.
@@ -80,31 +75,14 @@ name. Underneath, `worktree.plan_preview` looks that name up among the live boxe
 port the box already holds whether it was picked as a standing row, as a stale branch row
 drawn before the box existed, or typed by hand.
 
-The dropdown runs `--rows` when it opens, through `shellCommand.execute`, so its list
-is this scan and not a cached copy of an earlier one. It used to be a file, because
-`rioj7.command-variable` can only read one -- and the cost was not theoretical: the
-broken-PR menu that worked the same way spent two days a day stale after the pass that
-wrote it was switched off, still drawing rows for a PR that had been closed.
+**`preview-ui-host.py` scans fewer checkouts than this menu does**, and `ui_projects` is
+that line. It serves a frontend with `npm run dev`, so a checkout that declares no
+`[frontend] dir` is a pick that can only refuse; the terminal menu here brings stacks up
+and keeps offering every checkout that has one.
 
-**The dropdown lists fewer checkouts than this menu does**, and `ui_projects` is that
-line.
-Its reader serves a frontend with `npm run dev`, so a checkout that declares no
-`[frontend] dir` is an option that can only refuse; the terminal menu here brings stacks
-up and keeps offering every checkout that has one.
-
-**The scan fans out across the checkouts**, because a picker is a person watching an
-empty box: each one costs a `git fetch` and a `gh pr list`, which is five seconds in a
-row and about two in a pool. Nothing schedules this any more -- the list is built by the
-click that needs it.
-
-There used to be a `Rescan` row at the end of every checkout's list for this, picking
-nothing and falling through to the terminal menu below with the scan already done. It was
-the right answer while the file's only writer was the previous click, and it was a wrong
-answer to keep once the file had a writer of its own: it cost a row in every list, it
-asked the reader to know that the list they were looking at might be a lie, and the
-question it answered had already been asked and answered fifteen minutes ago. Each list's
-`asOf` stamp survives it, on the checkout row, because a timestamp is worth reading even
-when it is nearly always fresh.
+**The scan fans out across the checkouts**, because a person is watching: each one costs
+a `git fetch` and a `gh pr list`, which is five seconds in a row and about two in a pool.
+Nothing schedules this -- the list is built by the run that needs it.
 
 A ref picked from a row a later scan no longer produces is still served, as a plain
 branch: a stale row is a good guess about a ref, and `worktree.py` is the half that knows
@@ -121,7 +99,7 @@ picked" with the non-interactive spelling, never as an error.
 
 The machine has one box registry and one port registry, so a preview is owned by no
 single checkout. The checkout is a dimension inside the answer instead -- a column in the
-terminal menu, and the first of the dropdown's two questions. Restricting the sources to
+terminal menu. Restricting the sources to
 checkouts with a compose stack is what keeps devkit itself -- which has no stack, by
 contract -- out of its own menu.
 
@@ -150,8 +128,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_ports
 import devkit_project
-import picker_rows
-import picker_scan
 import sweep
 import task_branch as tb
 import worktree
@@ -168,7 +144,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # opened it and it is still open, which is the exact thing this task exists to put on
 # screen. Eight was cutting real ones: carameli carried five open PRs the day this was
 # raised and had carried more than eight the week before, and the rows that fell off
-# were silently absent from the dropdown with nothing saying a cap had been reached.
+# were silently absent from the list with nothing saying a cap had been reached.
 # `MENU_LIMIT` still trims the printed terminal menu, out loud.
 PR_LIMIT = 30
 BRANCH_LIMIT = 8
@@ -265,17 +241,16 @@ KIND_NOTE = {
 # fetches at once.
 SCAN_WORKERS = 8
 
-# `--pick-ref <project>:<ref>`, one token because a VS Code input resolves to one string.
-# The separator is safe rather than merely conventional: `git check-ref-format` refuses a
+# `--pick-ref <project>:<ref>`, one token per pick. The separator is safe rather than merely conventional: `git check-ref-format` refuses a
 # ref containing a colon, so the first one is always the one between the two halves.
 PICK_SEP = ":"
 
-# What joins several ticked rows into that one string, and it is chosen on the same terms
-# as the colon above rather than to match the `project` picker's comma: a comma is legal
-# in a ref name and a space is not, so this is the only separator that cannot land inside
-# the half that varies. It does assume no checkout is named with a space in it, which is
-# the registry's own assumption -- `register()` builds the first dropdown from directory
-# names, and a `COMPOSE_PROJECT_NAME` could not carry one anyway.
+# What joins several picks into one `--pick-ref` value, chosen on the same terms as the
+# colon above rather than to match `--project`'s comma: a comma is legal in a ref name
+# and a space is not, so this is the only separator that cannot land inside the half
+# that varies. It does assume no checkout is named with a space in it, which is the
+# registry's own assumption -- checkouts are directory names, and a
+# `COMPOSE_PROJECT_NAME` could not carry one anyway.
 PICK_LIST_SEP = " "
 
 # How long to keep waiting for the URL the box publishes, and how often to say so.
@@ -577,7 +552,7 @@ def render_menu(
 
 
 def pick_value(candidate: Candidate) -> str:
-    """The token the dropdown returns for one row: `<project>:<ref>`."""
+    """The `--pick-ref` token that names one row: `<project>:<ref>`."""
     return f"{candidate.project}{PICK_SEP}{candidate.ref}"
 
 
@@ -595,35 +570,21 @@ def split_picks(text: str) -> list[str]:
     """The `<project>:<ref>` tokens in one `--pick-ref` value, in the order they were ticked.
 
     Splitting on **any** run of whitespace rather than on `PICK_LIST_SEP` exactly, because
-    the value also reaches this script through a shell prompt and a task argv, and the one
-    thing that survives all of those unchanged is that no token contains a space. Repeats
-    are dropped here so the caller never has to think about a value the extension emitted
-    twice; picks that merely *land in the same box* are a different question and belong to
+    the value reaches this script through more than one shell, and the one thing that
+    survives all of them unchanged is that no token contains a space. Repeats are dropped
+    here so the caller never has to think about a value named twice; picks that merely *land in the same box* are a different question and belong to
     `dedupe`, which can name what it dropped.
     """
     return list(dict.fromkeys(text.split()))
-
-
-def unresolved(text: str) -> bool:
-    """True when `--pick-ref` carries VS Code's own placeholder rather than an answer.
-
-    Escaping either dropdown does not abort the task: VS Code runs the command anyway,
-    with the `${input:previewRow}` token left in the argv as literal text. That text can
-    never name a row -- `git check-ref-format` refuses `$` and `{`, so no real pick
-    starts with `${` -- which is what lets it be read as the cancel it is. Without this
-    it split on its colon like any pick and went to `worktree.py` as project `"${input"`,
-    which died three files away in `resolve_project` with a traceback.
-    """
-    return text.lstrip().startswith("${")
 
 
 def resolve_pick(text: str, candidates: list[Candidate]) -> Candidate:
     """The row a `--pick-ref` value names.
 
     A value matching no row is not an error, and that is the whole reason this is a
-    function rather than an index lookup: the dropdown is drawn from a file the previous
-    run wrote, so a row can be picked minutes after `reconcile` reaped the box that put
-    it there, or after its PR merged and its branch was deleted. What survives all of
+    function rather than an index lookup: a pick is often read off an earlier `--list`,
+    so a row can be named minutes after `reconcile` reaped the box that put it there, or
+    after its PR merged and its branch was deleted. What survives all of
     that is the ref, which is the only thing `plan_preview` needs -- so an unmatched pick
     becomes a plain branch row and fails, if it fails at all, against git rather than
     against a menu that was right an hour ago.
@@ -650,190 +611,6 @@ def resolve_picks(text: str, candidates: list[Candidate]) -> list[Candidate]:
     return [resolve_pick(token, candidates) for token in split_picks(text)]
 
 
-def menu_row(candidate: Candidate, now: _dt.datetime | None = None) -> str:
-    """One quick-pick line for a previewable ref.
-
-    The checkout is in the description because the list is flat: `shellCommand.execute`
-    resolves one input per command, so the "which checkout, then which of its refs" pair
-    the cached menu could nest has nowhere to live. It was never the question this task
-    asks anyway -- what is worth looking at is a property of the ref.
-    """
-    return picker_rows.row(
-        pick_value(candidate),
-        candidate.ref,
-        f"{candidate.project} -- {describe(candidate, now)}",
-        candidate.title,
-    )
-
-
-SCAN_NAME = "preview"
-
-
-def scan_entries(
-    candidates: list[Candidate], now: _dt.datetime | None = None
-) -> list[tuple[str, str]]:
-    """What stage one hands stage two: every row, tagged with its checkout, in rank.
-
-    A flat list in `collect`'s ranking rather than a mapping, because that ranking is
-    what stage two has to preserve -- trunks first, then standing boxes, then everything
-    else newest-first, across the whole machine. Ticking two checkouts gives one menu
-    ordered that way, not one checkout's rows followed by the other's.
-    """
-    return [(candidate.project, menu_row(candidate, now)) for candidate in candidates]
-
-
-def project_rows(candidates: list[Candidate], projects: list[str], token: str) -> list[str]:
-    """Stage one: one checkout per row, and what stage two would draw for it.
-
-    Every servable checkout is listed whether or not the scan found anything unusual in
-    it, and `ui_projects` rather than the scan decides which those are: a checkout is on
-    this list because `npm run dev` could serve it, which is a property of the checkout
-    and not of what happens to be open in it today. It always has at least its trunk, so
-    "nothing to preview" is not a state a row here can be in.
-    """
-    if not projects:
-        return [
-            picker_rows.nothing_row(
-                "no servable checkout",
-                "no registered checkout declares a [frontend] dir in its .devkit.toml",
-            )
-        ]
-    counts: dict[str, int] = dict.fromkeys(projects, 0)
-    under_review: dict[str, int] = dict.fromkeys(projects, 0)
-    for candidate in candidates:
-        if candidate.project in counts:
-            counts[candidate.project] += 1
-            if candidate.kind != KIND_TRUNK:
-                under_review[candidate.project] += 1
-    listed = []
-    for project in projects:
-        total, extra = counts[project], under_review[project]
-        listed.append(
-            picker_scan.project_row(
-                project,
-                token,
-                f"{total} ref{'' if total == 1 else 's'}"
-                + (f", {extra} under review" if extra else ", nothing under review"),
-                "tick as many checkouts as you want -- the next list covers all of them",
-            )
-        )
-    return listed
-
-
-def picked_rows(
-    workspace: Path,
-    checkouts: str,
-    fetch: bool = True,
-    now: _dt.datetime | None = None,
-) -> list[str]:
-    """Stage two: the rows for the ticked checkouts, from stage one's scan if it is theirs.
-
-    The token decides, and a miss is answered by scanning rather than by serving
-    anything older -- see `picker_scan`. The rescan covers only what was ticked, and a
-    scan of one checkout is the cheap end of the fan-out stage one already paid for.
-
-    An empty `checkouts` is `--rows` typed by hand with no first stage in front of it,
-    and answers with every servable checkout, the way this did before there was one.
-    """
-    projects, token = picker_scan.parse_projects(checkouts)
-    servable = ui_projects(workspace)
-    if not projects:
-        return rows(collect(workspace, fetch=fetch, projects=servable), now)
-    cached = picker_scan.read(SCAN_NAME, token)
-    if cached is not None:
-        return picker_scan.select(cached, projects) or rows([], now)
-    # Narrowed to what is servable as well as what was ticked: a checkout that reached
-    # here any other way could only draw rows `preview-ui-host.py` would refuse.
-    wanted = [project for project in projects if project in servable]
-    return rows(collect(workspace, fetch=fetch, projects=wanted), now)
-
-
-def drawing(args) -> bool:
-    """True when this run is a dropdown opening rather than a person serving something.
-
-    One predicate rather than two conditions in `main`, which is the widest function
-    here: both flags mean "print rows and stop", and `draw` is what tells them apart.
-    """
-    return bool(args.rows or args.project_rows)
-
-
-def draw(workspace: Path, stage_one: bool, checkouts: str, fetch: bool = True) -> list[str]:
-    """The rows for either dropdown stage. This return value IS the quick-pick.
-
-    `stage_one` runs the whole fan-out -- the only place it is paid for -- and records
-    what it found so stage two filters that instead of scanning again. Stage two is
-    `picked_rows`, which reads the record when the token names it and rescans only the
-    ticked checkouts when it does not.
-
-    Both are narrower than the terminal menu in one dimension and wider in another.
-    Narrower: `ui_projects` alone, because this list's reader serves a frontend with
-    `npm run dev` and a checkout declaring no `[frontend] dir` is an option that can
-    only refuse. Wider: untrimmed, because a quick-pick has no screen to run out of, so
-    the row `--limit` drops from a terminal is exactly the row only this list can offer.
-    """
-    if not stage_one:
-        return picked_rows(workspace, checkouts, fetch=fetch)
-    listed = ui_projects(workspace)
-    found = collect(workspace, fetch=fetch, projects=listed)
-    return project_rows(found, listed, picker_scan.write(SCAN_NAME, scan_entries(found)))
-
-
-def refuse_strays(candidates: list[Candidate], checkouts: str) -> None:
-    """Raise `ValueError` naming any ticked ref the checkout stage did not cover.
-
-    A stray pick is an unusable pick, so it leaves by the route an unresolvable one
-    already leaves by rather than growing each caller's `main` a second refusal branch.
-    Both readers of this module do exactly that, which is also what keeps the wording in
-    one place instead of two.
-    """
-    strayed = strayed_picks(candidates, checkouts)
-    if strayed:
-        raise ValueError(stray_report(strayed))
-
-
-def stray_report(strayed: list[str]) -> str:
-    """What to say about ticked refs the checkout stage did not cover."""
-    return (
-        f"Ticked {'a ref' if len(strayed) == 1 else 'refs'} from {', '.join(strayed)}, "
-        "which the checkout picker did not return -- the two picker stages disagree, so "
-        "nothing was served. See `.claude/rules/vscode-tasks.md` on the order the inputs "
-        "have to appear in."
-    )
-
-
-def strayed_picks(candidates: list[Candidate], checkouts: str) -> list[str]:
-    """Ticked refs whose checkout was not ticked in the first stage.
-
-    Nothing in the two stages can produce one: stage two draws only the checkouts stage
-    one returned. So a stray is evidence the chain itself misfired -- the extension
-    resolves `${input:...}` against a value it recorded when that input last ran, so an
-    input order that stopped putting the checkout stage first would quietly filter by
-    the *previous* click's checkouts. That is the one failure of this design that could
-    otherwise be silent, and serving a preview is the wrong place to be quietly wrong.
-    """
-    ticked, _ = picker_scan.parse_projects(checkouts)
-    if not ticked:
-        return []
-    return sorted({candidate.project for candidate in candidates} - set(ticked))
-
-
-def rows(candidates: list[Candidate], now: _dt.datetime | None = None) -> list[str]:
-    """Every previewable ref as a quick-pick line, in `collect`'s ranking.
-
-    Ranked rather than grouped, and the trunk rows ride along with the rest: a checkout
-    whose only row is its trunk is a checkout with nothing under review, and saying so by
-    drawing one plain row is what the cached menu's separate `project_note` was for.
-    """
-    if not candidates:
-        return [
-            picker_rows.nothing_row(
-                "nothing to preview",
-                "no live box, no open PR and no recent branch in any servable checkout",
-            )
-        ]
-    return [menu_row(candidate, now) for candidate in candidates]
-
-
 def parse_choice(text: str, count: int) -> tuple[str, list[int]]:
     """`("pick", [n, ...])`, `("all", [])`, `("quit", [])`, or `("again", [])` for a retry.
 
@@ -841,9 +618,8 @@ def parse_choice(text: str, count: int) -> tuple[str, list[int]]:
     A blank line is `quit` rather than `again`: pressing Enter at a menu is how someone
     who opened the wrong task gets out of it, and looping there would trap them.
 
-    Several numbers are one answer -- `1 3`, `1,3`, `1, 3` -- because the dropdown this
-    menu is the fallback for is a checkbox list, and a fallback that can only take one row
-    is a downgrade for exactly the caller who wanted two. **One bad token
+    Several numbers are one answer -- `1 3`, `1,3`, `1, 3` -- because comparing two rows
+    side by side is the ordinary way to use this. **One bad token
     rejects the whole line** rather than being skipped: the numbers are positions in a
     menu the reader is looking at, so silently serving two of the three they typed is the
     one outcome they cannot see happen.
@@ -1394,14 +1170,14 @@ def frontend_dir_for(project_dir: Path) -> str:
 
     "" rather than raising, because both callers' next line treats it as "this checkout
     cannot be served": `preview-ui-host.py` refuses the pick by name, and `ui_projects`
-    leaves the checkout out of the dropdown. A missing manifest and a manifest with no
+    leaves the checkout out of its scan. A missing manifest and a manifest with no
     frontend need the same answer.
 
     Lives here rather than in `preview-ui-host.py`, which is where it was written and
     which still exposes it under the same names: this module owns *which checkouts can be
-    previewed*, so the menu and the server that honours a pick from it read the manifest
+    previewed*, so the scan and the server that honours a pick from it read the manifest
     through one function. Two readers of the same table would eventually disagree about
-    what `enabled = false` means, and the dropdown would be the last place anyone looked.
+    what `enabled = false` means.
     """
     try:
         manifest = tomllib.loads((project_dir / ".devkit.toml").read_text(encoding="utf-8"))
@@ -1411,7 +1187,7 @@ def frontend_dir_for(project_dir: Path) -> str:
 
 
 def ui_projects(workspace: Path) -> list[str]:
-    """The checkouts the host Vite task can serve: registered, present, with a frontend.
+    """The checkouts `preview-ui-host.py` can serve: registered, present, with a frontend.
 
     A narrower list than `stack_projects`, and deliberately a *different* one rather than
     a replacement for it. The two answer different questions, because the two consumers of
@@ -1419,15 +1195,10 @@ def ui_projects(workspace: Path) -> list[str]:
 
       - the terminal menu here brings a **compose stack** up, so a checkout qualifies by
         having one -- `stack_projects`, which is what `collect` still defaults to.
-      - the `Preview: Open a UI Branch` task runs `npm run dev` on one directory and
-        nothing else, so a checkout qualifies by declaring `[frontend] dir`. A row from a
-        checkout that declares none is a dead end: the pick resolves, the task starts, and
-        `preview-ui-host.py` refuses it with "declares no [frontend] in .devkit.toml".
-
-    Until 2026-08-25 the dropdown was built from `stack_projects` because the task behind
-    it brought a stack up. The task is host-Vite-only now, so two of the three checkouts
-    it offered could not be served at all -- and a dropdown whose first question is a
-    checkout that answers nothing is worse than one that does not ask.
+      - `preview-ui-host.py` runs `npm run dev` on one directory and nothing else, so a
+        checkout qualifies by declaring `[frontend] dir`. A row from a checkout that
+        declares none is a dead end: the pick resolves, the run starts, and it is refused
+        with "declares no [frontend] in .devkit.toml".
     """
     root = workspace.parent
     return [
@@ -1443,8 +1214,7 @@ def network_reads(
     """One checkout's `recent_branches`, `open_prs` and `merged_refs`, all at once.
 
     `collect` fans out across checkouts, and these three were what each thread then paid
-    in turn: a `git fetch` and two `gh pr list`s, which put previewCheckout past its
-    budget at 8.1s. Neither `gh` read looks at a ref the fetch moves, so a checkout costs
+    in turn: a `git fetch` and two `gh pr list`s, 8.1s for the machine. Neither `gh` read looks at a ref the fetch moves, so a checkout costs
     the slowest of the three. What reads a ref the fetch moved runs after this returns.
     """
     with futures.ThreadPoolExecutor(max_workers=3) as pool:
@@ -1468,12 +1238,11 @@ def collect(
     saying the same thing. `merge_candidates` already owns "one row per distinct ref"; the
     membership test here is what defers to it.
 
-    `projects` narrows the sources, and the caller that passes it is the one building the
-    dropdown (`ui_projects`, a strict subset). It is a parameter rather than a filter on
-    the result because every checkout in the list costs a `git fetch` and a `gh pr list`:
-    discarding those rows afterwards would spend the whole scan and then throw two thirds
-    of it away -- and this now runs when a person opens the dropdown rather than on a
-    schedule, so that waste is seconds they spend watching an empty quick-pick.
+    `projects` narrows the sources, and the caller that passes it is `preview-ui-host.py`
+    (`ui_projects`, a strict subset). It is a parameter rather than a filter on the result
+    because every checkout in the list costs a `git fetch` and a `gh pr list`: discarding
+    those rows afterwards would spend the whole scan and then throw two thirds of it away,
+    in seconds a person spends waiting.
 
     Which is also why the checkouts are scanned concurrently. They share only `boxes`,
     read once before the pool and never written, and every source inside `scan` already
@@ -1745,25 +1514,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--pick-ref",
         default="",
         metavar="PROJECT:REF",
-        help="take these refs without asking, space-separated -- what the VS Code dropdown sends",
-    )
-    parser.add_argument(
-        "--rows",
-        action="store_true",
-        help="print the dropdown's rows (`value|label|description|detail`) and exit",
-    )
-    parser.add_argument(
-        "--project-rows",
-        action="store_true",
-        help="print the CHECKOUT picker's rows and exit, recording the scan they came from",
-    )
-    parser.add_argument(
-        "--checkouts",
-        default="",
-        help=(
-            f"ticked checkouts, `<project>{picker_scan.SEP}<scan token>` joined by "
-            f"`{picker_scan.LIST_SEP}` -- what the checkout picker returns"
-        ),
+        help="take these refs without asking, space-separated",
     )
     parser.add_argument(
         "--limit",
@@ -1811,17 +1562,6 @@ def main(argv: list[str] | None = None) -> int:
         echo("--ui picks one ref; --all re-serves standing boxes as they are. Drop one.")
         return 2
 
-    if args.pick_ref and unresolved(args.pick_ref):
-        # Before the scan: a cancelled run should cost nothing and touch nothing.
-        echo("Nothing picked -- the dropdown was cancelled.")
-        return 0
-
-    if drawing(args):
-        picker_rows.emit(
-            draw(workspace, stage_one=args.project_rows, checkouts=args.checkouts, fetch=args.fetch)
-        )
-        return 0
-
     if args.fetch and not args.list:
         echo("Reading boxes, open PRs and recent branches ...")
     everything = collect(workspace, fetch=args.fetch)
@@ -1842,7 +1582,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.pick_ref:
         try:
             picked = resolve_picks(args.pick_ref, everything)
-            refuse_strays(picked, args.checkouts)
         except ValueError as exc:
             echo(str(exc))
             return 2
@@ -1874,8 +1613,8 @@ def main(argv: list[str] | None = None) -> int:
             else [candidates[n - 1] for n in index]
         )
 
-    # Last, so it covers every route in: the dropdown can tick a stale row and the standing
-    # box that replaced it, `--all` and a `--pick-ref` can name one box between them, and
+    # Last, so it covers every route in: a `--pick-ref` can name a stale row and the
+    # standing box that replaced it, `--all` and a `--pick-ref` can name one box between them, and
     # `--ui` collapses rows that are distinct in the menu onto a single box name.
     chosen, collapsed = dedupe(chosen, ui=args.ui)
     for note in collapsed:

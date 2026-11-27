@@ -237,8 +237,8 @@ def cannot_start() -> int | None:
     if missing := missing_tools():
         why = (
             f"not usable from this PATH: {', '.join(missing)} -- install it, or `gh auth "
-            f"login` (scripts/bootstrap-machine.ps1 -Yes does both), then fully restart VS "
-            f"Code: a task inherits the PATH VS Code started with"
+            f"login` (scripts/bootstrap-machine.ps1 -Yes does both), then open a new "
+            f"terminal: a process inherits the PATH its terminal started with"
         )
         print(f"fix-pass: {why}", file=sys.stderr)
         write_artifact(f"fix-pass: FAILED -- {why}")

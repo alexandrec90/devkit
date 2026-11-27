@@ -16,7 +16,6 @@ resolves against the raw registry -- and that is the seam the task was written f
 than by naming a live checkout.
 """
 
-import json
 import subprocess
 from pathlib import Path
 
@@ -36,11 +35,6 @@ target_repo = merge_default.target_repo
 MergeError = merge_default.MergeError
 
 REPO = Path("C:/checkouts/reference-checkout")
-
-# The fixture registries below are deliberately NOT named `alex-projects.code-workspace`:
-# `test_self_hosting.py` treats that literal in an unmarked test as a read of the live
-# workstation file, which CI does not have. These tests pass their registry in as an
-# argument and never touch the real one.
 
 # The calls a clean run makes, keyed by the git arguments. A test overrides only the one
 # it is about; anything unlisted answers success with no output, which keeps each test
@@ -95,7 +89,6 @@ def run(fake, base=merge_default.AUTO, remote="origin"):
 # --- the registry seam ------------------------------------------------------
 
 REGISTRY = ("carameli", "devkit", "reference-checkout")
-WORKSPACE = json.dumps({"folders": [{"path": name} for name in REGISTRY]})
 
 
 def register(monkeypatch, *names: str) -> None:
@@ -116,32 +109,32 @@ def test_the_reference_checkout_is_reachable_from_here(monkeypatch):
     register(monkeypatch, *REGISTRY)
     assert "reference-checkout" in every_checkout()
     assert "reference-checkout" not in devkit_project.known_projects()
-    # The deprecated workspace-text form draws the same line.
-    assert "reference-checkout" in every_checkout(WORKSPACE)
-    assert "reference-checkout" not in devkit_project.known_projects(WORKSPACE)
+
+
+def test_every_checkout_reads_only_the_registry():
+    """The deprecated workspace-text form is gone with the workspace file."""
+    with pytest.raises(TypeError):
+        every_checkout("{}")
 
 
 def test_a_named_checkout_resolves_to_its_directory(tmp_path, monkeypatch):
-    """Off the registry: the workspace path only says where the checkouts sit, and the
-    file it names need not exist."""
+    """Off the registry, under the root it was handed."""
     register(monkeypatch, *REGISTRY)
-    workspace = tmp_path / "registry.code-workspace"
     (tmp_path / "reference-checkout").mkdir()
-    assert target_repo("reference-checkout", workspace) == tmp_path / "reference-checkout"
+    assert target_repo("reference-checkout", tmp_path) == tmp_path / "reference-checkout"
 
 
 def test_an_unknown_checkout_names_the_real_ones(tmp_path, monkeypatch):
     register(monkeypatch, *REGISTRY)
-    workspace = tmp_path / "registry.code-workspace"
     with pytest.raises(
         devkit_project.ProjectError, match=r"unknown checkout 'nope'.*reference-checkout"
     ):
-        target_repo("nope", workspace)
+        target_repo("nope", tmp_path)
 
 
 def test_no_checkout_means_the_current_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    assert target_repo("", tmp_path / "missing.code-workspace") == Path.cwd()
+    assert target_repo("", tmp_path / "missing") == Path.cwd()
 
 
 def test_an_unreadable_registry_is_reported_rather_than_traced(tmp_path, monkeypatch):
@@ -151,7 +144,7 @@ def test_an_unreadable_registry_is_reported_rather_than_traced(tmp_path, monkeyp
         lambda *_a, **_k: project_registry.parse_registry("projects = ["),
     )
     with pytest.raises(MergeError, match="cannot read the project registry"):
-        target_repo("reference-checkout", tmp_path / "missing.code-workspace")
+        target_repo("reference-checkout", tmp_path / "missing")
 
 
 # --- choosing the base ------------------------------------------------------
@@ -527,9 +520,12 @@ def test_the_remediation_block_says_where_the_work_went_only_when_it_went_somewh
 # --- the entrypoint ---------------------------------------------------------
 
 
-def test_main_runs_against_the_checkout_it_was_given(tmp_path, monkeypatch):
+@pytest.mark.parametrize("flag", ["--root", "--workspace"])
+def test_main_runs_against_the_checkout_it_was_given(tmp_path, monkeypatch, flag):
+    """`--root` names the projects root; the deprecated `--workspace` names it by a file
+    in it, never read -- a scheduled task registered before `--root` may still pass it."""
     register(monkeypatch, *REGISTRY)
-    workspace = tmp_path / "registry.code-workspace"
+    where = tmp_path if flag == "--root" else tmp_path / "registry.code-workspace"
     (tmp_path / "reference-checkout").mkdir()
     seen = {}
 
@@ -537,19 +533,16 @@ def test_main_runs_against_the_checkout_it_was_given(tmp_path, monkeypatch):
         seen["repo"] = repo
         return FakeGit()
 
-    code = main(
-        ["--checkout", "reference-checkout", "--workspace", str(workspace)], run_factory=factory
-    )
+    code = main(["--checkout", "reference-checkout", flag, str(where)], run_factory=factory)
     assert code == 0
     assert seen["repo"] == tmp_path / "reference-checkout"
 
 
 def test_main_reports_a_bad_checkout_without_touching_git(tmp_path, monkeypatch, capsys):
     register(monkeypatch, *REGISTRY)
-    workspace = tmp_path / "registry.code-workspace"
 
     def factory(repo):  # pragma: no cover - reaching this is the failure
         raise AssertionError("git must not be reached for an unresolvable checkout")
 
-    assert main(["--checkout", "ghost", "--workspace", str(workspace)], run_factory=factory) == 2
+    assert main(["--checkout", "ghost", "--root", str(tmp_path)], run_factory=factory) == 2
     assert "ghost" in capsys.readouterr().err

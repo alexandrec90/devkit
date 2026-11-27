@@ -14,14 +14,12 @@ manual spelling, one verb per lifecycle step:
 | `ship` | commit, push and open the PR for a box |
 | `delete` | destroy the box and its local branch |
 
-**CLI-only, and workspace tasks until 2026-09-04**: `claude --worktree` plus `/ship`
-covers all four for an ordinary task, so the rows duplicated a built-in. What the
-built-in cannot give a box is a port lease and a `COMPOSE_PROJECT_NAME`, which is what
-`spawn` is still for. `test_the_box_tier_keeps_one_task_and_it_is_read_only` owns the
-reasoning.
+**CLI-only**: `claude --worktree` plus `/ship` covers all four for an ordinary task.
+What the built-in cannot give a box is a port lease and a `COMPOSE_PROJECT_NAME`, which
+is what `spawn` is still for.
 
 **`spawn` and `attach` both end in `agent_tabs.open_agent`, and so do the other two
-tasks that spend a session.** How a tab is opened was here until 2026-09-19 and is now
+verbs that spend a session.** How a tab is opened was here until 2026-09-19 and is now
 `scripts/agent_tabs.py`, which its own docstring explains: two copies of "which window
 does the agent open in" would be two answers, and three scripts were reaching this
 hyphenated filename through `load_by_path` to avoid writing a second one.
@@ -166,7 +164,7 @@ def boxes_for(
     has been reaped has nothing for `attach` or `ship` to run in.
 
     `unmerged_only` drops a box whose PR has **merged** and keeps one whose PR is open --
-    pushing another commit to an open PR is the ordinary way to answer review, and a picker
+    pushing another commit to an open PR is the ordinary way to answer review, and a menu
     that hid it would send the operator looking for a verb that does not exist. It is a
     parameter rather than a second function because the PR lookup is what fills in
     `Candidate.pr`, so the filtered list and the labelled list are the same pass.
@@ -221,9 +219,9 @@ def choose(candidates: list[Candidate], branch: str, noun: str, reader=input) ->
     """`--branch` when given, otherwise the numbered prompt. None means "nothing to do".
 
     The prompt is a whole flushed LINE rather than `input("> ")`, and that detail is what
-    lets these verbs keep the failure artifact every workspace task owes. `log-wrap.py`
+    lets these verbs run under `log-wrap.py` and keep its failure artifact. `log-wrap.py`
     reads the child's stdout a line at a time; a bare `input` prompt has no newline and
-    would sit in a pipe buffer forever, so the operator would see a task that hangs with
+    would sit in a pipe buffer forever, so the operator would see a run that hangs with
     an empty terminal rather than a menu. stdin is inherited either way.
     """
     if branch:

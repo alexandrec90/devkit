@@ -247,8 +247,7 @@ cd /tmp/gen/probe_tag && pre-commit run --all-files
 ```
 
 > **`--no-register` is not optional here.** Without it the probe is written into
-> `alex-projects.code-workspace` — `folders` plus every scope picker — and stays
-> there after you delete the directory, leaving `sweep.py` with a registered checkout
+> devkit's `projects.toml` and stays there after you delete the directory, leaving `sweep.py` with a registered checkout
 > under a temp path. The flag exists for exactly this command.
 
 That last command is the acceptance test. It must not print "hook not found", and

@@ -61,12 +61,9 @@ def test_the_marker_says_the_tier_is_deselected_not_skipped():
 @pytest.mark.parametrize(
     "path",
     [
-        ".claude/rules/vscode-tasks.md",
         "README.md",
         "scripts/e2e.py",
         "tests/support.py",
-        "tests/test_workspace_task_index.py",
-        "tests/test_workspace_tasks_live.py",
     ],
 )
 def test_nothing_describing_the_tier_says_ci_skips_it(path):
@@ -169,18 +166,17 @@ def test_the_scheduled_run_writes_nothing_before_pytest(monkeypatch, tmp_path, c
     assert not hasattr(e2e, "publish")
 
 
-def _decorated(decorator):
-    def test_x():
-        pass
-
-    return decorator(test_x)
-
-
-def test_every_test_skipped_for_wanting_this_machine_is_in_the_local_tier():
-    """The decorator that skips a test in CI is the one that puts it here, so no test
-    can be skipped for wanting this machine without also being run on it."""
-    names = [mark.name for mark in _decorated(support.needs_live_workspace).pytestmark]
-    assert sorted(names) == ["local", "skipif"]
+def test_a_machine_with_no_checkout_fails_the_tier_rather_than_skipping(monkeypatch, tmp_path):
+    """`support.live_checkouts` is what a `local` test reads this machine's checkouts
+    through, and finding none is a failure, never an empty pass: the tier runs on the
+    workstation that holds them."""
+    monkeypatch.setattr(support.project_registry, "projects_root", lambda *_a: tmp_path)
+    monkeypatch.setattr(support.project_registry, "all_projects", lambda *_a: ["gone"])
+    with pytest.raises(pytest.fail.Exception, match="no registered checkout"):
+        support.live_checkouts()
+    (tmp_path / "gone").mkdir()
+    assert support.live_checkouts() == [("gone", tmp_path / "gone")]
+    assert not hasattr(support, "needs_live_workspace")
 
 
 def test_the_local_marker_is_registered():

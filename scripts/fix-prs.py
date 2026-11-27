@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Send an agent at everything that is red, deciding for itself what "everything" means.
 
-The task asks one question -- which agent -- and this script answers the rest. It scans
+The CLI takes one choice -- which agent -- and this script answers the rest. It scans
 every checkout for a red PR and every open scheduled-failure issue, reads what each gate
 actually said, and plans: a PR gets a session on its own head branch; a vendored test
 failing across several consumers gets **one** session in devkit; a release PR (red by
@@ -74,7 +74,6 @@ import gate_evidence
 import session_friction
 import sweep
 import task_branch as tb
-import task_input
 import worktree
 
 # Qualified rather than imported name by name, and that is the load-bearing part: the
@@ -498,16 +497,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    raw = sys.argv[1:] if argv is None else argv
-    # Ahead of `argparse`, per `.claude/rules/vscode-tasks.md`: a dismissed picker that
-    # reached the parser would be a usage error, which is a red icon, a toast and a
-    # `logs/` artifact for a run the user called off.
-    dismissed = task_input.cancelled_inputs(raw)
-    if dismissed:
-        print(task_input.cancel_report("fix-prs", dismissed))
-        return EXIT_OK
-
-    args = build_parser().parse_args(raw)
+    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     # Only its directory is read; no workspace file need exist.
     workspace = worktree.workspace_from(args.root, args.workspace)
 

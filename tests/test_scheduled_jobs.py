@@ -347,9 +347,10 @@ UNATTENDED: dict[str, str] = {
     "scripts/upgrade-project.py": "devkit-upgrade-projects runs it nightly",
     "scripts/docker-maint.py": "devkit-docker-prune and devkit-docker-stop-idle run it nightly",
     # No scheduler reaches this one today -- the nightly job that did was retired with
-    # the reference checkout it merged. It stays listed because the VS Code task runs it
-    # through `notify-wrap.py`, whose parent is an extension host with no console either.
-    "scripts/git-merge-default.py": "the VS Code merge task, from a console-less parent",
+    # the reference checkout it merged, and the VS Code task that ran it from a
+    # console-less extension host went with VS Code. It stays listed, window-less, so the
+    # next console-less caller needs no fix.
+    "scripts/git-merge-default.py": "no caller today; kept window-less for the next one",
     "scripts/global-tools.py": "devkit-global-tools runs it nightly",
     "scripts/rc-servers.py": "devkit-rc-servers runs it every 15 minutes",
     "scripts/rc_machine.py": "the tasklist, taskkill and server launch that pass makes",
@@ -386,8 +387,8 @@ UNATTENDED: dict[str, str] = {
     "scripts/docker_memory.py": "collectors.py imports it; its _spawn serves the by-hand report",
     "scripts/elevated_worker.py": "devkit-elevated runs the installed copy every 5 minutes",
     "scripts/elevated_request.py": "the schtasks query the fix pass asks after the worker with",
-    # reached from `workspace-status.py --notify`, which is the one script that imports
-    # it rather than being wrapped in `notify-wrap.py`; see that flag's docstring.
+    # reached from `workspace-status.py --notify`, the one script that imports it; see
+    # that flag's docstring.
     "scripts/notify.py": "the Windows PowerShell the status pass raises its toast through",
     # reached from an entry point
     "scripts/sweep.py": "the git and gh IO for reconcile and upgrade",

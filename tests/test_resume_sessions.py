@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from support import REPO_ROOT, devkit_project, load_script
+from support import REPO_ROOT, load_script
 
 rs = load_script("scripts/resume-sessions.py")
 agent_models = load_script("scripts/agent_models.py")
@@ -777,9 +777,9 @@ def test_each_agent_store_honours_its_config_home(monkeypatch, tmp_path):
 
 
 def test_the_script_is_stdlib_only():
-    """devkit ships no runtime dependencies, and this runs from a VS Code task.
+    """devkit ships no runtime dependencies, and this runs under the machine's `python`.
 
-    `agent_clis`, `agent_models`, `fix_prompts`, `task_input` and `wt_profile` are the only
+    `agent_clis`, `agent_models`, `agent_tabs`, `fix_prompts` and `wt_profile` are the only
     non-stdlib names allowed, and none is a dependency: all five are sibling scripts in the same
     directory, reached through the `sys.path` insert above them, and each is stdlib-only
     itself. Naming them here rather than widening the rule keeps a real third-party
@@ -803,7 +803,6 @@ def test_the_script_is_stdlib_only():
                 "subprocess",
                 "sys",
                 "agent_tabs",
-                "task_input",
                 "time",
                 "wt_profile",
                 "dataclasses",
@@ -811,72 +810,22 @@ def test_the_script_is_stdlib_only():
             }, f"non-stdlib import: {line}"
 
 
-def test_the_workspace_task_passes_the_resume_agent_checkboxes():
-    """The agent question is still a checkbox list, and it is now a live one.
-
-    It was a `pickStringRemember` until the model chain arrived. The swap is forced
-    rather than cosmetic: `resumeModel` reads this input's answer inside its own
-    command, and `shellCommand.execute` is the only place that extension records one --
-    from anything else it substitutes empty and would draw both catalogues however few
-    agents were ticked. `multiselect` is the property that has to survive: one global
-    recency slice across both stores is the question this task asks.
-    """
-    source = devkit_project.canonical_tasks_text()
-    task = source[source.index('"label": "Agents: Resume Recent Sessions"') :]
-    task = task[: task.index('"problemMatcher"')]
-    assert '"--agent"' in task
-    assert '"${input:resumeAgents}"' in task
-
-    picker = source[source.index('"id": "resumeAgents"') :]
-    picker = picker[: picker.index('"id": "resumeModel"')]
-    assert '"command": "shellCommand.execute"' in picker
-    assert '"multiselect": true' in picker
-    assert '"multiselectSeparator": ","' in picker
-    assert "agent-options.py" in picker
-
-
-def test_the_resume_task_asks_for_the_model_after_the_agent_and_the_effort_after_that():
-    """The chain's order, on the one task that is not a dispatch.
-
-    `augustocdias.tasks-shell-input` resolves a later input's `${input:<id>}` against
-    the value it recorded when that input last ran, and VS Code resolves inputs in the
-    order they appear in the arguments. Out of order, both stages draw a list from some
-    earlier click rather than failing -- which on this task means resuming sessions at a
-    model nobody picked this time. `tests/test_devkit_project.py` holds the same
-    property for every task; this one pins the spelling the script actually parses.
-    """
-    source = devkit_project.canonical_tasks_text()
-    task = source[source.index('"label": "Agents: Resume Recent Sessions"') :]
-    task = task[: task.index('"problemMatcher"')]
-    assert task.index("${input:resumeAgents}") < task.index("${input:resumeModel}")
-    assert task.index("${input:resumeModel}") < task.index("${input:resumeEffort}")
-    # `=`-joined, not two tokens: nothing strips an empty argument on this task's way to
-    # the script, so a lone `--model` would swallow the flag after it.
-    assert '"--model=${input:resumeModel}"' in task
-    assert '"--effort=${input:resumeEffort}"' in task
-
-
-def test_a_dismissed_agent_checkbox_list_opens_no_tabs(monkeypatch, capsys):
-    """Escaping that checkbox list must reopen nothing, and say so as a cancel.
-
-    This is the one picker task with no `notify-wrap.py` in front of it, and `log-wrap.py`
-    passes the literal through untouched, so the guard lives in `main` — and ahead of
-    `argparse`, because `--agent` carries a `type=` that would
-    reject the literal `${input:resumeAgents}` as a usage error rather than recognise it
-    as the dismissal it is.
-    """
+def test_an_unknown_agent_is_refused_before_anything_launches(monkeypatch):
+    """No picker literal is read as a cancel any more: `--agent`'s `type=` refuses
+    anything it does not know, as argparse's usage error, before a terminal opens."""
 
     def refuse(*args, **kwargs):
-        raise AssertionError("a cancelled task must not launch a terminal")
+        raise AssertionError("a refused run must not launch a terminal")
 
     monkeypatch.setattr(rs.subprocess, "run", refuse)
-    assert rs.main(["--agent", "${input:resumeAgents}", "--count", "4"]) == 0
-    assert "cancelled" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        rs.main(["--agent", "${input:resumeAgents}", "--count", "4"])
+    assert exc.value.code == 2
 
 
-def test_the_parser_is_its_own_function_and_still_carries_every_flag_the_task_passes():
+def test_the_parser_is_its_own_function_and_still_carries_every_flag():
     """Out of `main` for `structure_check`'s `function_lines`; what must not change is
-    what it accepts, because the workspace task spells all five by hand."""
+    what it accepts."""
     args = rs.build_parser().parse_args(
         ["--agent", "claude,codex", "--count", "7", "--model=claude:x", "--effort=max"]
     )

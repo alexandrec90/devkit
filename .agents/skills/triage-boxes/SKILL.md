@@ -7,8 +7,8 @@ argument-hint: 'Optional: a box name to triage first, or `--all` (the default)'
 
 # Clear the stranded boxes
 
-> Depends on git, `gh` (authenticated), and the workspace file the boxes are registered
-> under. Run it from the devkit checkout; every command takes `--workspace` from there.
+> Depends on git, `gh` (authenticated), and the projects root the boxes sit under. Run it
+> from the devkit checkout; every command takes `--root` from there.
 
 `worktree.py reconcile` runs every fifteen minutes and destroys a box once its PR merges.
 It cannot decide what to do with a box that never got a PR: reaping it may destroy the
@@ -31,7 +31,7 @@ this is where `worktree.py` lives. It is not in `sync-devkit.py`'s `MANIFEST`.
 ## 1. List them
 
 ```bash
-python scripts/worktree.py reconcile --dry-run --json --workspace <workspace file>
+python scripts/worktree.py reconcile --dry-run --json --root <projects root>
 ```
 
 Every row with `"stranded": true` is yours. The dry run asks GitHub, so `pr`, `pr_state`
@@ -116,7 +116,7 @@ commits, pushes and opens the PR:
 
 ```bash
 python scripts/worktree.py provision <box> --yes
-python scripts/worktree.py rescue <box> --ship --message "<subject>" --yes --workspace <workspace file>
+python scripts/worktree.py rescue <box> --ship --message "<subject>" --yes --root <projects root>
 ```
 
 Provision first: the commit runs the project's pre-commit gate, which needs the box's
@@ -129,7 +129,7 @@ resolve it by hand in the box and re-run.
 **Delete**:
 
 ```bash
-python scripts/worktree.py reap <box> --force --yes --workspace <workspace file>
+python scripts/worktree.py reap <box> --force --yes --root <projects root>
 ```
 
 `--force` is what a stranded box needs -- `reap` refuses a dirty box on purpose, and the

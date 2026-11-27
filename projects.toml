@@ -2,10 +2,8 @@
 #
 # `scripts/project_registry.py` reads this file, and owns why it is TOML and why the
 # settings one PC alone decides live elsewhere (`<projects-root>/.devkit-machine.json`).
-# It replaces the `folders` of the VS Code workspace file, which nothing reads for the
-# registry any more. Until `workspace.jsonc` is deleted, `tests/test_project_registry.py`
-# fails this list the moment it disagrees with that file's `folders`: register or retire
-# a project in both.
+# It replaced the `folders` of the retired VS Code workspace file, and is the only
+# registry: `new-project.py` and `plug-projects.py` write here and nowhere else.
 #
 # A project counts on a PC when its checkout sits beside devkit's there; one registered
 # here and absent from a machine is simply not that machine's.
@@ -31,8 +29,6 @@ projects = [
 
 # Settings every PC shares, keyed by their full name, quoted ("devkit.collectors"). Read
 # through `project_registry.setting`, and only from here: a key absent here is unset.
-# Until `workspace.jsonc` is deleted it carries the same values, and
-# `tests/test_project_registry.py` fails the two the moment they disagree: change both.
 # The settings one PC alone decides -- devkit.fixPass, devkit.onHold,
 # devkit.machineRole -- are never here.
 #

@@ -70,11 +70,6 @@ COVERED_BY: dict[str, tuple[str, str]] = {
         "split out of fix-prs.py along a section header; its tests drive the same fake "
         "git listings and runners as the dispatch tests that assert the order it is called in",
     ),
-    "notify-wrap.py": (
-        "tests/test_self_hosting.py",
-        "the wrapper's one behaviour is that it propagates the wrapped exit code, and "
-        "that is asserted beside the check that it stays byte-identical to the template",
-    ),
     "fix_send.py": (
         "tests/test_fix_pass.py",
         "the dispatch half was split out of fix-pass.py at its file_lines ceiling, and "
