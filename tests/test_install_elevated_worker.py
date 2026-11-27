@@ -759,6 +759,7 @@ def test_the_private_interpreter_can_load_the_worker(real_copy, tmp_path):
     )
     assert done.returncode == 0, done.stderr
     assert "restart-wsl-service" in done.stdout
+    assert "fleet-authorize" in done.stdout
 
 
 def test_a_full_install_copies_then_registers(planted):

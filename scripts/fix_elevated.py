@@ -8,8 +8,10 @@ this design refused. So a copy behind the checkout files nothing at all, and `--
 where that is read: a worker that is installed keeps working.
 
 **One person's step, and only while it is true:** a real request waiting on a machine with
-no worker (`elevated_request.read_waiting`), which is a need rather than a state. It names
-the machine and the exact command, and goes when the request ages out or a worker appears.
+no worker, or with one whose installed copy predates the verb asked for
+(`elevated_request.read_waiting`, `elevated_request.knows`), which is a need rather than a
+state. It names the machine and the exact command, and goes when the request ages out or
+a current worker appears.
 
 Two more are filed for a fixer rather than a person, since neither wants an admin paste:
 - a run the worker reports `failed` or `refused`: it cannot write the ledger, and its
@@ -48,10 +50,11 @@ def step(host: str, checkout: Path) -> str:
     )
 
 
-def waiting_detail(host: str, checkout: Path, verb: str) -> str:
+def waiting_detail(host: str, checkout: Path, verb: str, outdated: bool = False) -> str:
     """The finding's line, stable across passes: no count, no date."""
+    lacks = "whose elevated worker predates it" if outdated else "which has no elevated worker"
     return (
-        f"{verb} was requested on {host}, which has no elevated worker "
+        f"{verb} was requested on {host}, {lacks} "
         f"-- {fix_findings.triage.PERSON_STEP} {step(host, checkout)}"
     )
 
@@ -62,10 +65,12 @@ def owed(
     answer: tuple[str, str],
     waiting: list[str],
     outcomes: dict[str, tuple[str, str]],
+    predating: list[str] | None = None,
 ) -> list[str]:
     """Every detail true of this machine now."""
     state, why = answer
     details = [waiting_detail(host, checkout, verb) for verb in waiting]
+    details += [waiting_detail(host, checkout, verb, outdated=True) for verb in predating or []]
     if state == elevated_request.EXPOSED:
         details.append(f"the elevated worker on {host} is exposed: {why}")
     details += [
@@ -94,7 +99,19 @@ def check(
     waiting = elevated_request.read_waiting(ctx.devkit_dir, ctx.now.timestamp()) if missing else []
     if not missing and ctx.writes:
         elevated_request.clear_waiting(ctx.devkit_dir)
-    details = owed(machine, ctx.devkit_dir, answer, waiting, outcomes())
+    # An outdated copy asks for nothing by itself: only a request it cannot serve, which
+    # `elevated_request.knows` noted apart from the no-worker ones, is a need.
+    outdated = answer[0] == elevated_request.OUTDATED
+    predating = (
+        elevated_request.read_waiting(
+            ctx.devkit_dir, ctx.now.timestamp(), elevated_request.PREDATES
+        )
+        if outdated
+        else []
+    )
+    if answer[0] == elevated_request.CURRENT and ctx.writes:
+        elevated_request.clear_waiting(ctx.devkit_dir, elevated_request.PREDATES)
+    details = owed(machine, ctx.devkit_dir, answer, waiting, outcomes(), predating)
     journal.add(*(fix_findings.Finding(KIND, fix_loop.fix_cycle.DEVKIT, line) for line in details))
     filed = [f"{machine} -- filed: {line.split(' -- ')[0]}" for line in details]
     return filed + retire(ctx, machine, {f"{KIND}: {line}" for line in details})

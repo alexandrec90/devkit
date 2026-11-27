@@ -76,6 +76,7 @@ import fix_prompts
 import fix_reports
 import fix_send
 import fix_trees
+import fleet_ssh
 import git_trust
 import host_memory
 import job_claims
@@ -203,6 +204,9 @@ class Seams:
     disk: Callable[[], int | None] = job_claims.disk_here
     # Read off the workspace file beside `root`, so a test's root is never the live one.
     role: Callable[[Path], str] = machine_role.role_beside
+    # This PC published for SSH and its peers configured here (`fleet_ssh.scheduled`). A
+    # seam because the real one writes `~/.ssh` and may make a key.
+    fleet: Callable[[Path, sweep.Git], fleet_ssh.Joined] = fleet_ssh.scheduled
 
 
 # --- what is kept on this machine ---------------------------------------------------------------
@@ -907,6 +911,19 @@ def _heartbeat(boards: dict[str, Board], cycle: Cycle) -> None:
             cycle.journal.add(Finding("after-merge-missed", board.project, detail))
 
 
+def _fleet(boards: dict[str, Board], cycle: Cycle) -> None:
+    """This PC's SSH record published and its peers set up here (`fleet_ssh.join`), from
+    the refs this cycle's fetch of devkit brought. It files nothing: a key only an
+    administrator may add is asked of the elevated worker, whose result reaches the pass
+    through `fix_elevated.py`, as does a PC with no worker to ask."""
+    devkit = boards.get(DEVKIT)
+    if devkit is None:
+        return
+    joined = cycle.seams.fleet(devkit.path, cycle.git(devkit))
+    for line in joined.lines:
+        print(f"fleet: {line}", flush=True)
+
+
 def _unread_clock(names: list[str], errors: dict[str, str], since: dict, cycle: Cycle) -> None:
     """A project's fetch failing is a state with a clock like any other."""
     now = cycle.seams.now()
@@ -940,6 +957,7 @@ def run_pass(root: Path, only: list[str], seams: Seams) -> int:
     unread = dict(state.get("unread", {}))
     _unread_clock(names, errors, unread, cycle)
     cycle.journal.step("heartbeat", _heartbeat, boards, cycle)
+    cycle.journal.step("fleet", _fleet, boards, cycle)
     for board in boards.values():
         cycle.journal.step("queue", _run_board, board, cycle, boards, seen)
         cycle.journal.step("tidy", after_merge_tidy.daily, board, cycle, tidied)
