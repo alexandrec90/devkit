@@ -117,6 +117,16 @@ def test_phase_two_tags_main_once_the_bump_landed():
     assert steps[0] == "git tag v0.5.3 origin/main"
 
 
+def test_the_tag_plan_default_is_bound_to_main_at_import():
+    """Regression: `MAIN` was assigned below `tag_plan`, whose default reads it when
+    the module executes, so importing release.py raised NameError -- and the fix pass,
+    which loads it through fix_release and release-pipeline, crashed before any step."""
+    import inspect
+
+    default = inspect.signature(release.tag_plan).parameters["commit"].default
+    assert default == release.MAIN == "origin/main"
+
+
 def test_phase_two_tags_the_release_commit_it_is_given():
     steps, refusal = release.tag_plan("v0.5.3", "v0.5.3", set(), "abc123")
     assert refusal == "" and steps[0] == "git tag v0.5.3 abc123"
