@@ -115,8 +115,8 @@ def default_workspace(repo_root: Path, name: str = WORKSPACE_FILE_NAME) -> Path:
 
     That mattered because a box is exactly where an agent runs these scripts. Every
     workspace-aware script had its own copy of the naive line, and five of them broke
-    there in different ways: `devkit_project.py --adopt-tasks` -- the documented way to
-    record an intentional task-block edit -- exited 2 naming a path that does not exist,
+    there in different ways: `devkit_project.py --adopt-tasks` -- then the documented way
+    to record an intentional task-block edit -- exited 2 naming a path that does not exist,
     while `workspace-status.py` degraded to silence, which is the same failure with no
     symptom at all. `worktree.py` was alone in resolving both, so this is its logic
     moved down to where everything else can reach it.
@@ -315,8 +315,8 @@ def run_bounded(
     stop the clock and leave the wait.
 
     Decoded as UTF-8, which is what git and gh write, never with the locale's codec:
-    outside UTF-8 mode on Windows that is cp1252, and `canonical_history` read every
-    em dash in a committed task as mojibake (caff6e06).
+    outside UTF-8 mode on Windows that is cp1252, and the workspace drift check (since
+    retired) read every em dash in a committed task as mojibake (caff6e06).
     """
     timeout = _within_until(timeout)
     if timeout is not None and timeout <= 0:

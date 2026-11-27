@@ -179,10 +179,8 @@ def all_projects(repo_root: Path = REPO_ROOT) -> list[str]:
 def projects(root: Path | None = None, *, repo_root: Path = REPO_ROOT) -> list[str]:
     """Registered projects with a checkout under `root` (default: `projects_root`).
 
-    The disk decides, as it does in `devkit_project.machine_view`: a project counts on
-    this PC when its directory is there. Unlike `machine_view`, a PC holding none of
-    them gets none -- the render cannot empty `folders`, but a list of projects can be
-    empty, and here it is the true answer.
+    The disk decides: a project counts on this PC when its directory is there, and a
+    PC holding none of them gets none -- here an empty list is the true answer.
     """
     base = projects_root(repo_root) if root is None else root
     return [name for name in all_projects(repo_root) if (base / name).is_dir()]

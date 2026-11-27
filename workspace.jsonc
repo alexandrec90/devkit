@@ -1,28 +1,8 @@
-// devkit owns this file. It is the CANONICAL alex-projects.code-workspace.
-//
-// The live workspace file sits outside every repo, so for years it was the source of
-// truth and this copy was a mirror taken from it. That inverted the only property
-// worth having: the file every agent writes to had no branch, no history and no
-// review, so two sessions editing it raced with last-writer-wins, and a single
-// session's in-flight edit was globally live before its PR was even opened. It is
-// how alex-projects.code-workspace came to be running an UNMERGED branch's task
-// block (PR #177, 2026-08-21) for every window on the machine.
-//
-// So the direction is now canonical -> live:
-//
-//     python scripts/devkit_project.py --check-workspace    // do they agree?
-//     python scripts/devkit_project.py --render-workspace   // this file -> the live one
-//     python scripts/devkit_project.py --adopt-workspace    // the live one -> this file
-//
-// Edit THIS file, on a task branch, and let `--render-workspace` publish it once the
-// PR merges. Two agents then conflict in git, where a conflict is visible and
-// resolvable, instead of in a file with no history. `--adopt-workspace` remains for
-// the other direction — a hand edit in VS Code, or a workspace setting the editor
-// wrote itself — and rendering refuses rather than overwriting one.
-//
-// Comparison is SEMANTIC (parsed), not byte-for-byte: VS Code reformats this file
-// when it writes a setting through its own UI, and flagging that would train
-// everyone to ignore the check.
+// devkit owns this file. It was the CANONICAL alex-projects.code-workspace, rendered
+// over the live one; VS Code is retired, so nothing renders it, adopts from the live
+// file or compares the two any more. What still reads it is the task block below and
+// the registry half, which `register`/`unregister` write beside `projects.toml` until
+// this file is deleted.
 {
 	// The one workspace. Every checkout lives here, and `sweep.py` reads this
 	// `folders` list as the project registry — a project missing from it is invisible
@@ -35,11 +15,8 @@
 	// goes in `sweep.DEFAULT_EXCLUDE` and `devkit_project.NOT_PROJECTS` as well. Both
 	// sets are empty today: every folder below is a real project.
 	//
-	// This list is GLOBAL — every project on every workstation — and the live file is
-	// not: it is rendered through `devkit_project.machine_view`, which leaves out every
-	// project with no checkout beside it, so plugging a project in on one PC does not
-	// put a folder VS Code cannot open into every other PC's window. The plug picker
-	// draws such a project as "registered, not on this PC" and its tick clones it.
+	// This list is GLOBAL — every project on every workstation. The plug picker draws
+	// one with no checkout here as "registered, not on this PC" and its tick clones it.
 	"folders": [
 		{
 			"path": "ibkr_trader"
@@ -132,12 +109,7 @@
 	// multi-root workspace, so the bare form is ambiguous and VS Code will not resolve
 	// it. The named form is also why this file needs no absolute path.
 	//
-	// devkit owns and tests every script called here. If you are reading this in the
-	// live `.code-workspace`, you are reading a RENDER: the copy with a branch and a
-	// reviewer is `devkit/workspace.jsonc`, and `devkit_project.py --check-workspace`
-	// is the gate between them. Edit the canonical one and
-	// `--render-workspace`; `--adopt-workspace` goes the other way, for an edit VS
-	// Code itself made. `.claude/rules/vscode-tasks.md` carries the why.
+	// devkit owns and tests every script called here.
 	//
 	// Conventions. Label "Domain: Title Case Action". Every task carries a `detail` —
 	// the second line of the quick-pick, and the only place a one-click action can state
@@ -263,95 +235,11 @@
 				"problemMatcher": []
 			},
 			// --- the workspace file itself ------------------------------------
-			// This file has no branch: one copy serves every VS Code window on the
-			// machine, so an edit is globally live before anyone reviews it. devkit's
-			// `workspace.jsonc` is the copy with a branch and a reviewer, and these
-			// two are the only sanctioned way to move content between them. They are
-			// NOT dispatches -- there is one workspace file, so there is nothing to
-			// pick a checkout for, and the wrapping is written out here.
-			//
-			// There were three. "Workspace: Check Drift vs devkit's Copy" ran
-			// `--check-workspace`, which is the read-only half of the publish below --
-			// and the publish REFUSES an unadopted live edit and names every difference
-			// while refusing, so the check answered a question the click you were going
-			// to make answers anyway. The session-start line asks it every window as
-			// well. Nothing routed through it that publishing does not.
+			// Not a dispatch: there is one workspace file, so there is nothing to pick a
+			// checkout for, and the wrapping is written out here.
 			{
-				"label": "Workspace: Publish devkit's Copy",
-				"detail": "Renders devkit's workspace.jsonc over the live .code-workspace — the file every VS Code window on this machine reads. REFUSES rather than clobbering a live edit devkit never wrote; adopt that first. Publishes whatever branch the devkit checkout is on, so check it out before clicking.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Workspace: Publish devkit's Copy",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Workspace: Publish devkit's Copy",
-					"--",
-					"python",
-					"scripts/devkit_project.py",
-					"--render-workspace"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "cloud-upload",
-					"color": "terminal.ansiRed"
-				},
-				"runOptions": {
-					"instanceLimit": 4,
-					"instancePolicy": "warn"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				"label": "Workspace: Adopt Live Edits into devkit",
-				"detail": "The other direction, for edits VS Code made itself — a workspace setting changed through its UI. Records the live file back into devkit's workspace.jsonc and leaves it UNCOMMITTED, so it reads as stranded work until you ship it on a task branch.",
-				"type": "process",
-				"command": "python",
-				"args": [
-					"scripts/notify-wrap.py",
-					"Workspace: Adopt Live Edits into devkit",
-					"--",
-					"python",
-					"scripts/log-wrap.py",
-					"Workspace: Adopt Live Edits into devkit",
-					"--",
-					"python",
-					"scripts/devkit_project.py",
-					"--adopt-workspace"
-				],
-				"options": {
-					"cwd": "${workspaceFolder:devkit}"
-				},
-				"icon": {
-					"id": "save",
-					"color": "terminal.ansiCyan"
-				},
-				"runOptions": {
-					"instanceLimit": 4,
-					"instancePolicy": "warn"
-				},
-				"presentation": {
-					"reveal": "always",
-					"panel": "new",
-					"showReuseMessage": false,
-					"close": false
-				},
-				"problemMatcher": []
-			},
-			{
-				// Read-only, and the fourth of the workspace-file tasks for the same
-				// reason the other three exist: this file is the one place a reviewer
-				// cannot see what it is reviewing. Forty tasks and forty pickers spread
+				// Read-only: this file is the one place a reviewer cannot see what it is
+				// reviewing. Forty tasks and forty pickers spread
 				// over two thousand lines of JSONC, with `presentation`, `icon` and
 				// `problemMatcher` between every pair of facts worth reading.
 				"label": "Workspace: List Tasks as a Table",

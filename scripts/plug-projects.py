@@ -20,26 +20,24 @@ Three sources feed the list, because a project can be in any two of them:
 | no  | yes | yes | clones it onto this PC; the registry is untouched |
 | yes | yes | yes | nothing — it is already checked |
 
-**The registry is global and the checkout is per machine.** `workspace.jsonc` is
-committed, so a project plugged in on one workstation is registered on all of them —
-but each machine's live file is `devkit_project.machine_view`, the registry minus every
-project not checked out beside it. That is why the fourth row exists: on the other
-machines the project is registered and absent, the picker offers it as one row saying
-so, and ticking that row clones it here without editing the registry at all. Two PCs
-holding two different subsets of the registry is the ordinary state, not a half-applied
-sync. To drop a project from one PC only, delete its checkout; the next render leaves
-it out. Unchecking a project that *is* on this PC retires it from the registry — on
+**The registry is global and the checkout is per machine.** The registry is committed,
+so a project plugged in on one workstation is registered on all of them, while only
+some hold its checkout. That is why the fourth row exists: on the other machines the
+project is registered and absent, the picker offers it as one row saying so, and
+ticking that row clones it here without editing the registry at all. Two PCs holding
+two different subsets of the registry is the ordinary state, not a half-applied sync.
+To drop a project from one PC only, delete its checkout. Unchecking a project that
+*is* on this PC retires it from the registry — on
 every machine — and **touches nothing on disk**, so it stays reversible by checking
 the box again. What it does cost is visibility — an unregistered project is invisible
 to every sweep, and to the guard that routes an agent's edit into a box — which is why
 `unplug_hazards` refuses over live boxes and unpushed commits rather than silently
 orphaning them.
 
-The write goes to devkit's **canonical** `workspace.jsonc` and is then rendered over
-the live file by `publish_workspace`, per `.claude/rules/vscode-tasks.md`: the live file
-has no branch dimension, so a hand edit there is globally live before anyone reviews it.
-`edit_verdict` is the gate on that. The canonical edit then goes onto a task branch in a
-worktree of its own, with a ship intent (`hand_off_registry`), and the static checkout's
+The write goes to devkit's committed registry -- `projects.toml` and, until it is
+deleted, `workspace.jsonc` -- and never to the live workspace file, which nothing
+renders any more. `edit_verdict` gates where it is made from. The edit then goes onto a
+task branch in a worktree of its own, with a ship intent (`hand_off_registry`), and the static checkout's
 copy is put back: the fix pass runs from that checkout, and an edit left there for
 someone to commit was committed on a branch in it, which the pass then ran (a5ec492b).
 
@@ -86,7 +84,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import canonical_handoff
-import devkit_jsonc
 import devkit_project
 import picker_rows
 import project_registry
@@ -708,54 +705,22 @@ def in_ephemeral_box(root: Path) -> bool:
     return root.parent.name == worktree.BOXES_DIR_NAME
 
 
-def edit_verdict(*, branch: str, default: str, in_box: bool, live_unstamped: bool) -> str:
+def edit_verdict(*, branch: str, default: str, in_box: bool) -> str:
     """Why the registry must not be edited from here; "" when it may.
 
-    Pure, so the three ways this run would publish the wrong copy are testable without
-    a git tree. The first two are `workspace-status.publish_verdict`'s reasons in a
-    different order and for the same reason it has them — a task branch's
-    `workspace.jsonc` is a proposal, and a box's is a proposal nobody has even opened a
-    PR for yet, while the live file is what every window on the machine reads.
-
-    The third is this script's own. `publish_workspace` would refuse a live file
-    carrying a hand edit devkit never wrote, but it refuses *after* the canonical copy
-    has already been changed — so the run would leave a registry edit stranded in a
-    file nothing renders. Asking first is what makes the refusal recoverable.
+    Pure, so both are testable without a git tree. The registry edit is cut onto a task
+    branch off the static checkout's default branch (`hand_off_registry`), so a box's
+    copy, or a task branch's, is the wrong base: it carries an unmerged proposal the
+    registry branch would inherit.
     """
     if in_box:
         return (
-            "this is an ephemeral box, so its workspace.jsonc is an unmerged proposal -- "
+            "this is an ephemeral box, so its registry is an unmerged proposal -- "
             "run this from the devkit checkout"
         )
     if branch != default:
-        return f"devkit is on {branch}, not {default} -- publishing would make an unmerged proposal live"
-    if live_unstamped:
-        return (
-            "the live workspace file carries an edit devkit never wrote -- run "
-            "`python scripts/devkit_project.py --adopt-workspace` first, and commit it"
-        )
+        return f"devkit is on {branch}, not {default} -- the registry edit would carry an unmerged proposal"
     return ""
-
-
-def live_carries_a_hand_edit(live: Path) -> bool:
-    """Would `publish_workspace` refuse to overwrite `live`?
-
-    The same two terms in the same order, because a second implementation of "is it
-    safe to overwrite the file every window on this machine reads" is exactly what
-    extracting `publish_workspace` avoided. It is asked *early* here, before anything
-    is written, which is the one thing that function cannot do for a caller that edits
-    the canonical copy first.
-
-    Both halves matter. Drift alone is the ordinary state — it is what a plug or an
-    unplug is about to create. An unmatched stamp alone is the state right after an
-    adopt, where the live file is identical to the canonical one and simply not stamped
-    yet; refusing there would block a run over a hand edit that never happened.
-    """
-    text = live.read_text(encoding="utf-8")
-    drift = devkit_project.workspace_drift(
-        devkit_jsonc.loads(text), devkit_jsonc.loads(devkit_project.canonical_view(live)[0])
-    )
-    return bool(drift) and devkit_project.semantic_digest(text) != devkit_project.read_stamp(live)
 
 
 def unplug_hazards(name: str, root: Path, git) -> tuple[str, ...]:
@@ -935,9 +900,9 @@ def gather() -> tuple[list[Candidate], list[str]]:
     to clone or to create — both of which the plan names explicitly, so a step that
     needed the missing half cannot be reached by accident.
 
-    The registry is read from devkit's canonical copy, not the live file: the live file
-    is this machine's view and leaves out every project not checked out here, which is
-    exactly the row this picker has to draw as "registered, not on this PC".
+    The registry is read from devkit's committed copy, not the live file, which may
+    lack a project registered on another PC -- exactly the row this picker has to draw
+    as "registered, not on this PC".
     """
     registry = devkit_project.canonical_text()
     disk = disk_projects(WORKSPACE_ROOT)
@@ -958,18 +923,15 @@ def gather() -> tuple[list[Candidate], list[str]]:
 
 REGISTRY_INTENT = """{subject}
 
-`scripts/plug-projects.py` {what} on a confirmed pick and published the live workspace
-file from it. This is devkit's canonical `workspace.jsonc`, the registry every machine
-shares.
+`scripts/plug-projects.py` {what} on a confirmed pick. This is devkit's registry,
+`projects.toml` beside `workspace.jsonc`, which every machine shares.
 
 The script cut this branch itself. It used to leave the edit uncommitted in devkit's
 static checkout and say to commit it on a task branch, and a session did, in that
 checkout: the fix pass runs from it, so the pass ran the task branch's code and filed
 `pass-stale` (a5ec492b).
 
-It merges once green, as every unheld PR does: the pick was the decision, and until it
-lands the nightly render of the canonical copy (`scripts/e2e.py`) would undo it in the
-live file.
+It merges once green, as every unheld PR does: the pick was the decision.
 """
 
 
@@ -1010,9 +972,9 @@ def hand_off_registry(
 
 
 def _apply(steps: list[Step], owner: str, out) -> bool:
-    """Run every step's disk half, then write and publish the registry; whether its
-    edit was handed off onto a task branch (`hand_off_registry`). This PC's half of a
-    retire or a restore runs last (`local_halves`), once the registry edit is safe."""
+    """Run every step's disk half, then write the registry; whether its edit was handed
+    off onto a task branch (`hand_off_registry`). This PC's half of a retire or a
+    restore runs last (`local_halves`), once the registry edit is safe."""
     for step in steps:
         if step.unarchive:
             out(f"  unarchive {owner}/{step.name}")
@@ -1024,9 +986,7 @@ def _apply(steps: list[Step], owner: str, out) -> bool:
             out(f"  create  {owner}/{step.name} (public)")
             create_repo(owner, step.name, WORKSPACE_ROOT / step.name, _run, init=step.init_git)
 
-    # A clone-only run edits nothing in the registry -- the project was registered
-    # already -- and still publishes: the live file is this machine's view, and the
-    # checkout that just appeared is what puts the folder into it.
+    # A clone-only run edits nothing in the registry: the project was registered already.
     canonical = devkit_project.CANONICAL_WORKSPACE
     toml = canonical.parent / project_registry.REGISTRY_NAME
     edits = any(s.action in REGISTRY_EDITS for s in steps)
@@ -1041,13 +1001,6 @@ def _apply(steps: list[Step], owner: str, out) -> bool:
         for name in also:
             out(f"  update  {name} (projects)")
 
-    outcome, changes = devkit_project.publish_workspace(LIVE_WORKSPACE)
-    if outcome == devkit_project.RENDER_REFUSED:
-        raise PlugError(
-            f"{canonical.name} is written, but the live file carries an edit devkit never "
-            "wrote and was not published -- `--render-workspace --force` discards it"
-        )
-    out(f"  publish {LIVE_WORKSPACE.name} ({len(changes)} change(s)) -- reload the window")
     handed = hand_off_registry(steps, canonical, also=also) if clean_before else ""
     if handed:
         out(handed)
@@ -1172,7 +1125,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolved before the gate below, so that Escaping the quick-pick from a box costs a
     # line rather than an error about branches: nothing was picked, so nothing is being
-    # published and none of the gate's three reasons is about to be true.
+    # edited and neither of the gate's reasons is about to be true.
     ticks: tuple[str, ...] = ()
     if args.picks is not None:
         picked = parse_ticks(args.picks)
@@ -1205,7 +1158,6 @@ def main(argv: list[str] | None = None) -> int:
         branch=(git("rev-parse", "--abbrev-ref", "HEAD").stdout or "").strip(),
         default=task_branch.detect_default_branch(git),
         in_box=in_ephemeral_box(REPO_ROOT),
-        live_unstamped=live_carries_a_hand_edit(LIVE_WORKSPACE),
     )
     if verdict:
         print(f"ERROR   {verdict}", file=sys.stderr)

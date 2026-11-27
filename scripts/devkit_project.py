@@ -38,29 +38,24 @@ Pure helpers (`resolve_project`, `in_scope`, `plan_command`) are unit-tested in
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
 import sys
-from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
-import fix_cycle
-import machine_role
 import project_registry
 import sweep
 import task_input
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# The workspace file is the project registry: it lists the checkouts and, since the
-# task de-duplication, carries the shared task block that calls this script. Resolved
-# through `sweep` because this script is run from inside an ephemeral box as a matter
-# of course — `--adopt-tasks` is the documented way to record a task-block edit, and
-# the naive `REPO_ROOT.parent` made it exit 2 there, naming `.worktrees/<file>`.
+# The live workspace file's path, whose directory is the projects root (`--workspace` is
+# a deprecated alias for it). Resolved through `sweep` because this script runs from
+# inside an ephemeral box as a matter of course, where the naive `REPO_ROOT.parent`
+# names `.worktrees/<file>`.
 DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 
 # Checkouts registered so they can be read but shipping no harness, so nothing in ACTIONS
@@ -528,7 +523,7 @@ def known_projects(workspace_text: str | None = None) -> list[str]:
 
     `workspace_text` is **deprecated**. Given, the names come from that workspace text
     instead -- kept only for the writers that verify their own edit of a workspace file
-    (`register`, `unregister`, `machine_view`) until the file is retired. A reader passes
+    (`register`, `unregister`) until the file is retired. A reader passes
     nothing.
     """
     if workspace_text is not None:
@@ -783,8 +778,7 @@ def record_task_failure(
 def refuse_dispatch(exc: ProjectError, action: str, argv: list[str]) -> int:
     """Report a dispatch that could not start, and file it when it was a task's. Exit 2.
 
-    No action is no task: `--render-workspace` and `--adopt-workspace` already run
-    inside `log-wrap.py` in their own tasks, and `--list` is a picker's.
+    No action is no task: `--list` is a picker's, and `--check` is typed by hand.
     """
     print(f"devkit_project: {exc}", file=sys.stderr)
     title = task_title(action)
@@ -1255,301 +1249,15 @@ def unregister(text: str, names: list[str]) -> str:
     return updated
 
 
-# --- devkit owns the workspace file -------------------------------------------
+# --- devkit's copy of the workspace file ---------------------------------------
 #
-# The workspace file is not inside any repo, so it cannot be vendored the way
-# `sync-devkit.py`'s MANIFEST files are. devkit keeps the canonical copy here instead.
-#
-# **The direction used to run the other way**, and that is the failure this section
-# exists to stop repeating. The live file was the source and `workspace-tasks.jsonc`
-# was a mirror adopted from it, which made the authoritative copy of a 2,000-line file
-# the one with no branch, no history and no review. Three consequences, all of which
-# happened:
-#
-#   - Two sessions editing it raced, last writer winning silently, with no way to
-#     recover the loser's edit -- there was nothing to recover it *from*.
-#   - `--adopt-tasks` mirrored the WHOLE block, so one session's adopt swallowed
-#     whatever another session had left in the live file and carried it into an
-#     unrelated PR.
-#   - An agent's in-flight edit was live for every window on the machine the moment it
-#     was written. On 2026-08-21 the live file was found running the task block of PR
-#     #177, still open: 38 tasks reformatted and five deleted, in main's name.
-#
-# So the canonical copy is now the WHOLE file and the live one is rendered from it. An
-# agent edits `workspace.jsonc` on a task branch; git carries the conflict, where a
-# conflict is a visible thing with two sides rather than a silent overwrite.
-#
-# The comparison is SEMANTIC, not byte-for-byte. Vendored files are compared byte-wise
-# because they are copied verbatim and a stray reformat downstream shows up as drift
-# the consumer did not cause; this file is hand-edited *and* rewritten by VS Code
-# itself whenever a workspace setting is changed through its UI, so indentation and
-# key order are not meaningful and flagging them would train everyone to ignore it.
+# `workspace.jsonc` is what is left of the VS Code workspace file: the task block the
+# readers below parse, and the registry `register`/`unregister` still write beside
+# `projects.toml` (`project_registry`). Nothing renders it to the live `.code-workspace`
+# any more and nothing compares the two: render, adopt, check, publish and the drift
+# judged between them went with VS Code. The task layer, and this file, go next.
 
 CANONICAL_WORKSPACE = REPO_ROOT / "workspace.jsonc"
-
-# Spelled once so every remedy line in this module names the same command. It is
-# printed, not run: the caller may be in a box, in devkit, or in neither.
-RENDER_HINT = "python scripts/devkit_project.py"
-
-# Compared whole. `tasks` is compared entry-by-entry instead (see `tasks_drift`),
-# because "the tasks block differs" on a 2,000-line object names nothing actionable, and
-# `settings` key by key (`settings_drift`), because "settings differs" could not say
-# whether devkit had added a setting or someone had changed one.
-PLAIN_KEYS = ("folders", "extensions", "settings", "launch", "remoteAuthority")
-
-# The drift lines that mean **the canonical copy is ahead**: it carries something the
-# live file does not. Spelled once and used by both the producer and the two gates
-# below, so a reworded message cannot silently empty either of them.
-#
-# Every other line is treated as *possibly live-authored* -- including the "differs"
-# forms, which name a key both copies have and say nothing about who moved it last,
-# unless git shows devkit's copy once held the live value (`AHEAD_CHANGE`). That
-# asymmetry is the point: a wrong guess on a canonical-ahead line republishes a task git
-# already holds, and a wrong guess the other way discards an edit nothing holds at all.
-AHEAD_TASK = "missing from the workspace: "
-AHEAD_INPUT = "missing input: "
-AHEAD_FOLDER = "folder missing from the workspace: "
-AHEAD_SETTING = "setting missing from the workspace: "
-# A "differs" line whose live side is what devkit's copy held at an earlier commit
-# (`behind`): devkit changed it since the last render, and nobody edited the live file.
-AHEAD_CHANGE = "changed in devkit since the live file's copy: "
-CANONICAL_AHEAD = (AHEAD_TASK, AHEAD_INPUT, AHEAD_FOLDER, AHEAD_SETTING, AHEAD_CHANGE)
-# How far back `behind` looks for the live side of a "differs" line.
-HISTORY_DEPTH = 40
-
-# The operator's switches: settings a machine sets for itself, in its live file, and
-# that devkit's copy only gives a default for. `devkit.fixPass` turns this machine's
-# scheduled fix pass on; `devkit.onHold` pauses projects for the passes run here;
-# `devkit.machineRole` says whether heavy jobs come here first (`machine_role.py`). Each is
-# a live edit by design, so as ordinary settings they armed the refusal on every machine
-# that used them -- and one live `dispatch` kept `devkit.collectors`, merged in #463,
-# from ever reaching this machine (6d71fa28). So a render carries their live values over
-# the canonical ones, an adopt keeps the canonical defaults, and neither is drift.
-# Spelled through the modules that read them, so a renamed switch cannot leave this
-# tuple naming a key nothing sets.
-MACHINE_SETTINGS = (fix_cycle.SETTING, sweep.ON_HOLD_SETTING, machine_role.SETTING)
-
-
-def live_only(problems: list[str]) -> list[str]:
-    """The differences that could be an edit devkit never wrote.
-
-    Empty means every difference is the canonical copy carrying something new, which is
-    exactly what a publish is *for* -- see `publish_workspace`.
-    """
-    return [p for p in problems if not p.startswith(CANONICAL_AHEAD)]
-
-
-def canonical_only(problems: list[str]) -> list[str]:
-    """The differences an `--adopt-workspace` would delete from the canonical copy."""
-    return [p for p in problems if p.startswith(CANONICAL_AHEAD)]
-
-
-# A "differs" line's prefix -> how to find what it names in a parsed workspace file.
-_DIFFERS: dict[str, Callable[[dict, str], object]] = {
-    "definition differs: ": lambda payload, label: _by_label(_tasks_of(payload)).get(label),
-    "input definition differs: ": lambda payload, name: {
-        i.get("id"): i for i in _tasks_of(payload).get("inputs", [])
-    }.get(name),
-    "setting differs: ": lambda payload, key: (payload.get("settings") or {}).get(key),
-}
-
-
-def _tasks_of(payload: dict) -> dict:
-    block = payload.get("tasks") if isinstance(payload, dict) else None
-    return block if isinstance(block, dict) else {}
-
-
-def behind(problems: list[str], live: dict, history: Iterable[dict]) -> list[str]:
-    """`problems` with each "differs" line relabelled `AHEAD_CHANGE` when its live side is
-    what an earlier canonical copy in `history` (this machine's view of each) held.
-
-    A "differs" line names a key both copies carry and not who moved it, so it armed the
-    refusal whoever had: #566 changed one task's detail on 2026-10-07, the live file had
-    two settings added by hand that afternoon, and every daily publish refused from then
-    on (e6579536) -- naming the task as if it were the hand edit, and `--force` the only
-    way through. git knows the answer: a live value devkit's copy once held is the live
-    file behind, which a publish is for and an adopt must not revert.
-    """
-    past = list(history)
-    settled: list[str] = []
-    for line in problems:
-        prefix = next((p for p in _DIFFERS if line.startswith(p)), "")
-        name = line.removeprefix(prefix)
-        if prefix and (value := _DIFFERS[prefix](live, name)) is not None:
-            if any(_DIFFERS[prefix](old, name) == value for old in past):
-                line = f"{AHEAD_CHANGE}{line}"
-        settled.append(line)
-    return settled
-
-
-def judged_drift(
-    live: Path,
-    payload: dict,
-    canonical: dict,
-    history: Callable[[Path], Iterable[dict]] | None = None,
-) -> list[str]:
-    """`workspace_drift`, with what devkit changed since the live file's copy relabelled
-    (`behind`); git is asked only when a "differs" line is there to settle."""
-    problems = workspace_drift(payload, canonical)
-    if not any(line.startswith(tuple(_DIFFERS)) for line in problems):
-        return problems
-    return behind(problems, payload, (history or canonical_history)(live))
-
-
-def canonical_history(live: Path, depth: int = HISTORY_DEPTH) -> Iterator[dict]:
-    """Each committed `workspace.jsonc` of the last `depth`, newest first, as the machine
-    `live` belongs to renders it (`machine_view`); nothing where git cannot say."""
-    git = sweep.git_for(CANONICAL_WORKSPACE.parent)
-    shas = git("log", f"-{depth}", "--format=%H", "--", CANONICAL_WORKSPACE.name)
-    for sha in (shas.stdout or "").split() if shas.returncode == 0 else []:
-        shown = git("show", f"{sha}:{CANONICAL_WORKSPACE.name}")
-        if shown.returncode != 0:
-            continue
-        try:
-            yield devkit_jsonc.loads(machine_view(shown.stdout, live.parent)[0])
-        except ValueError:  # RegistryEditError included: a copy that would not render
-            continue
-
-
-# How long a pushed branch's copy of `workspace.jsonc` may hold a live edit before the
-# refusal it explains counts as a failure again: a PR open past this is stuck, not pending.
-HELD_DAYS = 14
-
-
-def pending_copies(live: Path, depth: int = HISTORY_DEPTH) -> Iterator[tuple[str, dict]]:
-    """`(branch, copy)` for each pushed `workspace.jsonc` commit HEAD does not hold yet,
-    newest first, as the machine `live` belongs to renders it; nothing where git cannot say.
-
-    The forward half of `canonical_history`: `new-project.py` registers a project in the
-    live file at once and in `workspace.jsonc` on a branch of its own (#704 for photolab),
-    so until that PR merges the live file carries an edit HEAD's copy lacks -- one git
-    holds all the same, on a remote branch.
-    """
-    git = sweep.git_for(CANONICAL_WORKSPACE.parent)
-    log = git(
-        "log",
-        "--remotes",
-        "--not",
-        "HEAD",
-        f"--since={HELD_DAYS}.days",
-        f"-{depth}",
-        "--source",
-        "--format=%H%x09%S",
-        "--",
-        CANONICAL_WORKSPACE.name,
-    )
-    for row in (log.stdout or "").splitlines() if log.returncode == 0 else []:
-        sha, _, branch = row.partition("\t")
-        shown = git("show", f"{sha}:{CANONICAL_WORKSPACE.name}")
-        if shown.returncode != 0:
-            continue
-        try:
-            yield branch, devkit_jsonc.loads(machine_view(shown.stdout, live.parent)[0])
-        except ValueError:  # RegistryEditError included: a copy that would not render
-            continue
-
-
-def held_on_branches(
-    problems: list[str], payload: dict, pending: Iterable[tuple[str, dict]]
-) -> dict[str, str]:
-    """Each `live_only` line of `problems` that some `pending` copy already holds, mapped
-    to that copy's branch: the line is gone from the live file's drift against it.
-
-    A refusal over lines all held here protects nothing git lacks, so it is a merge
-    awaited, not a decision owed -- `workspace-status.workspace_sync_line` says which
-    branch and files no failure (4ea2781c). The publish still refuses: rendering now
-    would drop the edit from every window until the branch merges.
-    """
-    unheld = set(live_only(problems))
-    held: dict[str, str] = {}
-    for branch, copy in pending:
-        if not unheld:
-            break
-        for line in unheld - set(live_only(workspace_drift(payload, copy))):
-            held[line] = branch
-        unheld -= held.keys()
-    return held
-
-
-def awaited_merge(
-    problems: list[str], payload: dict, pending: Iterable[tuple[str, dict]]
-) -> dict[str, str]:
-    """`held_on_branches`, when it accounts for every `live_only` line; else nothing.
-
-    The one reading of "this drift is a merge awaited, not a defect". The daily line had
-    it and the nightly test did not, so agent-terminal's #729, green and waiting on a
-    person, turned Local E2E red and sent a fixer at a state nothing is wrong with: the
-    live file cannot publish until that branch merges, and everything it carries is in
-    git. Drift with no live edit is no such thing: that is a publish owed, not a merge.
-    """
-    edits = set(live_only(problems))
-    held = held_on_branches(problems, payload, pending) if edits else {}
-    return held if edits and not edits - held.keys() else {}
-
-
-def live_drift(live: Path, canonical: str = "") -> list[str]:
-    """What the live file owes the canonical copy, as the check every copy agrees on reads
-    it: `judged_drift`, and nothing at all while `awaited_merge` explains it. `canonical`
-    is the copy to read in place of this tree's own (`merged_canonical`).
-
-    `workspace_drift` alone is the wrong question for a verdict. A task devkit changed
-    last week reads as "definition differs" until git is asked who moved it, and past
-    `HELD_DAYS` the branch stops counting, so a PR nobody merges goes red by itself.
-    """
-    payload = devkit_jsonc.loads(live.read_text(encoding="utf-8"))
-    problems = judged_drift(live, payload, devkit_jsonc.loads(canonical_view(live, canonical)[0]))
-    return [] if awaited_merge(problems, payload, pending_copies(live)) else problems
-
-
-def merged_canonical() -> str:
-    """`workspace.jsonc` on `origin/<default>`, or "" where git cannot say: what the live
-    file is rendered from, for a tree whose own copy may carry an un-merged edit."""
-    git = sweep.git_for(CANONICAL_WORKSPACE.parent)
-    head = git("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    branch = (head.stdout or "").strip() if head.returncode == 0 else ""
-    shown = git("show", f"{branch or 'origin/main'}:{CANONICAL_WORKSPACE.name}")
-    return shown.stdout if shown.returncode == 0 else ""
-
-
-def stamp_path(workspace: Path) -> Path:
-    """Where the render stamp for `workspace` lives.
-
-    Beside the live file, NOT under devkit's `logs/`. The stamp describes a
-    machine-global file, and an ephemeral box has its own empty `logs/` -- putting it
-    there would make every box's first `--render-workspace` believe the live file had
-    been hand-edited, which is the one case it must not get wrong.
-    """
-    return workspace.with_name(".devkit-workspace-render.json")
-
-
-def semantic_digest(text: str) -> str:
-    """A digest of what a workspace file MEANS, ignoring layout and comments.
-
-    A byte digest would report a hand edit every time VS Code rewrote the file after a
-    settings change of its own -- an alarm nobody caused and nobody can act on.
-    """
-    payload = devkit_jsonc.loads(text)
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()
-
-
-def read_stamp(workspace: Path) -> str | None:
-    """The digest devkit last rendered to `workspace`, or None if it never has."""
-    try:
-        recorded = json.loads(stamp_path(workspace).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    value = recorded.get("digest")
-    return value if isinstance(value, str) else None
-
-
-def write_stamp(workspace: Path, digest: str) -> None:
-    stamp_path(workspace).write_text(
-        json.dumps({"digest": digest, "workspace": workspace.name}, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
 
 
 def workspace_tasks(text: str) -> dict:
@@ -1602,39 +1310,6 @@ def extract_tasks_text(text: str) -> str:
     return "\n".join(line[1:] if line.startswith("\t") else line for line in block.splitlines())
 
 
-def _by_label(block: dict) -> dict[str, dict]:
-    return {t.get("label", "<unlabelled>"): t for t in block.get("tasks", [])}
-
-
-def tasks_drift(live: dict, canonical: dict) -> list[str]:
-    """Human-readable differences between two task blocks; empty when they agree."""
-    problems: list[str] = []
-    live_tasks, canon_tasks = _by_label(live), _by_label(canonical)
-    for label in sorted(canon_tasks.keys() - live_tasks.keys()):
-        problems.append(f"{AHEAD_TASK}{label}")
-    for label in sorted(live_tasks.keys() - canon_tasks.keys()):
-        problems.append(f"in the workspace but not in devkit: {label}")
-    for label in sorted(canon_tasks.keys() & live_tasks.keys()):
-        if live_tasks[label] != canon_tasks[label]:
-            problems.append(f"definition differs: {label}")
-
-    live_inputs = {i.get("id"): i for i in live.get("inputs", [])}
-    canon_inputs = {i.get("id"): i for i in canonical.get("inputs", [])}
-    for missing in sorted(canon_inputs.keys() - live_inputs.keys()):
-        problems.append(f"{AHEAD_INPUT}{missing}")
-    for extra in sorted(live_inputs.keys() - canon_inputs.keys()):
-        problems.append(f"input not in devkit: {extra}")
-    # Bodies too, not just ids. Comparing only the id set made every picker's OPTIONS
-    # invisible to this gate: `new-project.py` added data-lake to the live `project`
-    # picker, the id was already present on both sides, and devkit's copy sat a project
-    # behind with nothing red. The task half was compared this way from the start —
-    # an input is no less part of the block for being referenced rather than clicked.
-    for label in sorted(canon_inputs.keys() & live_inputs.keys()):
-        if live_inputs[label] != canon_inputs[label]:
-            problems.append(f"input definition differs: {label}")
-    return problems
-
-
 def canonical_text() -> str:
     """devkit's copy of the workspace file, as source."""
     return CANONICAL_WORKSPACE.read_text(encoding="utf-8")
@@ -1654,382 +1329,6 @@ def canonical_tasks() -> dict:
 def canonical_tasks_text() -> str:
     """The canonical `tasks` block as SOURCE, comments intact."""
     return extract_tasks_text(canonical_text())
-
-
-def _folder_names(block: object) -> set[str]:
-    """The checkouts a `folders` list names, by `path` (falling back to `name`)."""
-    if not isinstance(block, list):
-        return set()
-    names: set[str] = set()
-    for entry in block:
-        if isinstance(entry, dict):
-            names.add(str(entry.get("path") or entry.get("name") or "?"))
-    return names
-
-
-def settings_drift(live: object, canonical: object) -> list[str]:
-    """`settings`, compared key by key, leaving out `MACHINE_SETTINGS`.
-
-    Per key rather than whole, so a setting only devkit's copy has reads as the copy
-    being ahead -- which publishes -- instead of as "settings differs", which a live
-    edit to any other key made indistinguishable from someone's work.
-    """
-    live_map = live if isinstance(live, dict) else {}
-    canon_map = canonical if isinstance(canonical, dict) else {}
-    live_keys = live_map.keys() - set(MACHINE_SETTINGS)
-    canon_keys = canon_map.keys() - set(MACHINE_SETTINGS)
-    return [
-        *(f"{AHEAD_SETTING}{key}" for key in sorted(canon_keys - live_keys)),
-        *(
-            f"setting in the workspace but not in devkit: {key}"
-            for key in sorted(live_keys - canon_keys)
-        ),
-        *(
-            f"setting differs: {key}"
-            for key in sorted(live_keys & canon_keys)
-            if live_map[key] != canon_map[key]
-        ),
-    ]
-
-
-def machine_settings(payload: object) -> dict:
-    """The `MACHINE_SETTINGS` a parsed workspace file sets, by key."""
-    settings = payload.get("settings") if isinstance(payload, dict) else None
-    if not isinstance(settings, dict):
-        return {}
-    return {key: settings[key] for key in MACHINE_SETTINGS if key in settings}
-
-
-_DECODER = json.JSONDecoder()
-
-
-def _skip_space(scan: str, at: int) -> int:
-    while at < len(scan) and scan[at].isspace():
-        at += 1
-    return at
-
-
-def _members(scan: str, brace: int):
-    """`(key, value_start, value_end)` for each member of the object opening at `brace`.
-
-    `scan` is the text with comments and trailing commas blanked, which keeps every
-    offset, so the spans index the original text too.
-    """
-    at = _skip_space(scan, brace + 1)
-    while scan[at] != "}":
-        key, at = _DECODER.raw_decode(scan, at)
-        at = _skip_space(scan, _skip_space(scan, at) + 1)  # past the `:`
-        _value, end = _DECODER.raw_decode(scan, at)
-        yield key, at, end
-        at = _skip_space(scan, end)
-        if scan[at] == ",":
-            at = _skip_space(scan, at + 1)
-
-
-def carry_machine_settings(text: str, source: object) -> str:
-    """`text` with the `MACHINE_SETTINGS` values `source` (a parsed file) holds, written
-    in place so every comment survives. Only values that differ are touched; a key `text`
-    lacks is added at the top of its `settings`. `text` unchanged when it has none.
-    """
-    wanted = machine_settings(source)
-    held = machine_settings(devkit_jsonc.loads(text))
-    changed = {key: value for key, value in wanted.items() if key in held and held[key] != value}
-    added = {key: value for key, value in wanted.items() if key not in held}
-    scan = devkit_jsonc.drop_trailing_commas(devkit_jsonc.blank_comments(text))
-    brace = settings_brace(scan)
-    if brace < 0 or not (changed or added):
-        return text
-    spans = [(start, end, key) for key, start, end in _members(scan, brace) if key in changed]
-    for start, end, key in sorted(spans, reverse=True):
-        text = text[:start] + json.dumps(changed[key], ensure_ascii=False) + text[end:]
-    lines = "".join(
-        f"\n\t\t{json.dumps(key)}: {json.dumps(value, ensure_ascii=False)},"
-        for key, value in added.items()
-    )
-    return text[: brace + 1] + lines + text[brace + 1 :]
-
-
-def settings_brace(scan: str) -> int:
-    """Where the top-level `settings` object opens in `scan`, or -1 when it has none."""
-    root = _skip_space(scan, 0)
-    if scan[root : root + 1] != "{":
-        return -1
-    brace = next((start for key, start, _end in _members(scan, root) if key == "settings"), -1)
-    return brace if brace >= 0 and scan[brace] == "{" else -1
-
-
-def workspace_drift(live: dict, canonical: dict) -> list[str]:
-    """Human-readable differences across the WHOLE workspace file; empty when it agrees.
-
-    `folders` is the one that used to have no gate at all: `new-project.py` registers a
-    project by editing the live file, so a newly generated checkout existed only in the
-    copy with no history -- and every sweep, every status line and every `--project`
-    picker reads that list.
-    """
-    problems: list[str] = []
-    for key in PLAIN_KEYS:
-        before, after = canonical.get(key), live.get(key)
-        if before == after:
-            continue
-        if key == "folders":
-            # Named, not diffed. "folders differs" on the project registry is the one
-            # place a reader most needs to know WHICH checkout appeared or vanished.
-            canon_names, live_names = _folder_names(before), _folder_names(after)
-            for gone in sorted(canon_names - live_names):
-                problems.append(f"{AHEAD_FOLDER}{gone}")
-            for new in sorted(live_names - canon_names):
-                problems.append(f"folder in the workspace but not in devkit: {new}")
-            if canon_names == live_names:
-                problems.append("folders: same checkouts, different entries")
-        elif key == "settings":
-            problems += settings_drift(after, before)
-        else:
-            problems.append(f"{key} differs")
-    live_tasks, canon_tasks = live.get("tasks"), canonical.get("tasks")
-    return problems + tasks_drift(
-        live_tasks if isinstance(live_tasks, dict) else {},
-        canon_tasks if isinstance(canon_tasks, dict) else {},
-    )
-
-
-RENDER_PUBLISHED = "published"
-RENDER_CURRENT = "current"
-RENDER_REFUSED = "refused"
-
-
-# --- this machine's view of the registry ---------------------------------------
-#
-# The registry is global and the checkouts are not. `workspace.jsonc` is committed, so
-# a project plugged in on one workstation is registered on every workstation that pulls
-# devkit -- and rendered verbatim, that put a folder VS Code cannot open in every other
-# window on every other machine, with `plug-projects.py` the only thing that could
-# clear it. The disk is the per-machine fact, so the disk decides: the live file is the
-# canonical copy minus every registered project with no checkout beside it, and an
-# adopt puts those back before anything is written to the copy every machine shares.
-
-
-def absent_projects(text: str, root: Path) -> list[str]:
-    """Registered projects with no checkout under `root`, in registry order."""
-    return [name for name in known_projects(text) if not (root / name).is_dir()]
-
-
-def machine_view(text: str, root: Path) -> tuple[str, list[str]]:
-    """The canonical text as the workstation whose checkouts live under `root` renders it.
-
-    Returns `(text, left_out)`: the registry text with every absent project's folder
-    entry and picker options removed, through `unregister` so the two cannot disagree
-    about what registration touches, and the names it removed.
-
-    A machine holding none of them renders the whole list. A `folders` array cannot be
-    emptied -- `unregister` refuses to drop the last element, and a workspace with no
-    folder is not one -- and a live file with no checkout beside it at all is not
-    sitting where the registry describes, so there is nothing for the filter to say.
-    """
-    absent = absent_projects(text, root)
-    if not absent or len(absent) == len(known_projects(text)):
-        return text, []
-    return unregister(text, absent), absent
-
-
-def canonical_view(live: Path, canonical: str = "") -> tuple[str, list[str]]:
-    """`machine_view` of devkit's copy, or of the `canonical` text handed in, for the
-    workstation `live` belongs to.
-
-    Every comparison of the live file against the canonical copy goes through here --
-    the publish, the check, the adopt, the session-start sync line and the plug
-    script's early refusal -- because a comparison against the unfiltered copy reports
-    every project this machine does not hold as drift, on every run, forever.
-    """
-    return machine_view(canonical or canonical_text(), live.parent)
-
-
-def left_out_line(left_out: list[str]) -> str:
-    """The one line that says what this machine's render omits; "" when nothing."""
-    if not left_out:
-        return ""
-    return f"  not checked out on this machine, so not rendered: {', '.join(left_out)}"
-
-
-def publish_workspace(live: Path, *, force: bool = False) -> tuple[str, list[str]]:
-    """Render the canonical copy over `live`, unless that would discard someone's edit.
-
-    Extracted from `main()` so the session-start hook can publish on the same terms the
-    CLI does. That is the whole point of the extraction: a second implementation of
-    "is it safe to overwrite the file every window on the machine reads" is the last
-    thing this should grow.
-
-    Returns `(outcome, differences)`. `RENDER_CURRENT` stamps and writes nothing --
-    an unstamped-but-identical live file is the normal state right after an adopt, and
-    leaving it unstamped would make the NEXT render refuse for a hand edit that never
-    happened. `RENDER_REFUSED` writes nothing at all.
-
-    **A live file that does not exist yet is published over, not refused.** This
-    direction is how a fresh workstation gets one at all -- nothing else writes it --
-    and the refusal exists to protect a hand edit, of which a missing file has none. It
-    read as `cannot read the workspace registry` instead, and the bootstrap ended with
-    someone copying `workspace.jsonc` to the live path by hand, which is this function
-    without the stamp.
-
-    **The stamp is consulted only about differences that could be somebody's edit.** A
-    stale stamp says the live file changed since devkit last wrote it; it does not say
-    *what* changed, so refusing on it alone refuses on the strength of a canonical copy
-    that is merely ahead. That is not hypothetical: a hand edit adding one setting was
-    adopted into `workspace.jsonc` by hand (the only merge available -- see
-    `--adopt-workspace` below, which takes the whole file), and every publish after it
-    refused, listing five tasks and eight inputs the live file was *supposed* to be
-    given and naming no live edit at all. The click stayed red until someone typed
-    `--force`, which is the one verb that discards, for a state in which nothing was at
-    risk. So `live_only` decides, and the stamp only breaks the tie it names.
-
-    **What is rendered is this machine's view** -- `canonical_view` -- so a project
-    registered from another workstation and not cloned here is neither written into
-    the live file nor reported as drift against it.
-
-    **The operator's switches stay this machine's.** `MACHINE_SETTINGS` are left out of
-    the drift and carried from the live file into what is written, so turning the fix
-    pass on here is neither a reason to refuse nor undone by the next publish.
-    """
-    canonical, _left_out = canonical_view(live)
-    if not live.is_file():
-        live.parent.mkdir(parents=True, exist_ok=True)
-        live.write_text(canonical, encoding="utf-8", newline="\n")
-        write_stamp(live, semantic_digest(canonical))
-        return RENDER_PUBLISHED, [f"{live.name} did not exist -- created from the canonical copy"]
-    text = live.read_text(encoding="utf-8")
-    payload = devkit_jsonc.loads(text)
-    problems = judged_drift(live, payload, devkit_jsonc.loads(canonical))
-    if not problems:
-        write_stamp(live, semantic_digest(text))
-        return RENDER_CURRENT, []
-    if not force and live_only(problems) and semantic_digest(text) != read_stamp(live):
-        return RENDER_REFUSED, problems
-    rendered = carry_machine_settings(canonical, payload)
-    live.write_text(rendered, encoding="utf-8", newline="\n")
-    write_stamp(live, semantic_digest(rendered))
-    return RENDER_PUBLISHED, problems
-
-
-def keep_hint(problems: list[str], label: str) -> str:
-    """The "keep the live edits" line the two refusals print, under `label`.
-
-    `--adopt-workspace` takes the *whole* live file, so it is the remedy only while the
-    canonical copy has nothing of its own to lose. Naming it otherwise points at a
-    command that now refuses -- and used to delete the very tasks the list above says
-    the live file is missing. Written once because two refusals that disagree about
-    which command is safe is the same defect twice.
-    """
-    if not canonical_only(problems):
-        return f"{label}{RENDER_HINT} --adopt-workspace"
-    return (
-        f"{label}merge them into workspace.jsonc by hand, on a task branch"
-        " -- an adopt would delete what the live file is missing above"
-    )
-
-
-def adopt_workspace(live: Path, text: str, *, force: bool = False) -> int:
-    """Record the live file as the canonical copy. The `--adopt-workspace` verb.
-
-    An adopt is a whole-file overwrite in the direction the module's own preamble calls
-    the old failure -- harmless only while the canonical copy is behind the live one or
-    level with it. When it is AHEAD, the overwrite deletes committed work with nothing
-    to show it went: the tasks of PR #292 were one click from exactly that, because the
-    publish refusal named `--adopt-workspace` as the remedy for a live edit that had to
-    be merged by hand instead.
-
-    The live file is this machine's view, so the projects it leaves out are put back
-    with `register` before the canonical copy is written: an adopt from a workstation
-    holding two of seven checkouts must not retire the other five everywhere. A
-    re-registered entry lands where `insert_folder` puts one -- at the end of the
-    list, before any reference checkout -- so the diff may reorder `folders`; that is
-    visible in the PR, where a silent retirement would not have been.
-
-    `MACHINE_SETTINGS` keep the canonical copy's values for the same reason: this
-    machine's switches are not a default for every other one.
-    """
-    canonical, left_out = canonical_view(live) if CANONICAL_WORKSPACE.is_file() else ("", [])
-    losses = canonical_only(
-        judged_drift(live, devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
-        if canonical
-        else []
-    )
-    if losses and not force:
-        print(
-            f"devkit_project: {CANONICAL_WORKSPACE.name} carries content"
-            f" {live.name} does not -- adopting would delete it:",
-            file=sys.stderr,
-        )
-        for loss in losses:
-            print(f"  {loss}", file=sys.stderr)
-        print(
-            "  -> merge the live edit into workspace.jsonc by hand instead, on a"
-            " task branch\n"
-            f"  -> discard them: {RENDER_HINT} --adopt-workspace --force",
-            file=sys.stderr,
-        )
-        return 1
-    # Written directly rather than printed for redirection: the file carries en-dashes
-    # and arrows, and a redirected stdout on Windows is cp1252.
-    adopted = carry_machine_settings(text, devkit_jsonc.loads(canonical)) if canonical else text
-    CANONICAL_WORKSPACE.write_text(register(adopted, left_out), encoding="utf-8", newline="\n")
-    write_stamp(live, semantic_digest(text))
-    print(f"adopted {live.name} into {CANONICAL_WORKSPACE.name}")
-    if left_out:
-        print(f"  re-registered what this machine does not hold: {', '.join(left_out)}")
-    print("commit it on a task branch -- that is what gives the edit a reviewer")
-    return 0
-
-
-def check_workspace(live: Path, text: str) -> int:
-    """Report drift without touching either file. The `--check-workspace` verb.
-
-    Takes the registry text `main` already read rather than re-reading it: two reads of
-    a file every VS Code window writes could disagree, and the exit code would then not
-    be about the text the caller validated.
-    """
-    canonical, left_out = canonical_view(live)
-    problems = judged_drift(live, devkit_jsonc.loads(text), devkit_jsonc.loads(canonical))
-    if not problems:
-        print(f"{live.name}: matches {CANONICAL_WORKSPACE.name}")
-        if left_out:
-            print(left_out_line(left_out))
-        return 0
-    print(f"{live.name} has drifted from {CANONICAL_WORKSPACE.name}:")
-    for problem in problems:
-        print(f"  {problem}")
-    if left_out:
-        print(left_out_line(left_out))
-    print(keep_hint(problems, "  -> keep the live edits:  "))
-    print(f"  -> publish the canonical: {RENDER_HINT} --render-workspace")
-    return 1
-
-
-def render_workspace(live: Path, *, force: bool = False) -> int:
-    """Publish the canonical copy over the live file. The `--render-workspace` verb."""
-    rendered, problems = publish_workspace(live, force=force)
-    if rendered == RENDER_CURRENT:
-        print(f"{live.name}: already current")
-        return 0
-    if rendered == RENDER_REFUSED:
-        print(
-            f"devkit_project: {live.name} carries edits devkit did not"
-            " write -- refusing to overwrite them:",
-            file=sys.stderr,
-        )
-        for problem in problems:
-            print(f"  {problem}", file=sys.stderr)
-        print(
-            f"{keep_hint(problems, '  -> keep them:    ')}\n"
-            f"  -> discard them: {RENDER_HINT} --render-workspace --force",
-            file=sys.stderr,
-        )
-        return 1
-    print(f"rendered {CANONICAL_WORKSPACE.name} -> {live.name}")
-    for problem in problems:
-        print(f"  {problem}")
-    left_out = canonical_view(live)[1]
-    if left_out:
-        print(left_out_line(left_out))
-    return 0
 
 
 def expected_actions(project: str) -> set[str]:
@@ -2062,51 +1361,13 @@ def conformance(projects: list[str], root: Path) -> dict[str, list[str]]:
 # --- entrypoint -------------------------------------------------------------
 
 
-def _load_workspace(path: Path, may_create: bool = False) -> str:
-    """The live registry's text; `""` when there is none and the caller will write one.
-
-    `may_create` is `--render-workspace`, the one action that does not need a file to
-    read: it *creates* one from the canonical copy, which is how a fresh workstation gets
-    a registry at all. Reading unconditionally is what made that action exit 2 with
-    `cannot read the workspace registry` on the exact machine that has none yet.
-
-    The canonical copy stands in, rather than `""`: everything downstream -- the JSONC
-    check, `known_projects`, `workspace_drift` -- then works on real text, the drift comes
-    out empty, and `publish_workspace` reports the file it created. A flag rather than a
-    branch at the call site because `main` is one step under its complexity limit, and
-    this is the function that already owns "can the registry be read".
-
-    Parsing it is the same question, so an invalid or empty file is a `ProjectError`
-    too: one refusal path in `main`, which is what lets `refuse_dispatch` file all three.
+def _registry_projects() -> list[str]:
+    """The projects for `main`, off the registry: no workspace file is read, so a
+    dispatch, `--list` and `--check` run on a machine with none. A malformed registry is
+    a `ProjectError`, so `refuse_dispatch` files it under the task it stopped.
     """
-    if may_create and not path.is_file():
-        return canonical_text()
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ProjectError(f"cannot read the workspace registry at {path}: {exc}") from exc
-    try:
-        payload = devkit_jsonc.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ProjectError(f"{path} is not valid JSONC: {exc}") from exc
-    if not payload:
-        raise ProjectError(f"{path} is empty")
-    return text
-
-
-def _registry_for(args: argparse.Namespace) -> tuple[str, list[str]]:
-    """`(workspace text, projects)` for `main`: the projects always off the registry.
-
-    The workspace text is read only for the verbs that publish, check or adopt that file
-    -- `""` otherwise -- so a dispatch, `--list` and `--check` run on a machine with no
-    workspace file. A malformed registry is a `ProjectError`, so `refuse_dispatch` files
-    it under the task it stopped, as it did an unreadable workspace file.
-    """
-    text = ""
-    if args.render_workspace or args.check_workspace or args.adopt_workspace:
-        text = _load_workspace(args.workspace, may_create=bool(args.render_workspace))
-    try:
-        return text, known_projects()
+        return known_projects()
     except project_registry.RegistryError as exc:
         raise ProjectError(f"cannot read the project registry: {exc}") from exc
 
@@ -2159,40 +1420,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print which projects implement which actions, then exit",
     )
-    parser.add_argument(
-        "--check-workspace",
-        "--check-tasks",
-        dest="check_workspace",
-        action="store_true",
-        help="report how the live workspace file differs from devkit's canonical copy",
-    )
-    parser.add_argument(
-        "--render-workspace",
-        dest="render_workspace",
-        action="store_true",
-        help="publish workspace.jsonc to the live workspace file (the normal direction)",
-    )
-    parser.add_argument(
-        "--adopt-workspace",
-        "--adopt-tasks",
-        dest="adopt_workspace",
-        action="store_true",
-        help="record a live hand edit back into workspace.jsonc, for committing on a branch",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help=(
-            "with --render-workspace: overwrite live edits devkit did not write;"
-            " with --adopt-workspace: delete canonical content the live file lacks"
-        ),
-    )
     parser.add_argument("action", nargs="?", default="", choices=["", TESTS_VERB, *sorted(ACTIONS)])
     parser.add_argument("extra", nargs=argparse.REMAINDER, help="extra args for the script")
     args = parser.parse_args(argv)
 
     try:
-        text, projects = _registry_for(args)
+        projects = _registry_projects()
     except ProjectError as exc:
         return refuse_dispatch(exc, args.action, raw_argv)
 
@@ -2202,17 +1435,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         print("\n".join(projects))
         return 0
-
-    if args.adopt_workspace:
-        return adopt_workspace(args.workspace, text, force=args.force)
-
-    if args.render_workspace or args.check_workspace:
-        if not CANONICAL_WORKSPACE.is_file():
-            print(f"devkit_project: no canonical copy at {CANONICAL_WORKSPACE}", file=sys.stderr)
-            return 2
-        if args.check_workspace:
-            return check_workspace(args.workspace, text)
-        return render_workspace(args.workspace, force=args.force)
 
     if args.check:
         for name, actions in conformance(projects, root).items():

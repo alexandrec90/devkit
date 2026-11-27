@@ -1,5 +1,5 @@
 ---
-description: Where VS Code tasks live, how a task is defined and dispatched, and how devkit's canonical copy is rendered to the live workspace file
+description: Where VS Code tasks live and how a task is defined and dispatched
 paths:
   - workspace.jsonc
   - scripts/devkit_project.py
@@ -67,98 +67,13 @@ picker lists `known_projects`. The two coincide while `NOT_PROJECTS` is empty an
 be collapsed because of it: `insert_picker_option` maintains both, and a test pins each to
 its own source. Its docstring carries the rest.
 
-## Changing a task: edit devkit's copy, on a branch, then render
+## Changing a task: edit devkit's copy, on a branch
 
-`workspace.jsonc` is devkit's canonical copy of the **whole** workspace file, and the live
-`.code-workspace` — which lives outside every repo and so cannot be vendored — is what VS
-Code actually runs. **Edit the canonical one.** It is the only copy with a branch, a diff
-and a reviewer:
-
-```bash
-python scripts/devkit_project.py --check-workspace    # do they agree?
-# ...edit workspace.jsonc on a task branch, ship it, let the PR merge...
-python scripts/devkit_project.py --render-workspace   # workspace.jsonc -> the live file
-```
-
-**The last step runs itself, but only once a day.** `workspace_sync_line` in
-`scripts/workspace-status.py` publishes through `publish_workspace`, the same function the
-CLI calls, adding two conditions in `publish_verdict`: devkit's checkout is on its default
-branch and its `workspace.jsonc` is committed. A task branch's copy is a proposal and an
-uncommitted one is not even that, so from a box, or mid-edit, the line reports the drift
-and publishes nothing. When it does publish it asks for a window reload — VS Code reads
-the file once, at open.
-
-**What runs it is `devkit-workspace-status`, a scheduled job, not a session-start hook** —
-the whole pass is several seconds, which is what its own docstring says gets a hook
-disabled. So a merge does not publish: the render lands on the job's next pass, or when
-someone runs `--render-workspace`. Between those two the live file is behind, and the
-tasks a branch just changed are not the tasks a click will run. The hook the paragraph
-above once described was never wired at all, and three merged tasks sat unrendered for
-days before anyone noticed — which is why the automatic half is worth having even at a
-day's latency, and why the manual command stays documented rather than deprecated.
-
-**Never hand-edit the live file to make a change.** It has no branch dimension: one copy
-serves every window on the machine, so an in-flight edit is globally live before anyone
-reviews it, and two agents editing it race with last-writer-wins and nothing to recover
-the loser's edit *from*. Editing `workspace.jsonc` on a branch puts the conflict in git,
-where a conflict has two visible sides.
-
-**The render is this machine's view, not the whole registry.** `folders` in
-`workspace.jsonc` is global — every project on every workstation — and the live file is
-`devkit_project.machine_view` of it: the same text with every project that has no checkout
-beside the file taken out, folder entry and picker options both, through `unregister`.
-Every comparison of live against canonical goes through `canonical_view` for that reason,
-or a project cloned on another PC reads as drift here on every run; and an adopt
-re-registers what this machine leaves out before it writes the copy every machine shares.
-A project registered elsewhere reaches a PC through the plug picker's *registered, not on
-this PC* row, whose tick clones it, and leaves a PC by its checkout being deleted.
-
-**The other direction still exists, for the edits that are not yours to route.** VS Code
-rewrites the file itself when a workspace setting is changed through its UI.
-`--adopt-workspace` records the live file back into `workspace.jsonc` for committing on a
-branch, and `--render-workspace` *refuses* rather than overwriting an unadopted edit — the
-live file's meaning is stamped in `.devkit-workspace-render.json` beside it, and a stamp
-that no longer matches arms the refusal. `--force` overrides that, and it discards.
-
-**Only differences that could be someone's edit arm it.** A stale stamp says the live file
-moved, not what moved, so `live_only` reads the drift and a canonical copy that is merely
-*ahead* — tasks, inputs, folders or settings the live file is missing — publishes anyway:
-those are the entries a publish exists to deliver, and git holds every one of them. A
-"differs" line names a key both copies carry and not who moved it last, so git is asked:
-one whose live value an earlier `workspace.jsonc` held is devkit's change, relabelled
-by `devkit_project.behind` and published like the rest; any other counts as live-authored.
-A refusal whose every live edit a pushed branch already holds (`held_on_branches`, as
-`new-project.py` leaves one) still refuses, but the daily line names that branch and files
-no failure. `settings` is compared per key on the
-same terms, minus `devkit_project.MACHINE_SETTINGS`: the operator's switches, which a
-render carries over from the live file and an adopt never records. The live file's value
-is this machine's answer and `workspace.jsonc`'s only a fresh machine's default, so switch
-one in the live file directly; that is not the hand edit the paragraph above forbids.
-
-**And an adopt refuses in that same state, rather than deleting what it finds.**
-`--adopt-workspace` overwrites `workspace.jsonc` with the whole live file, so against a
-canonical copy that is ahead it deletes merged work — the state of the machine between any
-task's merge and its publish. It names what would go and stops; `--force` is the discarding
-half. **The merge that state needs is by hand:** copy the live edit into `workspace.jsonc`
-on a task branch, ship it, and publish after it merges.
-
-`test_the_live_workspace_matches_the_canonical_copy` holds the pairing and is
-`@needs_live_workspace`: deselected from CI, so drift is caught locally or not at all. It reads
-drift as the daily line does (`devkit_project.live_drift`): every live edit on a pushed
-branch is a merge awaited, green until `HELD_DAYS` runs out.
-
-**From a box it compares what has merged.** The live file is rendered from a *merged*
-canonical copy, so the test reads `workspace.jsonc` **as it stands on `origin/main`** there
-(`devkit_project.merged_canonical`), never the tree's own: your unlanded edit is not
-drift, and a red is the one the static checkout sees. `--check-workspace` still reads the
-tree's own copy, so from a box on an open task branch it reports your edit — an added task
-as `missing from the workspace`, a changed one as `definition differs`.
-
-**And the adopt direction is the wrong one here.** `--adopt-workspace` takes the *live*
-file — still main's render — over your canonical copy, so running it in a box to get green
-deletes the edit the branch exists for. It refuses on exactly that now, and the failure no
-longer offers it, but the reason is worth carrying: render only after the PR merges; a box
-never renders.
+`workspace.jsonc` is devkit's copy of the workspace file, and the only one with a
+branch, a diff and a reviewer, so a task changes there. **Nothing renders it to the live
+`.code-workspace` any more**: VS Code is being retired, and render, adopt, check and the
+daily publish went first. The live file keeps whatever it last held; this rule goes with
+the rest of the task layer.
 
 ## Conventions for the tasks themselves
 

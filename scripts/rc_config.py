@@ -37,8 +37,8 @@ RC_SETTING = "devkit.remoteControl"
 # fire. `devkit.onHold` is deliberately not subtracted: the phone matches the machine's
 # workspace, and a hold pauses adoption and box reporting, not reachability. A list is a second copy of the `folders` registry, so a
 # project plugged in later got no server until someone remembered to add it here too.
-# Read off the file the job is handed -- the live one is `machine_view`, so it is the
-# projects checked out on *this* machine, never one registered only on another PC.
+# Read off the file the job is handed: the live one, which lists the projects this
+# machine was rendered with before VS Code's retirement stopped the render.
 ALL_PROJECTS = "all"
 
 # The key in the `hosts` knob naming the machine that serves every project not named on

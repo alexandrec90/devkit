@@ -9,9 +9,9 @@ asserted, including the one that reads as "nothing to do" and is not.
 The **plan** decides an outward-facing act (creating a public GitHub repo) from a
 ticked checkbox, so it is pure and every step is asserted before anything can run it.
 
-And `edit_verdict` is the gate between this script and the file every window on the
-machine reads. Its three refusals are the ones that would otherwise publish an unmerged
-proposal, so they are tested without a git tree at all.
+And `edit_verdict` is the gate on where the registry is edited from. Its two refusals
+are the ones that would otherwise build a registry branch on an unmerged proposal, so
+they are tested without a git tree at all.
 
 A fourth since the checkboxes moved into VS Code, and it changed shape when the list
 stopped being a cached file: `toggled_selection` reads a pick as a set of rows to
@@ -47,7 +47,6 @@ github_repos = plug_projects.github_repos
 in_ephemeral_box = plug_projects.in_ephemeral_box
 interactive = plug_projects.interactive
 inventory = plug_projects.inventory
-live_carries_a_hand_edit = plug_projects.live_carries_a_hand_edit
 main = plug_projects.main
 toggle_detail = plug_projects.toggle_detail
 rows = plug_projects.rows
@@ -696,25 +695,27 @@ def test_the_preview_names_every_outward_facing_act():
 
 
 def test_the_registry_may_be_edited_from_a_clean_default_branch():
-    assert edit_verdict(branch="main", default="main", in_box=False, live_unstamped=False) == ""
+    assert edit_verdict(branch="main", default="main", in_box=False) == ""
 
 
-def test_a_box_may_not_publish():
-    """Its `workspace.jsonc` is a proposal nobody has even opened a PR for yet."""
-    verdict = edit_verdict(branch="main", default="main", in_box=True, live_unstamped=False)
+def test_a_box_may_not_edit_the_registry():
+    """Its registry is a proposal nobody has even opened a PR for yet."""
+    verdict = edit_verdict(branch="main", default="main", in_box=True)
     assert "ephemeral box" in verdict
 
 
-def test_a_task_branch_may_not_publish():
-    verdict = edit_verdict(branch="agent/x", default="main", in_box=False, live_unstamped=False)
+def test_a_task_branch_may_not_edit_the_registry():
+    verdict = edit_verdict(branch="agent/x", default="main", in_box=False)
     assert "not main" in verdict
 
 
-def test_a_live_file_carrying_a_hand_edit_is_refused_before_anything_is_written():
-    """`publish_workspace` would refuse it too, but only *after* the canonical copy has
-    changed — leaving a registry edit stranded in a file nothing renders."""
-    verdict = edit_verdict(branch="main", default="main", in_box=False, live_unstamped=True)
-    assert "--adopt-workspace" in verdict
+def test_the_gate_no_longer_reads_the_live_file():
+    """Nothing renders the live workspace file now, so a hand edit there is nothing a
+    registry edit could clobber: the stamp check and its `--adopt-workspace` remedy are
+    gone."""
+    assert not hasattr(plug_projects, "live_carries_a_hand_edit")
+    verdict = edit_verdict(branch="agent/x", default="main", in_box=True)
+    assert "--adopt-workspace" not in verdict
 
 
 def test_the_box_check_matches_the_workspace_layout(tmp_path):
@@ -724,46 +725,6 @@ def test_the_box_check_matches_the_workspace_layout(tmp_path):
     assert in_ephemeral_box(tmp_path / worktree.BOXES_DIR_NAME / "devkit--task-0101")
     assert not in_ephemeral_box(tmp_path / "devkit")
     assert in_ephemeral_box(REPO_ROOT) == (REPO_ROOT.parent.name == worktree.BOXES_DIR_NAME)
-
-
-# Both of these build a *fixture* file that merely bears the registry's name; neither
-# reads the real one, so neither wants `@needs_live_workspace`. The name comes off
-# `DEFAULT_WORKSPACE` rather than being spelled out because
-# `test_self_hosting.test_tests_reading_the_live_workspace_are_marked_to_skip_without_it`
-# recognises a live-file read by that literal, and a literal here reads to it as the
-# sixth CI-breaking test it exists to prevent.
-REGISTRY_NAME = devkit_project.DEFAULT_WORKSPACE.name
-
-
-def test_an_unstamped_but_identical_live_file_is_not_a_hand_edit(tmp_path):
-    """The state right after an adopt. Refusing there would block a run over an edit
-    that never happened."""
-    canonical = devkit_project.canonical_text()
-    live = tmp_path / REGISTRY_NAME
-    live.write_text(canonical, encoding="utf-8", newline="\n")
-    assert not live_carries_a_hand_edit(live)
-
-
-def test_a_live_file_that_differs_and_is_unstamped_is_a_hand_edit(tmp_path):
-    live = tmp_path / REGISTRY_NAME
-    live.write_text('{"folders": [{"path": "nothing-like-it"}]}', encoding="utf-8", newline="\n")
-    assert live_carries_a_hand_edit(live)
-
-
-def test_a_project_this_machine_does_not_hold_is_not_a_hand_edit(tmp_path):
-    """The live file is this machine's view: a project registered from another PC is
-    left out of it by devkit's own render, so its absence must not read as somebody's
-    edit -- or the picker refuses on every other workstation, over the very row it
-    exists to offer."""
-    canonical = devkit_project.canonical_text()
-    names = devkit_project.known_projects(canonical)
-    for name in names[1:]:
-        (tmp_path / name).mkdir()
-    live = tmp_path / REGISTRY_NAME
-    live.write_text(
-        devkit_project.unregister(canonical, [names[0]]), encoding="utf-8", newline="\n"
-    )
-    assert not live_carries_a_hand_edit(live)
 
 
 # --- the hazards ------------------------------------------------------------
@@ -1030,7 +991,6 @@ def ticking(listed, monkeypatch):
     build to get past `edit_verdict`.
     """
     monkeypatch.setattr(plug_projects, "edit_verdict", lambda **kwargs: "")
-    monkeypatch.setattr(plug_projects, "live_carries_a_hand_edit", lambda path: False)
     monkeypatch.setattr(plug_projects.sweep, "git_for", lambda root: lambda *a, **k: done("main\n"))
     monkeypatch.setattr(plug_projects.task_branch, "detect_default_branch", lambda git: "main")
     monkeypatch.setattr(plug_projects, "unplug_hazards", lambda *a, **kwargs: ())
@@ -1157,8 +1117,8 @@ def test_escaping_the_quick_pick_costs_a_line_even_where_the_gate_would_refuse(
     listed, monkeypatch, capsys
 ):
     """Escape leaves the literal `${input:...}` in the argument, and that is resolved
-    before `edit_verdict` on purpose: nothing was picked, so nothing is being published
-    and none of the gate's three reasons is about to be true. Move the check below the
+    before `edit_verdict` on purpose: nothing was picked, so nothing is being edited
+    and neither of the gate's reasons is about to be true. Move the check below the
     gate and cancelling from a box reports a branch error for a run that did nothing."""
     monkeypatch.setattr(plug_projects, "edit_verdict", lambda **kwargs: "a box may not publish")
     assert main(["--picks", "${input:plugSelection}", "--yes"]) == 0

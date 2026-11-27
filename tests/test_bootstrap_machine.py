@@ -4,7 +4,6 @@ are present, in an order where each one's input already exists."""
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from support import sweep
@@ -18,21 +17,26 @@ def _step_at(title: str) -> int:
     return at
 
 
-def test_the_bootstrap_renders_the_workspace_file():
-    """It told the operator to open `alex-projects.code-workspace` and never created it:
-    nothing else writes that file until `devkit-workspace-status`'s first daily pass, so
-    a new machine had no VS Code tasks at all -- including the plug picker that clones
-    the projects -- until someone found `--render-workspace` by hand."""
-    render_step = _step_at("Workspace file")
-    assert re.search(r"python \$render --render-workspace", SCRIPT[render_step:])
+def test_the_bootstrap_renders_no_workspace_file():
+    """The registry is `projects.toml`, committed in the clone, so a fresh machine has
+    nothing to render: the step that ran `--render-workspace` went with VS Code, and
+    the flag it ran no longer exists."""
+    assert "Step 'Workspace file'" not in SCRIPT
+    assert "--render-workspace" not in SCRIPT
 
 
-def test_the_render_runs_after_the_clone_and_before_the_summary():
-    """The renderer is a file in the clone, and the summary points at what it wrote."""
-    assert _step_at("Scheduled jobs") < _step_at("Workspace file") < _step_at("Left for you")
+def test_the_steps_run_clone_first_and_the_summary_last():
+    """Every later step reads a file in the clone, and the summary reports them all."""
+    assert (
+        _step_at("Python")
+        < _step_at("DEVKIT_DIR")
+        < _step_at("Scheduled jobs")
+        < _step_at("VS Code extensions")
+        < _step_at("Left for you")
+    )
 
 
-def test_the_summary_names_the_file_the_render_writes():
-    """The note spells the file name for the operator; the render takes it from
-    `sweep`. Two spellings are one rename away from pointing at different files."""
-    assert f"'{sweep.WORKSPACE_FILE_NAME}'" in SCRIPT
+def test_the_summary_names_the_cli_that_clones_the_registered_projects():
+    """With no plug picker to click, the summary points at the script behind it."""
+    tail = SCRIPT[_step_at("Left for you") :]
+    assert "plug-projects.py --plug" in tail
