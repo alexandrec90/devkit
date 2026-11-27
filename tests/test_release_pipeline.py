@@ -1492,8 +1492,10 @@ def test_a_yielded_release_exits_clean_and_a_failed_one_does_not(capsys):
 
 def test_the_pipeline_exits_through_prepare_outcome():
     """`run_pipeline` reads no PR to drive -- a failure or a yield -- through
-    `prepare_outcome`, so a yield is never mistaken for PR number -1."""
-    assert "return prepare_outcome(number, failure)" in inspect.getsource(rp.run_pipeline)
+    `prepare_outcome`, so a yield is never mistaken for PR number -1. The read moved into
+    `prepare_and_merge` (#869), whose ending `run_pipeline` returns unchanged."""
+    assert "return prepare_outcome(number, failure)" in inspect.getsource(rp.prepare_and_merge)
+    assert "(ended := prepare_and_merge(" in inspect.getsource(rp.run_pipeline)
 
 
 def _git_run(cmd, env=None):

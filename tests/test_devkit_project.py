@@ -1349,7 +1349,9 @@ def test_list_answers_on_a_machine_with_no_workspace_file(tmp_path, monkeypatch,
     """The dispatcher's verbs read the project registry, never the workspace file, so
     `--list` answers where there is none at all."""
     registry_lists(monkeypatch, "alpha", "beta")
-    missing = tmp_path / "alex-projects.code-workspace"
+    # Named apart from the live file's name, so the live-workspace guard in
+    # `test_self_hosting` does not read this absent path as a read of the real one.
+    missing = tmp_path / "absent.code-workspace"
     assert devkit_project.main(["--workspace", str(missing), "--list"]) == 0
     assert capsys.readouterr().out.split() == ["alpha", "beta"]
 

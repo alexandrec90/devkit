@@ -23,7 +23,11 @@ vendored everywhere and change least.
 4. **Repair it**, in `dispatch` mode: cut a fresh devkit worktree off `origin/<default>`,
    put the output in it, and send one `claude --bg` session at the pass itself. Once
    per failure signature per devkit commit, so a pass that keeps failing the same way
-   is repaired once per attempt at a fix, not once per half hour. A rescue whose intent
+   is repaired once per attempt at a fix, not once per half hour. "Commit" is both the
+   one the pass ran and `origin/<base>`'s tip (`rescue_key`): the pass follows `green`,
+   so behind a red `main` a merged fix never moved the first, and a crash fixed on `main`
+   was rescued once and then left for twelve hours. A rescue sent there is told that
+   `main`'s gate is its job too (`rescue_prompt`). A rescue whose intent
    is waiting while the pass still cannot run is shipped from here, since the pass that
    would ship it is the thing that is broken.
 
@@ -440,6 +444,23 @@ def signature(kind: str, detail: str, head: str) -> str:
     return hashlib.sha256(f"{kind}\n{shape}\n{head}".encode()).hexdigest()[:16]
 
 
+def rescue_key(kind: str, detail: str, head: str, tip: str) -> str:
+    """What a rescue is rationed by: the failure at the commit the pass ran *and* at
+    `origin/<base>`'s tip.
+
+    The finding is filed once per `signature`; a rescue is owed again whenever either
+    commit moves, since either may carry the fix. Keyed on `head` alone, the 2026-11-27
+    `NameError` was rescued once, its fix (#870) merged to a red `main`, `green` never
+    moved, and every pass for twelve hours crashed with nobody sent."""
+    return signature(kind, detail, f"{head}\n{tip}")
+
+
+def behind_base(root: Path, base: str) -> str:
+    """How many commits of `origin/<base>` the pass's checkout lacks, or "" for none."""
+    counted = git(root, "rev-list", "--count", f"HEAD..origin/{base}").stdout.strip()
+    return counted if counted.isdigit() and counted != "0" else ""
+
+
 def load_state(path: Path) -> dict:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -464,17 +485,36 @@ def file_once(
 # --- 4. repair ----------------------------------------------------------------------------
 
 
-def rescue_prompt(kind: str, detail: str, branch: str) -> str:
+def rescue_prompt(
+    kind: str, detail: str, branch: str, behind: str = "", base: str = "main"
+) -> str:
     """What the rescue session is told. It retires the finding `file_once` filed, against
     its own branch: unretired, the pass's next ledger sweep was sent at the same defect
-    while the rescue's PR was in review (755ee62b, #564)."""
+    while the rescue's PR was in review (755ee62b, #564).
+
+    `behind` is `behind_base`'s count. When the pass trails `origin/<base>`, a fix merged
+    there does not reach the pass until `<base>`'s gate passes and `green` moves, so the
+    red gate is in scope: told to fix the crash and stop, #870's rescue merged a fix
+    that could not deploy, and no session went at the two tests holding `green` back."""
+    if behind:
+        scope = (
+            f"The pass runs from origin/green, the newest commit whose PR Gate passed, and "
+            f"that checkout is {behind} commit(s) behind origin/{base}: nothing merged to "
+            f"{base} reaches the pass until {base}'s PR Gate is green. So first see whether "
+            f"{base} already fixes this failure. If it does, or {base}'s gate is red, make "
+            f"that gate green in the same PR -- its failing tests are in the newest failed "
+            f"run of gh run list --branch {base} --workflow 'PR Gate' -- or your fix will "
+            "never run. Nothing else is in scope"
+        )
+    else:
+        scope = "Nothing else is in scope"
     return (
         f"The scheduled fix pass itself is failing ({kind}): {detail}. Its full output is in "
         f"{FAILURE_LOG.as_posix()} in this worktree, which is devkit on the fresh branch "
         f"{branch} off the default branch. You are the fix pass's own repair: find why "
         "scripts/fix-pass.py, or a module it loads, fails this way; fix it with a regression "
-        "test that fails without the fix; then ship it as .claude/ship-intent.md says and stop. Nothing "
-        "else is in scope, and nothing else is shipped until the pass runs again. Once the "
+        "test that fails without the fix; then ship it as .claude/ship-intent.md says and stop. "
+        f"{scope}, and nothing else is shipped until the pass runs again. Once the "
         f"fix is in your intent, retire the {EVENT} group whose detail starts `{kind}:` -- "
         "its id is in python scripts/harness_triage.py's output -- with python "
         "scripts/harness_triage.py --resolve-like <id> --note <what fixed it> --pr "
@@ -506,7 +546,15 @@ def is_elevated() -> bool:
         return False
 
 
-def rescue(root: Path, kind: str, detail: str, output: str, now: _dt.datetime) -> str:
+def rescue(
+    root: Path,
+    kind: str,
+    detail: str,
+    output: str,
+    now: _dt.datetime,
+    behind: str = "",
+    base: str = "",
+) -> str:
     """Cut a fresh devkit worktree and send one background session at the pass; what happened.
 
     Refused from an elevated process, for `agent_tabs.ELEVATED`'s reason: the service a
@@ -517,7 +565,7 @@ def rescue(root: Path, kind: str, detail: str, output: str, now: _dt.datetime) -
         return "no rescue: claude is not on PATH"
     if is_elevated():
         return "no rescue: this process is elevated; run the watchdog from a shell that is not"
-    base = default_branch(root)
+    base = base or default_branch(root)
     stamp = now.strftime("%m%d-%H%M")
     branch = f"{RESCUE_PREFIX}-{stamp}"
     tree = root / ".claude" / "worktrees" / f"fix-pass-rescue-{stamp}"
@@ -541,7 +589,7 @@ def rescue(root: Path, kind: str, detail: str, output: str, now: _dt.datetime) -
             "--disallowedTools",
             "AskUserQuestion",
             "--",
-            rescue_prompt(kind, detail, branch),
+            rescue_prompt(kind, detail, branch, behind, base),
         ],
         cwd=tree,
         capture_output=True,
@@ -631,13 +679,19 @@ def watch(argv: list[str], now: _dt.datetime | None = None) -> int:
     if kind:
         evidence = str(_write(FAILURE_LOG, output))
         head = git(REPO_ROOT, "rev-parse", "HEAD").stdout.strip()
-        sig = signature(kind, detail, head)
-        fresh = file_once(state, sig, kind, detail, evidence, now)
+        file_once(state, signature(kind, detail, head), kind, detail, evidence, now)
         notes.append(f"watchdog: the pass failed ({kind}): {detail}")
         if mode == "dispatch":
             notes += ship_rescues(home(REPO_ROOT))
-            if fresh and kind in RESCUED:
-                notes.append(f"watchdog: {rescue(home(REPO_ROOT), kind, detail, output, now)}")
+            base = default_branch(REPO_ROOT)
+            tip = git(REPO_ROOT, "rev-parse", f"origin/{base}").stdout.strip()
+            key = rescue_key(kind, detail, head, tip)
+            rescued = state.setdefault("rescued", {})
+            if kind in RESCUED and key not in rescued:
+                rescued[key] = now.isoformat(timespec="seconds")
+                behind = behind_base(REPO_ROOT, base)
+                sent = rescue(home(REPO_ROOT), kind, detail, output, now, behind, base)
+                notes.append(f"watchdog: {sent}")
     if state_path:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(state, indent=1, sort_keys=True) + "\n", encoding="utf-8")
