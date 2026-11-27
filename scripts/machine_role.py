@@ -140,9 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     machine = root / project_registry.MACHINE_FILE_NAME
     try:
         if args.migrate:
-            copied = project_registry.migrate_machine_settings(
-                root=root, workspace=args.workspace
-            )
+            copied = project_registry.migrate_machine_settings(root=root, workspace=args.workspace)
             print(f"machine_role: copied {', '.join(copied) or 'nothing'} into {machine}")
         if args.role is not None:
             wanted = UNSET if args.role == UNSET_WORD else args.role

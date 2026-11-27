@@ -179,6 +179,7 @@ def workspace_from(root: Path | None, workspace: Path | None) -> Path:
         workspace = DEFAULT_WORKSPACE
     return sweep.projects_root.legacy_workspace(root, workspace).resolve()
 
+
 # Verdicts that mean the work has left the box, so the box is free to destroy.
 #   spent-branch  nothing beyond the base — nothing to lose
 #   needs-pr      pushed, nothing unpushed — the remote has every commit

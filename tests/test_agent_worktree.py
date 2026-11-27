@@ -771,9 +771,7 @@ def test_one_refusal_does_not_hide_the_removals_beside_it(workspace, monkeypatch
 # --- the menu and the entry point ----------------------------------------------------
 
 
-def test_a_missing_registry_is_a_usage_error_rather_than_a_traceback(
-    tmp_path, monkeypatch, capsys
-):
+def test_a_missing_registry_is_a_usage_error_rather_than_a_traceback(tmp_path, monkeypatch, capsys):
     """The picker runs this; a traceback would reach the quick-pick as no options at all,
     which is indistinguishable from a machine with no worktrees. The registry is
     `projects.toml`; a workspace file that is not there is no longer an error."""

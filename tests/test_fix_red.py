@@ -43,7 +43,11 @@ def _e2e_workspace(tmp_path: Path, hosts=None) -> Path:
         if isinstance(hosts, str):
             value = json.dumps(hosts)
         else:
-            value = "{" + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in hosts.items()) + "}"
+            value = (
+                "{"
+                + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in hosts.items())
+                + "}"
+            )
         (root / "projects.toml").write_text(
             f'[settings."devkit.localE2e"]\nhosts = {value}\n', encoding="utf-8"
         )

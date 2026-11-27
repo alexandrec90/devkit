@@ -425,9 +425,7 @@ def test_the_names_spelled_here_are_their_owners():
     assert trigger.SHIP_STATE == fix_pass.ship_intent.STATE_FILE.name
 
 
-def test_main_needs_no_workspace_file_and_takes_a_deprecated_one_as_its_root(
-    tmp_path, monkeypatch
-):
+def test_main_needs_no_workspace_file_and_takes_a_deprecated_one_as_its_root(tmp_path, monkeypatch):
     fired = []
     monkeypatch.setattr(trigger, "run_once", lambda root: fired.append(root) or 0)
     assert trigger.main(["--root", str(tmp_path)]) == 0

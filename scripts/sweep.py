@@ -2274,7 +2274,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"sweep: {exc}", file=sys.stderr)
         return 2
     if not names:
-        print(f"sweep: no checkouts registered in {project_registry.REGISTRY_NAME}", file=sys.stderr)
+        print(
+            f"sweep: no checkouts registered in {project_registry.REGISTRY_NAME}", file=sys.stderr
+        )
         return 2
     known = ", ".join(names)
     names, unknown = select(names, args.only)

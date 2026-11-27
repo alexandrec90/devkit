@@ -150,10 +150,14 @@ def test_held_reads_a_stored_value_and_is_empty_for_any_other_shape():
 
 def _no_git(monkeypatch):
     """Every checkout inspected as a directory that is not a repository."""
-    monkeypatch.setattr(sweep, "sweep", lambda root, names, fetch=True: [
-        sweep.Result(sweep.State(name=name), sweep.SKIPPED, "not a git checkout", [])
-        for name in names
-    ])
+    monkeypatch.setattr(
+        sweep,
+        "sweep",
+        lambda root, names, fetch=True: [
+            sweep.Result(sweep.State(name=name), sweep.SKIPPED, "not a git checkout", [])
+            for name in names
+        ],
+    )
 
 
 def test_main_sweeps_the_registry_under_the_root_with_no_workspace_file(

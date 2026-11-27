@@ -92,9 +92,7 @@ def e2e_here(
     them (default: this one); `workspace` is deprecated and not read.
     """
     del workspace
-    config = rc_config.read_hosts(
-        rc_config.LOCAL_E2E_SETTING, REPO_ROOT if root is None else root
-    )
+    config = rc_config.read_hosts(rc_config.LOCAL_E2E_SETTING, REPO_ROOT if root is None else root)
     here, _ = rc_config.assigned_here(
         config, projects, host or rc_config.harness_events.host_name(), verb="tested"
     )
