@@ -22,7 +22,6 @@ import pytest
 from support import (
     REPO_ROOT,
     TEMPLATES,
-    devkit_project,
     gh_steps_without_repo_context,
     harness_config,
     load_script,
@@ -251,50 +250,51 @@ def test_pytest_is_never_quiet_by_default_here_or_in_a_generated_project():
     assert not re.search(r"^addopts\s*=.*-q\b", template, re.M)
 
 
-def test_tests_reading_the_live_workspace_are_marked_to_skip_without_it():
-    """The registry sits *beside* the checkout, so CI never has it.
+def test_no_test_reads_the_retired_live_workspace_file():
+    """The registry is `projects.toml` now, and the live `.code-workspace` beside the
+    checkouts is frozen: its folders went stale the day nothing rendered it any more.
 
-    Five tests landed asserting against `alex-projects.code-workspace` by path, and
-    the PR gate went red with a FileNotFoundError naming a directory no runner could
-    have had. `support.needs_live_workspace` is the fix — it keeps the workstation
-    coverage and skips where the file cannot exist. This keeps the sixth such test
-    from being written without it.
+    Five tests once landed asserting against that file by path, and the PR gate went red
+    with a FileNotFoundError naming a directory no runner could have had. A test that
+    needs this machine's checkouts is `@local` and reads them through
+    `support.live_checkouts`; a fixture that needs the file's name spells it
+    `sweep.WORKSPACE_FILE_NAME`. So the literal, or the old `LIVE_WORKSPACE` handle, in
+    a test is a read of a file nothing keeps current.
     """
-    registry = devkit_project.DEFAULT_WORKSPACE.name
+    registry = "alex-projects.code-workspace"
     offenders = []
     for path in sorted((REPO_ROOT / "tests").glob("test_*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
                 continue
-            reads_it = any(
+            if node.name == "test_no_test_reads_the_retired_live_workspace_file":
+                continue
+            if any(
                 (isinstance(n, ast.Name) and n.id == "LIVE_WORKSPACE")
                 or (isinstance(n, ast.Constant) and n.value == registry)
                 for n in ast.walk(node)
-            )
-            marked = any(
-                isinstance(d, ast.Name) and d.id == "needs_live_workspace"
-                for d in node.decorator_list
-            )
-            if reads_it and not marked:
+            ):
                 offenders.append(f"{path.name}::{node.name}")
-    assert not offenders, f"these read {registry} without @needs_live_workspace: " + ", ".join(
-        offenders
-    )
+    assert not offenders, f"these read the retired {registry}: " + ", ".join(offenders)
 
 
 # --- copies that must not drift -----------------------------------------------
 
 
-def test_notify_scripts_are_byte_identical_to_the_template_copies():
-    """devkit's task wrappers are copies, not forks — nothing renders them.
+def test_notify_is_byte_identical_to_the_template_copy():
+    """devkit's `notify.py` is a copy, not a fork — nothing renders it.
 
-    They carry no placeholders, so there is no reason for the two to differ, and a silent
+    It carries no placeholders, so there is no reason for the two to differ, and a silent
     divergence means the fix you made locally never reaches a generated project.
+
+    `notify-wrap.py` was the other half of this pair. It wrapped a VS Code task for its
+    completion toast, and devkit's copy went with the task layer; the template's stays
+    until the consumer cleanup retires it.
     """
-    for name in ("notify.py", "notify-wrap.py"):
-        ours = (REPO_ROOT / "scripts" / name).read_bytes()
-        theirs = (TEMPLATES / "core" / "scripts" / name).read_bytes()
-        assert ours == theirs, f"scripts/{name} has drifted from templates/core/scripts/{name}"
+    ours = (REPO_ROOT / "scripts" / "notify.py").read_bytes()
+    theirs = (TEMPLATES / "core" / "scripts" / "notify.py").read_bytes()
+    assert ours == theirs, "scripts/notify.py has drifted from templates/core/scripts/notify.py"
+    assert not (REPO_ROOT / "scripts" / "notify-wrap.py").exists()
 
 
 def test_setup_action_template_matches_devkits():
@@ -916,171 +916,8 @@ def test_each_action_is_pinned_to_one_ref_within_a_tree(tree):
     assert not split, f"pinned to more than one ref in the same tree: {split}"
 
 
-def _tasks_json() -> dict:
-    """devkit's canonical copy of the SHARED task block.
-
-    These four checks used to read `devkit/.vscode/tasks.json`, which no longer
-    exists — devkit now owns zero project-level tasks, which is the only honest
-    position for the repo that prescribes the rule. They are repointed here rather
-    than deleted because the rules they enforce (a `detail` on everything, `process`
-    type, one real token per picker branch, no `${input:typo}`) were never about
-    devkit's two tasks; they are the conventions `.claude/rules/vscode-tasks.md` states
-    for VS Code tasks generally, and the shared block is now where nearly all of them
-    live.
-
-    The move also fixes a check that had been asserting against the wrong file for as
-    long as it existed: see `test_check_style_tasks_go_through_the_wrapper...` below.
-    """
-    raw = devkit_project.canonical_tasks_text()
-    return devkit_project.devkit_jsonc.loads(raw)
-
-
-def test_vscode_tasks_are_valid_and_labelled():
-    """Every task carries a `detail` — it is the only place a one-click action can state
-    its blast radius, which is `.claude/rules/vscode-tasks.md`'s rule for this file."""
-    tasks = _tasks_json()["tasks"]
-    assert tasks, "no tasks defined"
-    for task in tasks:
-        assert task.get("detail"), f"task {task['label']!r} has no detail"
-        assert task.get("type") == "process", f"task {task['label']!r} is not type=process"
-
-
-def test_devkit_ships_no_project_level_tasks():
-    """devkit prescribes the bar for a project task; it must also clear it.
-
-    Every action devkit needs is in the shared block and takes `--project`. Its own
-    two tasks were the last holdouts and neither survived the bar: "Test: Harness Hook
-    Tests" was generic (identical in every consumer, and duplicated a third time as
-    carameli's `--target=hook-tests`), and "Format: Check Only" ran `ruff format
-    --check` over files `lint-all.py` had just reformatted in place at
-    `scripts/lint-all.py`'s auto-fix pass — it could only ever fail on files nothing
-    had linted or edited, which is CI's job and CI already does it.
-    """
-    assert not (REPO_ROOT / ".vscode" / "tasks.json").exists(), (
-        "devkit has re-grown a project-level tasks.json; the shared block in "
-        f"{devkit_project.CANONICAL_WORKSPACE.name} is where a task belongs"
-    )
-
-
-# `lintScope` carries an empty option, and it is exempt for one real reason: it feeds
-# `devkit_project.py`, which strips empty arguments before exec (`plan_command`'s
-# `[a for a in extra if a]`, pinned by `tests/test_devkit_project.py`), so the empty
-# branch cannot reach argparse at all.
-#
-# That is worth distinguishing from the exemption this list replaced. `testSuite` was
-# carameli's picker feeding `run-tests.py` DIRECTLY, and it survived only because that
-# one script happens to use `parse_known_args`, which swallows a stray token instead of
-# rejecting it — an accident of one script, not a safe pattern. `testScope` and `e2eMode`
-# were the other two entries here; both are gone, folded into `Test: Run Suite`'s kind
-# checkboxes, where a ticked row names its argument outright and there is no empty branch
-# left to exempt.
-#
-# Listed rather than exempted silently so the deviation stays visible, and so nothing
-# joins it on the weaker justification.
-_EMPTY_OPTION_ALLOWED: frozenset[str] = frozenset({"lintScope"})
-
-
-def test_every_picker_option_supplies_a_real_token():
-    """`.claude/rules/vscode-tasks.md`'s rule for this file: a `${input:...}` picker
-    must produce one real token in every branch. An empty string does not vanish from
-    the args array — it reaches argparse as a stray positional and the task fails. This
-    is why sweep.py and new-project.py both carry a `--dry-run` that is redundant with
-    their default.
-    """
-    for spec in _tasks_json().get("inputs", []):
-        if spec.get("type") != "pickString" or spec["id"] in _EMPTY_OPTION_ALLOWED:
-            continue
-        for option in spec["options"]:
-            # A bare string option is its own value.
-            value = option if isinstance(option, str) else option["value"]
-            assert value != "", f"input {spec['id']!r} has an empty option; give it a real flag"
-
-
-def test_every_referenced_input_is_defined():
-    """A `${input:typo}` is not an error in VS Code — it prompts for an *undefined*
-    input and passes the literal through, so the task fails somewhere further down."""
-    data = _tasks_json()
-    defined = {spec["id"] for spec in data.get("inputs", [])}
-    for task in data["tasks"]:
-        for arg in task.get("args", []):
-            for referenced in re.findall(r"\$\{input:([^}]+)\}", arg):
-                assert referenced in defined, (
-                    f"task {task['label']!r} references undefined input {referenced!r}"
-                )
-
-
-def _check_tasks() -> list[dict]:
-    return [task for task in _tasks_json()["tasks"] if "--check" in task.get("args", [])]
-
-
-def test_check_style_tasks_go_through_the_wrapper_that_preserves_exit_codes():
-    """A `--check` task's whole output is its exit code, so the wrapper must pass it on.
-
-    `sweep.py --check` printed the same table the read-only sweep did; the only thing
-    distinguishing "nothing stranded" from "three checkouts need action" was 0 vs 1. Wrap
-    it in anything that returns its own status and the task goes green over stranded
-    work — a silent failure that looks exactly like success, which is the same shape as
-    the Stop-hook dispatch bug this file exists to catch.
-
-    **The block currently defines no `--check` task**, so this iterates over nothing:
-    `Ship: Check Workspace` was the only one, and it went when the sweep left the
-    quick-pick for `workspace-status.py`'s session-start line. It is kept as a forward
-    guard rather than deleted because the trap is in the *shape* of a check task, not
-    in that one — the next one added inherits the assertion instead of rediscovering
-    it. `test_notify_wrap_propagates_the_wrapped_exit_code` below asserts the property
-    itself, and does have a subject.
-    """
-    for task in _check_tasks():
-        assert task["args"][0] == "scripts/notify-wrap.py", (
-            f"task {task['label']!r} runs --check without notify-wrap.py, "
-            f"whose exit-code propagation is what makes the result readable"
-        )
-
-
-@pytest.mark.parametrize("code", [0, 1, 2])
-def test_notify_wrap_propagates_the_wrapped_exit_code(monkeypatch, code):
-    """The property the test above depends on, asserted rather than assumed.
-
-    Covers sweep.py --check's full range: 0 clean, 1 needs action, 2 blocked. `notify`
-    is stubbed because the real one raises a Windows toast per run, which a test suite
-    has no business doing — the assertion is the return value, not the notification.
-    """
-    notify_wrap = load_script("scripts/notify-wrap.py")
-    monkeypatch.setattr(notify_wrap, "notify", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["notify-wrap.py", "T", "--", sys.executable, "-c", f"raise SystemExit({code})"],
-    )
-    assert notify_wrap.main() == code
-
-
-def test_notify_wrap_runs_nothing_when_a_task_prompt_was_dismissed(monkeypatch, capsys):
-    """Every wrapped picker task's cancel lands here, so the check is worth one test.
-
-    Both halves matter and only one is obvious: nothing runs, *and* nothing is toasted.
-    A cancel is the user's own decision — notifying them of it would make dismissing a
-    picker louder than answering it. `subprocess.run` and `notify` are stubbed to raise
-    rather than to record, because a call to either is the failure itself.
-    """
-
-    def refuse(*args, **kwargs):
-        raise AssertionError("a cancelled task must neither run nor toast")
-
-    notify_wrap = load_script("scripts/notify-wrap.py")
-    monkeypatch.setattr(notify_wrap, "notify", refuse)
-    monkeypatch.setattr(notify_wrap.subprocess, "run", refuse)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "notify-wrap.py",
-            "T",
-            "--",
-            "python",
-            "scripts/plug-projects.py",
-            "${input:plugSelection}",
-        ],
-    )
-    assert notify_wrap.main() == 0
-    assert "cancelled" in capsys.readouterr().out
+def test_devkit_ships_no_vs_code_task_layer():
+    """VS Code is retired: devkit keeps no `.vscode/tasks.json` and no workspace task
+    block. A generic action is `devkit_project.py --project <name> <action>` on the CLI."""
+    assert not (REPO_ROOT / ".vscode" / "tasks.json").exists()
+    assert not (REPO_ROOT / "workspace.jsonc").exists()

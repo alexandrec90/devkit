@@ -51,7 +51,6 @@ exception is **coding-agent hooks**: none is wired, here or in any generated pro
 | Shape must not degrade | `scripts/hooks/structure_check.py` (size, complexity, fan-out, cycles, orphans, suppressions, dependencies and declared boundaries, ratcheted against `.devkit-structure.txt`; `--tighten` after a fix, `[structure]` in `.devkit.toml` to tune) |
 | Failure artifacts | `logs/lint-errors.log`, `logs/test-failures.log` |
 | Scheduled-failure reporting | `.github/workflows/scheduled-failure-issue.yml` → `scripts/report-workflow-failure.py` opens one assigned issue when `Nightly` fails, and closes it when it passes |
-| VS Code tasks | the multi-root workspace file — devkit owns no `.vscode/tasks.json`, which is the rule it prescribes |
 
 Not decoration — a utility that only runs downstream is a utility nobody tests. When
 the agent hooks were still wired, running them here surfaced four bugs that had shipped
@@ -65,9 +64,9 @@ utility it does not use.
 
 ## New workstation
 
-One line, once, per machine. There is no way to make it zero — every VS Code task in this
-workspace lives in the workspace file, which arrives with the clone this makes — but it is
-the only command a machine ever needs typed at it.
+One line, once, per machine. There is no way to make it zero — every devkit script
+arrives with the clone this makes — but it is the only command a machine ever needs typed
+at it.
 
 ```powershell
 # Dry run is the DEFAULT: prints every step, changes nothing.
@@ -77,17 +76,16 @@ the only command a machine ever needs typed at it.
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/alexandrec90/devkit/main/scripts/bootstrap-machine.ps1))) -Yes
 ```
 
-It wingets git, uv, the GitHub CLI and VS Code; installs Python with
+It wingets git, uv and the GitHub CLI; installs Python with
 `uv python install --default` rather than from python.org, whose installer ships no
 `python3.exe` and so leaves every devkit hook on the Microsoft Store alias (uv's bin
 directory goes ahead of `WindowsApps` on the user PATH); clones devkit; persists `DEVKIT_DIR`; runs
 `install-installers-schedule.py --yes` and then `installers.py maintain`, which is the
 step that actually puts every job on the machine rather than waiting for the first logon
-(the project registry is `projects.toml`, committed in the clone, so there is no
-workspace file to render); installs the two VS Code extensions the workspace tasks resolve their inputs through; and
-names anything left that only you can answer, such as an unset git identity, a `gh` that
-is not logged in, or a VS Code that was open during the installs and must be fully
-restarted — its tasks keep the PATH it launched with. Every step
+(the project registry is `projects.toml`, committed in the clone, so there is nothing
+to render); and names anything left that only you can answer, such as an unset git
+identity, a `gh` that is not logged in, or a terminal opened before the installs, which
+keeps the PATH it started with. Every step
 checks before it acts, so re-running it repairs a machine rather than doubling anything
 up. `-Path` chooses where to clone, `-SkipPrerequisites` leaves the software to whatever
 else manages it.
@@ -97,10 +95,9 @@ one installer anybody runs by hand, because it registers `devkit-installers` —
 discovers every other `scripts/install-*.py` by glob and runs its `--check`, and its
 `--yes` where that says to, daily and at every logon. An installer added next month is
 picked up with no registration step. The tray icon reports what the scheduler is doing,
-and the *Machine: Scheduled Jobs* workspace task manages the set by hand when you want to
-— tick the jobs, then **check only** (`status`), **install or repair** (`maintain`, the
-same pass the schedule runs, and what repairs a machine that has drifted) or **remove**
-(`uninstall`, which asks once more before it does anything).
+and `scripts/installers.py` manages the set by hand when you want to: **check only**
+(`status`), **install or repair** (`maintain`, the same pass the schedule runs, and what
+repairs a machine that has drifted) or **remove** (`uninstall`, dry unless `--yes`).
 
 The tray has no *Exit*: closing it removed the icon and left every job running, which is
 indistinguishable from a machine with nothing to report. `schtasks /End /TN devkit-tray`
@@ -484,7 +481,7 @@ python scripts/ledger-pool.py --unset                   # back to the checkout's
 ```
 
 With no branch tier wired, `scripts/agent-box.py` is what cuts, runs, ships and destroys a
-box on purpose. It is one verb per workspace task, and the tasks are the intended way in:
+box on purpose, one verb at a time:
 
 ```bash
 python scripts/agent-box.py spawn --project carameli --slug voicemail --agent claude
@@ -515,15 +512,9 @@ Haiku offers none (it takes no `--effort` at all) and Codex's `ultra` is offered
 Codex is the only CLI in play.
 
 ```bash
-python scripts/agent-options.py models --agent=claude   # the dropdown, as it will draw
-python scripts/agent-options.py efforts --agent=claude --model=claude:claude-opus-5
 python scripts/agent-worktree.py new --pick devkit:main --model=claude:claude-opus-5 \
     --effort=max
 ```
-
-The three workspace tasks that spend a session ask for all of this as a chain — which
-agent, then which of that CLI's models, then which of that model's levels — and a stage
-with one possible answer is never drawn. `.claude/rules/vscode-tasks.md` owns the wiring.
 
 ### A plain worktree, in the directories the agent CLIs use
 
@@ -549,8 +540,6 @@ python scripts/agent-worktree.py new --pick devkit:main --slug voicemail --agent
 python scripts/agent-worktree.py list                          # every checkout's worktrees
 python scripts/agent-worktree.py remove --picks "devkit:voicemail-0905"
 python scripts/agent-worktree.py remove --picks "devkit:spike-0905" --force keep
-python scripts/agent-worktree.py rows                          # the delete dropdown's rows, live
-python scripts/agent-worktree.py bases                         # the base-branch dropdown's rows
 ```
 
 **Not the box tier.** No port lease, no reaper, and no provisioner of its own — what a
@@ -563,12 +552,9 @@ so `/ship` and the branch policy read it exactly as they read a box's.
 `remove` refuses anything holding uncommitted paths or unpushed commits and names it;
 `--force force` discards. The local branch is deleted only with `git branch -d`, so a
 branch whose commits exist nowhere else is kept and said so, and origin's copy is never
-touched. *Agent: New Worktree* and *Agent: Delete Worktrees* are the same two verbs with
-dropdowns, and each runs its own scan when it opens — `agent-worktree.py bases` for what a
-branch can be cut from, `rows` for what can be destroyed. That matters most for the delete
-list, whose rows carry what each worktree holds (`clean and pushed`, `2 uncommitted
-path(s)`): read from a cache, that warning would be as old as the last scheduled pass, and
-it describes what the click is about to destroy.
+touched. `list` scans when it runs and says what each worktree holds (`clean and pushed`,
+`2 uncommitted path(s)`): read from a cache, that warning would be as old as the last
+scheduled pass, and it describes what `remove` is about to destroy.
 
 ### Shipping: `/land`, or an intent file
 
@@ -592,8 +578,8 @@ knows that nothing else can recover is *why* the change was made.
 
 `scripts/fix-pass.py` is what does the rest, every half hour and whenever `scripts/fix_trigger.py` sees something newly red (asked every two minutes), once `devkit.fixPass` in this
 PC's `<projects-root>/.devkit-machine.json` is switched on (`scripts/install-fix-pass-task.py` registers it, wired and
-off, and `off` means this PC sends no fixers: the ship task below still ships), or by hand through the *Agent: Fix What Is Red* task, which passes `dispatch`
-explicitly and asks only which agent. One pass, in order:
+off, and `off` means this PC sends no fixers: the ship task below still ships), or by hand
+as `python scripts/fix-pass.py --mode dispatch`. One pass, in order:
 
 The rule behind the order: anything a script can do, no session does. A fixer is sent at
 the one part that needs a change to the code, told to fix that and stop, and ends the
@@ -663,7 +649,7 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
 - **A red PR** gets a worktree on its own head branch with the gate's logs under
   `logs/gate/` and a prompt naming the failing tests; the fixer fixes, writes its
   intent, and the next pass commits and pushes to the PR. Same tier as the rows above,
-  so *Agent: Delete Worktrees* lists what it left behind; an existing Claude or Codex
+  so `agent-worktree.py list` shows what it left behind; an existing Claude or Codex
   worktree, or a live devkit box on the PR branch, is reused. The pass stamps the
   worktree with the ledger key (`logs/fix-dispatch.json`), which is how a blocked
   report finds its entry.
@@ -674,7 +660,7 @@ what the scheduled job does while the switch says `plan`. What each dispatch loo
 - **One vendored test failing in two or more consumers** is one devkit defect, and gets
   **one** session in devkit, on a fresh branch, with every consumer's logs beside it and
   the affected PRs named. This is the shape a devkit release fans out into, and the one
-  the old per-PR dropdown cost eight sessions on.
+  the old per-PR menu cost eight sessions on.
 - **A failing scheduled workflow** gets a fresh branch off the default branch in that
   project, the run's logs, and a prompt that ends with the ship intent; its PR carries
   `Closes #N` for the issue it was sent at, and the issue also closes itself when the
@@ -853,13 +839,12 @@ python scripts/preview-task.py            # menu, then bring the pick up and ope
 python scripts/preview-task.py --list     # print the menu and exit (agents: --json)
 python scripts/preview-task.py --pick 3   # take row 3 without asking
 python scripts/preview-task.py --all      # re-serve every standing preview
-python scripts/preview-task.py --rows     # the dropdown's rows, live
 ```
 
 `--all` is the post-reboot case: Docker stops every container on a restart while the
 boxes, their branches and their port leases all survive, so each preview lands back on
-the port it had before. It is a terminal tool: no VS Code task dispatches it, because a
-click asking "show me this branch" should not cost an image build (see below).
+the port it had before. Asking "show me this branch" should not cost an image build,
+which is what the frontend-only host below is for.
 
 A checkout with no compose stack contributes no rows, which keeps devkit out of a menu it
 would publish nothing for. Neither does a branch, box or PR under `agent/auto/`: that
@@ -869,21 +854,19 @@ agent session changed that I could look at", so a scheduler's work is discovery 
 declines — but a *standing* preview is never filtered out, because somebody asked for
 that one by name.
 
-#### The one-click version serves the frontend and nothing else
+#### The cheap version serves the frontend and nothing else
 
 `scripts/preview-ui-host.py` reads the same menu and answers a pick with `npm run dev`
 on the branch's frontend directory — no box, no image build, no backend — one host port
-per ticked row, each opened once it answers. That is the *Preview: Open a UI Branch*
-task, and it is the only preview task there is.
+per pick, each opened once it answers.
 
 ```bash
 python scripts/preview-ui-host.py --picks="carameli:agent/foo carameli:agent/bar"
-python scripts/preview-ui-host.py --rows      # the dropdown's rows, live
 python scripts/preview-ui-host.py --stop      # stop every host preview server
 ```
 
-The dropdown lists only checkouts declaring `[frontend] dir` in `.devkit.toml`
-(`ui_projects`), since a pick from anywhere else is an option that can only refuse. When
+It serves only checkouts declaring `[frontend] dir` in `.devkit.toml` (`ui_projects`),
+since a pick from anywhere else can only refuse. When
 the *stack* is what you need — an API, a worker, a database — that is the terminal menu
 above, or `worktree.py preview` under it.
 
@@ -1088,9 +1071,9 @@ profile in the default directory rather than another tab in that worktree.
 
 What no profile can do is put an **unelevated tab in an elevated window**: `-w` only ever
 sees windows at its own elevation. On a machine whose default profile carries
-`"elevate": true`, every window opened by hand is elevated while VS Code is not, so a tab
-spawned from a task gets a window of its own however `-w 0` is spelled. Run VS Code
-elevated, or drop `"elevate"` from the default profile — the two sides have to match, and
+`"elevate": true`, every window opened by hand is elevated while an unelevated launcher is
+not, so a tab it spawns gets a window of its own however `-w 0` is spelled. Run the
+launcher elevated, or drop `"elevate"` from the default profile — the two sides have to match, and
 the launchers print which way they are mismatched when they can see it coming.
 
 ```bash
@@ -1123,9 +1106,8 @@ new installer joins the pass by existing, and one that cannot be driven fails th
 `devkit-workspace-status` is the workspace's own health report, and it is a scheduled job
 for a reason worth knowing before you move it: `workspace-status.py` was written as a
 SessionStart line, every document here called it one, and **nothing ever ran it** — so a
-missing `uv`, an unset git identity, a stranded checkout and an uninstalled picker
-extension were all reported to nobody until the extension surfaced as `command
-'shellCommand.execute' not found` at the moment a task was clicked. It is not an agent
+missing `uv`, an unset git identity and a stranded checkout were all reported to nobody.
+It is not an agent
 hook now either, and deliberately: the pass is nine seconds, which as a per-session tax is
 the kind that gets a check disabled. `--notify` toasts only when there is something to
 report, so a healthy workspace is silent.
@@ -1238,7 +1220,7 @@ without a console window, and kills the whole process tree if the command outrun
 task. It writes `logs/collector-<name>.log` and exits with the command's own code, so 0
 must also cover "ran and deliberately did nothing". The command is read at fire time, so
 editing it needs no re-registration. Only a changed `minutes` does, and the next pass
-makes it. `collectors.py run-once <name>` (a row of the picker below) runs a scheduled
+makes it. `collectors.py run-once <name>` runs a scheduled
 collector by hand with its output in the terminal, whatever this machine is set to —
 its first, slow run before `run-here`, say — and refuses while the scheduled run is going,
 since the two would share one browser profile.
@@ -1253,10 +1235,6 @@ python scripts/collectors.py run-here            # this machine runs them all; s
 python scripts/collectors.py stop-here           # this machine must not; stops them now
 python scripts/collectors.py release ibkr_trader # forget one: neither started nor stopped
 ```
-
-The VS Code task **Machine: Ingestion Collectors** does the same from one pick. It lists
-every verb, for all collectors or for one, beside what this PC is set to now
-(`scripts/collectors_picker.py`).
 
 A machine never assigned is **hands off**, so a fresh workstation starts nothing.
 
@@ -1288,8 +1266,7 @@ any case). `python scripts/collectors.py` shows a handoff waiting in either dire
 `collector_handoff.py` holds the contract the project's command answers to.
 
 A collector without a `handoff` moves by hand, and its data stays where it was: `stop-here`
-on the old machine, then `run-here` on the new one. `move` is not a row of the picker:
-devkit keeps no list of the workspace's machines, and the picker cannot ask for a typed name.
+on the old machine, then `run-here` on the new one.
 
 While `move` exports, it holds the collectors pass lock (`PASS_LOCK` in
 `scripts/collectors.py`), waiting for it as `run-here` does. A scheduled pass meanwhile stands down rather than restarting the
@@ -1560,7 +1537,7 @@ python scripts/reap-stale.py status               # what it would stop, touching
 python scripts/install-reap-schedule.py --yes     # every 15 minutes, from the static checkout
 ```
 
-The *Machine: What Is Eating Memory* task (`scripts/memory-inventory.py`) is the
+`scripts/memory-inventory.py` is the
 read-only page in front of that: the images holding the most memory, every `claude`
 process with its role and idle time, the MCP servers, every dev server with its owner,
 and `reap-stale.py status`'s own verdict as the last section. It answers the question a
@@ -1676,7 +1653,7 @@ One failure none of these jobs can mend is WSL's own service stuck stopping — 
 Update WSL install that cannot stop it leaves it there, every `wsl` call hangs, and
 Docker's engine cannot start. The jobs run unelevated and may not end a service, so they
 detect it and name a person's step, which surfaces in the morning toast:
-**"Docker: Recover Stuck WSL"** (`docker-maint.py recover-wsl`). It ends the service
+`docker-maint.py recover-wsl`. It ends the service
 through one UAC prompt, installs the pending WSL update so the failed install has
 nothing left to retry, and restarts Docker Desktop as the signed-in user, never
 elevated. On a healthy WSL it changes nothing.
@@ -1684,9 +1661,9 @@ elevated. On a healthy WSL it changes nothing.
 A seventh job stood in that table until 2026-09-02: a nightly `git-merge-default.py`
 against a reference checkout, so its trunk arrived daily instead of as one unreviewable
 merge weeks later. It was the only scheduled job that touched a working tree a human was
-going to open, and it went when the checkout did. `git-merge-default.py` itself stays —
-it is the "Git: Merge Origin Default into Current Branch" task, which is where that
-merge is now asked for by hand rather than nightly.
+going to open, and it went when the checkout did. `git-merge-default.py` itself stays,
+for that merge asked for by hand rather than nightly:
+`python scripts/git-merge-default.py --checkout <name>`.
 
 **Every job in the table above is registered on one laptop, and that is the standing
 weakness of this tier.** `Get-ScheduledTaskInfo` on 2026-09-02 reported `devkit-release`,
@@ -1699,42 +1676,19 @@ host that is awake: a job whose work is pure GitHub API traffic (`devkit-release
 `devkit-upgrade-projects`) has no reason to be pinned to a laptop, while the ones that
 manage this machine's boxes, containers and global npm tree have no reason to leave it.
 
-## Reading the workspace task block
+## Running a project action
 
-`workspace.jsonc` is devkit's canonical copy of the multi-root workspace file, and the
-part of it worth reviewing -- every VS Code task and every `${input:...}` picker they ask
--- is the part JSONC hides best: each task's label, what it actually runs and its `detail`
-are separated by `presentation`, `icon` and `problemMatcher` blocks that never differ.
-
-`scripts/workspace-task-index.py` prints that block as tables instead.
+The generic actions -- test, lint, the Docker verbs, the per-project ones -- are
+`scripts/devkit_project.py`'s `ACTIONS`, run in a named checkout:
 
 ```bash
-python scripts/workspace-task-index.py                 # the LIVE workspace VS Code is running
-python scripts/workspace-task-index.py --canonical     # devkit's copy, i.e. this branch's proposal
-python scripts/workspace-task-index.py --format markdown --out review.md
+python scripts/devkit_project.py --project devkit lint
+python scripts/devkit_project.py --list      # the registered projects
+python scripts/devkit_project.py --check     # who implements which action
 ```
 
-Tasks are grouped by the domain in their label, one table per domain, with the wrapper
-layers (`notify-wrap.py`, `log-wrap.py`) stripped so the *Runs* column shows what
-executes. Then the pickers get a table of their own -- kind, the question asked, and every
-answer on offer with the default starred -- followed by a *Parameter | Asked by*
-cross-reference, which is where a picker no task uses shows up as `(unused)`.
-
-The parameter half is not an afterthought: a one-click task takes its blast radius from
-whatever its picker defaults to, and that default is the value furthest from the task's
-own definition in the file.
-
-The default target is the **live** file rather than the canonical one, because the
-question this answers is usually "what will the button in my window do". Pass
-`--canonical` to review a branch's proposal instead; with no live file on the machine (CI)
-it falls back to the canonical copy and says so in the header. Every run also writes the
-report under `logs/`, which is git-ignored -- a generated view of a file already in the
-repo is not a second copy anyone should have to keep true. (The file name is not spelled
-here on purpose: `test_doc_claims.py` reads a path in prose as a claim that it exists, and
-this one exists only after a run.)
-
-**"Workspace: List Tasks as a Table"** is the one-click form, and its picker chooses which
-copy. It is a report, not a gate: nothing fails, and nothing is written outside `logs/`.
+Each run is wrapped in `log-wrap.py`, so a failure leaves its artifact under that
+checkout's `logs/`.
 
 ## Authoring changes
 
@@ -1744,7 +1698,7 @@ Projects then `--pull`. Only `--push` from the one project actively authoring a 
 ## Creating a new project
 
 `scripts/new-project.py` renders a whole project from `templates/` — the harness
-seam, a Docker stack on registry-allocated ports, VS Code tasks, and a PR gate whose
+seam, a Docker stack on registry-allocated ports, and a PR gate whose
 drift check actually gates — instead of copying whichever existing repo was nearest.
 
 ```bash
@@ -1754,11 +1708,6 @@ python scripts/new-project.py sports_betting --preset data --description "..."
 # Apply. --no-remote stops before the GitHub repo is created.
 python scripts/new-project.py sports_betting --preset data --yes
 ```
-
-There is also a VS Code task, **"Project: New from devkit"**, in the shared workspace
-block (`workspace.jsonc` here, the multi-root workspace file live). A user-level
-copy in `%APPDATA%/Code/User/tasks.json` is callable from any window, which matters
-because a window opened on the project it creates sees no task list at all.
 
 | Preset | Features | Shaped like |
 | --- | --- | --- |
@@ -1805,29 +1754,21 @@ can delete.
 
 The initial commit runs the new project's pre-commit gate, so the generator builds the
 project's `.venv` with `uv sync` first. With neither `uv` nor `pre-commit` on `PATH` it
-refuses before writing anything. A tool installed after VS Code started is not on its
-`PATH` until VS Code restarts.
+refuses before writing anything. A tool installed after a terminal opened is not on its
+`PATH` until a new terminal is opened.
 
 ### Plugging a project in and out
 
 Creating one is not the only way a project enters the workspace, and deleting the
-folder is not how it leaves. The registry is the `folders` list in the workspace
-file, and **every tool here reads it** — `sweep.py`, `worktree.py`,
-`workspace-status.py`, the task dispatcher's project pickers, and the (unwired)
-worktree guard. Editing that list by hand means editing `projects.toml` and
-`workspace.jsonc` together and remembering the four pickers that mirror it; missing any
-of them leaves a project half-registered.
+folder is not how it leaves. The registry is `projects.toml`, and **every tool here
+reads it** — `sweep.py`, `worktree.py`, `workspace-status.py`, the action dispatcher,
+and the (unwired) worktree guard.
 
-`scripts/plug-projects.py` is the whole operation as a checkbox list. The VS Code task
-**"Workspace: Plug / Unplug Projects"** draws that list as a quick-pick with real
-checkboxes, scanned live when it opens, each row saying what its own tick will do; OK
-applies it and Escape changes nothing. The pick is the confirmation, so the task asks
-nothing in the terminal. A tick is an **action on that row**, not a picture of the
-registry: the extension behind the picker cannot open a list pre-ticked, so an
-untouched row says nothing and an empty pick changes nothing.
+`scripts/plug-projects.py` is the whole operation. A plug or unplug is an **action on
+that project**, not a picture of the registry: naming nothing changes nothing.
 
 ```bash
-python scripts/plug-projects.py            # the list, then tick and apply
+python scripts/plug-projects.py            # the list, then choose and apply
 python scripts/plug-projects.py --list     # read-only; works from a box too
 python scripts/plug-projects.py --plug apt-finder --unplug geo --yes
 python scripts/plug-projects.py --plug social-scraper --yes   # registered elsewhere: clone it here
@@ -1838,36 +1779,35 @@ not the workspace currently knows about it:
 
 | Source | Read from |
 | --- | --- |
-| plugged | the `folders` list of devkit's `workspace.jsonc`, minus `NOT_PROJECTS` |
+| plugged | devkit's `projects.toml`, minus `NOT_PROJECTS` |
 | on disk | directories in the projects root carrying a `.git` or a `.devkit.toml` |
 | on GitHub | `gh repo list --no-archived` |
 
 **The registry is global; the checkouts are per machine.** The registry is
 committed, so a project plugged in on one PC is registered on every PC that pulls
-devkit, and the other PCs hold no checkout of it until they choose to: the picker draws
-the project as *registered, not on this PC*, and ticking that row clones it here and
-leaves the registry alone. Two workstations holding two different subsets of the
+devkit, and the other PCs hold no checkout of it until they choose to: the list shows
+the project as *registered, not on this PC*, and plugging it clones it here and leaves
+the registry alone. Two workstations holding two different subsets of the
 registry is the ordinary state. To drop a project from one PC only, delete its
 checkout.
 
-Ticking an unplugged project clones its repo when only the repo exists, and creates
-the repo when only the folder does — so the checkbox is the whole action in both
-directions. Ticking a registered project that is on this PC retires it from the
+Plugging an unplugged project clones its repo when only the repo exists, and creates
+the repo when only the folder does — so the one flag is the whole action in both
+directions. Unplugging a registered project that is on this PC retires it from the
 registry, on every PC, and **touches nothing on disk**: it removes the entry and
 leaves the folder exactly where it was, which is what makes the toggle safe to
 experiment with. Before it unplugs, it names anything that would be stranded — a live
 box on that project, uncommitted files, unpushed commits — and refuses without
 `--force`.
 
-The write goes to the committed registry (`projects.toml`, and `workspace.jsonc` beside
-it until that file is deleted), never to the live workspace file, so the run refuses from
+The write goes to the committed registry, `projects.toml`, so the run refuses from
 a task branch and from inside a box. Its edit goes onto a task branch in a worktree of
 its own, with a ship intent, for the fix pass to ship (`hand_off_registry`). A clone onto this PC edits nothing there. Every run's failures
 land in `logs/plug-projects.log`, overwritten per run and emptied by a clean one.
 
 ### Retiring a project, and restoring it
 
-A tick in the picker is the registry and nothing else, so a project unticked there keeps
+A registry edit is the registry and nothing else, so a project dropped from it keeps
 its collector, its claimed scheduled tasks, its compose containers, and a GitHub repo
 that Dependabot keeps opening PRs on. Naming the project on the command line does the
 whole retirement on this machine, and its reverse:
@@ -1937,8 +1877,8 @@ locally; the `generated-project` job above is what exercises them.
 
 ### The local end-to-end tier: what no hosted runner can run
 
-Some tests need *this workstation*: the live workspace file, VS Code itself, a project's
-Docker stack, a browser session, a credential. CI deselects them, a session never runs the
+Some tests need *this workstation*: the checkouts beside devkit, a project's Docker
+stack, a browser session, a credential. CI deselects them, a session never runs the
 whole suite, and a box is not the static checkout -- so until this tier they ran only
 when a person happened to run the suite on `main`. Now `devkit-local-e2e`
 (`scripts/install-e2e-schedule.py`) runs what moved every half hour the PC has been idle for
@@ -1952,13 +1892,10 @@ ten minutes (an hour, for a tier that opens windows), and a red one reaches the 
 | `scripts/e2e-pass.py status` | Each project's last result. |
 | `devkit.localE2e` in `projects.toml` | **Which PC tests which project.** `hosts` takes `devkit.remoteControl`'s shape: one machine name, or `{"*": "pc-a", "carameli": "pc-b"}`. Every PC registers the job and tests only what this assigns it, so moving the job is editing this value. |
 
-devkit's own `scripts/e2e.py` runs every test marked `local`, and `needs_live_workspace`
-in `tests/support.py` applies that mark itself. Under the
-scheduler a skip there is a failure. That covers the live-workspace checks,
-`tests/test_workspace_tasks_live.py` (every picker run for real, every task cancelled,
-every path and extension present) and `tests/test_vscode_tasks_e2e.py`, which clicks
-every workspace task in an isolated VS Code. Set `DEVKIT_VSCODE_E2E_ONLY` to a
-comma-separated list of labels to drive just those.
+devkit's own `scripts/e2e.py` runs every test marked `local`; one that needs this
+machine's checkouts reads them through `live_checkouts` in `tests/support.py`, which
+fails rather than skips when it finds none. Under the scheduler a skip there is a
+failure.
 
 A project without the tier gets one from its fixer, sent the night the pass records it
 missing; to write it yourself, add its `scripts/e2e.py`. A pytest marker of its own,
@@ -2166,8 +2103,7 @@ was inverted underneath it and its expectation became the opposite of shipped po
 `enforce-capped-bash.decide` about the exact command the smoke prompts for and fails if
 the two ever disagree again, at no cost, in every PR gate.
 
-Both are reachable from **Test: Run Suite**, as the two menu rows marked `PAID`, backed
-by `scripts/hook-tests-live.py`; it prints what it is about to spend before launching
+Both run through `scripts/hook-tests-live.py` (the `test-hooks-live` action); it prints what it is about to spend before launching
 anything, and writes failures to
 `logs/hook-test-live-failures.log`. It exists because the raw `pytest` invocations above
 have two ways to cost nothing and prove nothing while exiting 0 — the CLI is not on
@@ -2178,7 +2114,7 @@ inherits, which is what makes the preflight a promise rather than a guess: with 
 model named on the command line and in the environment, no settings file, profile or
 stray shell export can put a pricier one in front of the CLI. `--model` and `--effort`
 override for one run; `--model` is refused for `both`, because one name cannot be valid
-for two CLIs. The task is scoped to devkit alone: these suites live in `tests/`, which
+for two CLIs. The action is scoped to devkit alone: these suites live in `tests/`, which
 is never vendored, so no consuming project has the file.
 
 For a local diagnostic, run `codex doctor --summary` first; it checks installation,

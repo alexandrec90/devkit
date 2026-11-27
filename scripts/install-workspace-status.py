@@ -4,11 +4,8 @@
 **The job this registers is the one that was supposed to already exist.**
 `workspace-status.py` was written as a SessionStart line and every document in the repo
 described it as one; nothing ever wired it. So for as long as it has existed it has
-reported a missing `uv`, an unset git identity, a stood-down `reconcile`, a leaked box
-and an uninstalled VS Code extension to nobody at all -- and the extension gap was
-eventually found the only way left, as `command 'shellCommand.execute' not found` at the
-moment a quick-pick task was clicked, which names a command rather than a package and so
-cannot even be searched for.
+reported a missing `uv`, an unset git identity, a stood-down `reconcile` and a leaked
+box to nobody at all.
 
 **Why a scheduled job rather than the hook it was named after.** The full pass is nine
 seconds on this workstation -- `sweep` 3.3s, the `schtasks` health query 3.1s, the box
@@ -35,9 +32,9 @@ Two things make the run legible, the same two `install-docker-prune.py` learned:
   `system32`, a scheduled task's default cwd.
 
 And `--notify` is what reaches a human between one log and the next. It toasts only when
-there is something to report, which is why it is a flag on the runner rather than
-`notify-wrap.py` around it: the wrapper toasts on every run and reads pass from fail off
-the exit code it propagates, and for a scheduled task that code **is** its `Last Result`.
+there is something to report, which is why it is a flag on the runner rather than a
+wrapper around it: a wrapper toasts on every run and reads pass from fail off the exit
+code it propagates, and for a scheduled task that code **is** its `Last Result`.
 Findings would then be reported by `schedule_health` as a broken job, every day the
 workspace had anything to say.
 
@@ -129,7 +126,7 @@ def status_arguments(python: str, root: Path = REPO_ROOT) -> str:
     """The arguments the scheduled task runs, as one string -- interpreter excluded.
 
     Nested `log-wrap.py --always <label> -- <python> workspace-status.py --notify`, the
-    same nesting a dispatched VS Code task gets from `devkit_project.plan_command`.
+    same nesting a dispatched action gets from `devkit_project.plan_command`.
 
     Every path is quoted: this workspace lives under a user profile, and profile names
     contain spaces on most machines that are not this one.

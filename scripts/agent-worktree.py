@@ -11,15 +11,11 @@ Claude session spawns, so the delete verb can see those too.
 | verb | what it does |
 | --- | --- |
 | `new` | cut `agent/<slug>-<mmdd>`, a worktree for it, and open Claude or Codex there |
-| `remove` | destroy the ticked worktrees, and their local branches when nothing is lost |
-| `rows` | print the delete dropdown's rows, from a scan, and stop |
-| `bases` | print the base-branch dropdown's rows and stop |
-| `tree-projects` | print the delete task's checkout rows, recording the scan behind them |
-| `base-projects` | print the new-worktree task's checkout rows, and record its scan |
+| `remove` | destroy the named worktrees, and their local branches when nothing is lost |
 | `list` | print the worktrees, for a terminal |
 
 **This is not the box tier and must not become it.** `worktree.py` cuts a box at
-`<workspace>/.worktrees/`, leases it a port and a `COMPOSE_PROJECT_NAME`, provisions its
+`<root>/.worktrees/`, leases it a port and a `COMPOSE_PROJECT_NAME`, provisions its
 toolchain and reaps it on a schedule; `agent-box.py spawn` is still the verb for a
 session that runs a compose stack. What is here is a plain git worktree: no lease and no
 reaper. Its toolchain is the git hook's (`worktree_env`), and `worktree.py provision`'s
@@ -32,25 +28,9 @@ does not configure their server or allocate a port lease.
 The one thing shared is how a terminal tab is opened, which is `agent_tabs.open_agent` --
 two copies of that would be two answers to "which window does the agent open in".
 
-The menus are live, and there is no file under them. Both are `shellCommand.execute`
-running `rows` or `bases` at the moment the picker opens, which is a scan of
-`git worktree list --porcelain` per checkout, fanned out. What that replaced was a JSON
-file only `worktree.reconcile` wrote, so a worktree cut a minute ago was not in the
-delete list and one destroyed a minute ago still was -- and `new` and `remove` each had
-to rewrite it as they finished to make the common case bearable. Nothing rewrites
-anything now: a worktree is in the list because it exists, which is also why
-`fix-prs.py` can cut into this tier without knowing this file exists.
-
-**Each dropdown asks which checkouts first, and that costs no second scan.**
-`tree-projects` and `base-projects` are the first stage, drawing one row per checkout
-with what it holds. `base-projects` runs the branch fan-out once and records it through
-`picker_scan`; the second stage, `bases --checkouts`, filters that record by the token
-it was handed. `tree-projects` only counts, from `git worktree list`, and records
-nothing, so `rows --checkouts` always reads the ticked checkouts' worktrees live: the
-`git status` each one costs is paid for what was ticked, never for the whole machine.
-Either way, a token naming no write is a rescan of what was ticked, so the list a person
-picks from is never older than the click that opened it. See
-`scripts/picker_scan.py` for why the token is the whole design.
+There is no file under `list` or `remove`: both read `git worktree list --porcelain` per
+checkout, fanned out, at the moment they run. A worktree is listed because it exists,
+which is also why `fix-prs.py` can cut into this tier without knowing this file exists.
 
 Every decision is in `scripts/agent_worktrees.py`, pure and separately tested; what is
 here spawns git and terminals, and takes a runner so the tests do not.
@@ -74,49 +54,27 @@ import agent_worktrees as aw
 import box_teardown
 import devkit_project
 import fix_reports
-import picker_rows
-import picker_scan
 import sweep
 import task_branch as tb
-import task_input
 import tree_provision
-import worktree
 
 # How many checkouts `scan` reads at once. A worktree scan is four `git` calls per
-# checkout and a `git status` per worktree found, which is seconds in a row; the picker
-# runs it while somebody watches.
+# checkout and a `git status` per worktree found.
 SCAN_WORKERS = 8
 
 # How many `git status` calls run at once, across every checkout. Wider than `SCAN_WORKERS`
 # because the wait is on the disk and not on a core: 96 cold trees took 25s at a width of
 # 8 and 8s at 32, and warm ones 2.1s at any width. Shared, because eight checkouts with a
-# pool each would be a hundred git processes on eight cores for one dropdown.
+# pool each would be a hundred git processes on eight cores for one listing.
 STATUS_WORKERS = 24
 STATUS_SLOTS = threading.BoundedSemaphore(STATUS_WORKERS)
 # `--no-optional-locks`: a bare `git status` refreshes the index and takes `index.lock`
-# to do it, in trees a live session may be committing from. A dropdown opening must not
-# be able to fail somebody's `git add`.
+# to do it, in trees a live session may be committing from. A listing must not be able
+# to fail somebody's `git add`.
 STATUS = ("--no-optional-locks", "status", "--porcelain")
 
-# What the `new` picker offers. `none` is CLI-only and deliberately not a row: the task's
-# whole purpose is opening an agent, and a worktree with nothing in it is `git worktree
-# add`, which needs no dropdown.
+# What `new` can open. `none` cuts the worktree and opens nothing.
 AGENTS = ("claude", "codex", "none")
-
-# What `picker_scan` files each dropdown's checkout-stage write under. Two names for
-# one scan on purpose: the two dropdowns are separate tasks, each clicked on its own, so
-# each records the half it will be asked for rather than sharing a write neither click
-# can be sure the other made.
-SCAN_NAMES = {"trees": "worktree-trees", "bases": "worktree-bases"}
-HALVES = tuple(SCAN_NAMES)
-
-# A `scan` half: the trees, listed but not read -- no `git status`, no ahead count, so
-# their zeros mean "not asked". Only the delete task's checkout stage takes it, to count.
-LISTED = "listed"
-
-# The token the delete task's checkout stage hands on. Empty names no write, so stage
-# two always rescans what was ticked (see `draw`).
-UNRECORDED = ""
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -127,27 +85,12 @@ EXIT_USAGE = 2
 GH_TIMEOUT = 20
 
 
-def listed_trees(project_dir: Path) -> list[aw.Tree]:
-    """This checkout's agent-CLI worktrees, counted but not read.
-
-    One `git worktree list` and nothing per worktree, so `dirty` and `unpushed` are
-    zero because nobody asked, not because the tree is clean: never draw a row from it.
-    """
-    listed = sweep.git_for(project_dir)("worktree", "list", "--porcelain")
-    if listed.returncode != 0:
-        return []
-    return [
-        aw.Tree(name, path, branch)
-        for name, path, branch in aw.nested(project_dir, listed.stdout or "")
-    ]
-
-
 def trees_for(project_dir: Path) -> list[aw.Tree]:
     """Every agent-CLI worktree of this checkout, in any tier, with what it holds.
 
-    The two counts are what the delete dropdown warns with, so they are read here rather
-    than at removal time: a row that says `clean and pushed` is the difference between a
-    checkbox list and a guess.
+    The two counts are what `list` and `remove` warn with, so they are read here rather
+    than left to `git worktree remove`: an entry that says `clean and pushed` is the
+    difference between a removal and a guess.
     """
     git = sweep.git_for(project_dir)
     listed = git("worktree", "list", "--porcelain")
@@ -172,7 +115,7 @@ def trees_for(project_dir: Path) -> list[aw.Tree]:
         return aw.Tree(name, path, branch, dirty, unpushed)
 
     # Fanned out for `scan`'s reason, one level in: a checkout with eight worktrees is
-    # eight `git status` calls, and this runs while somebody watches a quick-pick open.
+    # eight `git status` calls.
     with futures.ThreadPoolExecutor(max_workers=min(STATUS_WORKERS, len(nested))) as pool:
         return list(pool.map(read, nested))
 
@@ -189,10 +132,10 @@ AHEAD_OF_UPSTREAM = re.compile(r"\[ahead (\d+)")
 def ahead_counts(git, default: str) -> dict[str, int] | None:
     """`unpushed_count` for every local branch at once; None when this git cannot say.
 
-    The picker paid two `rev-list` calls and a `symbolic-ref` per worktree, which across
-    the machine's 257 worktrees was 770 of the 1050 git processes behind a 25-second
-    open: a `for-each-ref` per checkout answers all of them. `%(ahead-behind:)` is new
-    in git 2.41, so an older git fails the call and `trees_for` counts per worktree.
+    Two `rev-list` calls and a `symbolic-ref` per worktree, across the machine's 257
+    worktrees, was 770 of the 1050 git processes behind a 25-second listing: a
+    `for-each-ref` per checkout answers all of them. `%(ahead-behind:)` is new in git
+    2.41, so an older git fails the call and `trees_for` counts per worktree.
     """
     done = git("for-each-ref", AHEAD_FORMAT.format(default=default), "refs/heads")
     if done.returncode != 0:
@@ -294,86 +237,26 @@ def prior_work(source: Path, names: list[str], runner) -> list[str]:
     return lines
 
 
-def recent_bases(project_dir: Path) -> list[tuple[str, str]]:
-    """`(branch, note)` for origin's branches, most recently committed first.
+def scan(root: Path) -> dict[str, list[aw.Tree]]:
+    """Every registered checkout under `root`, and its worktrees.
 
-    Remote branches rather than local ones, because the base is a *start point* and a
-    stale local `main` is the one start point nobody means. The default branch is pinned
-    first whatever its date -- it is the answer nine times out of ten, and a dropdown
-    that buries it under yesterday's task branches is asking a question it already knows
-    the answer to.
-    """
-    git = sweep.git_for(project_dir)
-    default = tb.detect_default_branch(git)
-    done = git(
-        "for-each-ref",
-        "--sort=-committerdate",
-        "--format=%(refname:lstrip=3)%09%(committerdate:relative)",
-        "refs/remotes/origin",
-    )
-    if done.returncode != 0:
-        return [(default, "the default branch")]
-    rows = [(default, "the default branch")]
-    for line in (done.stdout or "").splitlines():
-        name, _, when = line.partition("\t")
-        if name and name not in ("HEAD", default) and len(rows) <= aw.BASE_LIMIT:
-            rows.append((name, f"last commit {when}"))
-    return rows
-
-
-def scan(
-    workspace: Path, projects: list[str] | None = None, halves: tuple[str, ...] = HALVES
-) -> tuple[dict[str, list[aw.Tree]], dict[str, list[tuple[str, str]]]]:
-    """Every registered checkout's worktrees and base branches.
-
-    Every checkout is listed even when it has neither, because the reader's question is
+    Every checkout is listed even when it has none, because the reader's question is
     "where are my worktrees", and one that silently drops out when it is empty is
     indistinguishable from one the scan could not reach.
 
-    Concurrent because both dropdowns now run this when they open rather than reading a
-    file a scheduled pass wrote. The per-checkout calls share nothing and both helpers
-    answer empty rather than raising, so the pool cannot fail where the loop would not.
-
-    `projects` narrows it to the checkouts a caller already knows it wants -- the second
-    picker stage, when the scan its first stage recorded is not the one it was handed.
-    A parameter rather than a filter on the result, because each name in it costs a
-    `git worktree list` and a `for-each-ref`: discarding those afterwards would spend
-    the whole fan-out the narrowing exists to avoid. Names the registry does not know
-    are dropped, so a stale pick cannot reach the filesystem as a path.
-
-    `halves` skips the half a picker will not draw, which is the same argument one level
-    up: the base picker drew from `recent_bases` alone and still paid a `git status` in
-    every worktree on the machine, which was nearly all of its seven seconds. A skipped
-    half comes back as an empty list per checkout; `LISTED` in place of `"trees"` lists
-    the worktrees without reading them.
+    Concurrent because the per-checkout calls share nothing and `trees_for` answers empty
+    rather than raising, so the pool cannot fail where the loop would not.
     """
-    # The registry names the projects; `workspace` only says where they sit (deprecated).
-    root = workspace.parent
     names = [name for name in devkit_project.known_projects() if (root / name).is_dir()]
-    if projects is not None:
-        wanted = set(projects)
-        names = [name for name in names if name in wanted]
     if not names:
-        return {}, {}
-
-    def one(name: str) -> tuple[list[aw.Tree], list[tuple[str, str]]]:
-        trees: list[aw.Tree] = []
-        if "trees" in halves:
-            trees = trees_for(root / name)
-        elif LISTED in halves:
-            trees = listed_trees(root / name)
-        return trees, recent_bases(root / name) if "bases" in halves else []
-
+        return {}
     with futures.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(names))) as pool:
-        found = list(pool.map(one, names))
-    return (
-        {name: trees for name, (trees, _) in zip(names, found, strict=True)},
-        {name: bases for name, (_, bases) in zip(names, found, strict=True)},
-    )
+        found = list(pool.map(lambda name: trees_for(root / name), names))
+    return dict(zip(names, found, strict=True))
 
 
 def create(
-    project: str, workspace: Path, slug: str, base: str, launch: agent_models.Launch, runner
+    project: str, root: Path, slug: str, base: str, launch: agent_models.Launch, runner
 ) -> int:
     """Cut the branch and the worktree, then hand it to the agent.
 
@@ -382,7 +265,6 @@ def create(
     branch's upstream, so a later bare `git push` lands the task's commits on the base
     branch, and a base that was not fetched is however stale this checkout last was.
     """
-    root = workspace.parent
     source = devkit_project.resolve_project(project, devkit_project.known_projects(), root)
     git = sweep.git_for(source)
     runner(["git", "-C", str(source), "fetch", "--quiet", "origin"], check=False)
@@ -429,7 +311,7 @@ def remove_one(project: str, source: Path, tree: aw.Tree, forced: bool, runner) 
     verdict, reason = aw.removal_decision(tree, forced)
     if verdict == aw.KEEP:
         print(f"  kept {tree.name}: {reason}")
-        print("    tick 'Force', or run this verb with --force, to discard it")
+        print("    run this verb with `--force force` to discard it")
         return EXIT_FAILED
     argv = ["git", "-C", str(source), "worktree", "remove", tree.path]
     if verdict == aw.FORCE:
@@ -459,23 +341,22 @@ def remove_one(project: str, source: Path, tree: aw.Tree, forced: bool, runner) 
     return EXIT_OK
 
 
-def remove(picks: list[tuple[str, str]], workspace: Path, forced: bool, runner) -> int:
-    """Every ticked worktree in turn. The worst exit code, so one refusal is still reported."""
-    root = workspace.parent
+def remove(picks: list[tuple[str, str]], root: Path, forced: bool, runner) -> int:
+    """Every named worktree in turn. The worst exit code, so one refusal is still reported."""
     projects = devkit_project.known_projects()
     worst = EXIT_OK
     for project, name in picks:
         source = devkit_project.resolve_project(project, projects, root)
         found = next((tree for tree in trees_for(source) if tree.name == name), None)
         if found is None:
-            print(f"  {project}: no worktree called {name} (the menu was stale)")
+            print(f"  {project}: no worktree called {name}")
             continue
         worst = max(worst, remove_one(project, source, found, forced, runner))
     return worst
 
 
 def render(trees: dict[str, list[aw.Tree]]) -> str:
-    """`list`, for the terminal. The same rows the delete dropdown would draw."""
+    """`list`, for the terminal: the fullest checkout first."""
     lines = []
     for project in sorted(trees, key=lambda name: (-len(trees[name]), name)):
         lines.append(f"{project}: {len(trees[project]) or 'no'} worktree(s)")
@@ -496,8 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
     # `remove` takes neither: destroying a worktree opens no session.
     agent_models.add_arguments(new)
 
-    gone = sub.add_parser("remove", help="destroy the ticked worktrees")
-    gone.add_argument("--picks", default="", help="ticked rows joined by a space")
+    gone = sub.add_parser("remove", help="destroy the named worktrees")
+    gone.add_argument(
+        "--picks",
+        default="",
+        help=f"`<project>{aw.PICK_SEP}<worktree>` tokens joined by a space, as `list` names them",
+    )
     gone.add_argument(
         "--force",
         default="keep",
@@ -505,160 +390,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="`force` discards uncommitted and unpushed work; `keep` refuses to",
     )
 
-    again = sub.add_parser("rows", help="print the delete dropdown's rows and stop")
-    from_refs = sub.add_parser("bases", help="print the base-branch dropdown's rows and stop")
-    tree_scope = sub.add_parser(
-        "tree-projects", help="print the delete task's CHECKOUT rows and stop"
-    )
-    base_scope = sub.add_parser(
-        "base-projects", help="print the new-worktree task's CHECKOUT rows and stop"
-    )
     shown = sub.add_parser("list", help="print the worktrees and stop")
-    # Wherever a checkout stage can precede one: the two row verbs read it to narrow,
-    # and `new`/`remove` read it to notice the two stages disagreeing.
-    for one in (new, gone, again, from_refs):
-        one.add_argument(
-            "--checkouts",
-            default="",
-            help=(
-                f"ticked checkouts, `<project>{picker_scan.SEP}<scan token>` joined by "
-                f"`{picker_scan.LIST_SEP}` -- what the checkout picker returns"
-            ),
-        )
-    for one in (new, gone, again, from_refs, tree_scope, base_scope, shown):
-        one.add_argument("--root", type=Path, default=None, help="the projects root")
-        one.add_argument("--workspace", type=Path, default=None, help=worktree.WORKSPACE_HELP)
+    for one in (new, gone, shown):
+        # `--workspace` is accepted and read only as the root's alias: scheduled jobs and
+        # old command lines still pass it.
+        sweep.projects_root.add_flags(one)
     return parser
 
 
-# The four verbs that draw a quick-pick, and which half of one scan each reads.
-# `draw` dispatches on this rather than `main` carrying four branches: they differ in
-# two values and nothing else, and `main` is already the widest function in the file.
-PICKER_VERBS = {
-    "rows": "trees",
-    "bases": "bases",
-    "tree-projects": "trees",
-    "base-projects": "bases",
-}
-
-
-def draw(workspace: Path, verb: str, checkouts: str) -> list[str]:
-    """The rows for whichever picker verb was asked for.
-
-    The `-projects` pair is stage one: it runs the fan-out, records it under the half's
-    own scan name, and draws a checkout per row. The bare pair is stage two, which
-    filters that record. Both are in one function because "which half" is the only
-    thing that varies across the four, and the caller's stdout IS the quick-pick.
-    """
-    half = PICKER_VERBS[verb]
-    if not verb.endswith("-projects"):
-        return picked_rows(workspace, checkouts, half)
-    if half == "trees":
-        # Counted, not read, and recorded as nothing. The row says how many worktrees a
-        # checkout has, which `git worktree list` answers alone, so stage one no longer
-        # pays a `git status` in every worktree on the machine (nine seconds across 257)
-        # for rows only stage two draws. A row built from this scan would call every
-        # worktree clean and pushed, so none is written: the empty token names no write,
-        # and stage two reads the ticked checkouts live -- `picker_scan`'s miss, on purpose.
-        trees, _ = scan(workspace, halves=(LISTED,))
-        return aw.tree_project_rows(trees, UNRECORDED)
-    _, bases = scan(workspace, halves=(half,))
-    return aw.base_project_rows(bases, picker_scan.write(SCAN_NAMES[half], aw.base_entries(bases)))
-
-
-def picked_rows(workspace: Path, checkouts: str, half: str) -> list[str]:
-    """Stage two for either dropdown: `half` is "trees" or "bases".
-
-    One function for both because the two differ only in which half of the scan they
-    read and which builder renders it -- and the part worth having in one place is the
-    token check, which is the whole safety property. A token that names no write is a
-    miss, and a miss rescans the ticked checkouts rather than serving anything older;
-    see `picker_scan`.
-
-    An empty `checkouts` is the verb typed by hand with no first stage in front of it,
-    and answers with the whole machine the way it did before there was one.
-    """
-    projects, token = picker_scan.parse_projects(checkouts)
-    if projects:
-        cached = picker_scan.read(SCAN_NAMES[half], token)
-        if cached is not None:
-            return picker_scan.select(cached, projects) or aw.empty_rows(half)
-    # A miss, or a verb typed by hand with no first stage in front of it. `projects`
-    # narrows the rescan in the first case and is empty in the second, which `scan`
-    # reads as "every checkout" -- the answer this verb gave before there was a stage.
-    found = scan(workspace, projects or None, (half,))
-    return aw.tree_rows(found[0]) if half == "trees" else aw.base_rows(found[1])
-
-
-def strayed_picks(picks: list[tuple[str, str]], checkouts: str) -> list[str]:
-    """Ticked rows whose checkout the first stage did not return.
-
-    Nothing in the two stages can produce one: stage two draws only the checkouts stage
-    one returned. So a stray is evidence the chain itself misfired -- the extension
-    resolves `${input:...}` from the value it recorded when that input LAST ran, so an
-    input order that stopped putting the checkout stage first would quietly filter by
-    the previous click's checkouts. On the delete task that would mean offering
-    somebody a list of worktrees they did not ask to see, which is the wrong place in
-    this repo to be quietly wrong.
-    """
-    ticked, _ = picker_scan.parse_projects(checkouts)
-    if not ticked:
-        return []
-    return sorted({project for project, _name in picks} - set(ticked))
-
-
-def stray_report(strayed: list[str], noun: str) -> str:
-    """What to print when a pick names a checkout the first stage did not."""
-    return (
-        f"agent-worktree: ticked {noun} from {', '.join(strayed)}, which the checkout "
-        "picker did not return -- the two picker stages disagree, so nothing was done. "
-        "See `.claude/rules/vscode-tasks.md` on the order the inputs have to appear in."
-    )
-
-
 def main(argv: list[str] | None = None, runner=subprocess.run) -> int:
-    raw = sys.argv[1:] if argv is None else argv
-    # Ahead of `argparse`, per `.claude/rules/vscode-tasks.md`: a dismissed picker that
-    # reached the parser would be a usage error, which is a red icon, a toast and a
-    # `logs/` artifact for a run the user called off.
-    dismissed = task_input.cancelled_inputs(raw)
-    if dismissed:
-        print(task_input.cancel_report("agent-worktree", dismissed))
-        return EXIT_OK
-
-    args = build_parser().parse_args(raw)
-    # Only its directory is read; no workspace file need exist.
-    workspace = worktree.workspace_from(args.root, args.workspace)
+    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    root = sweep.projects_root.from_flags(args.root, args.workspace).resolve()
 
     try:
-        if args.verb in PICKER_VERBS:
-            # `getattr` because the two stage-ONE verbs take no `--checkouts`: they are
-            # what a checkout stage is, so there is nothing in front of them to narrow by.
-            picker_rows.emit(draw(workspace, args.verb, getattr(args, "checkouts", "")))
-            return EXIT_OK
         if args.verb == "list":
-            print(render(scan(workspace)[0]))
+            print(render(scan(root)))
             return EXIT_OK
         if args.verb == "new":
             pick = aw.parse_pick(args.pick)
             if pick is None:
-                print("agent-worktree: no checkout picked -- nothing to do")
+                print("agent-worktree: no checkout named -- nothing to do")
                 return EXIT_OK
-            strayed = strayed_picks([pick], args.checkouts)
-            if strayed:
-                print(stray_report(strayed, "a base branch"), file=sys.stderr)
-                return EXIT_USAGE
             launch = agent_models.Launch.parse(args.agent, args.model, args.effort)
-            return create(pick[0], workspace, args.slug, pick[1], launch, runner)
+            return create(pick[0], root, args.slug, pick[1], launch, runner)
         picks = [p for p in (aw.parse_pick(t) for t in aw.split_picks(args.picks)) if p]
         if not picks:
-            print("agent-worktree: nothing ticked -- nothing to do")
+            print("agent-worktree: nothing named -- nothing to do")
             return EXIT_OK
-        strayed = strayed_picks(picks, args.checkouts)
-        if strayed:
-            print(stray_report(strayed, "worktrees"), file=sys.stderr)
-            return EXIT_USAGE
-        return remove(picks, workspace, args.force == "force", runner)
+        return remove(picks, root, args.force == "force", runner)
     except (devkit_project.ProjectError, devkit_project.project_registry.RegistryError) as exc:
         print(f"agent-worktree: {exc}", file=sys.stderr)
         return EXIT_USAGE

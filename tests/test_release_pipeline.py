@@ -614,22 +614,9 @@ def test_the_release_regates_right_after_confirming_the_tag():
     )
 
 
-def test_backing_out_of_the_consumer_checklist_cuts_no_release(capsys):
-    """The other half of the pair in `upgrade-project`: there an escaped picker is a
-    graceful no-op, because the picker IS the subject. Here the click is the whole
-    release, so escaping refuses before anything is tagged -- and it must refuse before
-    `gh` is even probed, or a machine without it would report the wrong reason."""
-    assert rp.main(["--projects=${input:adoptProjects}"]) == 1
-    err = capsys.readouterr().err
-    assert "nothing was picked" in err
-    # `--no-adopt` is the spelling for "release, but adopt nowhere"; the refusal has to
-    # name it, or the reader's only way out of the loop is to tick a box they don't want.
-    assert "--no-adopt" in err
-
-
-def test_the_projects_flag_is_the_checklists_own_spelling():
-    """The task passes `--projects=${input:adoptProjects}`, so the flag has to exist,
-    default to every consumer, and read through the same splitter the positional does."""
+def test_the_projects_flag_reads_through_upgrade_projects_splitter():
+    """`--projects` defaults to every consumer and reads through the same splitter
+    `upgrade-project.py`'s positional does, so the two cannot disagree on a list."""
     assert rp.build_parser().parse_args([]).projects == ""
     parsed = rp.build_parser().parse_args(["--projects=carameli,data-lake"])
     assert rp.upgrade_module().project_selection(parsed.projects) == ["carameli", "data-lake"]

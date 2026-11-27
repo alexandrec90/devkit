@@ -2139,12 +2139,8 @@ def scheduled_row(target: Target, held: str) -> tuple[str, str, str]:
 
 VERBS = {"run-here": config.RUN, "stop-here": config.STOP, "release": None}
 
-# The value of the picker row that runs nothing (`picker_rows.NOTHING`): drawn when no
-# collector is declared, so a click on it has to be a quiet no-op, not a usage error.
-NOTHING = "none"
-
 # One scheduled collector, run by hand in this terminal. Not one of `VERBS`: it assigns
-# nothing, so the picker offers it per collector and never for "all".
+# nothing, so it takes one collector by name and never "all".
 ONCE = "run-once"
 
 # The verbs that act on exactly one collector, named.
@@ -2155,34 +2151,20 @@ SINGLE = ("fire", ONCE)
 MOVE = "move"
 
 
-def split_pick(argv: Sequence[str]) -> list[str]:
-    """`run-here:ibkr_trader` -> `run-here ibkr_trader`.
-
-    The VS Code task's picker hands its pick over as one argument, and one argument is
-    all the dispatcher can pass through; typed at a terminal the two words arrive apart
-    and nothing changes.
-    """
-    if not argv or ":" not in argv[0]:
-        return list(argv)
-    verb, _, project = argv[0].partition(":")
-    return [verb, *([project] if project else []), *argv[1:]]
-
-
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "mode",
         nargs="?",
         default="status",
-        choices=("status", "maintain", MOVE, *SINGLE, *VERBS, NOTHING),
+        choices=("status", "maintain", MOVE, *SINGLE, *VERBS),
         help=(
             "status: report only (default). maintain: what the scheduler runs. run-here / "
             "stop-here: assign this machine, then act on it now. release: forget. "
             "move NAME.. --to HOST: hand them, data and all, to HOST, which takes them over "
             "on its next pass. "
             "fire NAME: run one scheduled collector once (what its own task runs). "
-            "run-once NAME: the same, by hand, its output in this terminal. "
-            "Also takes `<mode>:<project>`, the VS Code picker's spelling."
+            "run-once NAME: the same, by hand, its output in this terminal."
         ),
     )
     parser.add_argument("projects", nargs="*", help="collectors to assign (default: all)")
@@ -2190,7 +2172,7 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--to", help="move: the machine to hand them to, by its hostname (any case)"
     )
     parser.add_argument("--devkit", type=Path, default=REPO_ROOT, help=argparse.SUPPRESS)
-    args = parser.parse_args(split_pick(sys.argv[1:] if argv is None else argv))
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if args.to is not None and args.mode != MOVE:
         parser.error("--to is for `move` only")
     return args
@@ -2273,7 +2255,7 @@ def run_once(
     run: collector_tasks.Runner,
     streamer: collector_tasks.Streamer | None = None,
 ) -> int:
-    """`run-once <name>`: the VS Code task's "run it now", whatever this machine's
+    """`run-once <name>`: "run it now", by hand, whatever this machine's
     assignment -- a first run before `run-here` is the case it exists for.
 
     Refused while the scheduled task is running, for the reason `collector_tasks.running`
@@ -2353,9 +2335,6 @@ def main(
     handoffs: handoff.Handoff | None = None,
 ) -> int:
     args = parse_args(argv)
-    if args.mode == NOTHING:
-        print("collectors: nothing picked -- no collector is declared, so nothing was done")
-        return 0
     base = config.home(args.devkit.expanduser().resolve())
     now = _dt.datetime.now()
     collector_tasks.keep_docker_on_path()

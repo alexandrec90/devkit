@@ -1254,7 +1254,7 @@ def detect(events: Iterable[Event], targeted_runner: bool = False) -> list[tuple
 SETTLED_BY_THE_SESSION = frozenset({"user-frustration"})
 DEFAULT_BRANCHES = frozenset({"main", "master"})
 # The vendored rule that takes the suite off a session. A project without it -- one held
-# back from adoption (workspace.jsonc `devkit.onHold`), or never adopted -- asked for no
+# back from adoption (`devkit.onHold`), or never adopted -- asked for no
 # targeted run, so a whole one there is no friction: 0a4b17f3 was a data-lake session
 # whose CLAUDE.md names `run-tests.py` as "the suite", filed as if it had been told not to.
 SCOPE_RULE = ".claude/rules/session-scope.md"

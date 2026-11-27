@@ -2711,20 +2711,13 @@ def test_parse_args_defaults_to_read_only_status():
     assert collectors.parse_args(["run-here", "a", "b"]).projects == ["a", "b"]
 
 
-def test_split_pick_takes_the_pickers_one_argument_apart():
-    assert collectors.split_pick(["run-here:ibkr_trader"]) == ["run-here", "ibkr_trader"]
-    assert collectors.split_pick(["stop-here:"]) == ["stop-here"]
-    assert collectors.split_pick(["run-here", "a"]) == ["run-here", "a"]
-    assert collectors.split_pick([]) == []
-    assert collectors.parse_args(["release:sports_betting"]).projects == ["sports_betting"]
-
-
-def test_the_picker_row_that_runs_nothing_runs_nothing(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("DEVKIT_DIR", str(tmp_path))
-    docker = FakeDocker([])
-    assert collectors.main([collectors.NOTHING], docker=docker) == 0
-    assert docker.calls == [] and not (tmp_path / collectors.ARTIFACT).exists()
-    assert "nothing picked" in capsys.readouterr().out
+def test_the_pickers_joined_spellings_are_no_longer_modes():
+    """`<mode>:<project>` and the `none` row were a VS Code picker's; with the task layer
+    gone they are usage errors, never a silent no-op or a guessed split."""
+    for argv in (["release:sports_betting"], ["none"]):
+        with pytest.raises(SystemExit) as exc:
+            collectors.parse_args(argv)
+        assert exc.value.code == 2
 
 
 def test_reassign_refuses_a_typo_without_writing(tmp_path):
@@ -2951,7 +2944,9 @@ def test_run_once_runs_by_hand_whatever_this_machine_is_set_to(tmp_path, monkeyp
         seen.append((list(argv)[1:], Path(cwd).name))
         return 0
 
-    assert collectors.main(["run-once:social-scraper"], run=FakeSchtasks(), streamer=streamer) == 0
+    assert (
+        collectors.main(["run-once", "social-scraper"], run=FakeSchtasks(), streamer=streamer) == 0
+    )
     assert seen == [(["run", "social-scraper", "scrape"], "social-scraper")]
     assert "social-scraper exited 0" in capsys.readouterr().out
 

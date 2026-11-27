@@ -17,7 +17,6 @@ it does today. This tier carries only what neither of those can.
 | [`.claude/rules/local-e2e.md`](.claude/rules/local-e2e.md) | tests only this workstation can run |
 | [`.claude/rules/task-scripts.md`](.claude/rules/task-scripts.md) | what a script a task runs starts as |
 | [`.claude/fixer.md`](.claude/fixer.md) | a fix-pass session, where it differs from the rules above |
-| [`.claude/rules/vscode-tasks.md`](.claude/rules/vscode-tasks.md) | the workspace task block and its dispatcher |
 | [`scripts/CLAUDE.md`](scripts/CLAUDE.md) | vendoring, the two channels, boxes, scheduled jobs, loading a module by path |
 
 The first six are vendored *out* of here, so **point at them, never restate them**:

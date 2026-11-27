@@ -17,7 +17,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from support import LIVE_WORKSPACE, REPO_ROOT, load_script, needs_live_workspace, sweep
+import pytest
+from support import REPO_ROOT, live_checkouts, load_script, local, sweep
 
 ws = load_script("scripts/workspace-status.py")
 harness_triage = load_script("scripts/harness_triage.py")
@@ -136,25 +137,32 @@ def test_a_repo_with_no_tags_reports_nothing(tmp_path):
 
 def test_an_empty_registry_is_silent_and_successful(tmp_path, monkeypatch, capsys):
     """Nothing registered is simply nothing to report, which is not an error."""
-    monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", tmp_path / "nope.code-workspace")
+    monkeypatch.setattr(ws, "ROOT", tmp_path)
     monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: [])
     assert ws.main([]) == 0
     assert capsys.readouterr().out == ""
 
 
-def test_an_absent_workspace_file_still_reports(tmp_path, monkeypatch, capsys):
-    """The pass used to stop at a missing live file; only its directory is read now."""
+def test_a_root_with_no_workspace_file_still_reports(tmp_path, monkeypatch, capsys):
+    """The pass used to stop at a missing live file; it reads the root and the registry."""
     _workspace_reporting(monkeypatch, tmp_path, "[workspace] something to say")
     monkeypatch.setattr(ws, "SOURCE_ROOT", tmp_path)
-    (tmp_path / "w.code-workspace").unlink()
+    assert not (tmp_path / ws.sweep.WORKSPACE_FILE_NAME).exists()
     assert ws.main([]) == 0
     assert "something to say" in capsys.readouterr().out
 
 
+def test_the_pass_sweeps_the_root_it_resolved(tmp_path, monkeypatch):
+    """`ROOT`, not a workspace file's directory, is what the sweep is pointed at."""
+    seen = []
+    _workspace_reporting(monkeypatch, tmp_path, "")
+    monkeypatch.setattr(ws.sweep, "sweep", lambda root, *a, **k: seen.append(root) or [])
+    assert ws.main([]) == 0
+    assert seen == [tmp_path]
+
+
 def _crashing(monkeypatch, tmp_path) -> None:
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
-    monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
+    monkeypatch.setattr(ws, "ROOT", tmp_path)
     monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: ["proj"])
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
 
@@ -202,9 +210,7 @@ def _workspace_reporting(monkeypatch, tmp_path, message: str) -> None:
     workstation's menu from whatever `gh` said. That dropdown scans when it opens now, so
     the pass has no side effect left to contain.
     """
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
-    monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
+    monkeypatch.setattr(ws, "ROOT", tmp_path)
     monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: ["proj"])
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: [])
     monkeypatch.setattr(ws, "render", lambda *a, **k: message)
@@ -253,7 +259,7 @@ def test_the_daily_pass_moves_this_pcs_settings_into_the_machine_file(
     monkeypatch, tmp_path, capsys
 ):
     _workspace_reporting(monkeypatch, tmp_path, "")
-    workspace = tmp_path / "w.code-workspace"
+    workspace = tmp_path / ws.sweep.WORKSPACE_FILE_NAME
     workspace.write_text(
         '{"folders": [{"path": "proj"}], "settings": {"devkit.fixPass": "plan"}}',
         encoding="utf-8",
@@ -628,8 +634,8 @@ def test_the_preview_line_reaches_the_rendered_message():
 def test_this_pass_writes_no_dropdown_file():
     """It briefly was the plug checklist's writer, because that dropdown loaded a cached
     file and `worktree.reconcile` -- the previous writer -- had been stood down. The
-    dropdown runs `plug-projects.py --rows` when it opens now, so both the rebuild and
-    the line reporting it are gone.
+    dropdown is gone with the VS Code task layer, so both the rebuild and the line
+    reporting it are gone.
 
     Asserted rather than left to rot: the side effect was the reason this module's own
     fixtures had to stub a `gh`-shelling write, and a revert would silently start
@@ -642,9 +648,7 @@ def test_this_pass_writes_no_dropdown_file():
 def test_the_report_is_toolchain_and_render_and_nothing_else(monkeypatch, capsys, tmp_path):
     """The composition `main` now makes. A leftover checklist warning would appear here
     as a third line on a pass that has nothing to say."""
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text('{"folders": [{"path": "proj"}]}', encoding="utf-8")
-    monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", workspace)
+    monkeypatch.setattr(ws, "ROOT", tmp_path)
     monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: ["proj"])
     monkeypatch.setattr(ws.sweep, "sweep", lambda *a, **k: [])
     monkeypatch.setattr(ws, "toolchain_lines", lambda **k: [])
@@ -665,13 +669,12 @@ def test_no_agent_hook_is_expected_at_the_workspace_root():
 def toolchain(**over):
     """A fully-provisioned workstation, minus whatever the caller overrides.
 
-    The extension and Codex reporters are injected rather than left to their defaults
+    The Codex and terminal reporters are injected rather than left to their defaults
     because both read the machine running the tests -- which would make every assertion
-    here depend on what its VS Code has installed and how its `CODEX_HOME` is set up."""
+    here depend on how its `CODEX_HOME` and terminal are set up."""
     args = {
         "which": lambda _n: "/usr/bin/uv",
         "git": lambda *a: "someone",
-        "extensions": list,
         "codex": list,
         "terminal": list,
         "launchers": list,
@@ -701,23 +704,21 @@ def test_an_unset_git_identity_is_reported_with_the_key_that_is_missing():
     assert "Author identity unknown" in lines[0]
 
 
-def test_a_missing_vs_code_extension_joins_the_other_prerequisites():
-    """Same category and same reason -- no symptom until the moment it is needed -- so it
-    is reported in the same place rather than in a check somebody runs. The knowledge of
-    how VS Code records an install lives in `vscode_extensions.py`; this is the wiring,
-    which is otherwise the kind of line whose absence looks exactly like good news."""
-    assert toolchain(extensions=lambda: ["no such extension"]) == ["no such extension"]
+def test_no_vs_code_extension_is_a_prerequisite_any_more():
+    """VS Code is retired, and the tasks whose pickers needed its extensions with it, so
+    a machine without them is not a finding."""
+    assert not hasattr(ws, "vscode_extensions")
+    with pytest.raises(TypeError):
+        ws.toolchain_lines(extensions=list)
 
 
 def test_the_injected_reporters_default_to_the_real_ones():
     """An injected default that nothing wires up in production is a test passing alone.
-    Both reporters read this machine, so what is asserted is that the wiring reaches
+    The reporters read this machine, so what is asserted is that the wiring reaches
     them -- not what they find here."""
-    assert ws.vscode_extensions.report_lines is not None
     assert ws.codex_context.report_lines is not None
     assert ws.toolchain_lines(which=lambda _n: "/usr/bin/uv", git=lambda *a: "someone") == (
-        ws.vscode_extensions.report_lines()
-        + ws.codex_context.report_lines()
+        ws.codex_context.report_lines()
         + ws.wt_profile.status_lines()
         + ws.launcher_lines()
     )
@@ -728,19 +729,26 @@ def test_a_dead_launcher_in_any_checkout_is_named_with_the_checkout_and_its_fix(
 ):
     """513c55e5: `.venv/Scripts/mypy` dead for 26 days, and nothing said so until a session
     tried it. No gate runs a launcher, so a check somebody has to run would never fire."""
-    workspace = tmp_path / "ws.code-workspace"
     monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: ["fine", "broken"])
     gaps = {"broken": ws.toolchain.Gap("8 console scripts dead", "uv sync --reinstall")}
-    monkeypatch.setattr(ws.toolchain, "launcher_gap", lambda root: gaps.get(root.name))
-    assert ws.launcher_lines(workspace) == [
+    seen = []
+    monkeypatch.setattr(
+        ws.toolchain, "launcher_gap", lambda root: seen.append(root) or gaps.get(root.name)
+    )
+    assert ws.launcher_lines(tmp_path) == [
         "broken: 8 console scripts dead (fix: uv sync --reinstall)"
-    ], "the checkouts come off the registry: the workspace file need not exist"
+    ], "the checkouts come off the registry"
+    assert seen == [tmp_path / "fine", tmp_path / "broken"], "under the root it was given"
+    monkeypatch.setattr(ws, "ROOT", tmp_path / "default")
+    seen.clear()
+    ws.launcher_lines()
+    assert seen[0].parent == tmp_path / "default", "ROOT when no root is given"
     monkeypatch.setattr(
         ws.project_registry,
         "all_projects",
         lambda *_a, **_k: ws.project_registry.parse_registry("projects = ["),
     )
-    assert ws.launcher_lines(workspace) == [], "no registry to read"
+    assert ws.launcher_lines(tmp_path) == [], "no registry to read"
     assert toolchain(launchers=lambda: ["broken: x"]) == ["broken: x"]
 
 
@@ -890,14 +898,15 @@ def test_standing_another_job_down_leaves_the_reconcile_fallback_alone():
 UNADOPTED_EXCEPTIONS: dict[str, str] = {}
 
 
-@needs_live_workspace
+@local
 def test_every_registered_checkout_is_a_devkit_project():
-    """The shape check devkit did not have. Being registered in the workspace means
-    devkit's tooling manages you -- and every one of those tools (the vendored hooks,
-    the commit gate, `lint-fix.py`, `upgrade-project.py`) silently does nothing for a
-    checkout that never adopted. Nothing goes red; the work simply is not done."""
-    names = sweep.parse_workspace(LIVE_WORKSPACE.read_text(encoding="utf-8"))
-    faults = dict(ws.adoption_faults(LIVE_WORKSPACE.parent, names))
+    """The shape check devkit did not have. Being registered means devkit's tooling
+    manages you -- and every one of those tools (the vendored hooks, the commit gate,
+    `lint-fix.py`, `upgrade-project.py`) silently does nothing for a checkout that never
+    adopted. Nothing goes red; the work simply is not done."""
+    checkouts = live_checkouts()
+    names = [name for name, _ in checkouts]
+    faults = dict(ws.adoption_faults(checkouts[0][1].parent, names))
 
     unexpected = sorted(set(faults) - set(UNADOPTED_EXCEPTIONS))
     assert not unexpected, (

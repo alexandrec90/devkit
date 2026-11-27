@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Run a generic project action in a chosen checkout — the backend for the shared tasks.
+"""Run a generic project action in a chosen checkout: `--project X <action>`.
 
-Every task that is *generic* (test, lint, sync the agent context) used to be copied
-into each project's `.vscode/tasks.json`, where the copies drifted. They now live once
-in `alex-projects.code-workspace` and route through here with `--project`, so there is
-one definition and the project is an argument rather than a duplicated file.
+Every action that is *generic* (test, lint, sync the agent context) is defined once here
+and the checkout is an argument, rather than a copy per project that drifts. The
+checkout names are the registry's (`project_registry`, `projects.toml`).
 
 **This dispatches to the project's own script; it does not reimplement one.** The
 scripts genuinely differ per project by design — `templates/core/scripts/*.tmpl` ships
@@ -20,14 +19,8 @@ uv-based project, now exposes these small contract entrypoints; implementation r
 local because the projects genuinely have different test and lint pipelines.
 
 **Not every action is generic, and that is fine.** An `Action` may name the checkouts it
-applies to (`projects=`), which is what let the last project-level `.vscode/tasks.json`
-files be deleted outright. Defining a task here once, rather than in the repo, keeps one
-quick-pick entry per action without pretending a Playwright run or an IBKR backtest is
-something every project can do. (This also read "a task is duplicated once per
-worktree", which was the `-b` tier's doing: every repo was checked out twice, so a
-repo-level task appeared twice with no way to tell the copies apart. That tier is gone —
-agent work lands in an ephemeral box instead — but the argument for defining tasks here
-survives it.)
+applies to (`projects=`), so one definition here serves a Playwright run or an IBKR
+backtest without pretending every project can do it.
 `projects` restricts both halves: the dispatcher refuses an out-of-scope checkout, and
 `--check` stops demanding the script from projects the action was never meant for.
 
@@ -38,7 +31,6 @@ Pure helpers (`resolve_project`, `in_scope`, `plan_command`) are unit-tested in
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -46,17 +38,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import devkit_jsonc
 import project_registry
 import sweep
-import task_input
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# The live workspace file's path, whose directory is the projects root (`--workspace` is
-# a deprecated alias for it). Resolved through `sweep` because this script runs from
-# inside an ephemeral box as a matter of course, where the naive `REPO_ROOT.parent`
-# names `.worktrees/<file>`.
-DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 
 # Checkouts registered so they can be read but shipping no harness, so nothing in ACTIONS
 # applies. Empty since 2026-09-02 and kept as a mechanism: `known_projects` subtracts it
@@ -73,7 +58,7 @@ class Action:
     """One generic action: which script implements it, and how it is announced."""
 
     script: str  # relative to the owner's root, e.g. "scripts/lint-all.py"
-    label: str  # shown by notify-wrap and in the terminal title
+    label: str  # names the run's `logs/` artifact and its ledger entry
     args: tuple[str, ...] = ()  # fixed arguments before any the caller adds
     # Who implements it. PROJECT: each checkout ships its own (they differ by design,
     # and the shared thing is the CLI contract). DEVKIT: one implementation here, run
@@ -91,10 +76,9 @@ class Action:
     autofix_slug: str = ""
     autofix_labels: tuple[str, ...] = ()
     # Which checkouts this action applies to; empty means every one of them. Naming the
-    # checkout (`("carameli",)`) is how a genuinely project-specific action lives here
-    # instead of in that repo's `.vscode/tasks.json`. Names rather than a capability
-    # probe because the workspace pickers already list checkouts by name, and a stale
-    # entry fails loudly here.
+    # checkout (`("carameli",)`) is how a genuinely project-specific action lives here.
+    # Names rather than a capability probe because the registry lists checkouts by name,
+    # and a stale entry fails loudly here.
     projects: tuple[str, ...] = ()
 
 
@@ -137,24 +121,18 @@ DEVKIT_ONLY = ("devkit",)
 # `[db] enabled = false`), and an unscoped action would report it, plus every future
 # `bare` preset, as permanently non-conforming.
 #
-# A NEWLY GENERATED project with alembic is not in here until someone adds it, and until
-# then it has no one-click migration task. That is the deliberate trade: the alternative
-# is a task in the generated `.vscode/tasks.json`, which is the per-worktree duplicate
-# this whole arrangement removes. `new-project.py` cannot extend this tuple — it is
-# devkit source, not the workspace registry the generator already maintains.
+# A NEWLY GENERATED project with alembic is not in here until someone adds it.
+# `new-project.py` cannot extend this tuple — it is devkit source, not the registry the
+# generator already maintains.
 DB_PROJECTS = CARAMELI + IBKR
 
-# The shared contract. Adding an entry here is the *only* place a new generic task
-# needs defining — the workspace task block passes the key through verbatim.
+# The shared contract. Adding an entry here is the *only* place a new generic action
+# needs defining.
 ACTIONS: dict[str, Action] = {
     # --- implemented by each checkout ---
     "test": Action("scripts/run-tests.py", "Test: Run Suite"),
-    # Scope is a picker argument, not a second action -- `lintScope` in the workspace
-    # file answers "everything or changed?" and the answer travels as `--changed` or as
-    # nothing at all. There used to be a `lint-changed` twin here, and it bought a second
-    # task, a second icon and a second label for one flag; `test` has never had one, and
-    # the two now differ only in the script they call. Empty picker tokens are dropped in
-    # `plan_command`, which is what lets the wide branch pass no argument.
+    # Scope is an argument, not a second action: `--changed` or nothing at all. Empty
+    # tokens are dropped in `plan_command`, so the wide case may pass an empty one.
     "lint": Action(
         "scripts/lint-all.py",
         "Lint: Run",
@@ -168,16 +146,9 @@ ACTIONS: dict[str, Action] = {
         autofix_slug="codex-context-sync",
         autofix_labels=(sweep.AUTOFIX_LABEL, sweep.AUTOMERGE_LABEL),
     ),
-    # `sync-devkit` and `sync-branch` were here. Both lost their task and neither has
-    # another caller, so keeping them would have left `ACTIONS` naming two scripts
-    # nothing dispatches -- which `test_every_action_is_reachable_from_a_task` is there
-    # to refuse. "Harness: Check Drift vs devkit" ran `sync-devkit.py` in the STATIC
-    # checkout, on its home branch: `--check` is what the `devkit-drift` pre-commit hook
-    # and the PR gate already run, and `--pull` wrote an upgrade into a checkout with no
-    # branch and no PR under it, which is `upgrade-project.py`'s whole job and the reason
-    # it works in a box. The script stays and keeps every mode; only the click is gone.
-    # "Git: Sync Branch onto Origin Default (Keep Changes)" went with `git-sync-keep.py`
-    # itself -- VS Code's Source Control view rebases a checkout onto its trunk already.
+    # `sync-devkit` is deliberately not an action: `--pull` in a STATIC checkout writes an
+    # upgrade with no branch and no PR under it, which is `upgrade-project.py`'s whole job
+    # and the reason it works in a box.
     # --- implemented once, here ---
     # Stack lifecycle. DEVKIT-owned with a per-project override rather than
     # PROJECT-owned, which is the same shape `docker-prune` already uses: the compose
@@ -225,31 +196,29 @@ ACTIONS: dict[str, Action] = {
     # collects, and a commit charge that grows the pagefile onto the same volume -- and
     # only the first is Docker's. `docker-maint.py prune` cannot see the other two.
     #
-    # `--yes` is baked in because a task the user clicks to clean up should clean up; the
+    # `--yes` is baked in because asking for the action is asking it to clean up; the
     # script's own default is a dry run, which is what an agent gets when it runs it.
     #
     # DEVKIT_ONLY rather than DEVKIT-owned-and-unscoped, and the difference is not
     # cosmetic here: an unscoped action is run once per *selected checkout*, and this one
     # has no project dimension at all -- it sweeps `%TEMP%`, stops every container on the
-    # machine and reconciles the box registry. Picking three checkouts would sweep the
+    # machine and reconciles the box registry. Naming three checkouts would sweep the
     # same machine three times, the second and third finding nothing and reading as a
-    # no-op. Scoped, the task pins `--project devkit` and there is no picker to get wrong.
+    # no-op. Scoped, the only checkout it takes is `--project devkit`.
     "reclaim": Action(
         "scripts/reclaim.py", "Machine: Reclaim Resources", ("--yes",), projects=DEVKIT_ONLY
     ),
     # The scheduled jobs themselves, as a verb a human can reach. Scoped for `reclaim`'s
     # reason: the jobs are machine state with no project dimension, so an unscoped action
-    # would run the same pass once per ticked checkout.
+    # would run the same pass once per named checkout.
     #
     # Deliberately *not* how the jobs are kept current -- `devkit-installers` does that,
-    # daily and at logon, and a button that has to be remembered would be the same defect
-    # this whole tier exists to remove. What a human needs the click for is the two things
-    # a schedule cannot decide: seeing the set at all, and taking it back off again.
-    # `--yes` rides in from the task's own picker, so the uninstall is read before it runs.
+    # daily and at logon. What a human needs the verb for is the two things a schedule
+    # cannot decide: seeing the set at all, and taking it back off again. `--yes` rides
+    # in as a trailing argument, so the uninstall is read before it runs.
     "installers": Action("scripts/installers.py", "Machine: Scheduled Jobs", projects=DEVKIT_ONLY),
     # Which ingestion collectors this PC runs, stops or leaves alone. Scoped for
-    # `reclaim`'s reason -- the assignment is this machine's, not a checkout's -- and the
-    # task's one picker (`collectors_picker.py`) names the collector itself.
+    # `reclaim`'s reason -- the assignment is this machine's, not a checkout's.
     "collectors": Action(
         "scripts/collectors.py", "Machine: Ingestion Collectors", projects=DEVKIT_ONLY
     ),
@@ -262,35 +231,24 @@ ACTIONS: dict[str, Action] = {
     # Reviewing a UI change before its PR merges: host Vite on the picked branches'
     # frontends -- `npm run dev`, one port each, no Docker anywhere in it.
     #
-    # There used to be a second, clickable preview here (`preview`, on
-    # `scripts/preview-task.py`) that answered the same question with a compose stack per
-    # branch: a box, a port lease, an image build and an `npm ci` into a fresh named
-    # volume, about three minutes cold. It carried this label, so the task called
-    # *Open a UI Branch* was the expensive one, and the cheap one that does exactly what
-    # the label promises sat below it under a name nobody reads as the same question.
-    # Looking at a UI change needs node, the branch's files and a free port; the stack it
-    # was buying is one the reviewer never calls. `worktree.py preview` is still the CLI
-    # verb for the full-stack kind -- it is just not a thing anyone can click by mistake.
+    # Looking at a UI change needs node, the branch's files and a free port; the compose
+    # stack `worktree.py preview` builds is the CLI verb for the full-stack kind.
     #
-    # DEVKIT_ONLY for `reclaim`'s reason rather than its own, and it is worth repeating
-    # because this looks far more like a per-project action than it is: the menu it picks
-    # from is assembled from the box registry and the port registry, and there is exactly
-    # ONE of each on this machine. Run once per selected checkout it would print the same
-    # machine-wide menu two or three times over. The project dimension lives INSIDE the
-    # menu instead, as the first dropdown -- so no picker here, per the
-    # literal-over-single-option convention: the task pins `--project devkit`.
+    # DEVKIT_ONLY for `reclaim`'s reason: what it serves is assembled from the box
+    # registry and the port registry, and there is exactly ONE of each on this machine.
+    # Run once per selected checkout it would do the same machine-wide work two or three
+    # times over, so it takes `--project devkit` and names its branches itself.
     "preview-ui-host": Action(
         "scripts/preview-ui-host.py", "Preview: Open a UI Branch", projects=DEVKIT_ONLY
     ),
-    # The teardown half of the pair above, and the reason it is a task at all rather than
-    # something the serving task promises to do on its way out: a Vite server outlives the
-    # run that started it whenever the terminal is closed instead of interrupted, and the
-    # `finally` clause that would have stopped it never runs. Three nets catch that inside
-    # `preview-ui-host.py`; this is the fourth, the one a human can click when they want
-    # every server on the machine gone now, regardless of which terminal owns it.
+    # The teardown half of the pair above: a Vite server outlives the run that started it
+    # whenever the terminal is closed instead of interrupted, and the `finally` clause
+    # that would have stopped it never runs. Three nets catch that inside
+    # `preview-ui-host.py`; this is the fourth, for when every server on the machine
+    # should be gone now, regardless of which terminal owns it.
     #
-    # DEVKIT_ONLY and no picker for the same reason as its siblings -- there is one
-    # registry of running servers on this machine, so there is no checkout to pick.
+    # DEVKIT_ONLY for the same reason as its siblings -- there is one registry of running
+    # servers on this machine, so there is no checkout to name.
     "preview-ui-stop": Action(
         "scripts/preview-ui-host.py",
         "Preview: Stop Host UI Servers",
@@ -300,25 +258,20 @@ ACTIONS: dict[str, Action] = {
     # Sending an agent at a PR that is already red -- a merge conflict, a failed gate, or
     # both. Nothing else on this machine does it: `worktree.py reconcile` merges only what
     # is green and carries the merge label, so a broken PR is exactly the state its
-    # fifteen-minute pass steps over forever, and the row is the human's way of saying
+    # fifteen-minute pass steps over forever, and this is the human's way of saying
     # "yes, go and deal with that one".
     #
-    # DEVKIT_ONLY and a literal `--project devkit`, for `preview-ui-host`'s reason rather
-    # than its own -- and it looks even more like a per-project action than that one does.
-    # The menu is one scan across every checkout in the registry, and there is one box
-    # registry and one port registry on this machine. Run once per selected checkout it
-    # would draw the same cross-checkout dropdown two or three times over. The project
-    # dimension lives INSIDE the menu, as the first of the two nested pickers.
+    # DEVKIT_ONLY and `--project devkit`, for `preview-ui-host`'s reason: the pass is one
+    # scan across every checkout in the registry, so run once per selected checkout it
+    # would do the same cross-checkout work two or three times over.
     "fix-pass": Action("scripts/fix-pass.py", "Agent: Fix What Is Red", projects=DEVKIT_ONLY),
     # The worktree pair. Both runtimes cut their own now -- `claude --worktree` inside the
-    # checkout, `codex --worktree` under `~/.codex/` behind a repo digest -- so these rows
-    # are not the only way to get one. They stay because `new` asks which checkout and
-    # which base branch first, and `remove` is the only verb that reads every tier at once.
+    # checkout, `codex --worktree` under `~/.codex/` behind a repo digest -- so these are
+    # not the only way to get one. They stay because `remove` is the only verb that reads
+    # every tier at once.
     #
-    # DEVKIT_ONLY and a literal `--project devkit` for `fix-pass`'s reason exactly: the
-    # menu is one scan across every checkout in the registry, so the checkout is a column
-    # in the dropdown rather than a scope for the task. Run per selected checkout, each
-    # would draw the same cross-checkout list two or three times over.
+    # DEVKIT_ONLY and `--project devkit` for `fix-pass`'s reason exactly: the checkout is
+    # an argument of the script rather than a scope for the action.
     "worktree-new": Action(
         "scripts/agent-worktree.py", "Agent: New Worktree", ("new",), projects=DEVKIT_ONLY
     ),
@@ -329,28 +282,20 @@ ACTIONS: dict[str, Action] = {
     # has no project dimension at all -- run per selected checkout it would try to tag
     # this repo two or three times, and the second attempt would refuse a tag that now
     # exists. The consumers appear at the END of the run, as the adoption pass this hands
-    # off to, which is a different thing from the task being scoped to them -- and it is
-    # why the release task asks *two* project questions that must not be confused: this
-    # `--project devkit`, fixed, deciding where the release is cut; and the
-    # `adoptProjects` checklist, riding through as `--projects=`, deciding whose adoption
-    # PR opens afterwards.
+    # off to, which is a different thing from the action being scoped to them: this
+    # `--project devkit`, fixed, decides where the release is cut, and a trailing
+    # `--projects=` decides whose adoption PR opens afterwards.
     #
-    # It is an ACTIONS entry rather than a hand-written task like `Devkit: Upgrade
-    # Projects` because it needs the wrapping more than that one does, not less: the run
-    # spans a PR gate and a workflow dispatch, so its useful output arrives minutes apart
-    # and the reader is not watching. `plan_command` gives it the notify toast and the
-    # `logs/` artifact for free, and the level picker rides through as a trailing
-    # argument the same way `db-revision`'s `-m` does.
+    # It is an ACTIONS entry because it needs the wrapping: the run spans a PR gate and a
+    # workflow dispatch, so its useful output arrives minutes apart and the reader is not
+    # watching. `plan_command` gives it the `logs/` artifact for free, and the level rides
+    # through as a trailing argument the same way `db-revision`'s `-m` does.
     "release": Action("scripts/release-pipeline.py", "Devkit: Cut Release", projects=DEVKIT_ONLY),
-    # --- scoped to one repo's worktree pair ---
+    # --- scoped to one repo ---
     #
-    # These are the tasks that used to live in `carameli/.vscode/tasks.json` and
-    # `ibkr_trader/.vscode/tasks.json`. Nothing about them became generic — a Playwright
-    # run and an IBKR backtest are not things devkit or a `bare` preset can do. What
-    # changed is where the duplication was: a task defined in a repo is rendered once per
-    # *worktree folder*, so every one of these appeared twice in the quick-pick with no
-    # way to tell the copies apart, and the two copies drifted whenever the worktrees sat
-    # on different branches. Here they are defined once and the checkout is a picker.
+    # Nothing about these is generic — a Playwright run and an IBKR backtest are not things
+    # devkit or a `bare` preset can do — but they are defined once here and the checkout
+    # is an argument.
     #
     # `projects=` is what keeps `--check` honest about it: without the scope, every one of
     # these would be demanded of every checkout and each project would report five or six
@@ -358,17 +303,16 @@ ACTIONS: dict[str, Action] = {
     "test-target": Action("scripts/run-tests.py", "Test: Run Carameli Target", projects=CARAMELI),
     "e2e": Action("scripts/run-e2e.py", "Test: Run Browser E2E", projects=CARAMELI),
     # A `local-e2e` action stood here until 2026-09-02. It drove carameli's integration
-    # suite against the reference checkout that was retired from this workspace on that
+    # suite against the reference checkout that was retired from this registry on that
     # date, and the other half of the pair is what made it runnable: the orchestrator
     # boots a counterpart stack named by `VS_REPO_DIR`, so with no such checkout on the
     # machine it can only fail at the first step. carameli still ships the script; what
-    # is gone is the menu row and the dispatch that implied the machine could serve it.
+    # is gone is the dispatch that implied the machine could serve it.
     "ngrok": Action("scripts/start-ngrok.py", "Start: ngrok + Sync URLs", projects=CARAMELI),
     # Takes no argument on purpose. The script encodes every master in
     # `frontend/assets-src/comic-book/` that has no export yet and skips the rest, so
-    # the task is "I dropped pictures in, pick them up" rather than a prompt for a
-    # filename the picker cannot validate. Naming one is still a CLI call, where
-    # `--label` and `--max-edge` live.
+    # the action is "I dropped pictures in, pick them up". Naming one is a direct call of
+    # the script, where `--label` and `--max-edge` live.
     "encode-art": Action(
         "scripts/encode-comic-art.py", "Assets: Encode Comic-Book Art", projects=CARAMELI
     ),
@@ -378,13 +322,13 @@ ACTIONS: dict[str, Action] = {
         "scripts/snapshot-monthly.py", "Snapshot: Run Monthly", projects=IBKR
     ),
     # One script, two subcommands — the OOS run fixes its own warm-up and simulation
-    # starts, so it cannot just be `backtest` with different picker answers.
+    # starts, so it cannot just be `backtest` with different arguments.
     "backtest": Action("scripts/backtest-task.py", "Backtest: Run", ("run",), projects=IBKR),
     "backtest-oos": Action(
         "scripts/backtest-task.py", "Backtest: OOS (Honest Per-Fold)", ("oos",), projects=IBKR
     ),
-    # One script again, split the other way: the four read-only views are one task and a
-    # picker, the view riding in as a trailing argument, while the strategy lab is its own
+    # One script again, split the other way: the four read-only views are one action,
+    # the view riding in as a trailing argument, while the strategy lab is its own
     # action because it re-simulates for minutes and asks two more questions.
     "report": Action(
         "scripts/report-task.py", "Report: Open Model & Strategy Views", projects=IBKR
@@ -393,32 +337,31 @@ ACTIONS: dict[str, Action] = {
         "scripts/report-task.py", "Report: Run Strategy Lab", ("lab",), projects=IBKR
     ),
     # Advisory only: the Questrade client is GET-only, so the plan is a CSV and nothing is
-    # sent. Its sibling `check` subcommand gets no row -- `plan` already reads every
-    # account, and keeping the token alive is a schedule's job, not a click's.
+    # sent. Its sibling `check` subcommand is no action -- `plan` already reads every
+    # account, and keeping the token alive is a schedule's job.
     "questrade-plan": Action(
         "scripts/questrade-task.py", "Questrade: Recommend Orders", ("plan",), projects=IBKR
     ),
     # The local web UI, in the foreground until its terminal closes -- the MLflow view's
-    # shape. The script builds the frontend first when it has to, so the click is the
-    # whole setup. One server per port, which is why the task names the checkout.
+    # shape. The script builds the frontend first when it has to, so the action is the
+    # whole setup. One server per port, which is why the action names the checkout.
     "trader-ui": Action("scripts/ui-task.py", "IBKR: Open Trader UI", projects=IBKR),
     # --- scoped to social-scraper ---
     #
     # Signing in once in a visible browser, so the platform's persistent profile under
     # the checkout's `data/browser-profiles/<platform>/` carries the session every later
-    # scrape reuses. The platform rides in from the task as a trailing argument, so a
-    # Reddit row is a task-file edit rather than a second action.
+    # scrape reuses. The platform rides in as a trailing argument, so Reddit is an
+    # argument rather than a second action.
     "scraper-login": Action("scripts/login.py", "Scraper: Log In", projects=SOCIAL_SCRAPER),
     # --- scoped to photolab ---
     #
     # The trader UI's shape: in the foreground until its terminal closes. On the host rather
     # than in Docker because the `codex` and `claude` commands and their logins are out
-    # here. Fixed ports, which is why the task names the checkout.
+    # here. Fixed ports, which is why the action names the checkout.
     "album": Action("scripts/album.py", "Photolab: Open Album", projects=PHOTOLAB),
     # --- scoped to the checkouts that have a database ---
     #
-    # The last task to leave a `.vscode/tasks.json`, and the only one that was in the
-    # GENERATOR template rather than a live repo. PROJECT-owned because the two
+    # PROJECT-owned because the two
     # implementations genuinely differ and neither is a wrapper for the other: carameli
     # runs alembic inside its app container (PgBouncer sits in front of Postgres, so the
     # DDL connection has to bypass the pooler, and the container's env is the single
@@ -432,33 +375,19 @@ ACTIONS: dict[str, Action] = {
 
 # --- the test menu ----------------------------------------------------------
 #
-# One task asks which checkouts and which kinds of test, and this table is the second
-# question's answer set. There were five tasks: a suite runner, the vendored hook-test
-# runner, and three carameli-only ones — each with its own icon, its own `detail` and
-# its own single-pick argument picker, all sitting adjacent in the quick-pick answering
-# the same question. `.claude/rules/vscode-tasks.md` calls that shape a picker rather
-# than a task.
+# `--project a,b tests <kind>,<kind>` asks which checkouts and which kinds of test, and
+# this table is the second question's answer set.
 #
 # A kind is an (action, argument) pair rather than a new action, so nothing on the menu
 # can reach a script `ACTIONS` does not already name, and `Action.projects` still decides
 # which checkout may run it. `plan_test_runs` skips an out-of-scope pair BY NAME rather
-# than dropping it: one menu serves every checkout, so ticking `devkit` beside a
-# Playwright row is the ordinary way to use this, and a pair that vanishes silently is
+# than dropping it: one menu serves every checkout, so naming `devkit` beside a
+# Playwright kind is the ordinary way to use this, and a pair that vanishes silently is
 # indistinguishable from a suite that ran and passed.
 #
-# `test-hooks-live` is here as two rows, one per CLI, and it did not use to be. It was a
-# task of its own with a `claude`/`codex`/`both` single-pick, kept out of this table
-# because it launches a paid CLI session and a menu row is one keystroke away from every
-# free row above it. Ticking both rows is what `both` was, which is why there is no third
-# row -- `plan_test_runs` orders by this table, so the pair runs claude then codex.
-#
-# The cost did not stop being real, and the menu cannot ask a second time. What the fold
-# buys is one task instead of two adjacent ones asking the same question; what it costs
-# is that the workspace REMEMBERS a ticked row, so a paid row survives to the next click
-# unless it is unticked. That is stated on the rows themselves -- their labels lead with
-# PAID -- and `hook-tests-live.py` still prints what it is about to spend before it
-# launches anything. Neither is a confirmation, and there is nowhere in a checkbox
-# quick-pick to put one.
+# `test-hooks-live` is here as two kinds, one per CLI; naming both runs claude then
+# codex, since `plan_test_runs` orders by this table. They launch a paid CLI session, and
+# `hook-tests-live.py` prints what it is about to spend before it launches anything.
 @dataclass(frozen=True)
 class SuiteKind:
     """One row of the test menu: the action it dispatches, and the argument shaping it.
@@ -493,18 +422,13 @@ TEST_KINDS: dict[str, SuiteKind] = {
 # and this fans out to several — so it is a choice `main` handles beside them.
 TESTS_VERB = "tests"
 
-# Wrapper every generated project ships (`templates/core/scripts/notify-wrap.py`). When
-# present the command routes through it so a long task still notifies on completion;
-# when absent the command runs bare rather than failing.
-NOTIFY_WRAP = "scripts/notify-wrap.py"
-
 # The failure artifact, taken from **devkit's** checkout rather than the target's. Two
 # reasons, and the second is the load-bearing one: a checkout that has not yet pulled
 # the release adding `scripts/log-wrap.py` still gets an artifact, and the wrapper that
 # runs is the one this dispatcher was tested against rather than whatever vintage the
-# target vendored. Unconditional, unlike NOTIFY_WRAP above -- it is a MANIFEST entry of
-# devkit's own, so its absence is a broken checkout and should say so loudly instead of
-# quietly dropping every task's artifact.
+# target vendored. Unconditional -- it is a MANIFEST entry of devkit's own, so its
+# absence is a broken checkout and should say so loudly instead of quietly dropping every
+# run's artifact.
 LOG_WRAP = "scripts/log-wrap.py"
 
 # Where a dispatch that could not start keeps its reason: devkit's own `logs/`, since no
@@ -515,38 +439,27 @@ FAILURE_ROOT = REPO_ROOT
 # --- pure helpers -----------------------------------------------------------
 
 
-def known_projects(workspace_text: str | None = None) -> list[str]:
+def known_projects() -> list[str]:
     """Registered project names, minus the non-projects.
 
     Read through `project_registry.all_projects`, so every caller asks the one registry
     and none can disagree with another about which checkouts exist.
-
-    `workspace_text` is **deprecated**. Given, the names come from that workspace text
-    instead -- kept only for the writers that verify their own edit of a workspace file
-    (`register`, `unregister`) until the file is retired. A reader passes
-    nothing.
     """
-    if workspace_text is not None:
-        return sweep.parse_workspace(workspace_text, NOT_PROJECTS)
     return [name for name in project_registry.all_projects() if name not in NOT_PROJECTS]
 
 
 def project_selection(value: str) -> list[str]:
-    """Checkout names from a comma-delimited task input, preserving order.
-
-    VS Code command inputs must return one string.  The multi-pick used by the shared
-    test task therefore joins its selections with commas; the original single-project
-    CLI remains a one-item instance of the same format.
+    """Checkout names from a comma-delimited `--project`, preserving order, duplicates
+    dropped. A single name is a one-item instance of the same format.
     """
     return list(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
 
 
 def kind_selection(value: str) -> list[str]:
-    """Test-menu kinds from a comma-delimited task input, returned in MENU order.
+    """Test-menu kinds from a comma-delimited argument, returned in MENU order.
 
-    Menu order rather than the order they were ticked in: a checkbox list hands back
-    whatever the clicking order was, and a run whose sequence nobody can reproduce from
-    the artifact is a run nobody can compare against the last one.
+    Menu order rather than the order they were typed in: a run whose sequence depends on
+    how the arguments were spelled is a run nobody can compare against the last one.
 
     An unknown kind is refused here, before any checkout is resolved, because the pairs
     are a cross-product: the fourth of eight runs failing on a typo would leave three
@@ -565,7 +478,7 @@ def resolve_project(name: str, projects: list[str], root: Path, noun: str = "pro
     """The checkout directory for `name`, validated against the registry.
 
     Validating against the registry (not just `is_dir()`) is what makes a typo'd or
-    stale picker entry fail with the list of real names instead of running in a
+    stale name fail with the list of real names instead of running in a
     directory that happens to exist.
 
     `noun` is what the failure calls the thing that was not found. It exists because
@@ -596,9 +509,7 @@ def in_scope(action: Action, project: str) -> bool:
 def check_scope(action: Action, project: str) -> None:
     """Refuse an action aimed at a checkout it was never defined for.
 
-    The workspace gives each scoped task a picker listing only its own checkouts, so this
-    is a backstop rather than the first line of defence — but the CLI is public and the
-    picker is only a list of strings. Without it, `--project devkit backtest` would fall
+    Without it, `--project devkit backtest` would fall
     through to the missing-script error and read as "devkit has not implemented backtesting
     yet", which invites someone to go and implement it.
     """
@@ -618,12 +529,8 @@ def plan_test_runs(
     are not interleaved with another's.
 
     The skips are RETURNED rather than swallowed, and that is the whole reason this is a
-    function. A single menu is offered for every checkout — the alternative, a kind list
-    that narrows to the ticked checkouts, is a second dependent picker VS Code cannot
-    give sight of the first (`.claude/rules/vscode-tasks.md`), and the extension's
-    `dependsOn` filters the *result* rather than the list, which is the silent drop this
-    exists to avoid. So `devkit` beside a Playwright row is the ordinary case, and the
-    honest answer is a printed line naming the pair and the scope that excluded it.
+    function. A single menu serves every checkout, so `devkit` beside a Playwright kind
+    is the ordinary case, and the honest answer is a printed line naming the pair and the scope that excluded it.
 
     `check_scope` stays the single-action path's refusal: asking for one out-of-scope
     action is a mistake with nothing else to run, while asking for one of eight is not.
@@ -643,22 +550,17 @@ def plan_test_runs(
 def plan_command(
     action: Action, project_dir: Path, extra: list[str], devkit_root: Path = REPO_ROOT
 ) -> list[str]:
-    """The argv to run for `action`: the script, wrapped for logging and notification.
+    """The argv to run for `action`: the script, wrapped by `log-wrap.py`.
 
     Raises `ProjectError` when the script is missing — for a PROJECT action that is
     the conformance failure, reported by name rather than as a missing-file traceback
     from an unexpected cwd. A DEVKIT action is referenced by absolute path because it
     runs with cwd set to the *checkout*, not to devkit.
 
-    **Where every dispatched task gets its failure artifact.** Twenty of the workspace's
-    tasks are one of these, and this is the only point that can write the artifact to
-    the right place: the task names a *picker*, so until `resolve_project` has run
+    **Where every dispatched action gets its failure artifact.** This is the only point
+    that can write the artifact to the right place: until `resolve_project` has run
     nothing knows which checkout's `logs/` a failure belongs in. Wrapping here covers
-    every action, including ones added later, without touching the workspace file.
-
-    Nesting is `notify-wrap → log-wrap → the script`, each doing one thing: the toast
-    needs only an exit code, the artifact needs the output, and the script needs
-    neither to know about it.
+    every action, including ones added later.
     """
     if action.owner == DEVKIT:
         script = devkit_root / action.script
@@ -673,10 +575,7 @@ def plan_command(
             )
         target = action.script
     inner = ["python", target, *action.args, *[a for a in extra if a]]
-    logged = ["python", str(devkit_root / LOG_WRAP), action.label, "--", *inner]
-    if (project_dir / NOTIFY_WRAP).is_file():
-        return ["python", NOTIFY_WRAP, action.label, "--", *logged]
-    return logged
+    return ["python", str(devkit_root / LOG_WRAP), action.label, "--", *inner]
 
 
 def task_env(base: dict[str, str] | None = None) -> dict[str, str]:
@@ -687,8 +586,8 @@ def task_env(base: dict[str, str] | None = None) -> dict[str, str]:
     in UTF-8) killed the reader thread and printed its traceback into the task's
     terminal -- and the call returned exit 0 with `stdout=None`, so a `gh` listing it
     could not read was a listing of nothing. The scheduled fix pass had UTF-8 mode from
-    its watchdog (`fix-pass-watchdog.run_pass`), and clicking the same pass did not,
-    because a click comes through here. The variable is set rather than `-X utf8` because
+    its watchdog (`fix-pass-watchdog.run_pass`), and dispatching the same pass did not,
+    because a dispatch comes through here. The variable is set rather than `-X utf8` because
     it reaches every Python down the chain, the wrappers' children and their children
     included.
     """
@@ -778,7 +677,7 @@ def record_task_failure(
 def refuse_dispatch(exc: ProjectError, action: str, argv: list[str]) -> int:
     """Report a dispatch that could not start, and file it when it was a task's. Exit 2.
 
-    No action is no task: `--list` is a picker's, and `--check` is typed by hand.
+    No action is no task: `--list` and `--check` only report.
     """
     print(f"devkit_project: {exc}", file=sys.stderr)
     title = task_title(action)
@@ -847,7 +746,7 @@ def autofix_ship_plan(
     after: tuple[str, ...] | list[str],
     *,
     lint_ok: bool,
-    workspace: Path,
+    root: Path,
     devkit_root: Path = REPO_ROOT,
     slug: str = AUTOFIX_SLUG,
     labels: tuple[str, ...] = (),
@@ -901,7 +800,7 @@ def autofix_ship_plan(
             )
         )
     sweep_py = str(devkit_root / "scripts" / "sweep.py")
-    common = ("python", sweep_py, "--root", str(workspace.parent), "--only", project)
+    common = ("python", sweep_py, "--root", str(root), "--only", project)
     label_args = tuple(arg for label in labels for arg in ("--label", label))
     return AutofixOutcome(
         commands=(
@@ -923,412 +822,7 @@ def autofix_state(directory: Path) -> tuple[str, tuple[str, ...]]:
     return branch, sweep.parse_porcelain(git("status", "--porcelain").stdout or "")
 
 
-# --- registering a project, and retiring one --------------------------------
-#
-# The write side of the same registry. These edit the workspace file as TEXT rather
-# than round-tripping it through `json.dumps`: the file is heavily commented, and the
-# comments are the only place the folder list explains itself. A load/dump cycle would
-# silently delete every one of them.
-#
-# Offsets are found in a comment-blanked copy and applied to the original — safe
-# because `blank_comments` preserves length, and necessary because a `]` inside a
-# comment would otherwise end an array early.
-
-
-class RegistryEditError(ValueError):
-    """The workspace file is not shaped the way registration expects."""
-
-
-def _array_span(scan: str, start: int) -> tuple[int, int]:
-    """Offsets of the `[` at/after `start` and its matching `]`."""
-    try:
-        open_at = scan.index("[", start)
-    except ValueError as exc:
-        raise RegistryEditError("no array found where one was expected") from exc
-    depth = 0
-    i = open_at
-    in_string = False
-    while i < len(scan):
-        ch = scan[i]
-        if in_string:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-            if depth == 0:
-                return open_at, i
-        i += 1
-    raise RegistryEditError("unterminated array in the workspace file")
-
-
-def _entry_spans(scan: str, open_at: int, close_at: int) -> list[tuple[int, int]]:
-    """Offsets of each top-level `{...}` object directly inside an array."""
-    spans: list[tuple[int, int]] = []
-    depth = 0
-    start = -1
-    i = open_at + 1
-    in_string = False
-    while i < close_at:
-        ch = scan[i]
-        if in_string:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                spans.append((start, i + 1))
-        i += 1
-    return spans
-
-
-def _indent_of(text: str, offset: int) -> str:
-    """The whitespace beginning the line `offset` sits on — so inserts line up."""
-    line_start = text.rfind("\n", 0, offset) + 1
-    return text[line_start:offset] if not text[line_start:offset].strip() else "\t\t"
-
-
-def insert_folder(text: str, name: str) -> str:
-    """Add `{"path": name}` to `folders`, before any reference (non-project) checkout.
-
-    Inserting before the references rather than appending keeps a reference checkout
-    last, which is how the list reads in the folder tree and in a sweep report.
-    """
-    scan = devkit_jsonc.blank_comments(text)
-    key = scan.find('"folders"')
-    if key < 0:
-        raise RegistryEditError('the workspace file has no "folders" array')
-    open_at, close_at = _array_span(scan, key)
-    spans = _entry_spans(scan, open_at, close_at)
-    if not spans:
-        raise RegistryEditError("the workspace file lists no folders to insert beside")
-
-    for start, end in spans:
-        if any(f'"{ref}"' in scan[start:end] for ref in NOT_PROJECTS):
-            indent = _indent_of(text, start)
-            entry = f'{{\n{indent}\t"path": "{name}"\n{indent}}},\n{indent}'
-            return text[:start] + entry + text[start:]
-
-    start, end = spans[-1]
-    indent = _indent_of(text, start)
-    entry = f',\n{indent}{{\n{indent}\t"path": "{name}"\n{indent}}}'
-    return text[:end] + entry + text[end:]
-
-
-# Every picker whose options are a project list this module keeps current. One tuple
-# rather than one per direction: the pair below are inverses, and a name added to only
-# the insert side is a picker that grows a project and can never lose it again.
-MAINTAINED_PICKERS = (
-    "project",
-    "daemonProject",
-    # Lists MORE than the registry -- the reference checkouts too -- so a new
-    # project still has to be added to it, and this is the only place that can.
-    "mergeCheckout",
-    # And this one lists LESS: every consumer that adopts a devkit release, which
-    # is the registry minus devkit itself. Inserting into it is still right --
-    # `register` never names devkit, since devkit is already registered -- and the
-    # alternative, a hand-kept list of consumers, is exactly the drift that
-    # retired `sweepScope` and `upgradeScope`.
-    "adoptProjects",
-)
-
-
-def insert_picker_option(text: str, name: str) -> str:
-    """Add `name` to the maintained single- and multi-project picker options.
-
-    VS Code cannot build these at runtime (microsoft/vscode#81370), so the list is
-    written here instead. It is a convenience only — `resolve_project` validates the
-    answer against `folders`, so a missed update costs a picker entry, not correctness.
-    """
-    updated = text
-    for picker_id in MAINTAINED_PICKERS:
-        scan = devkit_jsonc.blank_comments(updated)
-        marker = scan.find(f'"id": "{picker_id}"')
-        if marker < 0:
-            if picker_id == "project":
-                raise RegistryEditError('the workspace file has no "project" input to extend')
-            continue  # Older/minimal registries do not yet carry the optional multi-pick.
-        options_at = scan.find('"options"', marker)
-        if options_at < 0:
-            raise RegistryEditError(f'the "{picker_id}" input has no options array')
-        open_at, close_at = _array_span(scan, options_at)
-
-        last_quote = scan.rfind('"', open_at, close_at)
-        if last_quote < 0:
-            raise RegistryEditError(f"the {picker_id} picker lists no options to insert beside")
-        line_start = updated.rfind("\n", 0, last_quote) + 1
-        indent = updated[
-            line_start : len(updated[line_start:]) - len(updated[line_start:].lstrip()) + line_start
-        ]
-        updated = updated[: last_quote + 1] + f',\n{indent}"{name}"' + updated[last_quote + 1 :]
-    return updated
-
-
-def register(text: str, names: list[str]) -> str:
-    """Register each of `names` as a project: a folder entry plus a picker option.
-
-    Verifies the result before returning it. A half-applied edit would leave the file
-    unparseable, and `sweep.parse_workspace` swallows that as "no checkouts" — the
-    exact silent failure this whole change was made to remove.
-    """
-    updated = text
-    for name in names:
-        if name in known_projects(updated):
-            continue  # re-running the generator must not double-register
-        updated = insert_folder(updated, name)
-        updated = insert_picker_option(updated, name)
-
-    try:
-        devkit_jsonc.loads(updated)
-    except json.JSONDecodeError as exc:
-        raise RegistryEditError(f"registration produced invalid JSONC: {exc}") from exc
-    missing = [n for n in names if n not in known_projects(updated)]
-    if missing:
-        raise RegistryEditError(f"registration did not take effect for: {', '.join(missing)}")
-    return updated
-
-
-def _drop_element(text: str, scan: str, start: int, end: int) -> str:
-    """Remove the array element at `text[start:end]`, taking one comma with it.
-
-    Two shapes, because a JSON array's separator belongs to whichever neighbour
-    survives: an element with a comma after it takes that comma and the rest of its
-    line, while the last element takes the comma *before* it instead. Getting this
-    wrong is not a formatting complaint — a stray comma is a trailing comma the
-    workspace file's own parser rejects, which is why `unregister` reparses.
-
-    Offsets are read from `scan`, the comment-blanked copy, so a `//` line sitting
-    between two entries cannot contribute a comma the parser never saw.
-    """
-    after = end
-    while after < len(scan) and scan[after] in " \t\r\n":
-        after += 1
-    if after < len(scan) and scan[after] == ",":
-        line_start = text.rfind("\n", 0, start) + 1
-        if text[line_start:start].strip():
-            line_start = start  # something else shares the line; keep it
-        cut = after + 1
-        while cut < len(scan) and scan[cut] in " \t":
-            cut += 1  # a trailing comment belonged to the element being removed
-        if scan.startswith("\r\n", cut):
-            cut += 2
-        elif cut < len(scan) and scan[cut] == "\n":
-            cut += 1
-        return text[:line_start] + text[cut:]
-
-    before = start
-    while before > 0 and scan[before - 1] in " \t\r\n":
-        before -= 1
-    if before > 0 and scan[before - 1] == ",":
-        return text[: before - 1] + text[end:]
-    raise RegistryEditError("cannot remove the only element of an array")
-
-
-def remove_folder(text: str, name: str) -> str:
-    """Drop `name`'s entry from `folders`. The inverse of `insert_folder`.
-
-    Matched on `path`, whitespace-insensitively, because VS Code rewrites this file
-    itself whenever a workspace setting is changed through its UI and its spacing is
-    not ours to predict. `name` is deliberately not consulted: a folder may carry a
-    display label distinct from its path, and the path is what every reader keys on.
-    """
-    scan = devkit_jsonc.blank_comments(text)
-    key = scan.find('"folders"')
-    if key < 0:
-        raise RegistryEditError('the workspace file has no "folders" array')
-    open_at, close_at = _array_span(scan, key)
-    for start, end in _entry_spans(scan, open_at, close_at):
-        if f'"path":"{name}"' in "".join(scan[start:end].split()):
-            return _drop_element(text, scan, start, end)
-    raise RegistryEditError(f'"{name}" is not in the workspace folders list')
-
-
-def _retarget_default(text: str, scan: str, close_at: int, replacement: str) -> str:
-    """Repoint an input's `default` when the option it named has just been removed.
-
-    A `pickString` whose default is not among its options renders that dead value as
-    the pre-filled answer, so retiring `carameli` would leave three pickers offering it
-    as the one checkout that no longer exists. Bounded by the next `"id":` because
-    these inputs are a flat list and `default` always follows `options` within one.
-    """
-    limit = scan.find('"id":', close_at)
-    limit = len(scan) if limit < 0 else limit
-    at = scan.find('"default"', close_at, limit)
-    if at < 0:
-        return text
-    value_open = scan.find('"', scan.index(":", at) + 1)
-    value_close = scan.find('"', value_open + 1)
-    if value_open < 0 or value_close < 0 or value_close > limit:
-        return text
-    return text[: value_open + 1] + replacement + text[value_close:]
-
-
-def remove_picker_option(text: str, name: str) -> str:
-    """Drop `name` from every maintained picker. The inverse of `insert_picker_option`.
-
-    A picker that never listed it is left alone: `mergeCheckout` lists more than the
-    registry, `adoptProjects` less, and an older file may carry fewer pickers. One left
-    with no option is emptied, not refused -- `adoptProjects` on a PC holding only devkit
-    -- because `_drop_element`'s refusal crashed a fresh machine's first render.
-    """
-    updated = text
-    for picker_id in MAINTAINED_PICKERS:
-        scan = devkit_jsonc.blank_comments(updated)
-        marker = scan.find(f'"id": "{picker_id}"')
-        if marker < 0:
-            if picker_id == "project":
-                raise RegistryEditError('the workspace file has no "project" input to trim')
-            continue
-        options_at = scan.find('"options"', marker)
-        if options_at < 0:
-            raise RegistryEditError(f'the "{picker_id}" input has no options array')
-        open_at, close_at = _array_span(scan, options_at)
-
-        token = f'"{name}"'
-        at = scan.find(token, open_at, close_at)
-        if at < 0:
-            continue
-        # An element, not the value half of a `{"label": …, "value": …}` option: those
-        # would need the whole object removed, and silently deleting half of one is how
-        # a picker starts offering an entry that resolves to nothing.
-        preceding = scan[open_at + 1 : at].rstrip()
-        if preceding and preceding[-1] not in ",":
-            raise RegistryEditError(f'the "{picker_id}" options are not a plain string list')
-
-        remaining = [o for o in devkit_jsonc.loads(scan[open_at : close_at + 1]) if o != name]
-        if not remaining:
-            updated = updated[: open_at + 1] + updated[close_at:]
-            continue
-        updated = _drop_element(updated, scan, at, at + len(token))
-        # Re-derive the span from the UPDATED text: `_drop_element`'s last-element branch
-        # cuts backwards, so a stale `close_at` would land mid-token.
-        after = devkit_jsonc.blank_comments(updated)
-        options_at = after.find('"options"', after.find(f'"id": "{picker_id}"'))
-        updated = _retarget_default(updated, after, _array_span(after, options_at)[1], remaining[0])
-    return updated
-
-
-def unregister(text: str, names: list[str]) -> str:
-    """Retire each of `names`: drop its folder entry and every picker option.
-
-    The inverse of `register`, and verified the same way for the same reason — a
-    half-applied removal leaves the file unparseable, and `sweep.parse_workspace`
-    swallows that as "no checkouts", which is the silent failure the registration side
-    was written to avoid. Nothing on disk is touched: unplugging a project is a
-    registry edit, so it stays reversible by plugging it back in.
-    """
-    updated = text
-    for name in names:
-        if name not in known_projects(updated):
-            continue  # already retired; re-running the picker must not fail on it
-        updated = remove_folder(updated, name)
-        updated = remove_picker_option(updated, name)
-
-    try:
-        devkit_jsonc.loads(updated)
-    except json.JSONDecodeError as exc:
-        raise RegistryEditError(f"retirement produced invalid JSONC: {exc}") from exc
-    still = [n for n in names if n in known_projects(updated)]
-    if still:
-        raise RegistryEditError(f"retirement did not take effect for: {', '.join(still)}")
-    return updated
-
-
-# --- devkit's copy of the workspace file ---------------------------------------
-#
-# `workspace.jsonc` is what is left of the VS Code workspace file: the task block the
-# readers below parse, and the registry `register`/`unregister` still write beside
-# `projects.toml` (`project_registry`). Nothing renders it to the live `.code-workspace`
-# any more and nothing compares the two: render, adopt, check, publish and the drift
-# judged between them went with VS Code. The task layer, and this file, go next.
-
-CANONICAL_WORKSPACE = REPO_ROOT / "workspace.jsonc"
-
-
-def workspace_tasks(text: str) -> dict:
-    """The `tasks` block of a workspace file, parsed."""
-    payload = devkit_jsonc.loads(text)
-    block = payload.get("tasks") if isinstance(payload, dict) else None
-    return block if isinstance(block, dict) else {}
-
-
-def extract_tasks_text(text: str) -> str:
-    """The `tasks` block as SOURCE, comments intact, dedented by one level.
-
-    Used to regenerate the canonical copy after an intentional edit to the workspace
-    file. Parsing and re-dumping would work for the comparison but would throw away
-    the comments, which are most of what the block is worth reading for.
-    """
-    scan = devkit_jsonc.blank_comments(text)
-    key = scan.find('"tasks"')
-    if key < 0:
-        raise RegistryEditError('the workspace file has no "tasks" block')
-    try:
-        open_at = scan.index("{", key)
-    except ValueError as exc:
-        raise RegistryEditError('"tasks" is not an object') from exc
-
-    depth = 0
-    i = open_at
-    in_string = False
-    while i < len(scan):
-        ch = scan[i]
-        if in_string:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch in "[{":
-            depth += 1
-        elif ch in "]}":
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
-    else:
-        raise RegistryEditError('unterminated "tasks" block')
-
-    block = text[open_at : i + 1]
-    return "\n".join(line[1:] if line.startswith("\t") else line for line in block.splitlines())
-
-
-def canonical_text() -> str:
-    """devkit's copy of the workspace file, as source."""
-    return CANONICAL_WORKSPACE.read_text(encoding="utf-8")
-
-
-def canonical_tasks() -> dict:
-    """The canonical `tasks` block, parsed.
-
-    A named accessor rather than a second file. The task block used to live in its own
-    `workspace-tasks.jsonc`, and seven call sites read that path directly; folding it
-    into the whole-file canonical without this would have replaced one duplicate
-    source of truth with seven hard-coded ways to find the new one.
-    """
-    return workspace_tasks(canonical_text())
-
-
-def canonical_tasks_text() -> str:
-    """The canonical `tasks` block as SOURCE, comments intact."""
-    return extract_tasks_text(canonical_text())
+# --- conformance ------------------------------------------------------------
 
 
 def expected_actions(project: str) -> set[str]:
@@ -1362,8 +856,7 @@ def conformance(projects: list[str], root: Path) -> dict[str, list[str]]:
 
 
 def _registry_projects() -> list[str]:
-    """The projects for `main`, off the registry: no workspace file is read, so a
-    dispatch, `--list` and `--check` run on a machine with none. A malformed registry is
+    """The projects for `main`, off the registry. A malformed registry is
     a `ProjectError`, so `refuse_dispatch` files it under the task it stopped.
     """
     try:
@@ -1372,23 +865,23 @@ def _registry_projects() -> list[str]:
         raise ProjectError(f"cannot read the project registry: {exc}") from exc
 
 
+def dispatch_root(workspace: Path | None) -> Path:
+    """The projects root the checkouts are resolved under.
+
+    `--workspace` is a deprecated alias kept because scheduled-task XML on a PC may still
+    pass it: only its directory is read. Absent, the root is the registry's own.
+    """
+    return workspace.parent if workspace is not None else project_registry.projects_root()
+
+
 def main(argv: list[str] | None = None) -> int:
-    # Task labels carry en-dashes and arrows; a Windows console is cp1252 and would
-    # raise UnicodeEncodeError mid-report rather than printing the drift it found.
+    # Action labels carry en-dashes; a Windows console is cp1252 and would raise
+    # UnicodeEncodeError mid-report rather than printing what it found.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
-    # Before argparse, because a dismissed quick-pick is not a usage error and must not
-    # be reported as one. Every task in `workspace.jsonc` that offers a multi-select
-    # picker routes through here, so this is the one place that turns Escape into a
-    # no-op for all of them -- see `task_input` for why VS Code cannot do it itself.
     raw_argv = sys.argv[1:] if argv is None else list(argv)
-    dismissed = task_input.cancelled_inputs(raw_argv)
-    if dismissed:
-        print(task_input.cancel_report("devkit_project", dismissed))
-        return 0
-
     parser = argparse.ArgumentParser(
         description="Run a generic project action in a chosen checkout.",
         epilog=(
@@ -1401,9 +894,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--project",
         default="",
-        help="one checkout name, or a comma-delimited list, as listed in the workspace",
+        help="one checkout name, or a comma-delimited list, as the registry lists them",
     )
-    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="deprecated: only its directory is read, as the projects root",
+    )
     parser.add_argument(
         "--no-ship-fixes",
         action="store_true",
@@ -1429,8 +927,7 @@ def main(argv: list[str] | None = None) -> int:
     except ProjectError as exc:
         return refuse_dispatch(exc, args.action, raw_argv)
 
-    # `--workspace` is a deprecated alias for the projects root: only its directory counts.
-    root = args.workspace.parent
+    root = dispatch_root(args.workspace)
 
     if args.list:
         print("\n".join(projects))
@@ -1452,7 +949,7 @@ def main(argv: list[str] | None = None) -> int:
         if not selected:
             raise ProjectError(f"no project given; expected one of: {', '.join(projects)}")
 
-        # Plan every selection before starting the first one. A stale picker entry or
+        # Plan every selection before starting the first one. A stale name or
         # missing project script must not leave a multi-project request half-executed.
         directories = {name: resolve_project(name, projects, root) for name in selected}
         planned: list[tuple[Path, Action, list[str]]] = []
@@ -1513,7 +1010,7 @@ def main(argv: list[str] | None = None) -> int:
             before,
             after,
             lint_ok=returncode == 0,
-            workspace=args.workspace,
+            root=root,
             slug=action.autofix_slug,
             labels=action.autofix_labels,
         )

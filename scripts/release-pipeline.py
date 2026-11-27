@@ -46,8 +46,8 @@ What it does, in order:
     `upgrade-project.py`, which opens an adoption PR
     per consumer and labels each one for auto-merge
 
-Step 8's *scope* is the one thing the click asks that the schedule cannot: `--projects`
-takes the consumers ticked in `Devkit: Cut Release`'s checklist, and omitting it means
+Step 8's *scope* is the one thing a hand run can say that the schedule cannot:
+`--projects` takes the consumers to adopt in, comma-delimited, and omitting it means
 `--all`, which is what the 2am pass wants. Narrowing it does not narrow the release --
 the tag is the tag -- it decides only whose adoption PR opens tonight.
 
@@ -373,12 +373,11 @@ def deliverable_changes(paths: Sequence[str], vendored: Sequence[str]) -> list[s
 def adoption_scope(projects: Sequence[str]) -> str:
     """The one argv token that tells `upgrade-project.py` which consumers to adopt in.
 
-    `--all` when the checklist ticked nothing, which is what the scheduled pass wants and
-    what this script did unconditionally before the picker existed -- a release nobody is
-    watching should reach every consumer, and only a human at the dropdown has a reason
-    to narrow it.
+    `--all` when `--projects` named nothing, which is what the scheduled pass wants -- a
+    release nobody is watching should reach every consumer, and only a human running it
+    by hand has a reason to narrow it.
 
-    One token rather than a flag and a value, because a ticked selection is a positional
+    One token rather than a flag and a value, because a selection is a positional
     for that script; and spelled once here because it appears three times -- the command,
     the dry run's plan, and the retry line printed when the adoption pass fails. A retry
     naming a different scope from the run it retries is a remedy for something else.
@@ -524,8 +523,8 @@ def upgrade_module():
     """`scripts/upgrade-project.py`, loaded by path.
 
     Hyphenated filename, hence the loader. Two questions are answered from there rather
-    than reimplemented here -- what the `MANIFEST` vendors, and how a VS Code checklist
-    spells its selection -- and both for the same reason: the adoption pass *is* that
+    than reimplemented here -- what the `MANIFEST` vendors, and how a comma-delimited
+    selection is split -- and both for the same reason: the adoption pass *is* that
     script, so a second spelling in this file would agree with it until the day one of
     them was the reason a release did not fire, or adopted somewhere nobody ticked.
     """
@@ -1145,8 +1144,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--projects",
         default="",
         help=(
-            "comma-delimited consumer names to open adoption PRs in, as the "
-            "`Devkit: Cut Release` checklist emits them. Omitted means every consumer"
+            "comma-delimited consumer names to open adoption PRs in. "
+            "Omitted means every consumer"
         ),
     )
     parser.add_argument(
@@ -1172,18 +1171,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
 
-    upgrade = upgrade_module()
-    if upgrade.picked_nothing(args.projects):
-        # Escaping the consumer checklist is backing out of the click, and the click is
-        # the whole release -- so nothing is cut. `--no-adopt` is the spelling for
-        # "release, but adopt nowhere"; an escaped picker is not a request for it.
-        print(
-            "release-pipeline: nothing was picked -- no release was cut. Tick the "
-            "consumers to adopt in, or pass --no-adopt to release without adopting.",
-            file=sys.stderr,
-        )
-        return 1
-    projects = upgrade.project_selection(args.projects)
+    projects = upgrade_module().project_selection(args.projects)
 
     if _run(["gh", "--version"]).returncode != 0:
         print(

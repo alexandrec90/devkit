@@ -26,11 +26,10 @@ degrades gracefully with no backend at all (the auth probe flips `ready` in a
 `.finally`, API-backed views render their offline state), so a UI-only review pays for
 a stack it never calls.
 
-So this is the cheap path wearing the clickable shape: the same option file, written by
-the same scan, picked from with checkboxes (`multiPick`), so several branches come up
-side by side in one run, each on its own port, each opened in the browser once it
-answers. `preview-task.py` stays a terminal tool for the times the stack really is what
-is under review.
+So this is the cheap path: the same scan `preview-task.py --list` prints, picked from
+with `--picks`, so several branches come up side by side in one run, each on its own
+port, each opened in the browser once it answers. `preview-task.py` stays the tool for
+the times the stack really is what is under review.
 
 What one run does, per picked row:
 
@@ -98,11 +97,10 @@ project, nothing for `reconcile` to own.
 
 Usage:
     python preview-ui-host.py --picks="carameli:agent/foo carameli:agent/bar"
-    python preview-ui-host.py --rows         # the dropdown's rows, live, serving nothing
-    python preview-ui-host.py --stop         # stop every host preview server
+    python preview-ui-host.py --stop        # stop every host preview server
     python preview-ui-host.py --clean        # remove every .ui-previews copy
 
-The scan, the option file, the pick grammar and the probe are all `preview-task.py`'s,
+The scan, the pick grammar and the probe are all `preview-task.py`'s,
 loaded by path (the file is hyphenated) through the shared loader -- one branch-listing
 implementation for both tasks, because a second copy is a fork that no gate would
 drift-check. Tested in `tests/test_preview_ui_host.py`.
@@ -127,8 +125,6 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "precommit"))
-import picker_rows
-import picker_scan
 import sweep
 import worktree
 from _loader import load_by_path
@@ -930,18 +926,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--picks",
         default="",
         metavar="'PROJECT:REF ...'",
-        help="space-joined <project>:<ref> tokens -- what the checkbox dropdown sends",
-    )
-    parser.add_argument(
-        "--rows",
-        action="store_true",
-        help="print the dropdown's rows and exit, serving nothing",
-    )
-    parser.add_argument(
-        "--checkouts",
-        default="",
-        metavar="'PROJECT@TOKEN,...'",
-        help="what the checkout dropdown sends -- the stage the row dropdown was narrowed by",
+        help="space-joined <project>:<ref> tokens, as `preview-task.py --list` names them",
     )
     parser.add_argument(
         "--clean",
@@ -982,27 +967,6 @@ def report_reaped(entry: dict) -> str:
     )
 
 
-def cancelled(picks: str, checkouts: str) -> bool:
-    """True when either dropdown was dismissed rather than answered.
-
-    Either of them, because either can be the one escaped and a cancel has to cost
-    nothing whichever it was. VS Code leaves the literal `${input:...}` in the argv
-    rather than aborting the task; `preview_task.unresolved` is what recognises it.
-    """
-    return any(value and preview_task.unresolved(value) for value in (picks, checkouts))
-
-
-def narrowed(candidates: list, checkouts: str) -> list:
-    """`candidates` cut down to the ticked checkouts, or all of them when none were.
-
-    This path already holds the scan, so it filters what it has rather than reading the
-    write the checkout stage recorded -- the same rows by a shorter route. An empty
-    `checkouts` is `--rows` typed by hand, with no first stage to narrow by.
-    """
-    ticked, _token = picker_scan.parse_projects(checkouts)
-    return [c for c in candidates if c.project in ticked] if ticked else candidates
-
-
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     # Only its directory is read; no workspace file need exist.
@@ -1020,10 +984,6 @@ def main(argv: list[str] | None = None) -> int:
     for entry in reap_orphans():
         echo(report_reaped(entry))
 
-    if cancelled(args.picks, args.checkouts):
-        echo("Nothing picked -- the dropdown was cancelled.")
-        return 0
-
     if args.fetch:
         echo("Reading boxes, open PRs and recent branches ...")
     # Scoped to the checkouts this script can actually serve: the scan skips a
@@ -1031,9 +991,6 @@ def main(argv: list[str] | None = None) -> int:
     # row that would land back here as a refusal.
     projects = preview_task.ui_projects(workspace)
     everything = preview_task.collect(workspace, fetch=args.fetch, projects=projects)
-    if args.rows:
-        picker_rows.emit(preview_task.rows(narrowed(everything, args.checkouts)))
-        return 0
 
     npm = shutil.which("npm")
     if npm is None:
@@ -1041,22 +998,17 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not args.picks.strip():
-        echo("Nothing picked. --picks takes the dropdown's space-joined <project>:<ref> tokens.")
+        echo(
+            "Nothing picked. --picks takes space-joined <project>:<ref> tokens; "
+            "`preview-task.py --list` lists the refs there are."
+        )
         return 0
     try:
         resolved = preview_task.resolve_picks(args.picks, everything)
-        # A ticked ref whose checkout the first stage did not return leaves by the same
-        # route an unresolvable one does; `preview_task.refuse_strays` owns the wording.
-        preview_task.refuse_strays(resolved, args.checkouts)
     except ValueError as exc:
         echo(str(exc))
         return 2
 
-    # The two picker stages agreeing is not something the dropdowns can guarantee, and
-    # the way they disagree is silent: `augustocdias.tasks-shell-input` resolves the row
-    # stage's `${input:previewCheckout}` from the value it recorded when THAT input last
-    # ran, so an argument order that stopped putting the checkout stage first would
-    # narrow by a previous click's checkouts and serve a branch nobody asked to see.
     if not resolved:
         return 0
 

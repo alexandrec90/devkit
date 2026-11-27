@@ -3,38 +3,28 @@
   Provision a fresh Windows workstation for devkit, from nothing to self-maintaining.
 
 .DESCRIPTION
-  The one thing a new machine cannot get from a VS Code task, because every task in this
-  workspace lives in the workspace file -- which arrives with the clone this script makes.
-  That is the whole reason it exists, and the reason it is PowerShell rather than Python
-  like everything else under scripts/: it runs before Python is installed.
+  The one thing a new machine cannot get from devkit's own scripts, because they arrive
+  with the clone this script makes. That is the whole reason it exists, and the reason it
+  is PowerShell rather than Python like everything else under scripts/: it runs before
+  Python is installed.
 
-  It does the six steps a workstation needed by hand, none of which was written down:
+  It does the five steps a workstation needed by hand, none of which was written down:
 
-    1. winget the prerequisites: git, uv, the GitHub CLI, VS Code -- then Python from uv,
-       so `python3` is a real interpreter and not the Microsoft Store alias every devkit
+    1. winget the prerequisites: git, uv, the GitHub CLI -- then Python from uv, so
+       `python3` is a real interpreter and not the Microsoft Store alias every devkit
        hook would otherwise hit.
     2. clone devkit.
     3. persist DEVKIT_DIR, without which the harness ledger silently no-ops.
     4. run install-installers-schedule.py --yes -- the ONE installer a machine ever runs
        by hand. It registers devkit-installers, which from then on discovers every other
        scripts/install-*.py by glob and keeps it current, daily and at logon.
-    5. install the two VS Code extensions the workspace tasks resolve their inputs
-       through. Without them roughly twenty tasks fail with
-       "command 'extension.commandvariable.pickStringRemember' not found", which names a
-       command rather than a package and so cannot be searched for.
-    6. report whatever is left that only a human can answer -- notably the git identity,
-       `gh auth login`, and restarting a VS Code that was open during the installs.
+    5. report whatever is left that only a human can answer -- notably the git identity
+       and `gh auth login`.
 
   Idempotent: every step checks before it acts, so re-running it repairs a machine rather
   than doubling anything up. Dry by default, like every installer in this repo; -Yes
   applies. Nothing here is devkit-specific magic -- the same steps by hand are in the
   "New workstation" section of README.md.
-
-  NOTE ON STEP 5. scripts/vscode_extensions.py is emphatic that "a recommendations entry
-  is a prompt, never an install", and that stands: a daily *reporter* must never install
-  software behind the operator. This is the opposite context -- an explicit,
-  operator-invoked provisioning run whose entire purpose is to put the machine in a
-  working state -- so it installs them and says that it did. The reporter keeps prompting.
 
 .PARAMETER Path
   Where to clone devkit. Default: ~\vs-code\devkit.
@@ -89,15 +79,7 @@ $Prerequisites = @(
     @{ Command = 'uv';   Id = 'astral-sh.uv';             Name = 'uv' }
     # Every PR, gate and fix-pass read goes through it; the fix pass refuses to start without it.
     @{ Command = 'gh';   Id = 'GitHub.cli';               Name = 'GitHub CLI' }
-    @{ Command = 'code'; Id = 'Microsoft.VisualStudioCode'; Name = 'VS Code' }
 )
-
-# Only rioj7.command-variable supplies pickStringRemember/multiPick, which roughly twenty
-# of the workspace's tasks resolve their checkout through; tasks-shell-input supplies
-# shellCommand.execute, which the agent tasks use. Kept in step with workspace.jsonc's
-# own "recommendations" list -- vscode_extensions.py reads that list as the source of
-# truth once the clone exists, and reports anything missing on the daily pass.
-$Extensions = @('rioj7.command-variable', 'augustocdias.tasks-shell-input')
 
 function Test-Command($name) {
     $null -ne (Get-Command $name -ErrorAction SilentlyContinue)
@@ -119,7 +101,7 @@ Step 'Prerequisites'
 if ($SkipPrerequisites) {
     Note 'skipped (-SkipPrerequisites)'
 } elseif (-not (Test-Command 'winget')) {
-    Warn 'winget is not on PATH -- install App Installer from the Microsoft Store, or install git, uv, gh and VS Code yourself.'
+    Warn 'winget is not on PATH -- install App Installer from the Microsoft Store, or install git, uv and gh yourself.'
     $script:Problems += 'winget unavailable; prerequisites not checked'
 } else {
     foreach ($tool in $Prerequisites) {
@@ -248,31 +230,9 @@ if (-not (Test-Path $installer)) {
     }
 }
 
-# No workspace-file step: the project registry is projects.toml, committed in the clone,
-# so there is nothing to render. The step that rendered the live .code-workspace went
-# with VS Code's retirement.
+# No registry step: the project registry is projects.toml, committed in the clone.
 
-# --- 5. VS Code extensions ----------------------------------------------------
-
-Step 'VS Code extensions'
-if (-not (Test-Command 'code')) {
-    Warn 'the `code` CLI is not on PATH -- VS Code will prompt for these when you open the workspace.'
-} else {
-    $installed = @(code --list-extensions 2>$null)
-    foreach ($extension in $Extensions) {
-        if ($installed -contains $extension) {
-            Note "$extension : already installed"
-            continue
-        }
-        Would "code --install-extension $extension"
-        if ($Yes) {
-            code --install-extension $extension | Out-Null
-            if ($LASTEXITCODE -ne 0) { $script:Problems += "could not install $extension" }
-        }
-    }
-}
-
-# --- 6. what only a human can answer ------------------------------------------
+# --- 5. what only a human can answer ------------------------------------------
 
 Step 'Left for you'
 if (Test-Command 'git') {
@@ -293,14 +253,13 @@ if (Test-Command 'gh') {
         Warn 'gh is not logged in -- every PR and gate read fails. Fix: gh auth login'
     }
 }
-# A VS Code task inherits the PATH VS Code was launched with, so a tool installed while it
-# was open is invisible to every task until it is fully quit -- "Agent: Fix what is red"
-# then dies on a FileNotFoundError that names no program.
-if ($script:SoftwareInstalled -and (Get-Process -Name 'Code' -ErrorAction SilentlyContinue)) {
-    Warn 'VS Code was running while software was installed -- quit every window and reopen it, or its tasks will not find the new tools.'
+# A terminal inherits the PATH it was opened with, so a tool installed while it was open
+# is invisible to it until it is reopened.
+if ($script:SoftwareInstalled) {
+    Warn 'Software was installed -- open a new terminal, or it will not find the new tools.'
 }
 Note "Clone the projects registered from other PCs: python $Path\scripts\plug-projects.py --plug <name>"
-Note 'The tray icon reports every scheduled job, and "Machine: Scheduled Jobs" manages them.'
+Note "The tray icon reports every scheduled job, and python $Path\scripts\installers.py manages them."
 
 # --- the summary --------------------------------------------------------------
 

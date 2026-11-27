@@ -7,13 +7,11 @@ of its own.
 
 There was a sibling, `git-sync-keep.py`, and this was deliberately not a mode of it:
 that one **rebased** the current branch onto `origin/<default>`, which is what a task
-branch wants. It is gone, with its task, because VS Code's own Source Control view
-rebases a checkout onto its trunk without a picker or a script. Nothing there does what
-the rest of this file is for.
+branch wants, and `git pull --rebase` already does that without a script.
 
 Two consequences, and they are the whole design:
 
-**It is a workspace task, not a dispatched project action.** `devkit_project.py`
+**It is its own CLI, not a dispatched project action.** `devkit_project.py`
 resolves checkouts through `known_projects`, which subtracts `NOT_PROJECTS` --
 correctly, because every action it dispatches needs a harness a reference checkout
 does not have. Merging the trunk in needs nothing but git: no `.devkit.toml`, no
@@ -23,9 +21,9 @@ dispatcher's contract moves to allow it.
 
 **A conflict is an expected outcome, not a crash.** The merge is left in progress
 with every unmerged path named, because resolving it is the next step and aborting
-would throw away exactly the state that work needs. The task wraps this in
-`log-wrap.py`, so the list survives as `logs/<task>.log` -- something to hand an
-agent, rather than something to scrape out of a terminal that has scrolled.
+would throw away exactly the state that work needs. Run under `log-wrap.py`, the list
+survives as `logs/<label>.log` -- something to hand an agent, rather than something to
+scrape out of a terminal that has scrolled.
 
 Nothing is pushed, and no branch is created or deleted. Uncommitted work is stashed
 and restored when git would otherwise refuse over it -- see `merge`.
@@ -46,11 +44,9 @@ import project_registry
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 
-# `--base auto` means "ask the remote". Spelled as a value rather than as the absence
-# of the flag because the VS Code picker feeding it must supply one real token in
-# every branch -- an empty string reaches argparse as a stray positional.
+# `--base auto` means "ask the remote", spelled as a value so it can be passed as well
+# as defaulted.
 AUTO = "auto"
 DEFAULT_REMOTE = "origin"
 
@@ -68,20 +64,16 @@ class MergeError(ValueError):
 # --- pure helpers -----------------------------------------------------------
 
 
-def every_checkout(workspace_text: str | None = None) -> list[str]:
-    """Every project in the registry, reference checkouts included.
+def every_checkout() -> list[str]:
+    """Every project in the registry, reference checkouts included: the raw
+    `project_registry.all_projects()`.
 
     `devkit_project.known_projects` subtracts `NOT_PROJECTS`, and `sweep` subtracts its
     own `DEFAULT_EXCLUDE`, both for the same good reason: those checkouts ship no
-    harness, so every action either tool dispatches would fail in one. This task is the
-    exception that proves it -- it runs git and nothing else -- and applying the
-    exclusion here would remove the checkout the task was written for.
-
-    The raw `project_registry.all_projects()`. `workspace_text` is deprecated: given, the
-    folders of that workspace text are read instead, with nothing excluded either.
+    harness, so every action either tool dispatches would fail in one. This script is
+    the exception that proves it -- it runs git and nothing else -- and applying the
+    exclusion here would remove the checkout it was written for.
     """
-    if workspace_text is not None:
-        return sweep.parse_workspace(workspace_text, frozenset())
     return project_registry.all_projects()
 
 
@@ -130,13 +122,12 @@ def remediation(repo: Path, branch: str, target: str, paths: list[str], stashed:
     )
 
 
-def target_repo(checkout: str, workspace: Path) -> Path:
-    """The directory to run in: a named checkout, or the cwd when none is given.
+def target_repo(checkout: str, root: Path) -> Path:
+    """The directory to run in: a named checkout under `root`, or the cwd when none is
+    given.
 
-    Validated against the registry rather than by `is_dir()`, so a stale picker entry
-    fails naming the real checkouts instead of running somewhere that happens to exist.
-    `workspace` is a deprecated alias for where the checkouts sit: only its directory
-    is read.
+    Validated against the registry rather than by `is_dir()`, so a typo'd name fails
+    naming the real checkouts instead of running somewhere that happens to exist.
     """
     if not checkout:
         return Path.cwd()
@@ -144,7 +135,7 @@ def target_repo(checkout: str, workspace: Path) -> Path:
         names = every_checkout()
     except project_registry.RegistryError as exc:
         raise MergeError(f"cannot read the project registry: {exc}") from exc
-    return devkit_project.resolve_project(checkout, names, workspace.parent, noun="checkout")
+    return devkit_project.resolve_project(checkout, names, root, noun="checkout")
 
 
 # --- git --------------------------------------------------------------------
@@ -411,16 +402,12 @@ def main(argv: list[str] | None = None, run_factory: Callable[[Path], Runner] = 
         help=f"branch to merge FROM, or {AUTO!r} (default) to read it off the remote",
     )
     parser.add_argument("--remote", default=DEFAULT_REMOTE)
-    parser.add_argument(
-        "--workspace",
-        type=Path,
-        default=DEFAULT_WORKSPACE,
-        help="deprecated: names the projects root (this file's directory) and nothing else",
-    )
+    sweep.projects_root.add_flags(parser)
     args = parser.parse_args(argv)
 
     try:
-        repo = target_repo(args.checkout, args.workspace)
+        root = sweep.projects_root.from_flags(args.root, args.workspace, REPO_ROOT)
+        repo = target_repo(args.checkout, root)
     except (MergeError, devkit_project.ProjectError) as exc:
         print(f"git-merge-default: {exc}", file=sys.stderr)
         return 2

@@ -2,9 +2,8 @@
 """Whether this machine's Codex is wired to read a repo's instruction tier at all.
 
 `workspace-status.py`'s `toolchain_lines` reports the workstation prerequisites nothing
-else mentions -- `uv` on PATH, a git identity, a VS Code extension -- and this is the
-fourth, found the way the third was: by hand, from a claim that had quietly stopped
-being true.
+else mentions -- `uv` on PATH, a git identity -- and this is the third, found the way the
+first two were: by hand, from a claim that had quietly stopped being true.
 
 **Two machine-local files carry devkit's whole Codex story, and neither is in any
 repository.** `README.md` states both as mitigations already in place:
@@ -54,8 +53,8 @@ BRIDGE_MARKER = ".claude/rules"
 CONFIG_NAME = "config.toml"
 AGENTS_NAME = "AGENTS.md"
 
-# Same list and the same reason as `vscode_extensions.UNREADABLE`: an absent or
-# unreadable file, and one whose bytes are not text. Anything else is a bug here.
+# An absent or unreadable file, and one whose bytes are not text. Anything else is a bug
+# here.
 UNREADABLE = (OSError, ValueError, UnicodeDecodeError)
 
 

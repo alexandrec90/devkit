@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run every registered project's local end-to-end tests, once you are away from the PC.
 
-The tests no hosted runner can run -- the live workspace file, VS Code itself, a Docker
-stack, a browser, a credential -- run here, on the workstation that has all of them, and
+The tests no hosted runner can run -- the checkouts beside this one, a Docker stack, a
+browser, a credential -- run here, on the workstation that has all of them, and
 what they find reaches the fix pass as a red default branch (`e2e_results.py` owns that
 half and says why it is a result file rather than this job's exit code).
 
@@ -113,9 +113,8 @@ SETTING = rc_config.LOCAL_E2E_SETTING
 
 DEFAULT_IDLE_MINUTES = 10
 DEFAULT_UNTIL = "06:30"
-# One project's ceiling. devkit's own tier drives every workspace task twice in a real
-# VS Code, which is most of half an hour; a hung editor is the likely way to reach this,
-# and the run is ended with its whole process tree and recorded red, naming the timeout.
+# One project's ceiling. A hung browser or stack is the likely way to reach it, and the
+# run is ended with its whole process tree and recorded red, naming the timeout.
 DEFAULT_TIMEOUT_MINUTES = 60
 # How often the idle wait looks again.
 POLL_SECONDS = 120
@@ -396,7 +395,7 @@ def run_pass(
 
 # --- the scheduled run ---------------------------------------------------------------------
 
-# Projects whose tier opens windows on this desktop: VS Code, tkinter. A person back at
+# Projects whose tier opens windows on this desktop (tkinter, for one). A person back at
 # the keyboard mid-run would find one under their cursor, so these wait for a PC that has
 # been left for much longer, and run about once a day.
 OPENS_WINDOWS = frozenset({"devkit", "radio"})

@@ -8,8 +8,8 @@ project does not. That job used to be an inline shell block, so a session could 
 every targeted check green and still learn about that class only from a gate cycle:
 #424's vendored temp-root contract reddened exactly such a project and cost a full
 cycle and a fixer session to find (85c4fb7f). And the block was not safe to copy onto
-a workstation: `new-project.py` registers its render in the machine's real
-`alex-projects.code-workspace` unless told `--no-register`.
+a workstation: `new-project.py` registers its render in devkit's real
+`projects.toml` unless told `--no-register`.
 
 So the rehearsal is this script, and the gate job runs it: one recipe, run the same way
 in both places.

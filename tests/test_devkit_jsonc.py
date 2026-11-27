@@ -7,12 +7,7 @@ markers *inside* string values, and commas that only look trailing.
 import json
 
 import pytest
-from support import (
-    LIVE_WORKSPACE,
-    devkit_jsonc,
-    devkit_project,
-    needs_live_workspace,
-)
+from support import devkit_jsonc
 
 blank_comments = devkit_jsonc.blank_comments
 drop_trailing_commas = devkit_jsonc.drop_trailing_commas
@@ -101,21 +96,3 @@ def test_genuinely_malformed_text_still_raises():
 def test_plain_json_is_unchanged():
     payload = {"folders": [{"path": "a"}, {"path": "b"}], "n": [1, 2, 3]}
     assert loads(json.dumps(payload)) == payload
-
-
-# --- the real files ---------------------------------------------------------
-
-
-@needs_live_workspace
-def test_the_workspace_file_parses():
-    """The registry sweep.py reads. If this fails, `Ship: Sweep` reports nothing."""
-    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
-    payload = loads(text)
-    assert [f["path"] for f in payload["folders"]], "workspace lists no folders"
-
-
-def test_the_canonical_shared_task_block_parses():
-    """devkit owns no `.vscode/tasks.json` of its own any more — this is the block it
-    does own, and every task test reads it. If it stops parsing, they read nothing."""
-    text = devkit_project.canonical_tasks_text()
-    assert loads(text)["version"] == "2.0.0"

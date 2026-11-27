@@ -5,8 +5,8 @@ The projects root is the directory every registered checkout sits in, one level 
 static checkout. It used to be spelled `<root>/alex-projects.code-workspace`'s parent,
 and `sweep.default_workspace` was the resolver; the workspace file is retired, so the
 directory is the answer and the file name survives only for what still reads that file
--- `project_registry.migrate_machine_settings`'s one-shot, and the VS Code task layer
-until it is deleted.
+-- `project_registry.migrate_machine_settings`'s one-shot -- and for the CLIs that still
+thread a `workspace` path and read only its directory (`legacy_workspace`).
 
 Its own module, stdlib only, because both `sweep` and `project_registry` need it and
 `sweep` reads the registry: kept in either, the other import was a cycle.
@@ -119,8 +119,8 @@ def legacy_workspace(
 ) -> Path:
     """A `workspace` path for code that still threads one and reads only its directory:
     the deprecated `--workspace` as given, else `WORKSPACE_FILE_NAME` in `from_flags`'s
-    root. Never a file anything opens -- a CLI's internals switch to the root itself
-    once the task layer is gone, and this goes with them."""
+    root. Never a file anything opens. `worktree.py` and a dozen CLIs beside it pass that
+    path through their internals; this goes once those take the root itself."""
     if workspace is not None:
         return workspace
     return from_flags(root, None, repo_root) / WORKSPACE_FILE_NAME

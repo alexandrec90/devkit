@@ -2187,7 +2187,8 @@ def spawn_and_route(
 
 def workspace_arg(args: list[str]) -> Path:
     """The workspace path the hook was pointed at, resolved: `--root` (a path in it),
-    else the deprecated `--workspace`, else `worktree.DEFAULT_WORKSPACE`. Read off the
+    else the deprecated `--workspace`, else a path in this checkout's projects root
+    (`worktree.workspace_from`). Read off the
     raw argv, as before: a hook takes no parser."""
 
     def flag(name: str) -> Path | None:

@@ -198,7 +198,8 @@ def prune(workspace_root: Path, keep: int = 200) -> int:
 
 def workspace_arg(args: list[str]) -> Path:
     """The workspace path the hook was pointed at, resolved: `--root` (a path in it), else
-    the deprecated `--workspace`, else `worktree.DEFAULT_WORKSPACE`. Off the raw argv: a
+    the deprecated `--workspace`, else a path in this checkout's projects root
+    (`worktree.workspace_from`). Off the raw argv: a
     hook takes no parser. Only its directory is read."""
 
     def flag(name: str) -> Path | None:

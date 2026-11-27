@@ -31,8 +31,7 @@ Every function takes `repo_root` -- the checkout the caller runs in, which may b
 or an agent CLI's worktree -- and resolves the rest through `projects_root.py` rather
 than a copy of its box arithmetic.
 
-Unit-tested in `tests/test_project_registry.py`, which also holds `projects.toml` to
-the `folders` of `workspace.jsonc` while both exist.
+Unit-tested in `tests/test_project_registry.py`.
 
 Imports nothing of devkit's but `devkit_jsonc` and `projects_root`, so `sweep` and the
 rest can read the registry without an import cycle.
@@ -303,11 +302,8 @@ def migrate_machine_settings(
 # The `projects` array is edited a line at a time, as `new-project.py`'s `register_slot`
 # edits `ports.toml`'s `[slots]`: the stdlib has no TOML writer, and a dump-and-rewrite
 # would drop the comments this file exists to carry. Every edit is reparsed before it is
-# returned, because a half-applied one is a registry every reader sees as wrong.
-#
-# Until `workspace.jsonc` is deleted, every writer of the registry writes BOTH: this
-# file and the workspace file's `folders` (`devkit_project.register` / `unregister`),
-# and `tests/test_project_registry.py` fails the moment they disagree.
+# returned, because a half-applied one is a registry every reader sees as wrong. This
+# file is the only registry a writer edits: `workspace.jsonc` is deleted.
 
 _ARRAY_OPEN = re.compile(r"^\s*projects\s*=\s*\[")
 _ENTRY = re.compile(r'^(?P<indent>\s*)"(?P<name>[^"\\]*)"\s*(?P<comma>,?)\s*(?P<comment>#.*)?$')
@@ -392,8 +388,7 @@ def register_text(text: str, *names: str, before: frozenset[str] = frozenset()) 
     """`projects.toml` text with each of `names` added to `projects`.
 
     Appended at the end of the array -- before the first name in `before`, when one is
-    there -- which is where `devkit_project.insert_folder` puts a folder (ahead of any
-    `NOT_PROJECTS` reference checkout), so the two registries keep one order. A name
+    there, so a `NOT_PROJECTS` reference checkout stays last. A name
     already registered is skipped, so a re-run changes nothing; comments and blank lines
     are kept. A file with no `projects` gets one, ahead of its first table.
     """

@@ -11,15 +11,13 @@ still fires and simply enforces an older policy -- there is no failure to notice
 which is why it needs a line here rather than a check someone remembers to run.
 
 **Who runs it, and the two years this file spent answering nobody.** Every docstring
-here, in `schedule_health.py`, in `vscode_extensions.py` and in three places in
-`README.md` called this "the session-start line", and the `Ship: Check Workspace`
-quick-pick row was *deleted* on the strength of that. Nothing ever ran it: devkit's
-`SessionStart` hook is `.claude/hooks/session-start.sh`, whose local branch wires the
-commit gate and reports a missing venv, and `git log -S` finds no commit that ever
-named this file in a settings file. So a missing `uv`, an unset git identity, a
-picker's absent VS Code extension, a stood-down `reconcile` and a leaked box were all
-reported to nobody, and the extension gap surfaced the only way it could -- as
-`command 'shellCommand.execute' not found` at the moment a task was clicked.
+here, in `schedule_health.py` and in three places in `README.md` called this "the
+session-start line", and a quick-pick row that ran it was *deleted* on the strength of
+that. Nothing ever ran it: devkit's `SessionStart` hook is
+`.claude/hooks/session-start.sh`, whose local branch wires the commit gate and reports a
+missing venv, and `git log -S` finds no commit that ever named this file in a settings
+file. So a missing `uv`, an unset git identity, a stood-down `reconcile` and a leaked box
+were all reported to nobody.
 
 `install-workspace-status.py` is what runs it now: a daily `devkit-workspace-status`
 job, deliberately **not** an agent hook, because the full pass is nine seconds
@@ -38,9 +36,8 @@ Design constraints, all from the fact that nobody is watching when this runs:
   have uncommitted work" does not need a fetch to be true.
 - **Silent when healthy.** Prints nothing when there is nothing to say, so the one
   time it does speak is worth reading, and raises no toast either.
-- **Absent workspace is silence, not an error.** The registry is a workstation-local
-  file; on CI, a fresh clone, or anyone else's machine there is simply nothing to
-  report.
+- **An empty registry is silence, not an error.** Nothing registered is simply nothing
+  to report.
 
 Tested in `tests/test_workspace_status.py`.
 """
@@ -69,14 +66,13 @@ import project_registry
 import schedule_health
 import sweep
 import toolchain
-import vscode_extensions
 import worktree
 import wt_profile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # `notify.py` says notifications are a task-wrapper concern and that a diagnostic script
 # should never import it. This is the one caller that cannot use the wrapper, and the
-# reason is the exit code: `notify-wrap.py` toasts on every run and decides pass from
+# reason is the exit code: a task wrapper toasts on every run and decides pass from
 # fail by the code it propagates, which for a scheduled task **is** its `Last Result`.
 # Making findings exit non-zero would have `schedule_health` reporting this job as
 # broken every day it had something to say; keeping it 0 would toast "Passed in 9s" at a
@@ -90,9 +86,8 @@ NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Box-aware (see `projects_root.py`). This one had the quietest version of the bug: a
 # session started inside a box resolved a root holding no checkouts, and this hook's
 # whole design is to stay silent when it cannot tell -- so it reported nothing, in
-# exactly the checkouts an agent works in. Its directory is the projects root; the file
-# is read only by `machine_role.migrate_and_say`, if it is still there.
-DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
+# exactly the checkouts an agent works in.
+ROOT = sweep.projects_root.projects_root(REPO_ROOT)
 # devkit's PERMANENT checkout, which is this one unless the session is in a box. The
 # adoption and retired-hook checks below exempt the source of those files by comparing
 # paths against it -- and from a box the comparison missed, so this line reported devkit
@@ -176,8 +171,8 @@ def stranded_line(results: list[sweep.Result]) -> str:
     the static tier has. The workspace used to carry `Ship: Sweep Workspace` and `Ship:
     Check Workspace` for the same answer on demand; neither was ever run, because a
     report you have to remember to ask for loses to one printed at the top of every
-    session. So a checkout missing from the workspace file's `folders` is not merely
-    unsweepable -- nothing anywhere will mention its stranded work.
+    session. So a checkout missing from `projects.toml` is not merely unsweepable --
+    nothing anywhere will mention its stranded work.
     """
     actionable = [r for r in results if r.verdict in sweep.ACTIONABLE]
     if not actionable:
@@ -429,7 +424,7 @@ def boxes_line(rows: list[dict]) -> str:
     a thing someone has to act on. A box is the same problem wearing a different shape:
     it holds a port slot out of a fixed ceiling and, if its project has a stack, a set of
     containers and volumes. Nothing else says a box exists — they are deliberately absent
-    from the workspace file, so the sweep cannot see them and no picker lists them.
+    from the project registry, so the sweep cannot see them.
 
     Three states, because they want different actions, and only one of them wants a
     command from whoever reads this line. A box that still holds work wants shipping. A
@@ -781,20 +776,22 @@ def _age(seconds: float) -> str:
     return f"{hours}h" if hours < 24 else f"{hours // 24}d {hours % 24}h"
 
 
-def launcher_lines(workspace: Path = DEFAULT_WORKSPACE) -> list[str]:
+def launcher_lines(root: Path | None = None) -> list[str]:
     """One line per checkout with console scripts that name a gone interpreter; [] for
     none, or no registry to read. No gate runs a launcher, and a filed line is a fixer.
-    The checkouts are the project registry's; `workspace` only names where they sit."""
+    The checkouts are the project registry's; `root` is where they sit, `ROOT` unless
+    given."""
     try:
         names = sweep.managed(project_registry.all_projects())
     except project_registry.RegistryError:
         return []
-    gaps = ((name, toolchain.launcher_gap(workspace.parent / name)) for name in names)
+    where = ROOT if root is None else root
+    gaps = ((name, toolchain.launcher_gap(where / name)) for name in names)
     return [f"{name}: {gap.line}" for name, gap in gaps if gap]
 
 
 def toolchain_lines(
-    which=shutil.which, git=None, extensions=None, codex=None, terminal=None, launchers=None
+    which=shutil.which, git=None, codex=None, terminal=None, launchers=None
 ) -> list[str]:
     """The workstation prerequisites nothing else reports missing; [] when they are set.
 
@@ -802,18 +799,18 @@ def toolchain_lines(
     so `worktree.py new`, `provision` and `session-start.sh` all end in the same failure
     wearing three different messages -- and an unset git identity surfaces as `sweep.py
     --ship` dying at `git commit` with `Author identity unknown`, at the end of the one
-    operation whose whole purpose is to get work off a machine. The third, a workspace
-    task's VS Code extension, is `vscode_extensions.py`; injected rather than called so
-    this function's own tests do not depend on what the machine running them installed.
-    The fourth, `codex_context.py`, is the same shape one runtime over: two files in
-    `CODEX_HOME` decide whether Codex reads a repo's instruction tier at all, neither is
-    in any repository, and a session that has read none of `.claude/rules/` is
-    indistinguishable from one that has. The fifth, `wt_profile.status_lines`, is a
+    operation whose whole purpose is to get work off a machine. The third,
+    `codex_context.py`, is the same shape one runtime over: two files in `CODEX_HOME`
+    decide whether Codex reads a repo's instruction tier at all, neither is in any
+    repository, and a session that has read none of `.claude/rules/` is
+    indistinguishable from one that has. The fourth, `wt_profile.status_lines`, is a
     default terminal profile that elevates: every session typed into it cuts trees the
     unelevated fix pass cannot own, and each such tree read as its own problem (1ee03f0f).
+    The reporters are injected rather than called so this function's own tests do not
+    depend on what the machine running them installed.
 
-    The first three were found by hand on a fresh workstation bootstrap, which is exactly
-    the session that has no idea which of its failures are its own doing; the fourth was
+    The first two were found by hand on a fresh workstation bootstrap, which is exactly
+    the session that has no idea which of its failures are its own doing; the third was
     found by a session noticing README asserting a mitigation this machine had lost.
     """
     run = git or _git
@@ -831,7 +828,6 @@ def toolchain_lines(
             f"(fix: git config --global {unset[0]} ...)"
         )
     reporters = (
-        extensions or vscode_extensions.report_lines,
         codex or codex_context.report_lines,
         terminal or wt_profile.status_lines,
         launchers or launcher_lines,
@@ -1134,9 +1130,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
-    # Its directory is the projects root; the file itself is read only by the one-shot
-    # machine-settings migration at the end, and need not exist.
-    workspace = DEFAULT_WORKSPACE
+    root = ROOT
+    # The retired workspace file, read only by the one-shot machine-settings migration at
+    # the end and by `worktree.survey`, which takes its directory; it need not exist.
+    workspace = root / sweep.WORKSPACE_FILE_NAME
     resumed = machine_clock.awake_since()
     if args.notify:
         # The unattended run only: a person at a terminal is not made to wait.
@@ -1145,7 +1142,6 @@ def main(argv: list[str] | None = None) -> int:
         names = sweep.managed(project_registry.all_projects())
         if not names:
             return 0
-        root = workspace.parent
         results = sweep.sweep(root, names, fetch=False)
         latest = latest_devkit_tag(root / "devkit")
         behind = projects_behind(root, names, latest) if latest else {}
@@ -1168,15 +1164,11 @@ def main(argv: list[str] | None = None) -> int:
             headroom=headroom_line(root),
         )
         # Prefixed here rather than passed into `render`: these come first because a
-        # machine missing uv, a git identity or a task's extension cannot act on the
+        # machine missing uv or a git identity cannot act on the
         # lines below, so saying them second would hand out fixes that cannot run --
         # and `render` already takes more arguments than anything should.
         tools = toolchain_lines()
         toolchain = "\n".join(f"[workspace] {line}" for line in tools)
-        # No plug-menu rebuild rides on this pass any more. That checklist was the last
-        # dropdown reading a cached file, and it now scans when it opens
-        # (`plug-projects.py --rows`), so there is nothing left for a scheduled writer to
-        # keep fresh -- and nothing for this pass to warn about when it could not.
         message = "\n".join(part for part in (toolchain, report) if part)
     except Exception:
         # The job failing, unlike a finding: exit non-zero with the traceback, so the

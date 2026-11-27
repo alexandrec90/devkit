@@ -147,7 +147,7 @@ def test_workspace_arg_reads_root_or_the_deprecated_workspace(tmp_path):
     given = tmp_path / "w.code-workspace"
     assert task_slug.workspace_arg(["--workspace", str(given)]) == given.resolve()
     assert task_slug.workspace_arg(["--root", str(tmp_path)]).parent == tmp_path.resolve()
-    assert task_slug.workspace_arg([]) == worktree.DEFAULT_WORKSPACE.resolve()
+    assert task_slug.workspace_arg([]) == worktree.workspace_from(None, None)
 
 
 def test_an_unreadable_registry_serves_nothing(tmp_path, monkeypatch):

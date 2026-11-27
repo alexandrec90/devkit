@@ -91,8 +91,8 @@ project — which carries `scripts/**` allowances devkit's own config does not a
 those paths. So `templates/` is excluded from ruff (`force-exclude = true`, so the
 exclusion holds for the explicitly-named paths that `lint-all.py --changed` and
 pre-commit pass), from mypy, and from `lint-all.py`'s `--changed` scope.
-`scripts/notify.py` and `scripts/notify-wrap.py` are **byte-identical copies** of the
-files under `templates/core/scripts/`, and a test enforces that.
+`scripts/notify.py` is a **byte-identical copy** of the file under
+`templates/core/scripts/`, and a test enforces that.
 
 ## Loading a module by path
 
@@ -166,7 +166,7 @@ state a checkout can only reach by surviving the work done in it. A box cut fres
   names it too, and killing the session that asked for the reap is worse than the husk.
   A session *standing in* the box maps nothing there, so `reconcile` asks `claude agents`
   (`box_teardown.vacate`): an idle background one is stopped, any other is a `WAIT`.
-- **A box is never registered in the workspace file.** That would put it in `sweep.py`'s
+- **A box is never registered in `projects.toml`.** That would put it in `sweep.py`'s
   scope and give its lifecycle two owners; `workspace-status.py` reports boxes instead.
 - **`worktree-guard.py` is the one caller that skips provisioning.** It was built as a
   PreToolUse hook (unwired now, like every agent hook), where minutes read as a hang — so

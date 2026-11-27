@@ -26,15 +26,15 @@ from pathlib import Path
 import pytest
 from support import (  # also what puts `scripts/` on the path for the imports below
     generate,
+    live_checkouts,
     load_script,
-    needs_live_workspace,
+    local,
 )
 
 import after_merge
 import delivery
 import devkit_manifest
 import ship_intent
-import sweep
 
 ROOT = Path(__file__).resolve().parents[1]
 new_project = load_script("scripts/new-project.py")
@@ -256,9 +256,7 @@ def test_the_section_names_the_elevated_verbs_the_queue_takes():
 
 
 def _projects() -> list[tuple[str, Path]]:
-    workspace = sweep.default_workspace(ROOT)
-    names = sweep.parse_workspace(workspace.read_text(encoding="utf-8"))
-    return [(name, workspace.parent / name) for name in names]
+    return live_checkouts()
 
 
 def _run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -269,7 +267,7 @@ def _run(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-@needs_live_workspace
+@local
 def test_every_project_is_direct_on_its_default_branch():
     """Read off origin, not the checkout: a flow edited and never merged gates nothing
     out of anyone's way, and that is how every project sat gated on 2026-11-23."""
@@ -294,14 +292,14 @@ def _origin_manifest(root: Path) -> dict:
     return tomllib.loads(shown.stdout) if shown.returncode == 0 else {}
 
 
-@needs_live_workspace
+@local
 def test_every_money_project_guards_its_money_paths_on_origin():
     """Without `[delivery] guarded`, an order-placing change would merge with no gate."""
     projects = dict(_projects())
     unguarded = []
     for name in MONEY_PROJECTS:
         if name not in projects:
-            pytest.fail(f"{name} is not registered in the workspace file")
+            pytest.fail(f"{name} is not registered with a checkout on this machine")
         delivery_table = _origin_manifest(projects[name]).get("delivery", {})
         if not delivery_table.get("guarded"):
             unguarded.append(name)
@@ -312,7 +310,7 @@ def test_every_money_project_guards_its_money_paths_on_origin():
 STUCK_AFTER_HOURS = 6
 
 
-@needs_live_workspace
+@local
 def test_no_pr_sits_open_waiting_for_a_person():
     """**The outcome itself.** Every rule above can hold and PRs still pile up -- on
     2026-11-24 there were 30 open across 8 repositories, none of them held. Anything
@@ -337,7 +335,7 @@ def test_no_pr_sits_open_waiting_for_a_person():
     assert stuck == [], f"open past {STUCK_AFTER_HOURS} h with nothing holding them: {stuck}"
 
 
-@needs_live_workspace
+@local
 def test_no_project_requires_a_check_before_a_merge():
     """Branch protection or a ruleset that requires a check would make GitHub refuse the
     merger's merge, and every `/ship` would sit open behind CI after all."""

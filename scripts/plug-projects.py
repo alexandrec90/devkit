@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Plug a project into the workspace, or unplug one, from a checkbox list.
+"""Plug a project into the registry, or unplug one, from a checkbox list.
 
-The `folders` array in the workspace file is the project **registry** — `sweep.py`,
-`worktree.py`, `worktree-guard.py`, `workspace-status.py`, `preview-task.py` and the
-task dispatcher all read it through `devkit_project.known_projects`, and every
-`register()`-maintained picker mirrors it. So "is this project part of the workspace"
-already has exactly one answer; what it did not have was a verb. Retiring `apt-finder`
-(commit `dce470e`) was seven hand-made deletions across five arrays, which is the kind
-of edit that half-lands and leaves `sweep.parse_workspace` reporting no checkouts at
-all.
+`projects.toml` is the project **registry** — `sweep.py`, `worktree.py`,
+`worktree-guard.py`, `workspace-status.py`, `preview-task.py` and the dispatcher all read
+it through `project_registry`. So "is this project registered" already has exactly one
+answer; what it did not have was a verb. Retiring `apt-finder` (commit `dce470e`) was
+seven hand-made deletions across five arrays, which is the kind of edit that half-lands.
 
 Three sources feed the list, because a project can be in any two of them:
 
@@ -23,7 +20,7 @@ Three sources feed the list, because a project can be in any two of them:
 **The registry is global and the checkout is per machine.** The registry is committed,
 so a project plugged in on one workstation is registered on all of them, while only
 some hold its checkout. That is why the fourth row exists: on the other machines the
-project is registered and absent, the picker offers it as one row saying so, and
+project is registered and absent, the list offers it as one row saying so, and
 ticking that row clones it here without editing the registry at all. Two PCs holding
 two different subsets of the registry is the ordinary state, not a half-applied sync.
 To drop a project from one PC only, delete its checkout. Unchecking a project that
@@ -34,29 +31,20 @@ to every sweep, and to the guard that routes an agent's edit into a box — whic
 `unplug_hazards` refuses over live boxes and unpushed commits rather than silently
 orphaning them.
 
-The write goes to devkit's committed registry -- `projects.toml` and, until it is
-deleted, `workspace.jsonc` -- and never to the live workspace file, which nothing
-renders any more. `edit_verdict` gates where it is made from. The edit then goes onto a
-task branch in a worktree of its own, with a ship intent (`hand_off_registry`), and the static checkout's
-copy is put back: the fix pass runs from that checkout, and an edit left there for
-someone to commit was committed on a branch in it, which the pass then ran (a5ec492b).
+The write goes to devkit's committed `projects.toml`, never to the retired live
+workspace file. `edit_verdict` gates where it is made from. The edit then goes onto a
+task branch in a worktree of its own, with a ship intent (`hand_off_registry`), and the
+static checkout's copy is put back: the fix pass runs from that checkout, and an edit
+left there for someone to commit was committed on a branch in it, which the pass then
+ran (a5ec492b).
 
-**The checkboxes live in VS Code, not in this terminal.** `--rows` scans the three
-sources and prints the quick-pick, `plugSelection` draws it, and `--picks` reads the
-answer back. The terminal loop below is what a bare `python scripts/plug-projects.py`
-still gets, and the task never reaches it -- which is what lets the task run inside
-`log-wrap.py`, whose pipe could not carry that loop's prompt. The wrapper keeps the run
-and files a failed one on the harness-events ledger; this script's own
-`logs/plug-projects.log` names the registry it ended with.
+A bare `python scripts/plug-projects.py` gets the terminal checkbox loop below; `--list`
+prints the list, and `--picks NAMES` flips the named rows without the loop. This
+script's own `logs/plug-projects.log` names the registry it ended with.
 
-**A tick is a toggle, and that is a deliberate break from the checklist it replaced.**
-That list came from `logs/plug-menu.json`, which only `worktree.py reconcile` rewrote —
-so it was stale by construction, and it froze outright the moment that pass was stood
-down. `shellCommand.execute` runs a command when the picker opens but has no `picked`
-field, so a live list cannot open pre-ticked; rather than keep a writer alive for the
-ticks alone, the answer became relative. It now means the same thing whenever it is
-applied, it matches what the terminal loop's `toggle` verb has always done, and doing
-nothing is a no-op in both directions instead of a request to retire every project.
+**A tick is a toggle**: `--picks` means the same thing whenever it is applied, it
+matches what the terminal loop's `toggle` verb does, and naming nothing is a no-op in
+both directions instead of a request to retire every project.
 
 **By name, `--unplug` is the whole retirement and `--plug` its reverse.** A tick stays
 the registry alone, as its row says, but `--unplug NAME` then runs `project_retire`: this
@@ -66,7 +54,7 @@ for a fixer to chase. `--plug NAME` unarchives the repo before it clones, and pu
 what this PC's record says was running. On a second PC, the same flag does the local
 half alone (`RETIRE_HERE`, `RESTORE_HERE`): the registry and the repo are global.
 
-Pure helpers (`inventory`, `render`, `parse_command`, `plan`, `edit_verdict`, `rows`,
+Pure helpers (`inventory`, `render`, `parse_command`, `plan`, `edit_verdict`,
 `toggled_selection`, `clone_picks`, `scripted_selection`, `with_local_halves`) carry the
 decisions and are unit-tested in `tests/test_plug_projects.py`; `main` is the shell
 around them.
@@ -85,7 +73,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import canonical_handoff
 import devkit_project
-import picker_rows
 import project_registry
 import project_retire
 import sweep
@@ -95,6 +82,8 @@ import worktree
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The projects root, where the checkouts are cloned and plugged.
 WORKSPACE_ROOT = project_registry.projects_root(REPO_ROOT)
+# devkit's committed registry, the one file a plug or an unplug edits.
+REGISTRY = project_registry.registry_path(REPO_ROOT)
 ARTIFACT = REPO_ROOT / "logs" / "plug-projects.log"
 
 # The GitHub account these checkouts live under. Hard-coded exactly as
@@ -110,7 +99,7 @@ SKIP_DIRS = frozenset({"logs"})
 PLUG = "plug"
 UNPLUG = "unplug"
 # The registry already names it; the disk does not have it. Distinct from PLUG because
-# the registry half is already true, so `apply_registry` must not re-register it.
+# the registry half is already true, so `apply_projects` must not re-register it.
 CLONE = "clone"
 # This PC's half of a retire or a restore, for a project whose registry half is already
 # true -- the second PC that ran it. Neither edits the registry.
@@ -209,7 +198,7 @@ def github_repos(runner) -> tuple[list[str], frozenset[str]]:
 
 
 def inventory(
-    registry_text: str,
+    registered: list[str],
     disk: list[str],
     repos: list[str],
     *,
@@ -219,24 +208,21 @@ def inventory(
 ) -> list[Candidate]:
     """Merge the three sources into one ordered list of candidates.
 
-    Registered projects keep the registry's own order — that array is hand-arranged and
-    reordering it in the listing would make the checkbox numbers disagree with the
-    workspace tree everyone reads. Everything else is appended alphabetically.
+    `registered` is the raw registry, in its own order. Registered projects keep that
+    order — the array is hand-arranged and reordering it in the listing would make the
+    checkbox numbers disagree with the file everyone reads. Everything else is appended
+    alphabetically.
 
     An archived repo is offered only when it is registered or on disk: a retired
     project's checkout is kept, so its row is there to plug back, while every repo
     archived long ago and never cloned here stays out of the list.
 
     `NOT_PROJECTS` is subtracted, so a reference checkout cannot be offered for
-    unplugging. It is in `folders` on purpose and every consumer of the registry
+    unplugging. It is registered on purpose and every consumer of the registry
     already excludes it by name; letting a checkbox retire it would break the one
-    task that resolves against the raw registry.
+    script that resolves against the raw registry (`git-merge-default.py`).
     """
-    plugged = [
-        n
-        for n in devkit_project.known_projects(registry_text)
-        if n not in devkit_project.NOT_PROJECTS
-    ]
+    plugged = [n for n in dict.fromkeys(registered) if n not in devkit_project.NOT_PROJECTS]
     on_disk, on_github = set(disk), set(repos)
     offered = on_disk | (on_github - (set(archived) - set(plugged)))
     rest = sorted(offered - set(plugged) - devkit_project.NOT_PROJECTS, key=str.lower)
@@ -366,113 +352,23 @@ def interactive(
                 state.symmetric_difference_update({name})
 
 
-# --- the same list, drawn by VS Code ----------------------------------------------
-
-
-def toggle_detail(candidate: Candidate, owner: str) -> str:
-    """What ticking this row will do, as the sentence under its label.
-
-    The pick is the confirmation: the task runs `--picks ... --yes`, so this string is
-    the last thing anyone reads before a public GitHub repo is created. Every row says
-    what its *own* tick does, because a tick now means "flip this" and the two
-    directions cost wildly different things -- retiring a registry entry is reversible
-    and touches no disk, while plugging one can clone, or create and push, a repository.
-
-    The one row whose tick is not a registry toggle is a project registered from
-    another workstation and absent here: its tick clones the checkout onto this PC and
-    leaves the registry alone. It used to read "leaving it alone clones it", which the
-    task could never deliver -- an untouched picker resolves to no picks, and no picks
-    is a no-op -- so the clone was only ever reachable by hand.
-    """
-    if candidate.plugged and needs_clone(candidate):
-        return (
-            f"registered, not on this PC -- ticking clones {owner}/{candidate.name} here "
-            "(the registry is untouched)"
-        )
-    if candidate.plugged:
-        return (
-            "in the registry -- ticking retires it on every PC "
-            "(registry only; nothing on disk is touched)"
-        )
-    if not candidate.on_disk:
-        return f"not on disk -- ticking clones {owner}/{candidate.name} first"
-    if not candidate.on_github:
-        return f"no repo -- ticking CREATES the public {owner}/{candidate.name} and pushes it"
-    if candidate.archived:
-        return f"archived on GitHub -- ticking unarchives {owner}/{candidate.name} and registers it"
-    return "on disk and on GitHub -- ticking registers it, and nothing else"
-
-
-def rows(candidates: list[Candidate], owner: str) -> list[str]:
-    """The quick-pick's lines, built from the scan that just ran.
-
-    **Ticking a row toggles it**, which is the whole difference from the checklist this
-    replaced and the reason `guarded_selection` is gone rather than ported.
-    `shellCommand.execute` has exactly four positional fields and no `picked`, so a live
-    list cannot open pre-ticked -- and that is a better fit than it first looks, because
-    a tick is now a *relative* instruction. The checklist's answer was the absolute
-    registry it wanted, which is only meaningful against the state the rows were drawn
-    from; when that state was a file written a quarter of an hour ago, an untouched row
-    silently asserted a registry that had since moved. A toggle says "flip this one", so
-    it means the same thing whenever it is applied and the rows can be drawn from a scan
-    that costs a `gh` call rather than a scheduled writer nobody owns.
-
-    The consequence worth reading twice: doing nothing is now a no-op in both
-    directions. An empty pick changes nothing instead of retiring the whole registry,
-    which is what `main` needed a special-cased error for.
-    """
-    if not candidates:
-        return [
-            picker_rows.nothing_row("no projects found", "nothing on disk, on GitHub or registered")
-        ]
-    return [
-        picker_rows.row(
-            candidate.name,
-            candidate.name,
-            candidate.where
-            + ("" if candidate.harnessed or not candidate.on_disk else "  (no .devkit.toml)"),
-            toggle_detail(candidate, owner),
-        )
-        for candidate in candidates
-    ]
+# --- the scripted answer ---------------------------------------------------------
 
 
 def parse_ticks(value: str) -> tuple[str, ...]:
-    """Split the checklist's one-string answer. A VS Code input resolves to one string,
-    so `separator` joins the ticked values and this is the other half of that."""
+    """Split `--picks`'s one-string answer, comma- or space-separated."""
     return tuple(name for name in value.replace(",", " ").split() if name)
-
-
-def picked_nothing(value: str) -> bool:
-    """Did the quick-pick never open at all?
-
-    Escape leaves the input unresolved and VS Code passes the literal `${input:...}`
-    through to the task — the shape `preview-task.py` treats as a graceful no-op, for
-    the reason its input carries no `checkEscapedUI`: the extension's abort flag is
-    sticky, so opting into it retires the dropdown for the life of the window.
-    """
-    return "${input:" in value
 
 
 def toggled_selection(picked: tuple[str, ...], plugged: set[str]) -> set[str]:
     """The registry the picks ask for: the live one, with every ticked row flipped.
 
     A symmetric difference, and it needs no `offered` list and no guard against a row
-    whose premise moved -- which is the entire reason this replaced
-    `selection_from_ticks` and `guarded_selection` rather than joining them.
+    whose premise moved: a toggle is relative, so the worst a raced registry edit can do
+    is flip a row the person did mean to flip -- not a silent retirement of a project
+    nobody mentioned.
 
-    Those two existed because the checklist was a **file**: its rows were written by a
-    pass that had since finished, so the answer had to be read as "current state, edited
-    by the rows that were drawn", and a row drawn with a tick the registry no longer
-    agreed with had to be skipped rather than obeyed. Both are properties of a cached
-    list. `rows` is now generated when the picker opens, and a toggle is relative
-    anyway, so the worst a raced registry edit can do is flip a row the person did mean
-    to flip -- a no-op away from what they asked for, not a silent retirement of a
-    project nobody mentioned.
-
-    Names the scan did not offer cannot appear here, so nothing filters them: they would
-    have to be typed by hand into `--picks`, and `main` rejects an unknown name before
-    this is reached. Nor can a clone pick: `clone_picks` takes those out first, because
+    Names the scan did not offer are dropped by `main` before this is reached. Nor can a clone pick: `clone_picks` takes those out first, because
     flipping a registered-elsewhere row would read as its retirement.
     """
     return set(plugged).symmetric_difference(picked)
@@ -487,7 +383,7 @@ def scripted_selection(
 ) -> tuple[set[str], set[str]]:
     """`(registry the run asks for, projects to clone here)` for the two scripted entries.
 
-    The quick-pick's answer (`ticks`) and the `--plug`/`--unplug` flags read "clone it
+    The `--picks` answer (`ticks`) and the `--plug`/`--unplug` flags read "clone it
     here" differently, which is why `plan` takes the clone set explicitly. A tick on a
     registered-elsewhere row is a clone and not a toggle, so it is taken out before the
     toggles are read; `--plug` of such a project is a clone; and `--unplug` of one says
@@ -506,14 +402,14 @@ def after_apply_notes(steps: list[Step], handed: bool = False) -> list[str]:
 
     A clone edits nothing in the registry -- the project was registered already, from
     another workstation -- so there is nothing to commit and the note would send
-    someone to ship a `workspace.jsonc` that has not changed. Nor does an edit `_apply`
+    someone to ship a `projects.toml` that has not changed. Nor does an edit `_apply`
     handed off onto a task branch: the fix pass ships that one. The note that remains is
     for a cut that failed, and says where the branch goes, since "commit it on a task
     branch" in the static checkout is how the pass came to run one (a5ec492b).
     """
     notes = []
     if any(s.action in REGISTRY_EDITS for s in steps) and not handed:
-        name = devkit_project.CANONICAL_WORKSPACE.name
+        name = REGISTRY.name
         notes.append(f"  ship {name} from a worktree, never a branch in devkit's own checkout:")
         notes.append("  the fix pass runs from that checkout, on whatever branch it is on.")
     if any(s.action == PLUG for s in steps):
@@ -544,13 +440,13 @@ def plan(
 ) -> list[Step]:
     """Every ticked-but-unregistered and registered-but-unticked project, as work.
 
-    Unplugs come first. Both halves are one `register`/`unregister` call each, so the
+    Unplugs come first. Both halves are one registry edit each, so the
     order only decides what the preview reads like — and a list that retires before it
     adds matches how the numbers in the list will move.
 
     `clone` names the registered-elsewhere projects to clone onto this PC. It is
     explicit rather than "every checked row that `needs_clone`" because every caller
-    means something different by an untouched row: the quick-pick's answer names only
+    means something different by an untouched row: `--picks` names only
     what was ticked, `--unplug` names nothing about the rest, and only the terminal
     loop's `apply` is a statement about every box it drew.
     """
@@ -577,7 +473,7 @@ def plan(
     # A registered project that is not on disk is the fresh-workstation case, and the
     # other-workstation case -- and it is the one row where the tick and the registry
     # already agree, so both loops above skip it and no verb offered the clone. Four
-    # projects were in `folders`, none was on disk, and the answer was a hand-written
+    # projects were registered, none was on disk, and the answer was a hand-written
     # `gh repo clone` loop. This keeps one verb for "make the registry true here": the
     # registry half is already done, so the step carries only the disk half.
     steps.extend(
@@ -599,9 +495,9 @@ def with_local_halves(
     """`steps`, with this PC's half of a retire or a restore added for every project
     named by `--plug` or `--unplug`.
 
-    Only the flags reach it. A tick is a toggle whose row promises "registry only;
-    nothing on disk is touched", so the quick-pick and the terminal loop pass no names
-    and are left exactly as they were.
+    Only the flags reach it. A tick is a toggle of the registry alone, with nothing on
+    disk touched, so `--picks` and the terminal loop pass no names and are left exactly
+    as they were.
 
     A named project whose registry half is already true still gets its local half: the
     second PC that ran a retired project unplugs it to stop it there, and a project
@@ -804,29 +700,11 @@ def create_repo(owner: str, name: str, path: Path, runner, *, init: bool) -> Non
         raise PlugError(f"could not create {owner}/{name} on GitHub")
 
 
-def apply_registry(text: str, steps: list[Step]) -> str:
-    """Apply every step's registry half to `text`, in one pass each way.
-
-    `register` and `unregister` both verify their own result and raise
-    `RegistryEditError` on a half-applied edit, which is the failure this whole tier
-    exists for: `sweep.parse_workspace` reads an unparseable workspace file as "no
-    checkouts", so a broken registry is silent everywhere it matters.
-    """
-    retiring = [s.name for s in steps if s.action == UNPLUG]
-    adding = [s.name for s in steps if s.action == PLUG]
-    if retiring:
-        text = devkit_project.unregister(text, retiring)
-    if adding:
-        text = devkit_project.register(text, adding)
-    return text
-
-
 def apply_projects(text: str, steps: list[Step]) -> str:
-    """`apply_registry` for `projects.toml` text: the same steps, the same order.
+    """Apply every step's registry half to `projects.toml` text, retirements first.
 
-    The registry's new home, written beside `workspace.jsonc` until that file is gone --
-    `tests/test_project_registry.py` fails the two the moment they disagree. Raises
-    `project_registry.RegistryError` on an edit that did not take.
+    Raises `project_registry.RegistryError` on an edit that did not take: a half-applied
+    registry is one every reader sees as wrong.
     """
     retiring = [s.name for s in steps if s.action == UNPLUG]
     adding = [s.name for s in steps if s.action == PLUG]
@@ -834,40 +712,34 @@ def apply_projects(text: str, steps: list[Step]) -> str:
     return project_registry.register_text(text, *adding, before=devkit_project.NOT_PROJECTS)
 
 
-def write_registry(canonical: Path, steps: list[Step]) -> list[Path]:
-    """Write `steps`' registry half to `canonical` and the `projects.toml` beside it;
-    the files written, `canonical` first (`projects.toml` only when it changed).
+def write_registry(registry: Path, steps: list[Step]) -> bool:
+    """Write `steps`' registry half to `registry` (`projects.toml`); whether it changed.
 
-    Both edits are computed before either is written, so a refusal from one leaves the
-    other untouched rather than the two registries disagreeing. A checkout with no
-    `projects.toml` writes `canonical` alone: there the workspace file is still the
-    whole registry (`project_registry.all_projects`).
+    A missing or unreadable file is a `PlugError`, never a silent skip: `projects.toml`
+    is the whole registry, and a file created here holding one name would read as a
+    registry of one.
     """
-    toml = canonical.parent / project_registry.REGISTRY_NAME
-    edits = [(canonical, apply_registry(canonical.read_text(encoding="utf-8"), steps))]
-    if toml.is_file():
-        before = toml.read_text(encoding="utf-8")
-        try:
-            after = apply_projects(before, steps)
-        except project_registry.RegistryError as exc:
-            raise PlugError(f"{exc} -- nothing was written") from exc
-        if after != before:
-            edits.append((toml, after))
-    for path, text in edits:
-        path.write_text(text, encoding="utf-8", newline="\n")
-    return [path for path, _ in edits]
+    try:
+        before = registry.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PlugError(f"cannot read {registry}: {exc}") from exc
+    try:
+        after = apply_projects(before, steps)
+    except project_registry.RegistryError as exc:
+        raise PlugError(f"{exc} -- nothing was written") from exc
+    if after == before:
+        return False
+    registry.write_text(after, encoding="utf-8", newline="\n")
+    return True
 
 
 def write_artifact(problems: list[str]) -> None:
     """Persist this run's failures under `logs/`, per `.claude/rules/engineering.md`.
 
-    The script writes its own artifact instead of the task being wrapped in
-    `log-wrap.py`, which is the ordinary way. That wrapper pipes the child's stdout and
-    reads it a line at a time, so a prompt that has not ended its line never reaches the
-    terminal and the checkbox loop below hangs waiting for input nobody can see — true
-    of a bare `python scripts/plug-projects.py` whichever way the task is spelled. One
-    artifact covering both entry points is also the only version of this that stays
-    right when someone runs the CLI, which is where the confirmations still live.
+    The script writes its own artifact instead of being wrapped in `log-wrap.py`, which
+    is the ordinary way. That wrapper pipes the child's stdout and reads it a line at a
+    time, so a prompt that has not ended its line never reaches the terminal and the
+    checkbox loop below would hang waiting for input nobody can see.
 
     Emptied on a clean run, the way `log-wrap.py` empties its own log, so it never
     describes a failure already fixed.
@@ -900,11 +772,15 @@ def gather() -> tuple[list[Candidate], list[str]]:
     to clone or to create — both of which the plan names explicitly, so a step that
     needed the missing half cannot be reached by accident.
 
-    The registry is read from devkit's committed copy, not the live file, which may
-    lack a project registered on another PC -- exactly the row this picker has to draw
-    as "registered, not on this PC".
+    The registry is devkit's committed `projects.toml`, which holds a project registered
+    on another PC -- exactly the row this list has to draw as "registered, not on this
+    PC". A malformed one is an `OSError` for `main` to report: guessing would offer to
+    plug every registered project back in.
     """
-    registry = devkit_project.canonical_text()
+    try:
+        registry = project_registry.parse_registry(REGISTRY.read_text(encoding="utf-8"))
+    except project_registry.RegistryError as exc:
+        raise OSError(str(exc)) from exc
     disk = disk_projects(WORKSPACE_ROOT)
     warnings: list[str] = []
     archived: frozenset[str] = frozenset()
@@ -924,7 +800,7 @@ def gather() -> tuple[list[Candidate], list[str]]:
 REGISTRY_INTENT = """{subject}
 
 `scripts/plug-projects.py` {what} on a confirmed pick. This is devkit's registry,
-`projects.toml` beside `workspace.jsonc`, which every machine shares.
+`projects.toml`, which every machine shares.
 
 The script cut this branch itself. It used to leave the edit uncommitted in devkit's
 static checkout and say to commit it on a task branch, and a session did, in that
@@ -943,30 +819,25 @@ def registry_change(steps: list[Step]) -> tuple[str, str]:
     parts = [f"{verb} {', '.join(names)}" for verb, names in verbs if names]
     if not parts:
         return "", ""
-    subject = " and ".join(parts).capitalize() + " in the workspace registry"
+    subject = " and ".join(parts).capitalize() + " in the project registry"
     what = " and ".join(f"{verb}ged {', '.join(names)}" for verb, names in verbs if names)
     slug = "-".join(f"{verb}-{'-'.join(names)}" for verb, names in verbs if names)
     return slug, REGISTRY_INTENT.format(subject=subject, what=what)
 
 
-def hand_off_registry(
-    steps: list[Step], canonical: Path, runner=subprocess.run, also: tuple[str, ...] = ()
-) -> str:
+def hand_off_registry(steps: list[Step], registry: Path, runner=subprocess.run) -> str:
     """Put the registry edit on a task branch off the static checkout: the line to print,
-    or "" when nothing was handed off and the person still has to commit it. `also`
-    names the other registry files written beside `canonical` (`projects.toml`), which
-    go onto the same branch."""
+    or "" when nothing was handed off and the person still has to commit it."""
     slug, intent = registry_change(steps)
     if not slug:
         return ""
-    cut = canonical_handoff.hand_off(canonical, slug, intent, runner, also=also)
+    cut = canonical_handoff.hand_off(registry, slug, intent, runner)
     if cut.said:
         return f"  WARNING {cut.said}"
     if cut.tree is None:
         return ""
-    files = " and ".join([canonical.name, *also])
     return (
-        f"  branch  {cut.branch}: {files}, for the fix pass to ship and merge once "
+        f"  branch  {cut.branch}: {registry.name}, for the fix pass to ship and merge once "
         f"green\n          {cut.tree}"
     )
 
@@ -987,21 +858,15 @@ def _apply(steps: list[Step], owner: str, out) -> bool:
             create_repo(owner, step.name, WORKSPACE_ROOT / step.name, _run, init=step.init_git)
 
     # A clone-only run edits nothing in the registry: the project was registered already.
-    canonical = devkit_project.CANONICAL_WORKSPACE
-    toml = canonical.parent / project_registry.REGISTRY_NAME
+    registry = REGISTRY
     edits = any(s.action in REGISTRY_EDITS for s in steps)
     # Asked before the write, so an edit already sitting there is never carried off onto
     # a branch under this pick's name.
-    clean_before = edits and not any(canonical_handoff.dirty(p) for p in (canonical, toml))
-    also: tuple[str, ...] = ()
-    if edits:
-        written = write_registry(canonical, steps)
-        out(f"  update  {canonical.name} (folders + every maintained picker)")
-        also = tuple(p.name for p in written[1:])
-        for name in also:
-            out(f"  update  {name} (projects)")
+    clean_before = edits and not canonical_handoff.dirty(registry)
+    if edits and write_registry(registry, steps):
+        out(f"  update  {registry.name} (projects)")
 
-    handed = hand_off_registry(steps, canonical, also=also) if clean_before else ""
+    handed = hand_off_registry(steps, registry) if clean_before else ""
     if handed:
         out(handed)
     local_halves(steps, owner, out)
@@ -1050,14 +915,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="print the checkbox list and exit")
     parser.add_argument("--json", action="store_true", help="with --list, emit JSON")
     parser.add_argument(
-        "--rows",
-        action="store_true",
-        help="print the VS Code quick-pick's rows from a live scan, and exit",
-    )
-    parser.add_argument(
         "--picks",
         metavar="NAMES",
-        help="the quick-pick's answer: the ticked names, whose registry state is flipped",
+        help="names (comma- or space-separated) whose registry state is flipped",
     )
     parser.add_argument("--plug", action="append", default=[], metavar="NAME")
     parser.add_argument("--unplug", action="append", default=[], metavar="NAME")
@@ -1075,29 +935,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         candidates, warnings = gather()
     except OSError as exc:
-        write_artifact([f"could not read the workspace: {exc}"])
-        print(f"ERROR   could not read the workspace: {exc}", file=sys.stderr)
+        write_artifact([f"could not read the registry: {exc}"])
+        print(f"ERROR   could not read the registry: {exc}", file=sys.stderr)
         return 2
-
-    # BEFORE the `NOTE` lines, because on this path stdout *is* the quick-pick and any
-    # other line becomes an option somebody can tick. A degraded `gh` listing draws one
-    # row saying so instead: `gather` falls back to the folder half alone, which makes
-    # every repo that exists read as `no repo` -- a list whose every detail offers to
-    # CREATE the repository it already has. `--refresh-menu` declined to write the file
-    # at all for this reason, and declining to draw a pickable row is the same refusal.
-    if args.rows:
-        picker_rows.emit(
-            [
-                picker_rows.nothing_row(
-                    "the GitHub listing failed -- no rows drawn",
-                    "without it every existing repo reads as one to create",
-                    "check `gh auth status`, then open this picker again",
-                )
-            ]
-            if warnings
-            else rows(candidates, args.owner)
-        )
-        return 0
 
     for warning in warnings:
         print(f"  NOTE    {warning}")
@@ -1123,23 +963,18 @@ def main(argv: list[str] | None = None) -> int:
         write_artifact([f"unknown project(s): {', '.join(unknown)}"])
         return 2
 
-    # Resolved before the gate below, so that Escaping the quick-pick from a box costs a
-    # line rather than an error about branches: nothing was picked, so nothing is being
-    # edited and neither of the gate's reasons is about to be true.
+    # Resolved before the gate below, so that naming nothing from a box costs a line
+    # rather than an error about branches: nothing is being edited and neither of the
+    # gate's reasons is about to be true.
     ticks: tuple[str, ...] = ()
     if args.picks is not None:
         picked = parse_ticks(args.picks)
-        # Three spellings of "never mind", and all of them have to land here rather than
-        # further down: an unresolved `${input:...}` from Escape, the `NOTHING` sentinel
-        # row a scan with nothing to offer draws, and an empty string. Under the
-        # checklist an empty answer meant "retire everything" and needed an error of its
-        # own; a tick is a toggle now, so no ticks is simply no change.
-        if picked_nothing(args.picks) or not picked or set(picked) == {picker_rows.NOTHING}:
+        # A tick is a toggle, so no ticks is simply no change.
+        if not picked:
             print("  nothing was picked -- nothing changed")
             write_artifact([])
             return 0
-        # A row can only have come from the scan a moment ago, so a name that is not a
-        # candidate now was typed by hand. Dropped with a note rather than failing the
+        # A name that is not a candidate is dropped with a note rather than failing the
         # run, because the *other* ticks are still true.
         stale = sorted(set(picked) - known)
         if stale:
@@ -1219,7 +1054,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         handed = _apply(steps, args.owner, print)
-    except (PlugError, devkit_project.RegistryEditError, OSError) as exc:
+    except (PlugError, project_registry.RegistryError, OSError) as exc:
         print(f"ERROR   {exc}", file=sys.stderr)
         write_artifact([str(exc)])
         return 1

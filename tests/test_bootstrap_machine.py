@@ -31,9 +31,17 @@ def test_the_steps_run_clone_first_and_the_summary_last():
         _step_at("Python")
         < _step_at("DEVKIT_DIR")
         < _step_at("Scheduled jobs")
-        < _step_at("VS Code extensions")
         < _step_at("Left for you")
     )
+
+
+def test_the_bootstrap_installs_and_mentions_no_vs_code():
+    """VS Code is retired: no winget entry for it, no extension step, and no warning
+    about a VS Code that was open while tools were installed."""
+    assert "Microsoft.VisualStudioCode" not in SCRIPT
+    assert "Step 'VS Code extensions'" not in SCRIPT
+    assert "--install-extension" not in SCRIPT
+    assert "VS Code" not in SCRIPT
 
 
 def test_the_summary_names_the_cli_that_clones_the_registered_projects():

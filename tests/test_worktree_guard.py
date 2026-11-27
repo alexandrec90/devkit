@@ -833,7 +833,7 @@ def test_workspace_arg_reads_root_or_the_deprecated_workspace_off_the_raw_argv(t
     given = tmp_path / "w.code-workspace"
     assert guard.workspace_arg(["--workspace", str(given)]) == given.resolve()
     assert guard.workspace_arg(["--root", str(tmp_path)]).parent == tmp_path.resolve()
-    assert guard.workspace_arg(["--root"]) == guard.worktree.DEFAULT_WORKSPACE.resolve()
+    assert guard.workspace_arg(["--root"]) == guard.worktree.workspace_from(None, None)
 
 
 def test_holds_a_checkout_is_any_registered_directory_under_the_root(tmp_path):
@@ -872,11 +872,11 @@ def test_an_in_checkout_edit_on_a_task_branch_is_allowed(root, monkeypatch):
 
 
 def test_an_edit_into_a_reference_checkout_is_allowed(root, monkeypatch, reference):
-    """A checkout in `folders` but not in the registry gets no box, whatever branch it
-    is parked on.
+    """A registered checkout in `NOT_PROJECTS` gets no box, whatever branch it is
+    parked on.
 
     The wiring is the assertion: `main` builds its project list with `known_projects`,
-    which subtracts `NOT_PROJECTS`, rather than with `sweep.parse_workspace` directly.
+    which subtracts `NOT_PROJECTS`, rather than with the raw registry directly.
     Read raw, the registry would put a reference checkout behind a block and cut it an
     ephemeral box on an `agent/...` branch -- for a checkout that ships nothing, has no
     harness, and may well have a remote with no PR for that branch to become.

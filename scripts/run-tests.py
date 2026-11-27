@@ -71,9 +71,9 @@ TEMPLATE_SUFFIX = ".tmpl"
 COVERED_BY_SOURCE = "tests/test_test_contract.py"
 
 # A data file the suite holds to invariants, -> the tests that read the live file. No
-# name leads there: `ports.toml` is read through `devkit_ports.load(REPO_ROOT)` and
-# `workspace.jsonc` through `devkit_project.canonical_tasks()`, so a change to either
-# alone named no test and the one that gates it ran only by hand (817b82a0). Listed are
+# name leads there: `ports.toml` is read through `devkit_ports.load(REPO_ROOT)`, so a
+# change to it alone named no test and the one that gates it ran only by hand
+# (817b82a0). Listed are
 # the tests whose assertions are about the file's content, not every test that loads it
 # as a fixture; `tests/test_run_tests.py` fails an entry whose file or test is gone.
 READ_BY: dict[str, tuple[str, ...]] = {
@@ -87,13 +87,6 @@ READ_BY: dict[str, tuple[str, ...]] = {
         "tests/test_installers.py",
         "tests/test_e2e_pass.py",
         "tests/test_rc_config.py",
-    ),
-    "workspace.jsonc": (
-        "tests/test_devkit_ports.py",
-        "tests/test_project_registry.py",
-        "tests/test_agent_options.py",
-        "tests/test_workspace_task_index.py",
-        "tests/test_devkit_project.py",
     ),
     ".pre-commit-config.yaml": ("tests/test_precommit_hooks.py",),
     ".pre-commit-hooks.yaml": ("tests/test_precommit_hooks.py",),
@@ -132,16 +125,10 @@ PYTEST_NO_TESTS_COLLECTED = 5
 # whole of `scripts/hooks/tests` to reach the two ratchets -- 1,693 tests, twice in one
 # session, the second catching the untested-symbol failure the named run had not
 # (9caa3f5d). `--only` is the run of just the named files.
-#
-# The installers picker is held to every `scripts/install-*.py` on disk, so a new
-# installer names only its own test and a `workspace.jsonc` edit names that file's
-# readers: a session that added `install-codex-context.py` ran green and met the picker
-# test first on the gate (83db1c30).
 CONTRACT_TESTS = (
     "tests/test_test_contract.py",
     "tests/test_scheduled_jobs.py",
     "tests/test_install_tray.py",
-    "tests/test_installers.py::test_the_scheduled_jobs_picker_offers_every_installer_on_disk",
     "tests/test_self_hosting.py",
     "tests/test_doc_claims.py",
     "tests/test_installer_contract.py",

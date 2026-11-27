@@ -1,4 +1,4 @@
-"""The task toast: `scripts/notify.py`, and `notify-wrap.py`'s use of it.
+"""The toast: `scripts/notify.py`, which `workspace-status.py`'s daily pass raises.
 
 There was no test file here at all, which is the whole reason this needed fixing: the
 toast was a `from win11toast import toast` behind a bare `except Exception: pass`, that
@@ -8,8 +8,8 @@ anywhere, because a swallowed import and a delivered toast are the same exit cod
 
 So these tests are written against the two properties that failure had: that the toast
 needs nothing installed, and that a failure to show one is *said out loud* rather than
-swallowed. `test_notify_wrap_propagates_the_wrapped_exit_code` in `test_self_hosting.py`
-already covers the wrapper's exit-code contract and is not repeated here.
+swallowed. The task wrapper that once called it, `notify-wrap.py`, is gone from devkit
+with the VS Code task layer.
 """
 
 import ast

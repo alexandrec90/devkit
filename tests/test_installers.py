@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from support import REPO_ROOT, devkit_jsonc, load_script
+from support import REPO_ROOT, load_script
 
 installers = load_script("scripts/installers.py")
 
@@ -455,8 +455,8 @@ class Removals:
 
 def test_short_name_is_what_a_person_ticks(tmp_path):
     """The file name is the stable identifier -- `TASK_NAME` is not, because two
-    installers register no job at all -- but nobody wants `install-` and `.py` in a
-    picker, and the workspace checklist is spelled in these."""
+    installers register no job at all -- but nobody wants to type `install-` and `.py`
+    into `--only`."""
     assert installers.short_name(Path("scripts/install-reap-schedule.py")) == "reap-schedule"
     assert installers.short_name(Path("scripts/install-tray.py")) == "tray"
 
@@ -513,9 +513,9 @@ def test_a_failed_removal_is_reported_and_does_not_stop_the_rest(tmp_path):
     assert installers.exit_code(outcomes) == 2
 
 
-def test_nothing_ticked_means_everything_not_nothing(tmp_path):
-    """A `multiPick` the operator dismissed sends "", and a run that silently did nothing
-    would be read as "there was nothing to do"."""
+def test_nothing_named_means_everything_not_nothing(tmp_path):
+    """An empty `--only` is every installer: a run that silently did nothing would be
+    read as "there was nothing to do"."""
     assert installers.parse_only("") == []
     root = a_checkout(tmp_path, "install-alpha.py", "install-beta.py")
     chosen, missing = installers.select(installers.discover(root), [])
@@ -531,7 +531,7 @@ def test_a_tick_may_be_spelled_short_or_long(tmp_path):
         assert missing == []
 
 
-def test_the_checklist_separator_and_stray_spaces_survive():
+def test_the_list_separator_and_stray_spaces_survive():
     assert installers.parse_only(" tray , reap-schedule ,, ") == ["tray", "reap-schedule"]
 
 
@@ -559,16 +559,3 @@ def test_uninstall_carries_the_same_per_installer_options_the_check_does(tmp_pat
     runner = Removals()
     installers.decommission(root, True, {"install-alpha.py": ["--merge"]}, runner)
     assert runner.calls[0][2:] == ["--uninstall", "--yes", "--merge"]
-
-
-def test_the_scheduled_jobs_picker_offers_every_installer_on_disk():
-    """`installerJobs` is a hand-kept list, and it had already lost `collectors` and
-    `fix-pass-task` when `e2e-schedule` was added beside them: an installer missing from
-    it cannot be ticked, only reached by running every installer at once."""
-    inputs = devkit_jsonc.loads((REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8"))[
-        "tasks"
-    ]["inputs"]
-    picker = next(spec for spec in inputs if spec.get("id") == "installerJobs")
-    offered = [option for group in picker["args"]["optionGroups"] for option in group["options"]]
-    on_disk = [path.stem.removeprefix("install-") for path in installers.discover(REPO_ROOT)]
-    assert offered == on_disk

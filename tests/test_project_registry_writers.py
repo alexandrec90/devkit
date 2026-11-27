@@ -74,7 +74,7 @@ def test_a_last_name_with_no_comma_gets_one():
 
 
 def test_a_name_goes_before_a_reference_checkout():
-    """Where `devkit_project.insert_folder` puts a folder, so the registries keep one order."""
+    """A `NOT_PROJECTS` reference checkout stays last in the registry."""
     edited = pr.register_text(SAMPLE, "gamma", before=frozenset({"beta"}))
     assert pr.parse_registry(edited) == ["alpha", "gamma", "beta"]
 

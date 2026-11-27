@@ -17,7 +17,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from support import LIVE_WORKSPACE, needs_live_workspace, sweep
+from support import sweep
 
 import devkit_manifest
 
@@ -26,7 +26,6 @@ DATE = dt.date(2026, 7, 29)
 
 State = sweep.State
 classify = sweep.classify
-parse_workspace = sweep.parse_workspace
 plan_for = sweep.plan_for
 
 
@@ -63,29 +62,13 @@ def on_anchor(**overrides) -> State:
     return State(**{**base, **overrides})
 
 
-# --- workspace parsing ------------------------------------------------------
+# --- which registered checkouts the sweep manages -----------------------------------
 
-WORKSPACE = json.dumps(
-    {
-        "folders": [
-            {"path": "carameli"},
-            {"path": "carameli-b"},
-            {"path": "ibkr_trader"},
-            {"path": "devkit"},
-            {"path": "reference-checkout"},
-        ]
-    }
-)
+REGISTRY = ["carameli", "carameli-b", "ibkr_trader", "devkit", "reference-checkout"]
 
 
-def test_workspace_folders_are_read_in_file_order():
-    assert parse_workspace(WORKSPACE, frozenset()) == [
-        "carameli",
-        "carameli-b",
-        "ibkr_trader",
-        "devkit",
-        "reference-checkout",
-    ]
+def test_managed_keeps_the_registry_order():
+    assert sweep.managed(REGISTRY, frozenset()) == REGISTRY
 
 
 def test_excluded_checkouts_are_dropped():
@@ -94,47 +77,15 @@ def test_excluded_checkouts_are_dropped():
     which is the mechanism, and the thing that has to still work when a reference
     checkout is registered again."""
     excluded = frozenset({"reference-checkout"})
-    assert "reference-checkout" not in parse_workspace(WORKSPACE, excluded)
-    assert len(parse_workspace(WORKSPACE, excluded)) == 4
+    assert "reference-checkout" not in sweep.managed(REGISTRY, excluded)
+    assert len(sweep.managed(REGISTRY, excluded)) == 4
     # And the default: nothing is excluded unless a caller says so.
-    assert len(parse_workspace(WORKSPACE)) == 5
+    assert len(sweep.managed(REGISTRY)) == 5
 
 
-def test_nested_paths_reduce_to_the_checkout_name():
-    text = json.dumps({"folders": [{"path": "nested/dir/proj"}, {"path": "win\\style\\other"}]})
-    assert parse_workspace(text, frozenset()) == ["proj", "other"]
-
-
-def test_malformed_workspace_reports_nothing_rather_than_raising():
-    # A root-level task should print "no checkouts" and move on, not crash.
-    assert parse_workspace("{not json") == []
-    assert parse_workspace("[]") == []
-
-
-def test_commented_workspace_is_read_not_silently_skipped():
-    """The real file carries comments and the shared task block.
-
-    Under `json.loads` this returned [] — the sweep would report "no checkouts" and
-    exit 0, which reads as "nothing to ship" rather than "I could not parse the
-    registry". That failure is invisible in exactly the situation the sweep exists
-    to catch, so it gets a regression test.
-    """
-    text = """{
-        // the checkouts this sweep manages
-        "folders": [
-            { "path": "carameli" },
-            { "path": "devkit" },
-        ],
-        "tasks": { "version": "2.0.0", "tasks": [] }
-    }"""
-    assert parse_workspace(text, frozenset()) == ["carameli", "devkit"]
-
-
-@needs_live_workspace
-def test_the_real_workspace_file_still_lists_checkouts():
-    """Guards the live registry, not a fixture: sweep must never see it as empty."""
-    text = LIVE_WORKSPACE.read_text(encoding="utf-8")
-    assert parse_workspace(text), "sweep reads no checkouts from the real workspace file"
+def test_the_workspace_file_parser_is_gone():
+    """The registry is `projects.toml`; nothing reads a workspace file's `folders`."""
+    assert not hasattr(sweep, "parse_workspace")
 
 
 def test_held_reads_a_stored_value_and_is_empty_for_any_other_shape():
@@ -230,11 +181,6 @@ def test_an_unknown_only_name_is_reported_not_ignored():
     kept, unknown = sweep.select(["carameli", "devkit"], ["caramelli"])
     assert kept == []
     assert unknown == ["caramelli"]
-
-
-def test_duplicate_folder_entries_are_swept_once():
-    text = json.dumps({"folders": [{"path": "proj"}, {"path": "proj"}]})
-    assert parse_workspace(text, frozenset()) == ["proj"]
 
 
 # --- host detection ---------------------------------------------------------

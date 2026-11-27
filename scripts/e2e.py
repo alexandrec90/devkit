@@ -5,14 +5,14 @@ devkit's copy of the contract `scripts/e2e-pass.py` runs in every registered che
 (`e2e_results.py` owns it): exit 0 green, anything else red, each failing test printed as
 pytest's `FAILED <id>` line. What it runs is every test marked `local`, which `addopts`
 deselects from every other run, CI's included: that, not a skip, is what keeps the tier
-off a runner. `tests/support.py`'s `needs_live_workspace` applies the mark itself,
-beside a skip for a by-hand run where the test cannot work.
+off a runner. A test that needs this machine's checkouts reads them through
+`tests/support.py`'s `live_checkouts`.
 
 **A skip is a failure when the scheduler runs it.** A by-hand run can skip on purpose: a
-box is not the static checkout, and a second machine has no live workspace. Under the
-scheduled pass (`e2e-pass.ENV_FLAG` set) the checkout is the static one on its default
-branch, so nothing has a reason left to skip, and one that does is the machine drifting
-from what the tests assume -- a moved workspace file, a checkout off its branch. Each skip is
+box is not the static checkout. Under the scheduled pass (`e2e-pass.ENV_FLAG` set) the
+checkout is the static one on its default branch, so nothing has a reason left to skip,
+and one that does is the machine drifting from what the tests assume -- a checkout
+missing or off its branch. Each skip is
 printed as a `FAILED` line naming its reason, so it signs the result like any failure.
 By hand, in a box, the skips are listed and do not fail the run: that is a fixer
 reproducing what it can, and the scheduled run re-tests the rest.
@@ -21,7 +21,7 @@ reproducing what it can, and the scheduled run re-tests the rest.
 skip-as-pass `hook-tests-live.py` exists to refuse.
 
 **Test ids on the command line run those alone, still inside the tier.** The whole tier
-holds this machine for over half an hour and opens VS Code; the scheduled pass names
+holds this machine for a long while; the scheduled pass names
 nothing, and a fixer reproducing one `FAILED` line names that line's id.
 
 Tested in `tests/test_e2e.py`.

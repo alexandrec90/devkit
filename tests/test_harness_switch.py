@@ -119,7 +119,7 @@ def test_the_roots_are_the_user_tier_the_workspace_and_every_checkout(tmp_path, 
 
 
 def test_a_registered_checkout_that_is_not_on_disk_is_skipped(tmp_path, monkeypatch):
-    """`workspace.jsonc` outlives an unplugged clone, and a root that does not exist would
+    """`projects.toml` outlives an unplugged clone, and a root that does not exist would
     make the whole group fail rather than switch the ones that do."""
     workspace = tmp_path / "ws" / "w.code-workspace"
     (tmp_path / "ws").mkdir(parents=True)
@@ -402,14 +402,13 @@ def test_an_unknown_group_is_a_usage_error(workspace, capsys):
     assert "unknown group" in capsys.readouterr().err
 
 
-def test_a_dismissed_picker_is_a_cancel_rather_than_a_run(workspace, monkeypatch, capsys):
-    """VS Code aborts a run itself only for its own input types; a dismissed `command`
-    input arrives as the literal, and the receiving script is the only place that can
-    treat it as a cancel."""
+def test_an_unsubstituted_picker_literal_is_no_longer_a_cancel(workspace, monkeypatch, capsys):
+    """The VS Code task that could pass `${input:harnessGroups}` is gone, so the literal
+    is an unknown group like any other -- refused, and nothing applied."""
     monkeypatch.setattr(switch, "apply", _never)
     argv = ["--off", "--group", "${input:harnessGroups}", "--workspace", str(workspace)]
-    assert switch.main(argv) == switch.EXIT_OK
-    assert "nothing done" in capsys.readouterr().out
+    assert switch.main(argv) == switch.EXIT_USAGE
+    assert "unknown group" in capsys.readouterr().err
 
 
 def test_no_verb_reports_rather_than_acts(workspace, monkeypatch, capsys):

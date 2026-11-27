@@ -400,24 +400,18 @@ def test_migrate_leaves_a_malformed_machine_file_as_found(tmp_path):
 # --- the committed registry ------------------------------------------------------------
 
 
-def test_the_committed_registry_agrees_with_the_canonical_workspace():
-    """While both exist, a project registered in one and not the other is a drift the
-    migration would ship: readers switched to `projects.toml` would lose it."""
-    registry = pr.parse_registry((REPO_ROOT / pr.REGISTRY_NAME).read_text(encoding="utf-8"))
-    canonical = (REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8")
-    assert registry == sweep.parse_workspace(canonical, frozenset())
-
-
 def test_the_committed_registry_holds_devkit_and_parses_its_settings():
     text = (REPO_ROOT / pr.REGISTRY_NAME).read_text(encoding="utf-8")
     assert "devkit" in pr.all_projects(REPO_ROOT)
     assert isinstance(pr.parse_shared_settings(text), dict)
 
 
-# The settings every reader now takes from `projects.toml`. Until `workspace.jsonc` is
-# deleted it is rendered into each PC's live file and still carries them, so a value
-# changed in one file and not the other would read differently on a PC whose live file
-# answers a key `projects.toml` lacks.
+def test_the_committed_registry_is_the_only_one():
+    """`workspace.jsonc` is deleted: nothing beside `projects.toml` can disagree with it."""
+    assert not (REPO_ROOT / "workspace.jsonc").exists()
+
+
+# The settings every reader takes from `projects.toml`, and the only ones it may hold.
 SHARED_KEYS = (
     "devkit.collectors",
     "devkit.remoteControl",
@@ -426,13 +420,6 @@ SHARED_KEYS = (
     "devkit.reapStale",
     "devkit.dashboards",
 )
-
-
-def test_the_committed_shared_settings_agree_with_the_canonical_workspace():
-    shared = pr.parse_shared_settings((REPO_ROOT / pr.REGISTRY_NAME).read_text(encoding="utf-8"))
-    canonical = pr.workspace_settings((REPO_ROOT / "workspace.jsonc").read_text(encoding="utf-8"))
-    for key in SHARED_KEYS:
-        assert shared.get(key) == canonical.get(key), key
 
 
 def test_the_committed_registry_holds_no_machine_setting():
