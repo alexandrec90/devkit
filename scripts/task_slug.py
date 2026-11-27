@@ -209,10 +209,13 @@ def workspace_arg(args: list[str]) -> Path:
 
 def serves_checkouts(root: Path) -> bool:
     """Whether any registered project is checked out under the projects root `root`;
-    False for a registry that cannot be read, which is a machine with no box tier."""
+    False for a registry that cannot be read, which is a machine with no box tier.
+
+    `worktree.known_projects` wraps the registry's `RegistryError` in a `WorktreeError`,
+    so both are caught: either escaping would crash the prompt hook this guards."""
     try:
         names = worktree.known_projects()
-    except worktree.sweep.project_registry.RegistryError:
+    except (worktree.WorktreeError, worktree.sweep.project_registry.RegistryError):
         return False
     return any((root / name).is_dir() for name in names)
 

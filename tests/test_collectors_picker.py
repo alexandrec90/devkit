@@ -7,8 +7,6 @@ that runs nothing rather than an empty (and so failed-looking) list.
 
 from __future__ import annotations
 
-import json
-
 from support import load_script
 
 picker = load_script("scripts/collectors_picker.py")
@@ -17,12 +15,6 @@ picker_rows = load_script("scripts/picker_rows.py")
 config = picker.config
 
 DECLARED = [config.Collector("ibkr_trader", "app"), config.Collector("sports_betting", "collector")]
-
-# `test_main_prints_only_rows` writes a fixture that merely bears the registry's name. The
-# name comes off `sweep` rather than being spelled out because
-# `test_self_hosting.test_tests_reading_the_live_workspace_are_marked_to_skip_without_it`
-# reads that literal in a test as a read of the live file, which CI never has.
-REGISTRY_NAME = config.sweep.WORKSPACE_FILE_NAME
 
 
 def values(lines):
@@ -88,8 +80,9 @@ def test_main_prints_only_rows(tmp_path, monkeypatch, capsys):
     root = tmp_path / "devkit"
     root.mkdir()
     monkeypatch.setenv("DEVKIT_DIR", str(root))
-    (tmp_path / REGISTRY_NAME).write_text(
-        json.dumps({"settings": {config.SETTING: {"ibkr_trader": {"service": "app"}}}}),
+    # The setting is read off `projects.toml` in the devkit checkout, and nothing else.
+    (root / "projects.toml").write_text(
+        f'projects = []\n\n[settings."{config.SETTING}"]\nibkr_trader = {{ service = "app" }}\n',
         encoding="utf-8",
     )
     assert picker.main() == 0

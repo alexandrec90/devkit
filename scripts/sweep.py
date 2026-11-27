@@ -2153,8 +2153,8 @@ def run_mode(
     return report, 2 if any(r.failed for r in ran) else 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+def _selection_flags(parser: argparse.ArgumentParser) -> None:
+    """Which checkouts a sweep reads, and how it reports them."""
     projects_root.add_flags(parser)
     parser.add_argument(
         "--exclude",
@@ -2204,6 +2204,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         help="skip `git fetch` (fast, but ahead/behind counts may be stale)",
     )
+
+
+def _mode_flags(parser: argparse.ArgumentParser) -> None:
+    """What a sweep does to what it read: `--branch`, `--ship` or `--sync`, and `--yes`."""
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--branch",
@@ -2262,6 +2266,12 @@ def main(argv: list[str] | None = None) -> int:
             "repeat for more than one"
         ),
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    _selection_flags(parser)
+    _mode_flags(parser)
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     if not args.dry_run and not (args.branch or args.ship or args.sync):
         parser.error("--yes has no effect without --branch, --ship or --sync")
