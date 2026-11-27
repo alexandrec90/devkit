@@ -235,6 +235,12 @@ OFF_THE_LEDGER: dict[str, str] = {
         "only once it exits. Its one failure with no other signal -- not starting -- is "
         "what tray.py writes logs/tray.log for, and schedule_health reads its Last Result"
     ),
+    "devkit-dashboards": (
+        "resident, as the tray is: the gateway runs from logon to sign-out, so the wrapper "
+        "would hold its output for the whole session and report only at exit. It appends "
+        "its own logs/dashboards.log as it goes, and a gateway that died is restarted by "
+        "the task's own 15-minute repetition"
+    ),
     "devkit-fix-pass": (
         "files its own: the pass files every step that fails, and the watchdog files a "
         "pass that crashed, hung or ran stale (file_once). It exits non-zero mostly for "

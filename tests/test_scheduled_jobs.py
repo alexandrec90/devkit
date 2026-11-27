@@ -244,6 +244,24 @@ def test_the_tray_is_never_given_an_execution_time_limit():
     assert "<LogonTrigger>" in xml
 
 
+def test_the_dashboard_gateway_writes_the_file_its_installer_advertises():
+    installer = load_script("scripts/install-dashboards.py")
+    runner = load_script("scripts/dashboards.py")
+    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
+
+
+def test_the_dashboard_gateway_is_never_given_an_execution_time_limit():
+    """Resident like the tray: an hour's limit would close every dashboard port an hour
+    after logon. The repetition is what restarts a gateway that died."""
+    installer = load_script("scripts/install-dashboards.py")
+    script = installer.dashboards_script(REPO_ROOT)
+    xml = installer.task_document("pythonw.exe", installer.dashboards_arguments(script), script)
+    assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml
+    assert "<LogonTrigger>" in xml
+    assert "<Interval>PT15M</Interval>" in xml
+    assert "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>" in xml
+
+
 def test_the_status_pass_writes_the_file_its_installer_advertises():
     """Same shape as the prune: `workspace-status.py` writes no artifact of its own --
     it prints, and every other caller of it is a terminal. The wrapper is what gives the
