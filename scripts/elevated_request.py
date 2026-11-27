@@ -9,8 +9,7 @@ and still shut to the user, and `results`, what its last runs came to.
 
 **A PC with no worker is told so only when something wanted it.** With no spool, `request`
 leaves a dated note in the checkout's `logs/` instead, and `fix_elevated.py` turns that
-into a person's step. So does a worker whose installed copy predates the verb asked for
-(`knows`): it would delete the request as junk, and nothing would say so. Nothing prompts for an install or an upgrade otherwise: an
+into a person's step. Nothing prompts for an install or an upgrade otherwise: an
 unreviewed merge plus a prompted admin paste is the dispatcher this design refused. A
 worker that is installed keeps working, whatever the checkout has moved on to.
 
@@ -36,8 +35,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 TASK_NAME = "devkit-elevated"
-VERBS = ("restart-wsl-service", "fleet-authorize")
-FLEET_AUTHORIZE = "fleet-authorize"
+VERBS = ("restart-wsl-service",)
 
 ROOT = r"C:\ProgramData\devkit"
 SPOOL = ROOT + r"\requests"
@@ -45,9 +43,6 @@ HOME = ROOT + r"\elevated"
 WORKER_NAME = "elevated_worker.py"
 WORKER = HOME + "\\" + WORKER_NAME
 RESULTS = HOME + r"\results.json"
-# What `fleet-authorize` last saw in sshd's administrators file, which the user cannot
-# read: `elevated_worker.FLEET_SEEN_NAME`.
-FLEET_SEEN = HOME + r"\fleet-authorized.json"
 REQUEST_SUFFIX = ".request"
 CHECKOUT = Path(__file__).resolve().parents[1]
 # What a person runs, from an elevated terminal, in this checkout.
@@ -58,9 +53,6 @@ FAILED = "failed"
 
 # A request made where there is no worker, in the checkout: `{verb: when}`.
 WAITING = Path("logs") / "elevated-waiting.json"
-# The same, for a worker whose installed copy predates the verb (`knows`): apart, so an
-# outdated worker with no such request still asks for nothing.
-PREDATES = Path("logs") / "elevated-predates.json"
 # How long a request waits. Past this nobody has asked again, so the need is gone, and a
 # person's step about it would no longer be true.
 WAITING_FOR = 24 * 60 * 60
@@ -110,27 +102,6 @@ def not_installed(checkout: Path) -> str:
     )
 
 
-def predates(verb: str, checkout: Path) -> str:
-    """Said for an installed worker whose copy does not know `verb`, which would delete the
-    request as junk: the same need as no worker, and the same one command."""
-    return (
-        f"the elevated worker on this PC predates {verb}: from an elevated terminal, run "
-        f"`{install_command(checkout)}`. One administrator action per PC, which no job can "
-        "take for you."
-    )
-
-
-def knows(verb: str, worker: str = WORKER) -> bool:
-    """Whether the installed copy serves `verb`: its name, quoted, in that file, which the
-    user may read. A copy that cannot be read is taken to: the request then stands, and the
-    worker's own results say what came of it."""
-    try:
-        with open(worker, encoding="utf-8", errors="replace") as handle:
-            return f'"{verb}"' in handle.read()
-    except OSError:
-        return True
-
-
 def static_checkout() -> Path:
     """The permanent checkout, whose `logs/` the fix pass reads, from a box or a session
     tree as much as from itself."""
@@ -140,10 +111,10 @@ def static_checkout() -> Path:
     return harness_events.ledger_root() or CHECKOUT
 
 
-def read_waiting(checkout: Path, now: float, note: Path = WAITING) -> list[str]:
+def read_waiting(checkout: Path, now: float) -> list[str]:
     """Each verb asked for on this PC within `WAITING_FOR`, and that the list still has."""
     try:
-        held = json.loads((checkout / note).read_text(encoding="utf-8"))
+        held = json.loads((checkout / WAITING).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(held, dict):
@@ -155,10 +126,10 @@ def read_waiting(checkout: Path, now: float, note: Path = WAITING) -> list[str]:
     ]
 
 
-def note_waiting(checkout: Path, verb: str, now: float, note: Path = WAITING) -> None:
-    """Say `verb` was wanted and there was no worker to serve it. A failure to is not the
-    caller's problem: they already have the sentence that says so."""
-    path = checkout / note
+def note_waiting(checkout: Path, verb: str, now: float) -> None:
+    """Say `verb` was wanted and there was no worker. A failure to is not the caller's
+    problem: they already have the sentence that says so."""
+    path = checkout / WAITING
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({verb: now}), encoding="utf-8")
@@ -166,8 +137,8 @@ def note_waiting(checkout: Path, verb: str, now: float, note: Path = WAITING) ->
         return
 
 
-def clear_waiting(checkout: Path, note: Path = WAITING) -> None:
-    (checkout / note).unlink(missing_ok=True)
+def clear_waiting(checkout: Path) -> None:
+    (checkout / WAITING).unlink(missing_ok=True)
 
 
 def _create_empty(path: str) -> bool:
@@ -198,10 +169,6 @@ def request(
         root = checkout or static_checkout()
         note_waiting(root, verb, time.time())
         return not_installed(root)
-    if not knows(verb, worker):
-        root = checkout or static_checkout()
-        note_waiting(root, verb, time.time(), PREDATES)
-        return predates(verb, root)
     try:
         created = _create_empty(os.path.join(spool, verb + REQUEST_SUFFIX))
     except OSError as exc:

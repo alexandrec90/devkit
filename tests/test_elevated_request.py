@@ -25,7 +25,7 @@ def installed(tmp_path, monkeypatch):
     spool = tmp_path / "requests"
     spool.mkdir()
     copy = tmp_path / "elevated_worker.py"
-    copy.write_bytes((REPO_ROOT / "scripts" / "elevated_worker.py").read_bytes())
+    copy.touch()
     return spool, copy
 
 
@@ -34,12 +34,8 @@ def ask(verb, spool, copy, checkout=Path("C:/devkit")):
 
 
 def test_the_verb_list_is_defined_once_and_the_workers_copy_matches():
-    assert request.VERBS == (VERB, request.FLEET_AUTHORIZE)
+    assert request.VERBS == (VERB,)
     assert set(request.VERBS) == set(worker.VERBS)
-
-
-def test_the_fleet_receipt_is_where_the_worker_writes_it():
-    assert request.FLEET_SEEN == worker.HOME + "\\" + worker.FLEET_SEEN_NAME
 
 
 def test_a_request_is_an_empty_file_of_the_exact_name(installed):
@@ -73,25 +69,6 @@ def test_asking_twice_is_one_request(installed):
     ask(VERB, spool, copy)
     assert ask(VERB, spool, copy) == f"{VERB} is already waiting for the worker"
     assert len(list(spool.iterdir())) == 1
-
-
-def test_a_worker_that_predates_the_verb_is_told_so_and_noted_as_waiting(installed, tmp_path):
-    """An older copy would delete the request as junk, and nothing would say so."""
-    spool, copy = installed
-    copy.write_text('VERBS = {"restart-wsl-service": None}\n', encoding="utf-8")
-    checkout = tmp_path / "devkit"
-    said = ask(request.FLEET_AUTHORIZE, spool, copy, checkout)
-    assert said == request.predates(request.FLEET_AUTHORIZE, checkout)
-    assert "install-elevated-worker.py" in said
-    assert list(spool.iterdir()) == []
-    now = time.time()
-    assert request.read_waiting(checkout, now, request.PREDATES) == [request.FLEET_AUTHORIZE]
-    assert request.read_waiting(checkout, now) == [], "not the no-worker note"
-    assert ask(VERB, spool, copy, checkout).startswith(f"{VERB} requested")
-
-
-def test_an_unreadable_copy_lets_the_request_stand(tmp_path):
-    assert request.knows(VERB, str(tmp_path / "nowhere.py"))
 
 
 def test_no_worker_says_so_and_names_the_exact_command(tmp_path, monkeypatch):

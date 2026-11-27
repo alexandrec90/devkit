@@ -357,7 +357,6 @@ UNATTENDED: dict[str, str] = {
     "scripts/log-wrap.py": "the wrapper every job but the tray is launched through",
     "scripts/e2e-pass.py": "devkit-local-e2e runs it every half hour; it spawns each project's e2e.py",
     "scripts/after-merge-pass.py": "devkit-after-merge runs it every 5 min; it spawns queued commands",
-    "scripts/fleet_ssh.py": "the ssh-keygen, tailscale, whoami and icacls the pass's fleet join makes",
     "scripts/e2e.py": "the pass spawns devkit's own; it spawns pytest over the local tier",
     "scripts/tier-pass.py": "devkit-medium-tier runs it every 15 minutes; it spawns each suite",
     "scripts/disposable_tree.py": "the git worktree add and remove that pass makes per run",
