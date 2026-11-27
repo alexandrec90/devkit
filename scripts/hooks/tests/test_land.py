@@ -346,6 +346,47 @@ def test_a_schema_that_cannot_be_read_never_holds(world):
     assert run_land(world, FakeGitHub(world)) == land.LANDED
 
 
+def test_skew_keys_asks_only_of_a_devkit_toml_change_and_fails_open(tmp_path):
+    repo = land.Repo(root=tmp_path, slug=SLUG, default="main")
+    unasked = SimpleNamespace(
+        skew=lambda *_a: pytest.fail("asked of a change with no .devkit.toml")
+    )
+    assert land.skew_keys(repo, ["README.md"], merger, None, unasked) == []
+
+    def no_base(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 128, "", "no such path")
+
+    asked = SimpleNamespace(skew=lambda _root, base: ["[delivery] e2e"] if base == {} else [])
+    assert land.skew_keys(repo, [".devkit.toml"], merger, no_base, asked) == ["[delivery] e2e"]
+
+    def no_git(_argv, **_kwargs):
+        raise OSError("git is not installed")
+
+    assert land.skew_keys(repo, [".devkit.toml"], merger, no_git, asked) == []
+
+
+def test_hold_for_skew_labels_and_writes_the_line_once(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+    fake_merger = SimpleNamespace(
+        HOLD_LABEL=merger.HOLD_LABEL, gh=lambda argv, _run: calls.append(argv)
+    )
+    labelled: list[tuple[int, str]] = []
+    monkeypatch.setattr(land, "label", lambda _repo, n, name, _m, _r: labelled.append((n, name)))
+    check = load_module("scripts/land_check.py")
+    repo = land.Repo(root=tmp_path, slug=SLUG, default="main")
+    keys = ["[delivery] e2e"]
+
+    land.hold_for_skew(repo, {"number": 7, "body": "Why."}, keys, fake_merger, None, check)
+    assert labelled == [(7, merger.HOLD_LABEL), (7, check.SKEW_LABEL)]
+    assert calls[0][:4] == ["api", "--method", "PATCH", f"repos/{SLUG}/pulls/7"]
+    assert check.skew_line(keys) in calls[0][-1]
+
+    calls.clear()
+    held = {"number": 7, "body": check.with_skew_line("Why.", keys)}
+    land.hold_for_skew(repo, held, keys, fake_merger, None, check)
+    assert calls == []
+
+
 def test_nothing_to_land_says_so(world):
     with pytest.raises(land.LandError, match="nothing to land"):
         run_land(world, FakeGitHub(world))

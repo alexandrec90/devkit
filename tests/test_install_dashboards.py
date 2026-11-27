@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from support import load_script
 
 installer = load_script("scripts/install-dashboards.py")
@@ -66,3 +67,11 @@ def test_the_dry_run_registers_nothing(monkeypatch, capsys):
     monkeypatch.setattr(installer, "_run_argv", never)
     assert installer.main([]) == 0
     assert "Dry run" in capsys.readouterr().out
+
+
+def test_the_parser_takes_one_mode_and_yes():
+    args = installer.build_parser().parse_args(["--check"])
+    assert args.check and not args.apply and not args.uninstall
+    assert installer.build_parser().parse_args(["--uninstall", "--yes"]).apply
+    with pytest.raises(SystemExit):
+        installer.build_parser().parse_args(["--check", "--status"])

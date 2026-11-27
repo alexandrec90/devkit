@@ -385,6 +385,27 @@ def test_pre_push_blocks_a_release_tag_riding_along_with_a_branch():
     assert "'v1.2.3'" in decision.errors[0]
 
 
+TAG_STARTED = "name: Release\non:\n  push:\n    tags:\n      - 'v*.*.*'\njobs: {}\n"
+DISPATCHED = "name: Release\non:\n  workflow_dispatch:\n    inputs:\n      phase: {}\n"
+
+
+def test_tag_push_is_the_release_only_where_the_workflow_runs_on_the_tag():
+    assert git_policy.tag_push_is_the_release(TAG_STARTED)
+    assert not git_policy.tag_push_is_the_release(DISPATCHED)
+    assert not git_policy.tag_push_is_the_release(TAG_STARTED + "  workflow_dispatch:\n")
+    assert not git_policy.tag_push_is_the_release("")
+
+
+def test_pre_push_lets_a_tag_through_where_the_tag_push_is_the_release():
+    """0b32da85: skinamp's release.yml runs only on a `v*.*.*` tag push, so the refusal
+    pointing at `phase=tag` left no sanctioned way to cut its first release."""
+    show = ("git", "show", f"HEAD:{git_policy.branch.RELEASE_WORKFLOW}")
+    tagged = FakeRunner({**git_responses(), show: completed(list(show), stdout=TAG_STARTED)})
+    assert git_policy.evaluate_pre_push("origin", "", tag_push("v0.1.0"), tagged).ok
+    dispatched = FakeRunner({**git_responses(), show: completed(list(show), stdout=DISPATCHED)})
+    assert not git_policy.evaluate_pre_push("origin", "", tag_push("v0.1.0"), dispatched).ok
+
+
 def test_pre_push_allows_deleting_a_release_tag():
     # Deletion is the recovery move for a tag already published, and the rest of the
     # policy exempts deletions too. Blocking it would trap the mistake instead of the

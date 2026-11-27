@@ -163,7 +163,7 @@ def default_branch_schema(project_dir: Path) -> land_check.Schema | None:
         return None
     try:
         return land_check.schema_from_source(shown.stdout)
-    except Exception:  # an unreadable copy releases nothing; the next pass asks again
+    except land_check.SOURCE_ERRORS:  # an unreadable copy releases nothing; asked again next pass
         return None
 
 

@@ -174,6 +174,22 @@ DATACLASS_TABLES = {
 
 Schema = Mapping[str, frozenset[str]]
 
+# What reading, parsing or running a project's copy of `harness_config.py` can raise: a
+# file missing or undecodable, TOML or Python that does not parse, and the module body
+# itself failing as it runs. Every skew answer is fail-open on exactly these.
+SOURCE_ERRORS: tuple[type[Exception], ...] = (
+    OSError,
+    ValueError,
+    SyntaxError,
+    RuntimeError,
+    LookupError,
+    AttributeError,
+    TypeError,
+    NameError,
+    ImportError,
+    ArithmeticError,
+)
+
 
 def schema_of(module: object) -> dict[str, frozenset[str]]:
     """Legal keys per `.devkit.toml` table, as a loaded `harness_config` module has them.
@@ -227,7 +243,7 @@ def skew(root: Path, base_settings: Mapping[str, object]) -> list[str]:
         source = (root / HARNESS_CONFIG).read_text(encoding="utf-8")
         head = tomllib.loads((root / ".devkit.toml").read_text(encoding="utf-8"))
         return new_unknown_keys(head, base_settings, schema_from_source(source))
-    except Exception:  # fail-open by contract: a doubt never holds a change
+    except SOURCE_ERRORS:  # fail-open by contract: a doubt never holds a change
         return []
 
 

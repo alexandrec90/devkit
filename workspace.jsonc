@@ -1919,6 +1919,7 @@
 								"agent-env",
 								"codex-context",
 								"collectors",
+								"dashboards",
 								"docker-prune",
 								"docker-stop-idle",
 								"e2e-schedule",
