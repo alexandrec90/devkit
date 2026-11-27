@@ -902,9 +902,14 @@ def quiet_scan(monkeypatch):
     return everything
 
 
-def test_main_refuses_a_missing_workspace(tmp_path, capsys):
-    assert host.main(["--workspace", str(tmp_path / "gone.code-workspace")]) == 2
-    assert "no workspace registry" in capsys.readouterr().out
+def test_main_needs_no_workspace_file_and_takes_its_root(tmp_path, monkeypatch, capsys):
+    """Only the deprecated `--workspace`'s directory is read, as `--root` names it."""
+    seen = []
+    monkeypatch.setattr(host, "clean", lambda root: seen.append(root) or 5)
+    assert host.main(["--workspace", str(tmp_path / "gone.code-workspace"), "--clean"]) == 5
+    assert host.main(["--root", str(tmp_path / "r"), "--clean"]) == 5
+    assert seen == [tmp_path, tmp_path / "r"]
+    assert "no workspace registry" not in capsys.readouterr().out
 
 
 def test_main_dispatches_clean(workspace, monkeypatch):

@@ -60,6 +60,7 @@ import devkit_project
 import e2e_results
 import fix_switch
 import harness_events
+import projects_root
 import red_seen
 import sweep
 import worktree_tiers
@@ -503,14 +504,14 @@ def pass_for(
 
 
 def run_once(
-    workspace: Path,
+    root: Path,
     run: Run = sweep.run_bounded,
     now: _dt.datetime | None = None,
     clock: Callable[[], float] = time.time,
 ) -> int:
+    """One fire, for the checkouts under the projects root `root`."""
     now = now or _dt.datetime.now(_dt.UTC)
-    mode = fix_switch.workspace_mode(workspace)
-    root = workspace.parent
+    mode = fix_switch.root_mode(root)
     projects = devkit_project.known_projects()  # the registry, not the workspace file
     path = state_path(root)
     seen, follow = read_state(path)
@@ -536,13 +537,12 @@ def run_once(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--workspace", type=Path, default=None)
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    workspace = (args.workspace or sweep.default_workspace(REPO_ROOT)).resolve()
-    if not workspace.is_file():
-        print(f"error: no workspace file at {workspace}", file=sys.stderr)
-        return 2
-    return run_once(workspace)
+    return run_once(projects_root.from_flags(args.root, args.workspace, REPO_ROOT).resolve())
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_schtasks
 import harness_state
 import installer_cli
+import projects_root
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -84,25 +85,24 @@ class Schedule:
     python: str
     script: str
     every: int
-    workspace: str = ""
+    root: str = ""
 
     @property
     def arguments(self) -> list[str]:
-        """What follows the interpreter: named `--workspace` because a scheduled task
-        starts in `system32`, and a moved checkout should fail loudly."""
+        """What follows the interpreter: the projects root named with `--root` because a
+        scheduled task starts in `system32`, and a moved checkout should fail loudly."""
         argv = ["-X", "utf8", self.script]
-        return [*argv, "--workspace", self.workspace] if self.workspace else argv
+        return [*argv, "--root", self.root] if self.root else argv
 
 
 def schedule_for(every: int = DEFAULT_INTERVAL, root: Path = REPO_ROOT) -> Schedule:
     """Resolve the schedule against *this* interpreter and *this* checkout."""
-    workspace = sweep.default_workspace(root)
     return Schedule(
         name=TASK_NAME,
         python=windowless(sys.executable),
         script=str((root / "scripts" / "ship-pass.py").resolve()),
         every=every,
-        workspace=str(workspace) if workspace else "",
+        root=str(projects_root.projects_root(root)),
     )
 
 

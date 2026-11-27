@@ -1015,9 +1015,9 @@ The format is `.claude/ship-intent.md`'s last section; the decisions are `script
 
 With two PCs on the same jobs, each says what it is, in its own
 `<projects-root>/.devkit-machine.json` (`devkit.machineRole`, beside `devkit.fixPass` and
-`devkit.onHold`). Where that file does not set one, the live workspace file still answers;
-the daily `devkit-workspace-status` pass copies all three out of it once, and `--migrate`
-does the same by hand:
+`devkit.onHold`), and nowhere else: a key that file does not set is unset. A PC still
+holding them in the retired live workspace file gets them copied out once by the daily
+`devkit-workspace-status` pass, and `--migrate` does the same by hand:
 
 ```bash
 python scripts/machine_role.py                       # this PC's role, and what it means
@@ -1423,10 +1423,10 @@ JSON:
 "devkit.remoteControl": ["devkit", "carameli"]
 ```
 
-or `"all"` in place of the list, which serves every project in `folders` -- on hold or
-not -- and re-reads them on every fire, so a project plugged in later gets a server with
-no edit here. That is every project *checked out on this machine*, because the live file
-is rendered per machine. Or, with the knobs:
+or `"all"` in place of the list, which serves every project in the registry
+(`projects.toml`'s `projects`) -- on hold or not -- and re-reads them on every fire, so a
+project plugged in later gets a server with no edit here; `hosts` says which machine
+serves which. Or, with the knobs:
 
 ```jsonc
 "devkit.remoteControl": {
@@ -1830,7 +1830,7 @@ not the workspace currently knows about it:
 | Source | Read from |
 | --- | --- |
 | plugged | the `folders` list of devkit's `workspace.jsonc`, minus `NOT_PROJECTS` |
-| on disk | directories beside the workspace file carrying a `.git` or a `.devkit.toml` |
+| on disk | directories in the projects root carrying a `.git` or a `.devkit.toml` |
 | on GitHub | `gh repo list --no-archived` |
 
 **The registry is global; the checkouts are per machine.** The registry is

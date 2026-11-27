@@ -1017,7 +1017,7 @@ def test_a_missing_checkout_directory_is_an_unadopted_one(tmp_path):
 
 
 # The project registry `main` validates against, as the last `workspace` set it. The
-# workspace file still carries `devkit.onHold` and names the projects root.
+# workspace path only names the projects root; `devkit.onHold` is in the machine file.
 REGISTERED: list[str] = []
 
 
@@ -1185,8 +1185,8 @@ def test_a_failed_policy_reinstall_reaches_the_artifact_and_the_exit_code(tmp_pa
 
 
 def test_the_unattended_sweep_passes_over_a_project_on_hold(tmp_path, capsys, monkeypatch):
-    """`--all` reads `devkit.onHold` off the workspace file and upgrades everything else;
-    naming the paused project on the command line still upgrades it."""
+    """`--all` reads `devkit.onHold` off this PC's machine file and upgrades everything
+    else; naming the paused project on the command line still upgrades it."""
     monkeypatch.setattr(up, "latest_tag", lambda _devkit: "v0.5.3")
     monkeypatch.setattr(up, "commit_for", lambda _devkit, _rev: RELEASE_COMMIT)
     monkeypatch.setattr(up, "source_at_tag", _no_worktree)
@@ -1201,9 +1201,9 @@ def test_the_unattended_sweep_passes_over_a_project_on_hold(tmp_path, capsys, mo
         (tmp_path / name).mkdir()
         (tmp_path / name / "DEVKIT_VERSION").write_text("1234567\n", encoding="utf-8")
     ws = workspace(tmp_path, "carameli", "ibkr_trader")
-    text = json.loads(ws.read_text(encoding="utf-8"))
-    text["settings"] = {sweep.ON_HOLD_SETTING: ["ibkr_trader"]}
-    ws.write_text(json.dumps(text), encoding="utf-8")
+    (tmp_path / ".devkit-machine.json").write_text(
+        json.dumps({sweep.ON_HOLD_SETTING: ["ibkr_trader"]}), encoding="utf-8"
+    )
 
     assert up.main(["--all", "--yes", "--workspace", str(ws), "--devkit", str(tmp_path)]) == 0
     out = capsys.readouterr().out
@@ -1914,12 +1914,15 @@ def test_the_artifact_says_which_mode_produced_it():
 
 
 def test_a_run_that_never_reached_a_project_still_writes_one(tmp_path, monkeypatch, capsys):
-    """`no workspace file` and `devkit has no tags` are the two failures most likely
-    to be read hours later out of a task terminal nobody was watching."""
-    assert up.main(["--all", "--workspace", str(tmp_path / "missing.code-workspace")]) == 2
+    """A name the registry lacks and `devkit has no tags` are the failures most likely
+    to be read hours later out of a task terminal nobody was watching. A workspace file
+    that is not there is no longer one of them: only its directory is read."""
+    assert up.main(["nope", "--workspace", str(tmp_path / "missing.code-workspace")]) == 2
     written = (up.REPO_ROOT / up.ARTIFACT).read_text(encoding="utf-8")
-    assert "no workspace file" in written
+    assert "nope not in the project registry" in written
+    assert "no workspace file" not in written
     assert up.ARTIFACT.as_posix() in capsys.readouterr().err
+    assert up.main(["nope", "--root", str(tmp_path)]) == 2, "`--root` names the same root"
 
 
 def test_a_run_with_nothing_to_do_clears_what_the_last_one_left(tmp_path, monkeypatch):

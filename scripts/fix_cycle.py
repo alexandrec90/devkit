@@ -32,7 +32,7 @@ unattended. Three rules, each pure and tested in `tests/test_fix_cycle.py`:
   watch does that job, with a person reading it.
 
 The switch is this PC's machine file, `<projects-root>/.devkit-machine.json`
-(`project_registry.MACHINE_KEYS`, falling back to the live workspace file's `settings`):
+(`project_registry.MACHINE_KEYS`; nothing else is read):
 `"devkit.fixPass"`, `off` (the default), `plan` (write what would happen, do nothing) or
 `dispatch`. The scheduled job reads it on every pass; `--mode` overrides it by hand. Wired to be fully
 automatic, and off until a week of manual passes has read right.
@@ -48,7 +48,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import devkit_jsonc
 import e2e_results
 import fix_ledger
 import fix_plan
@@ -137,28 +136,17 @@ class Harness:
 # --- the switch -----------------------------------------------------------------------
 
 
-def mode_from_workspace(text: str) -> str:
-    """`devkit.fixPass` off the workspace file; `OFF` for anything absent or misspelt."""
-    try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return OFF
-    settings = payload.get("settings") if isinstance(payload, dict) else None
-    return mode_value(settings.get(SETTING) if isinstance(settings, dict) else None)
-
-
 def mode_value(value: object) -> str:
     """A stored `devkit.fixPass` as a mode; `OFF` for anything absent or misspelt."""
     return value if isinstance(value, str) and value in MODES else OFF
 
 
-def mode_here(workspace: Path) -> str:
-    """`devkit.fixPass` on the machine whose live workspace file is `workspace`: the
-    machine file beside it (`project_registry.setting`), else that file's `settings`.
-    `OFF` for anything absent, misspelt or unreadable -- a malformed machine file
-    included, as a malformed workspace file always was."""
+def mode_here(root: Path) -> str:
+    """`devkit.fixPass` on the machine whose projects root is `root`, off its machine
+    file (`project_registry.setting`). `OFF` for anything absent, misspelt or
+    unreadable -- a malformed machine file included."""
     try:
-        return mode_value(project_registry.setting(SETTING, workspace=workspace))
+        return mode_value(project_registry.setting(SETTING, root=root))
     except (project_registry.RegistryError, OSError):
         return OFF
 

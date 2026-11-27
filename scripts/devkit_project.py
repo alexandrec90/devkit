@@ -901,7 +901,7 @@ def autofix_ship_plan(
             )
         )
     sweep_py = str(devkit_root / "scripts" / "sweep.py")
-    common = ("python", sweep_py, "--workspace", str(workspace), "--only", project)
+    common = ("python", sweep_py, "--root", str(workspace.parent), "--only", project)
     label_args = tuple(arg for label in labels for arg in ("--label", label))
     return AutofixOutcome(
         commands=(

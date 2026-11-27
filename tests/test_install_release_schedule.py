@@ -32,7 +32,7 @@ def a_schedule(**overrides):
         "python": WINDOWS_PYTHON,
         "root": Path(r"C:\ws\devkit"),
         "at": "02:00",
-        "workspace": r"C:\ws\alex.code-workspace",
+        "checkouts": r"C:\ws",
     }
     return sched.Schedule(**{**base, **overrides})
 
@@ -66,15 +66,20 @@ def test_the_artifact_is_the_one_the_label_slugs_to():
     assert sched.ARTIFACT == f"logs/{log_wrap.slug(sched.LABEL)}.log"
 
 
-def test_the_workspace_is_named_rather_than_left_to_a_default():
+def test_the_root_is_named_rather_than_left_to_a_default():
     """The registered command is the only record of what the adoption pass will reach,
     and a scheduled task has no cwd worth relying on."""
-    assert a_schedule().arguments.endswith('--workspace "C:\\ws\\alex.code-workspace"')
+    assert a_schedule().arguments.endswith('--root "C:\\ws"')
+    assert "--workspace" not in a_schedule().arguments
 
 
-def test_a_checkout_with_no_workspace_beside_it_omits_the_flag():
+def test_an_empty_root_omits_the_flag():
     """An empty string would reach argparse as a stray positional, not as an absence."""
-    assert "--workspace" not in a_schedule(workspace="").arguments
+    assert "--root" not in a_schedule(checkouts="").arguments
+
+
+def test_the_resolved_root_is_the_checkouts_parent(tmp_path):
+    assert sched.schedule_for(root=tmp_path / "devkit", python="py").checkouts == str(tmp_path)
 
 
 # --- the two interpreters ------------------------------------------------------
@@ -334,13 +339,11 @@ def test_every_path_in_the_arguments_is_quoted(tmp_path):
     ).replace(f'"{sched.pipeline_script(root).resolve()}"', "")
 
 
-def test_a_checkout_with_no_workspace_beside_it_passes_no_flag():
-    """`--workspace ""` would reach the adoption pass as an empty path rather than as
-    the absence of one."""
-    assert "--workspace" not in sched.release_arguments(WINDOWS_PYTHON, REPO_ROOT)
-    assert "--workspace" in sched.release_arguments(
-        WINDOWS_PYTHON, REPO_ROOT, "somewhere/alex.code-workspace"
-    )
+def test_no_root_passes_no_flag():
+    """`--root ""` would reach the adoption pass as an empty path rather than as the
+    absence of one."""
+    assert "--root" not in sched.release_arguments(WINDOWS_PYTHON, REPO_ROOT)
+    assert '--root "somewhere"' in sched.release_arguments(WINDOWS_PYTHON, REPO_ROOT, "somewhere")
 
 
 def test_the_runner_captures_output_and_leaves_a_failure_to_the_caller():

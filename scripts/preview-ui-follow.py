@@ -213,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="preview-ui-follow.py",
         description="Keep every open host UI preview on the tip of the branch it shows.",
     )
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
     parser.add_argument(
         "--workspace",
         type=Path,
@@ -238,7 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     # Only the checkouts' directory is read, so no workspace file is needed: `--workspace`
     # is a deprecated way to name it, by naming a file beside the checkouts.
-    root = args.workspace.parent if args.workspace else project_registry.projects_root(REPO_ROOT)
+    root = args.root or (
+        args.workspace.parent if args.workspace else project_registry.projects_root(REPO_ROOT)
+    )
     if not root.is_dir():
         host.echo(f"no projects root at {root}")
         return 2

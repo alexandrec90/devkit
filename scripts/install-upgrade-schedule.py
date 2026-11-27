@@ -103,21 +103,21 @@ class Schedule:
     script: str
     at: str
 
-    workspace: str = ""
+    root: str = ""
 
     @property
     def command(self) -> list[str]:
         """The argv the scheduler runs. `--all --yes` is the whole point of it.
 
-        `--workspace` is passed explicitly, the way the sibling reconcile task does.
-        `upgrade-project.py` can resolve it from its own location, but a scheduled task
-        has no cwd worth relying on and the registered command is the only record of
-        what it operates on -- a reader of `schtasks /Query` should not have to know the
-        default to know the blast radius.
+        `--root`, the projects root, is passed explicitly, the way the sibling reconcile
+        task does. `upgrade-project.py` can resolve it from its own location, but a
+        scheduled task has no cwd worth relying on and the registered command is the
+        only record of what it operates on -- a reader of `schtasks /Query` should not
+        have to know the default to know the blast radius.
         """
         argv = [self.python, self.script, "--all", "--yes"]
-        if self.workspace:
-            argv += ["--workspace", self.workspace]
+        if self.root:
+            argv += ["--root", self.root]
         return argv
 
 
@@ -153,13 +153,12 @@ def schedule_for(at: str = DEFAULT_TIME, root: Path = REPO_ROOT) -> Schedule:
     imports `sweep`, `worktree` and `task_branch` from beside it. Naming the interpreter
     that is running this installer is the only spelling that is right by construction.
     """
-    workspace = sweep.default_workspace(root)
     return Schedule(
         name=TASK_NAME,
         python=windowless_python(),
         script=str((root / "scripts" / "upgrade-project.py").resolve()),
         at=at,
-        workspace=str(workspace) if workspace else "",
+        root=str(sweep.projects_root.projects_root(root)),
     )
 
 

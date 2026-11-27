@@ -263,6 +263,8 @@ def test_the_parser_accepts_a_single_pass_and_a_faster_interval():
 def test_main_refuses_a_projects_root_that_is_not_there(tmp_path, capsys):
     assert follow.main(["--workspace", str(tmp_path / "gone" / "nope.code-workspace")]) == 2
     assert "no projects root" in capsys.readouterr().out
+    assert follow.main(["--root", str(tmp_path / "gone")]) == 2
+    assert "no projects root" in capsys.readouterr().out
 
 
 def test_main_needs_only_the_directory_a_workspace_file_would_sit_in(tmp_path, monkeypatch):

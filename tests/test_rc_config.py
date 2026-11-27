@@ -17,8 +17,7 @@ from support import REPO_ROOT, TEMPLATES, load_script
 
 rc_config = load_script("scripts/rc_config.py")
 
-# The project registry `ALL_PROJECTS` expands to, as the last `workspace_text` set it:
-# `folders` stands for the machine's registered projects.
+# The project registry `ALL_PROJECTS` expands to, as the last `configured` set it.
 REGISTERED: list[str] = []
 
 
@@ -28,21 +27,17 @@ def _registry(monkeypatch):
     monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
 
 
-def workspace_text(
-    setting: object = None, folders: tuple[str, ...] = ("devkit", "carameli")
-) -> str:
+def configured(setting: object = None, folders: tuple[str, ...] = ("devkit", "carameli")):
+    """`RC_SETTING` read as stored, with `folders` the registered projects."""
     REGISTERED[:] = folders
-    payload: dict = {"folders": [{"path": name} for name in folders], "settings": {}}
-    if setting is not None:
-        payload["settings"][rc_config.RC_SETTING] = setting
-    return json.dumps(payload)
+    return rc_config.config_of(setting)
 
 
-# --- parse_config -----------------------------------------------------------
+# --- config_of ----------------------------------------------------------------
 
 
 def test_a_bare_list_is_the_shorthand_for_a_config_of_defaults():
-    config = rc_config.parse_config(workspace_text(["devkit"]))
+    config = configured(["devkit"])
     assert config.projects == ("devkit",)
     assert config.spawn == rc_config.DEFAULT_SPAWN
     assert config.permission_mode == rc_config.DEFAULT_PERMISSION_MODE
@@ -50,45 +45,33 @@ def test_a_bare_list_is_the_shorthand_for_a_config_of_defaults():
 
 
 def test_the_object_form_carries_the_knobs():
-    config = rc_config.parse_config(
-        workspace_text(
-            {
-                "projects": ["devkit"],
-                "spawn": "worktree",
-                "permissionMode": "acceptEdits",
-                "updateAt": "05:30",
-                "idleMinutes": 45,
-            }
-        )
+    config = configured(
+        {
+            "projects": ["devkit"],
+            "spawn": "worktree",
+            "permissionMode": "acceptEdits",
+            "updateAt": "05:30",
+            "idleMinutes": 45,
+        }
     )
     assert config == rc_config.Config(("devkit",), "worktree", "acceptEdits", "05:30", 45)
 
 
-def test_a_workspace_with_no_setting_serves_nothing():
+def test_no_setting_serves_nothing():
     """The default has to be off. A machine that upgraded into this job and got servers
     it never asked for would be paying 300-400 MB per project to find out."""
-    assert rc_config.parse_config(workspace_text()).projects == ()
+    assert configured().projects == ()
 
 
 @pytest.mark.parametrize(
-    "text",
-    ["", "{", "[]", '"a string"', json.dumps({"settings": []}), json.dumps({"settings": {}})],
-    ids=["empty", "truncated", "list", "scalar", "settings-not-a-dict", "no-setting"],
+    "value",
+    [None, "", 3, "devkit", {"spawn": "worktree"}],
+    ids=["unset", "empty", "scalar", "a-name", "no-projects"],
 )
-def test_malformed_input_serves_nothing_rather_than_raising(text):
+def test_a_setting_that_is_neither_list_nor_object_serves_nothing(value):
     """A scheduled task runs windowless: its traceback goes nowhere. Serving nothing is
     visible in the artifact, which a crash is not."""
-    assert rc_config.parse_config(text) == rc_config.Config()
-
-
-def test_a_setting_that_is_neither_list_nor_object_is_ignored():
-    assert rc_config.parse_config(workspace_text("devkit")) == rc_config.Config()
-
-
-def held_text(setting: object, folders: tuple[str, ...], held: list[str]) -> str:
-    payload = json.loads(workspace_text(setting, folders))
-    payload["settings"]["devkit.onHold"] = held
-    return json.dumps(payload)
+    assert configured(value).projects == ()
 
 
 @pytest.mark.parametrize(
@@ -98,11 +81,9 @@ def held_text(setting: object, folders: tuple[str, ...], held: list[str]) -> str
 )
 def test_all_serves_every_registered_project(setting):
     """A list is a second copy of the registry, and a project plugged in after it was
-    written got no server. `all` reads the registry on every fire instead -- the project
-    registry, not the workspace file's folders."""
-    text = workspace_text(setting, ("devkit", "carameli"))
+    written got no server. `all` reads the registry on every fire instead."""
     REGISTERED[:] = ["devkit", "carameli", "freshly-plugged"]
-    assert rc_config.parse_config(text).projects == ("devkit", "carameli", "freshly-plugged")
+    assert rc_config.config_of(setting).projects == ("devkit", "carameli", "freshly-plugged")
 
 
 def test_all_serves_nothing_off_a_registry_that_cannot_be_read(monkeypatch):
@@ -111,50 +92,45 @@ def test_all_serves_nothing_off_a_registry_that_cannot_be_read(monkeypatch):
         "all_projects",
         lambda *_a, **_k: project_registry.parse_registry("projects = ["),
     )
-    assert rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS)).projects == ()
+    assert rc_config.config_of(rc_config.ALL_PROJECTS).projects == ()
 
 
 def test_all_keeps_the_object_form_s_knobs():
-    text = workspace_text({"projects": rc_config.ALL_PROJECTS, "spawn": "worktree"})
-    assert rc_config.parse_config(text).spawn == "worktree"
+    assert configured({"projects": rc_config.ALL_PROJECTS, "spawn": "worktree"}).spawn == "worktree"
 
 
 def test_all_still_serves_a_project_on_hold():
-    """The phone matches the machine's workspace, always. Subtracting `devkit.onHold`
-    here once left three of seven checkouts unreachable from the phone with nothing in
-    the artifact saying why -- a hold pauses adoption and box reporting, not this."""
-    text = held_text(rc_config.ALL_PROJECTS, ("devkit", "carameli"), ["carameli"])
-    config = rc_config.parse_config(text)
+    """The phone matches the registry, always. Subtracting `devkit.onHold` here once left
+    three of seven checkouts unreachable from the phone with nothing in the artifact
+    saying why -- a hold pauses adoption and box reporting, not this."""
+    config = configured(rc_config.ALL_PROJECTS, ("devkit", "carameli"))
     assert config.projects == ("devkit", "carameli")
     assert rc_config.selected(config, ["devkit", "carameli"]) == (["devkit", "carameli"], [])
 
 
-def test_all_in_a_workspace_with_no_folders_serves_nothing():
-    assert rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS, ())).projects == ()
+def test_all_with_nothing_registered_serves_nothing():
+    assert configured(rc_config.ALL_PROJECTS, ()).projects == ()
 
 
 def test_an_explicit_list_serves_a_held_project_it_names():
-    text = held_text(["devkit", "carameli"], ("devkit", "carameli"), ["carameli"])
-    config = rc_config.parse_config(text)
+    config = configured(["devkit", "carameli"], ("devkit", "carameli"))
     assert rc_config.selected(config, ["devkit", "carameli"]) == (["devkit", "carameli"], [])
 
 
 def test_non_string_project_names_are_dropped_not_stringified():
-    assert rc_config.parse_config(
-        workspace_text({"projects": ["devkit", 7, None, ""]})
-    ).projects == (("devkit",))
+    assert configured({"projects": ["devkit", 7, None, ""]}).projects == (("devkit",))
 
 
 def test_a_boolean_idle_window_falls_back_to_the_default():
     """`isinstance(True, int)` is true, so `"idleMinutes": true` would otherwise set a
     one-minute window -- a restart in the middle of nearly every turn."""
-    config = rc_config.parse_config(workspace_text({"projects": ["d"], "idleMinutes": True}))
+    config = configured({"projects": ["d"], "idleMinutes": True})
     assert config.idle_minutes == rc_config.DEFAULT_IDLE_MINUTES
 
 
 @pytest.mark.parametrize("value", [0, -5, "20", 1.5], ids=["zero", "negative", "string", "float"])
 def test_an_unusable_idle_window_falls_back_to_the_default(value):
-    config = rc_config.parse_config(workspace_text({"projects": ["d"], "idleMinutes": value}))
+    config = configured({"projects": ["d"], "idleMinutes": value})
     assert config.idle_minutes == rc_config.DEFAULT_IDLE_MINUTES
 
 
@@ -208,7 +184,7 @@ def test_a_name_that_is_not_a_checkout_is_reported_not_skipped_silently():
     to do, which is the one answer this job must never give wrongly."""
     serve, notes = rc_config.selected(rc_config.Config(("devkit", "typo")), ["devkit"])
     assert serve == ["devkit"]
-    assert len(notes) == 1 and "typo" in notes[0]
+    assert len(notes) == 1 and "typo" in notes[0] and "registry" in notes[0]
 
 
 def test_everything_known_is_served_with_nothing_to_report():
@@ -223,8 +199,8 @@ def test_everything_known_is_served_with_nothing_to_report():
 
 
 def test_without_hosts_every_machine_serves_its_own_checkouts():
-    """A one-PC workspace has nothing to assign, so absent keeps the old reading."""
-    config = rc_config.parse_config(workspace_text(rc_config.ALL_PROJECTS))
+    """A one-PC fleet has nothing to assign, so absent keeps the old reading."""
+    config = configured(rc_config.ALL_PROJECTS)
     assert config.hosts == ()
     assert rc_config.assigned_here(config, ["devkit", "carameli"], "anyone") == (
         ["devkit", "carameli"],
@@ -234,9 +210,7 @@ def test_without_hosts_every_machine_serves_its_own_checkouts():
 
 def test_a_bare_host_string_assigns_every_project_to_that_machine():
     """Spelled as `harness_events.host_name` spells it: any case, MagicDNS suffix off."""
-    config = rc_config.parse_config(
-        workspace_text({"projects": "all", "hosts": "Desktop-A.tail1234.ts.net"})
-    )
+    config = configured({"projects": "all", "hosts": "Desktop-A.tail1234.ts.net"})
     assert config.hosts == (("*", "desktop-a"),)
     assert rc_config.assigned_here(config, ["devkit", "carameli"], "desktop-a") == (
         ["devkit", "carameli"],
@@ -245,9 +219,9 @@ def test_a_bare_host_string_assigns_every_project_to_that_machine():
 
 
 def test_a_machine_another_is_assigned_to_serves_nothing_and_says_who_does():
-    """The point of `hosts`: the workspace file is the same on every PC, and without it
-    the phone listed each project once per machine."""
-    config = rc_config.parse_config(workspace_text({"projects": "all", "hosts": "desktop-a"}))
+    """The point of `hosts`: the setting is the same on every PC, and without it the
+    phone listed each project once per machine."""
+    config = configured({"projects": "all", "hosts": "desktop-a"})
     here, elsewhere = rc_config.assigned_here(config, ["devkit"], "desktop-b")
     assert here == []
     assert elsewhere == ["devkit: served by desktop-a, not here (desktop-b)"]
@@ -263,52 +237,40 @@ def test_parse_hosts_is_the_one_reading_every_hosts_knob_shares():
     assert elsewhere == ["devkit: tested by desktop-a, not here (desktop-b)"]
 
 
-def test_setting_hosts_reads_any_settings_hosts_and_nothing_else():
-    """The one reading `e2e-pass.py` and the fix pass share for `devkit.localE2e`."""
-    text = json.dumps({"settings": {rc_config.LOCAL_E2E_SETTING: {"hosts": "PC-A"}}})
-    assert rc_config.setting_hosts(text, rc_config.LOCAL_E2E_SETTING).hosts == (("*", "pc-a"),)
-    assert rc_config.setting_hosts(text, rc_config.RC_SETTING).hosts == ()
-
-
-@pytest.mark.parametrize("text", ["{", "[]", '{"settings": []}', '{"settings": {"s": "pc"}}'])
-def test_setting_hosts_of_a_broken_or_absent_setting_assigns_nobody(text):
-    assert rc_config.setting_hosts(text, "s").hosts == ()
-
-
-# --- read off projects.toml, with the workspace file as fallback -------------------
+# --- read off projects.toml, and nothing else -------------------------------------
 
 
 def _checkout(tmp_path, registry: str | None, setting: object = None):
-    """`(workspace, root)`: a devkit checkout at `root` and a live file beside it."""
+    """A devkit checkout at `tmp_path / "devkit"`, with a live file beside it that the
+    readers must never consult."""
     root = tmp_path / "devkit"
     root.mkdir()
     if registry is not None:
         (root / "projects.toml").write_text(registry, encoding="utf-8")
-    workspace = tmp_path / "alex-projects.code-workspace"
-    workspace.write_text(workspace_text(setting, ("devkit", "radio")), encoding="utf-8")
-    return workspace, root
+    live = tmp_path / "alex-projects.code-workspace"
+    payload = {"settings": {rc_config.RC_SETTING: setting}} if setting is not None else {}
+    live.write_text(json.dumps(payload), encoding="utf-8")
+    return root
 
 
-def test_read_config_prefers_projects_toml_and_expands_all_from_the_registry(tmp_path):
+def test_read_config_reads_projects_toml_and_expands_all_from_the_registry(tmp_path):
     registry = '[settings."devkit.remoteControl"]\nprojects = "all"\nspawn = "worktree"\n'
-    workspace, root = _checkout(tmp_path, registry, ["devkit"])
+    root = _checkout(tmp_path, registry, ["devkit"])
     REGISTERED[:] = ["devkit", "radio", "freshly-plugged"]
-    config = rc_config.read_config(workspace, root)
+    config = rc_config.read_config(root)
     assert config.projects == ("devkit", "radio", "freshly-plugged")
     assert config.spawn == "worktree"
 
 
-def test_read_config_falls_back_to_the_workspace_file(tmp_path):
-    workspace, root = _checkout(tmp_path, None, {"projects": ["radio"], "capacity": 3})
-    assert rc_config.read_config(workspace, root) == rc_config.parse_config(
-        workspace.read_text(encoding="utf-8")
-    )
+def test_read_config_never_falls_back_to_the_workspace_file(tmp_path):
+    root = _checkout(tmp_path, "[settings]\n", {"projects": ["radio"], "capacity": 3})
+    assert rc_config.read_config(root) == rc_config.Config()
 
 
-def test_read_config_serves_nothing_for_a_malformed_registry_or_a_missing_file(tmp_path):
-    workspace, root = _checkout(tmp_path, "[settings\n", ["devkit"])
-    assert rc_config.read_config(workspace, root) == rc_config.Config()
-    assert rc_config.read_config(tmp_path / "absent", root) == rc_config.Config()
+def test_read_config_serves_nothing_for_a_malformed_or_missing_registry(tmp_path):
+    root = _checkout(tmp_path, "[settings\n", ["devkit"])
+    assert rc_config.read_config(root) == rc_config.Config()
+    assert rc_config.read_config(tmp_path / "absent") == rc_config.Config()
 
 
 def test_config_of_reads_a_stored_value_with_all_meaning_the_registry():
@@ -318,30 +280,32 @@ def test_config_of_reads_a_stored_value_with_all_meaning_the_registry():
     assert rc_config.config_of(3) == rc_config.Config()
 
 
-def test_read_hosts_prefers_projects_toml_and_a_malformed_one_assigns_nobody(tmp_path):
+def test_read_hosts_reads_projects_toml_and_a_malformed_one_assigns_nobody(tmp_path):
     registry = '[settings."devkit.localE2e"]\nhosts = "pc-b"\n'
-    workspace, root = _checkout(tmp_path, registry)
+    root = _checkout(tmp_path, registry)
     setting = rc_config.LOCAL_E2E_SETTING
-    assert rc_config.read_hosts(setting, workspace, root).hosts == (("*", "pc-b"),)
+    assert rc_config.read_hosts(setting, root).hosts == (("*", "pc-b"),)
+    assert rc_config.read_hosts(rc_config.RC_SETTING, root).hosts == ()
     (root / "projects.toml").write_text("[settings\n", encoding="utf-8")
-    assert rc_config.read_hosts(setting, workspace, root).hosts == ()
+    assert rc_config.read_hosts(setting, root).hosts == ()
+    assert rc_config.read_hosts(setting, tmp_path / "absent").hosts == ()
 
 
 def test_hosts_of_reads_only_a_stored_values_hosts():
     assert rc_config.hosts_of({"hosts": "PC-A", "projects": "all"}).hosts == (("*", "pc-a"),)
     assert rc_config.hosts_of("pc-a") == rc_config.Config()
+    assert rc_config.hosts_of(None) == rc_config.Config()
 
 
-def test_the_committed_registry_serves_every_project_from_one_machine(tmp_path):
+def test_the_committed_registry_serves_every_project_from_one_machine():
     """The phone needs one server per project, not one per PC."""
-    config = rc_config.read_config(_checkout(tmp_path, None)[0], REPO_ROOT)
+    REGISTERED[:] = ["devkit", "radio"]
+    config = rc_config.read_config(REPO_ROOT)
     assert config.projects == ("devkit", "radio") and config.hosts
 
 
 def test_a_project_named_in_hosts_overrides_the_default_machine():
-    config = rc_config.parse_config(
-        workspace_text({"projects": "all", "hosts": {"*": "desktop-a", "carameli": "desktop-b"}})
-    )
+    config = configured({"projects": "all", "hosts": {"*": "desktop-a", "carameli": "desktop-b"}})
     assert rc_config.assigned_here(config, ["devkit", "carameli"], "desktop-b")[0] == ["carameli"]
     assert rc_config.assigned_here(config, ["devkit", "carameli"], "desktop-a")[0] == ["devkit"]
 
@@ -349,7 +313,7 @@ def test_a_project_named_in_hosts_overrides_the_default_machine():
 def test_a_project_hosts_leaves_unassigned_is_served_nowhere_out_loud():
     """No `*` and no entry of its own: no machine serves it, and every machine says so
     rather than each quietly assuming another one has it."""
-    config = rc_config.parse_config(workspace_text({"projects": "all", "hosts": {"devkit": "a"}}))
+    config = configured({"projects": "all", "hosts": {"devkit": "a"}})
     here, elsewhere = rc_config.assigned_here(config, ["devkit", "carameli"], "b")
     assert here == []
     assert "carameli" in elsewhere[1] and "served nowhere" in elsewhere[1]
@@ -361,7 +325,7 @@ def test_a_project_hosts_leaves_unassigned_is_served_nowhere_out_loud():
     ids=["non-string-host", "empty-host", "no-name-left", "empty-project", "list", "int"],
 )
 def test_an_unusable_hosts_entry_is_dropped(hosts):
-    config = rc_config.parse_config(workspace_text({"projects": ["devkit"], "hosts": hosts}))
+    config = configured({"projects": ["devkit"], "hosts": hosts})
     assert config.hosts == ()
 
 
@@ -438,15 +402,13 @@ def test_the_session_capacity_is_bounded_well_below_the_cli_default():
     assert rc_config.Config().capacity == rc_config.DEFAULT_CAPACITY
 
 
-def test_the_capacity_can_be_raised_from_the_workspace_file():
-    assert (
-        rc_config.parse_config(workspace_text({"projects": ["d"], "capacity": 20})).capacity == 20
-    )
+def test_the_capacity_can_be_raised_from_the_setting():
+    assert configured({"projects": ["d"], "capacity": 20}).capacity == 20
 
 
 @pytest.mark.parametrize("value", [0, -1, "8", True], ids=["zero", "negative", "string", "bool"])
 def test_an_unusable_capacity_falls_back_to_the_default(value):
-    config = rc_config.parse_config(workspace_text({"projects": ["d"], "capacity": value}))
+    config = configured({"projects": ["d"], "capacity": value})
     assert config.capacity == rc_config.DEFAULT_CAPACITY
 
 
@@ -454,16 +416,11 @@ def test_power_saving_is_off_unless_it_was_asked_for():
     """It is a real trade-off, not a free saving: past four hours the sessions it stops
     are gone rather than paused."""
     assert rc_config.Config().power_saving is False
-    assert rc_config.parse_config(workspace_text(["devkit"])).power_saving is False
+    assert configured(["devkit"]).power_saving is False
 
 
 def test_power_saving_turns_on_only_for_a_real_boolean_true():
-    assert (
-        rc_config.parse_config(
-            workspace_text({"projects": ["d"], "powerSaving": True})
-        ).power_saving
-        is True
-    )
+    assert configured({"projects": ["d"], "powerSaving": True}).power_saving is True
 
 
 @pytest.mark.parametrize(
@@ -472,7 +429,7 @@ def test_power_saving_turns_on_only_for_a_real_boolean_true():
 def test_a_truthy_non_boolean_never_turns_power_saving_on(value):
     """A `"false"` that read as True is how a mode nobody asked for starts destroying
     sessions."""
-    config = rc_config.parse_config(workspace_text({"projects": ["d"], "powerSaving": value}))
+    config = configured({"projects": ["d"], "powerSaving": value})
     assert config.power_saving is False
 
 

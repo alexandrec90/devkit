@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import devkit_jsonc
 import project_registry
 import sweep
 
@@ -237,16 +236,6 @@ def _container_entry(project: str, raw: dict) -> tuple[Collector | None, str]:
     ), ""
 
 
-def parse_setting(text: str) -> tuple[list[Collector], list[str]]:
-    """`(collectors, notes)` out of a workspace file's text. Never raises."""
-    try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return [], ["the workspace file does not parse"]
-    settings = payload.get("settings") if isinstance(payload, dict) else None
-    return parse_value(settings.get(SETTING) if isinstance(settings, dict) else None)
-
-
 def parse_value(raw: object) -> tuple[list[Collector], list[str]]:
     """`(collectors, notes)` out of the setting's value, as stored. Never raises.
 
@@ -272,19 +261,14 @@ def parse_value(raw: object) -> tuple[list[Collector], list[str]]:
 def declared(root: Path) -> tuple[list[Collector], list[str]]:
     """The collectors the checkout at `root` declares, with any notes.
 
-    Read through `project_registry.setting`: `projects.toml` in `root`, else the live
-    workspace file beside it. A file that is there and malformed is a note, as an
-    unparseable workspace file always was, rather than a crash of the scheduled job.
+    Read through `project_registry.setting`, off `projects.toml` in `root` and nothing
+    else. A file that is missing or malformed is a note naming it, rather than a crash
+    of the scheduled job.
     """
     try:
         raw = project_registry.setting(SETTING, repo_root=root)
     except (project_registry.RegistryError, OSError) as exc:
         return [], [str(exc)]
-    if raw is None:
-        registry = project_registry.registry_path(root)
-        workspace = project_registry.live_workspace(root)
-        if not registry.is_file() and not workspace.is_file():
-            return [], [f"no {registry.name} at {registry} and no workspace file at {workspace}"]
     return parse_value(raw)
 
 

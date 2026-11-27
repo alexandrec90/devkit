@@ -26,21 +26,20 @@ def intent(tree: Path, project: str = "roguelike", direct: bool = True) -> ship_
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
-    """A workspace on one switch setting, with what would ship recorded."""
+    """A projects root on one switch setting, with what would ship recorded. The
+    `workspace` is the path the pass still threads; only its directory is read."""
     (tmp_path / "devkit").mkdir()
     workspace = tmp_path / "alex.code-workspace"
     table: dict = {"intents": [], "shipped": [], "workspace": workspace, "root": tmp_path}
 
     def fix_pass_mode(mode: str) -> None:
-        workspace.write_text(
-            '{"folders": [{"path": "devkit"}, {"path": "roguelike"}], '
-            f'"settings": {{"devkit.fixPass": "{mode}"}}}}',
-            encoding="utf-8",
+        (tmp_path / ".devkit-machine.json").write_text(
+            f'{{"devkit.fixPass": "{mode}"}}', encoding="utf-8"
         )
 
     table["mode"] = fix_pass_mode
     fix_pass_mode("dispatch")
-    # The projects come off the registry; the workspace file carries only the setting.
+    # The projects come off the registry; the machine file carries only the setting.
     monkeypatch.setattr(
         ship_pass.devkit_project.project_registry,
         "all_projects",
@@ -254,8 +253,9 @@ def test_write_artifact_makes_its_directory(tmp_path, monkeypatch):
     assert (tmp_path / ship_pass.ARTIFACT).read_text(encoding="utf-8") == "said\n"
 
 
-def test_the_workspace_defaults_to_the_machines_own():
-    assert ship_pass.build_parser().parse_args([]).workspace == ship_pass.worktree.DEFAULT_WORKSPACE
+def test_the_root_defaults_to_the_machines_own():
+    args = ship_pass.build_parser().parse_args([])
+    assert args.root is None and args.workspace is None
 
 
 def test_a_refusal_is_the_fix_passs_on_a_machine_that_dispatches(world, tmp_path, monkeypatch):
@@ -319,19 +319,20 @@ def test_a_step_that_crashed_is_this_script_breaking(world, tmp_path, monkeypatc
     assert [f.kind for f in written] == ["pass-step-crashed"]
 
 
-def test_no_workspace_file_is_a_usage_error_with_a_record(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(ship_pass, "REPO_ROOT", tmp_path)
-    assert ship_pass.main(["--workspace", str(tmp_path / "absent")]) == ship_pass.EXIT_USAGE
-    assert "no workspace file" in (tmp_path / ship_pass.ARTIFACT).read_text(encoding="utf-8")
+def test_no_workspace_file_is_needed(world, monkeypatch):
+    monkeypatch.setattr(ship_pass.git_trust, "adopt", lambda root, write: "")
+    assert not world["workspace"].exists()
+    assert ship_pass.main(["--root", str(world["root"])]) == ship_pass.EXIT_OK
 
 
-def test_main_trusts_the_workspace_in_this_process_and_writes_no_global_config(world, monkeypatch):
+def test_main_trusts_the_root_in_this_process_and_writes_no_global_config(world, monkeypatch):
     adopted = []
     monkeypatch.setattr(
         ship_pass.git_trust, "adopt", lambda root, write: adopted.append((root, write)) or ""
     )
+    assert ship_pass.main(["--root", str(world["root"])]) == ship_pass.EXIT_OK
     assert ship_pass.main(["--workspace", str(world["workspace"])]) == ship_pass.EXIT_OK
-    assert adopted == [(world["workspace"].parent.resolve(), False)]
+    assert adopted == [(world["root"].resolve(), False)] * 2
 
 
 def test_a_crash_says_so_in_the_record_and_is_raised(world, monkeypatch):

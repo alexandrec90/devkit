@@ -2185,6 +2185,25 @@ def spawn_and_route(
     return code
 
 
+def workspace_arg(args: list[str]) -> Path:
+    """The workspace path the hook was pointed at, resolved: `--root` (a path in it),
+    else the deprecated `--workspace`, else `worktree.DEFAULT_WORKSPACE`. Read off the
+    raw argv, as before: a hook takes no parser."""
+
+    def flag(name: str) -> Path | None:
+        return Path(args[args.index(name) + 1]) if name in args[:-1] else None
+
+    return worktree.workspace_from(flag("--root"), flag("--workspace"))
+
+
+def holds_a_checkout(root: Path, projects: list[str]) -> bool:
+    """Whether any registered project is checked out under `root`. None is a CI runner,
+    a fresh clone, anyone else's machine: no cross-checkout edit is possible there, so
+    the hook is silent -- the correct answer, not an error. It used to ask whether a
+    workspace file was there, which is no longer a question about the machine."""
+    return any((root / name).is_dir() for name in projects)
+
+
 def main(argv: list[str] | None = None) -> int:
     # First, before stdin and before the registry read: an operator who has stood the
     # branch tier down cuts boxes with `claude --worktree` (or `agent-box.py spawn`,
@@ -2193,16 +2212,10 @@ def main(argv: list[str] | None = None) -> int:
     if harness_config.hooks_off("branch-tier"):
         return EXIT_ALLOW
 
-    args = sys.argv[1:] if argv is None else argv
-    workspace = Path(args[args.index("--workspace") + 1]) if "--workspace" in args else None
     # Resolved for the same reason `worktree.main` resolves it: the box path in the block
     # message is built from `workspace.parent`, and the agent has to be able to use it
-    # from wherever its next tool call runs.
-    workspace = (workspace or worktree.DEFAULT_WORKSPACE).resolve()
-    # No multi-root registry means no cross-checkout edit is possible: a CI runner, a
-    # fresh clone, anyone else's machine. Silence is the correct answer, not an error.
-    if not workspace.is_file():
-        return EXIT_ALLOW
+    # from wherever its next tool call runs. Only that directory is read.
+    workspace = workspace_arg(sys.argv[1:] if argv is None else argv)
 
     payload = parse_hook_input(read_stdin())
     if payload is None or _tool_name(payload) not in MUTATING_TOOLS:
@@ -2226,8 +2239,10 @@ def main(argv: list[str] | None = None) -> int:
     except devkit_project.project_registry.RegistryError:
         return EXIT_ALLOW
 
-    cwd = str(payload.get("cwd") or "")
     root = workspace.parent
+    if not holds_a_checkout(root, projects):
+        return EXIT_ALLOW
+    cwd = str(payload.get("cwd") or "")
     session = str(payload.get("session_id") or payload.get("sessionId") or "")
 
     # The branch tier, ahead of the write tiers: a command doing both is pathological, and

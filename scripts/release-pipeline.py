@@ -995,10 +995,11 @@ def run_pipeline(
     devkit: Path,
     version: str,
     adopt: bool,
-    workspace: Path | None,
+    root: Path | None,
     projects: Sequence[str] = (),
 ) -> int:
-    """Execute the release. 0 done, 1 refused, 2 a step failed."""
+    """Execute the release. 0 done, 1 refused, 2 a step failed. `root` is the projects
+    root the adoption pass is handed; None leaves it to resolve its own."""
     if main_fallback(devkit) == version:
         # Resumable: the prepare PR has already merged, so the bump is on main and only
         # the tag is missing. Re-running the task after a network failure at step 7
@@ -1030,8 +1031,8 @@ def run_pipeline(
         "--devkit",
         str(devkit),
     ]
-    if workspace is not None:
-        command += ["--workspace", str(workspace)]
+    if root is not None:
+        command += ["--root", str(root)]
     upgrade = upgrade_module()
     # Emptied first, so a pass that dies before writing its own leaves nothing that
     # `adoption_outcome` could read as the previous run's verdict.
@@ -1135,7 +1136,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--devkit", type=Path, default=REPO_ROOT, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--workspace", type=Path, default=None, help="workspace file for the adoption pass"
+        "--root", type=Path, default=None, help="the projects root for the adoption pass"
+    )
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
     )
     parser.add_argument(
         "--projects",
@@ -1230,7 +1234,15 @@ def main(argv: list[str] | None = None) -> int:
     healed = precommit_store.say_healed(precommit_store.heal())
     if healed:
         print(f"release-pipeline: {healed}")
-    return run_pipeline(args.devkit, version, args.adopt, args.workspace, projects)
+    return run_pipeline(args.devkit, version, args.adopt, adoption_root(args), projects)
+
+
+def adoption_root(args: argparse.Namespace) -> Path | None:
+    """The projects root the adoption pass is handed: `--root`, else the directory of the
+    deprecated `--workspace`, else None, which leaves the pass to resolve its own."""
+    if args.root is not None:
+        return args.root
+    return args.workspace.parent if args.workspace is not None else None
 
 
 if __name__ == "__main__":

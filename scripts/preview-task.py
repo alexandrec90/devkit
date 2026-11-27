@@ -1734,7 +1734,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog="preview-task.py",
         description="Pick a branch, PR or box to look at, and bring its stack up.",
     )
-    parser.add_argument("--workspace", type=Path, default=None, help="the .code-workspace registry")
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
+    )
     parser.add_argument("--list", action="store_true", help="print the menu and exit")
     parser.add_argument("--json", action="store_true", help="with --list, emit JSON")
     parser.add_argument("--pick", type=int, default=0, help="take row N without asking")
@@ -1798,10 +1801,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    workspace = args.workspace or sweep.default_workspace(REPO_ROOT)
-    if not workspace.is_file():
-        echo(f"no workspace registry at {workspace}")
-        return 2
+    # Only its directory is read; no workspace file need exist.
+    workspace = sweep.projects_root.legacy_workspace(args.root, args.workspace, REPO_ROOT)
 
     if args.ui and args.all:
         # `--all` re-serves boxes as whatever their leases say they are; `--ui` names

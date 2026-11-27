@@ -61,7 +61,6 @@ from __future__ import annotations
 import argparse
 import ast
 import datetime as _dt
-import json
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -69,7 +68,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import devkit_jsonc
 import devkit_schtasks
 import installer_cli
 import harness_state
@@ -173,23 +171,13 @@ def task_name(script: Path) -> str:
     return ""
 
 
-def parse_options(text: str) -> dict[str, list[str]]:
-    """`SETTING` out of a workspace file: installer file name -> the extra arguments.
-
-    Lenient the way `reap-stale.parse_settings` is, for its reason: a scheduled task
-    whose stdout goes nowhere must not crash on a hand-edited file. An entry that is not
-    a list of strings is dropped rather than passed to an installer as something else.
-    """
-    try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    settings = payload.get("settings") if isinstance(payload, dict) else None
-    return options_of(settings.get(SETTING) if isinstance(settings, dict) else None)
-
-
 def options_of(raw: object) -> dict[str, list[str]]:
-    """`SETTING`'s value, as stored, as installer file name -> extra arguments."""
+    """`SETTING`'s value, as stored, as installer file name -> extra arguments.
+
+    Lenient, because a scheduled task whose stdout goes nowhere must not crash on a
+    hand-edited file: an entry that is not a list of strings is dropped rather than
+    passed to an installer as something else.
+    """
     if not isinstance(raw, dict):
         return {}
     return {
@@ -199,16 +187,15 @@ def options_of(raw: object) -> dict[str, list[str]]:
     }
 
 
-def read_options(workspace: Path | None, root: Path) -> dict[str, list[str]]:
-    """`SETTING` as `project_registry.setting` reads it for the checkout at `root` -- its
-    `projects.toml`, else `workspace` (else the live file `root` resolves to).
+def read_options(root: Path) -> dict[str, list[str]]:
+    """`SETTING` off the `projects.toml` of the checkout at `root`.
 
-    Nothing where neither file sets it -- the state every installer's defaults are for
-    -- and nothing for a malformed `projects.toml`, as `parse_options` gives nothing for
-    a broken workspace file.
+    Nothing where it is not set -- the state every installer's defaults are for -- and
+    nothing for a missing or malformed `projects.toml`, so the pass still checks every
+    installer at its defaults rather than stopping before its artifact.
     """
     try:
-        raw = project_registry.setting(SETTING, repo_root=root, workspace=workspace)
+        raw = project_registry.setting(SETTING, repo_root=root)
     except (project_registry.RegistryError, OSError):
         return {}
     return options_of(raw)
@@ -437,10 +424,12 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "pass wants; the workspace checklist is what fills it"
         ),
     )
-    parser.add_argument("--workspace", type=Path, default=None)
-    # Accepted and ignored: `devkit-installers` was registered passing it (#427), and a
+    # Both accepted and ignored, for one reason: a job was registered passing it, and a
     # usage error would stop that job before its artifact until the next `maintain`
-    # re-registers it without. Drop it once no registration on a machine names it.
+    # re-registers it without. `--running-under` since #427; `--workspace` since the
+    # settings left the workspace file (`fix-pass.py` passed it). Drop each once no
+    # registration or caller on a machine names it.
+    parser.add_argument("--workspace", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--running-under", default="", help=argparse.SUPPRESS)
     parser.add_argument(
         "--devkit",
@@ -469,8 +458,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     devkit = args.devkit.expanduser().resolve()
     root = sweep.source_checkout(devkit)
-    workspace = args.workspace or sweep.default_workspace(root)
-    options = read_options(Path(workspace) if workspace else None, root)
+    options = read_options(root)
     only = parse_only(args.only)
     if args.mode == "uninstall":
         # `--dry-run` wins over `--yes`, which only matters if a picker ever sends both:

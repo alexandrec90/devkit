@@ -11,7 +11,7 @@ and the next request starts it again. The gateway forwards TCP and knows nothing
 beyond the probe that says a dashboard is up, so the project's framework is the project's
 business.
 
-**Which dashboards exist** is the workspace file's `devkit.dashboards`, beside
+**Which dashboards exist** is `devkit.dashboards` in devkit's `projects.toml`, beside
 `devkit.collectors`, keyed by project. An entry is one of two kinds:
 
 - **a host command** (`command`): argv run from the project's checkout, carrying a
@@ -66,8 +66,8 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import devkit_jsonc
 import devkit_ports
+import project_registry
 import sweep
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -220,19 +220,13 @@ def parse_entry(
 
 
 def parse_setting(
-    text: str, default_port: Callable[[str], int | None]
+    raw: object, default_port: Callable[[str], int | None]
 ) -> tuple[list[Dashboard], list[str]]:
-    """`(dashboards, notes)` out of a workspace file's text. Never raises.
+    """`(dashboards, notes)` out of `SETTING`'s value, as stored. Never raises.
 
     A malformed entry is a note, not silence: a dashboard dropped quietly reads exactly
     like a dashboard nobody declared. Two entries on one port keep the first.
     """
-    try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return [], ["the workspace file does not parse"]
-    settings = payload.get("settings") if isinstance(payload, dict) else None
-    raw = settings.get(SETTING) if isinstance(settings, dict) else None
     if raw is None:
         return [], []
     if not isinstance(raw, dict):
@@ -280,18 +274,18 @@ def home(root: Path = REPO_ROOT) -> Path:
 
 
 def declared(root: Path) -> tuple[list[Dashboard], list[str]]:
-    """The dashboards the workspace file beside `root` declares, with any notes."""
-    workspace = sweep.default_workspace(root)
+    """The dashboards the devkit checkout at `root` declares in its `projects.toml`, with
+    any notes -- one naming the file when it is missing or does not parse."""
     try:
-        text = workspace.read_text(encoding="utf-8")
-    except OSError:
-        return [], [f"no workspace file at {workspace}"]
-    return parse_setting(text, registry_port(root))
+        raw = project_registry.setting(SETTING, repo_root=root)
+    except (project_registry.RegistryError, OSError) as exc:
+        return [], [str(exc)]
+    return parse_setting(raw, registry_port(root))
 
 
 def checkout_of(project: str, root: Path) -> Path:
-    """The project's static checkout, beside the workspace file."""
-    return sweep.default_workspace(root).parent / project
+    """The project's static checkout, at the projects root beside `root`."""
+    return sweep.projects_root.projects_root(root) / project
 
 
 # --- decisions -------------------------------------------------------------------------

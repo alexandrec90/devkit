@@ -8,6 +8,7 @@ wrong; everything that would spawn a session is replaced.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import subprocess
 import sys
 import time
@@ -108,14 +109,26 @@ def test_a_failure_signature_ignores_numbers_and_quoted_names_but_not_the_commit
     )
 
 
-def test_the_mode_is_the_flag_else_the_workspace_switch_else_off(tmp_path):
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text('{"settings": {\n  "devkit.fixPass": "dispatch"\n}}', encoding="utf-8")
-    assert watchdog.mode_of(["--mode", "plan"], workspace) == "plan"
-    assert watchdog.mode_of(["--scheduled"], workspace) == "dispatch"
+def _switch(root: Path, mode: str | None) -> None:
+    """This PC's machine file, setting the fix pass's switch to `mode` (None: unset)."""
+    values = {} if mode is None else {"devkit.fixPass": mode}
+    (root / ".devkit-machine.json").write_text(json.dumps(values), encoding="utf-8")
+
+
+def test_the_mode_is_the_flag_else_the_machine_switch_else_off(tmp_path):
+    _switch(tmp_path, "dispatch")
+    assert watchdog.mode_of(["--mode", "plan"], tmp_path) == "plan"
+    assert watchdog.mode_of(["--scheduled"], tmp_path) == "dispatch"
     assert watchdog.mode_of([], tmp_path / "missing") == "off"
-    assert watchdog.workspace_of(["--workspace", str(workspace)]) == workspace
-    assert watchdog.workspace_of(["--scheduled"]) is None
+
+
+def test_the_root_is_the_flag_else_a_deprecated_workspace_s_directory(tmp_path):
+    workspace = tmp_path / "w.code-workspace"
+    assert watchdog.root_of(["--root", str(tmp_path / "r")]) == tmp_path / "r"
+    assert watchdog.root_of(["--workspace", str(workspace)]) == tmp_path
+    assert watchdog.root_of(["--root", str(tmp_path), "--workspace", "x/y"]) == tmp_path
+    assert watchdog.root_of(["--scheduled"]) is None
+    assert watchdog.root_of(["--root"]) is None
 
 
 def test_a_scheduled_interpreter_is_swapped_for_its_console_twin(tmp_path, monkeypatch):
@@ -132,10 +145,9 @@ def test_a_scheduled_interpreter_is_swapped_for_its_console_twin(tmp_path, monke
 
 @pytest.fixture
 def watched(tmp_path, monkeypatch):
-    """A workspace in `dispatch`, a devkit checkout at a fixed commit, and a log of what
-    the watchdog would have done."""
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text('{"settings": {"devkit.fixPass": "dispatch"}}', encoding="utf-8")
+    """A projects root in `dispatch`, a devkit checkout at a fixed commit, and a log of
+    what the watchdog would have done."""
+    _switch(tmp_path, "dispatch")
     devkit = tmp_path / "devkit"
     devkit.mkdir()
     seen: dict = {
@@ -169,7 +181,7 @@ def watched(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(watchdog, "ship_rescues", lambda root: [])
-    seen["argv"] = ["--scheduled", "--workspace", str(workspace)]
+    seen["argv"] = ["--scheduled", "--root", str(tmp_path)]
     seen["devkit"] = devkit
     return seen
 
@@ -292,17 +304,22 @@ def test_a_refusal_is_filed_and_never_sent_a_session(watched):
 
 
 def test_plan_mode_files_a_crash_but_sends_no_one(watched, tmp_path):
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text('{"settings": {"devkit.fixPass": "plan"}}', encoding="utf-8")
+    _switch(tmp_path, "plan")
     watched["outcome"] = (1, TRACE)
     assert watchdog.watch(watched["argv"], NOW) == 2
     assert watched["rescues"] == [] and len(findings(watched["devkit"])) == 1
 
 
 def test_off_neither_updates_nor_judges_beyond_the_exit(watched, tmp_path):
-    (tmp_path / "w.code-workspace").write_text('{"settings": {}}', encoding="utf-8")
+    _switch(tmp_path, None)
     assert watchdog.watch(watched["argv"], NOW) == 0
     assert watched["updates"] == 0
+
+
+def test_a_task_registered_with_a_deprecated_workspace_still_reads_its_switch(watched, tmp_path):
+    watched["argv"] = ["--scheduled", "--workspace", str(tmp_path / "w.code-workspace")]
+    assert watchdog.watch(watched["argv"], NOW) == 0
+    assert watched["updates"] == 1, "dispatch, read off the machine file beside it"
 
 
 def test_a_pass_whose_code_moved_is_updated_and_run_once_more(watched, monkeypatch):

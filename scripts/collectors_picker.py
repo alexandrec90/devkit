@@ -53,7 +53,7 @@ def rows(collectors: list[config.Collector], assignment: dict[str, str]) -> list
         return [
             picker_rows.nothing_row(
                 "No collectors declared",
-                f"add `{config.SETTING}` to the workspace file",
+                f"add `{config.SETTING}` to devkit's projects.toml",
             )
         ]
     summary = ", ".join(f"{c.project} ({now(assignment, c.project)})" for c in collectors)

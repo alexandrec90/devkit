@@ -1,4 +1,4 @@
-"""`scripts/project_registry.py`: the registry and settings, with the workspace file as fallback."""
+"""`scripts/project_registry.py`: the registry and settings, with no live-file fallback."""
 
 from __future__ import annotations
 
@@ -130,41 +130,40 @@ def test_workspace_settings_read_through_comments():
 # --- the registry ----------------------------------------------------------------------
 
 
-def test_the_registry_file_wins_over_the_workspace_file(tmp_path):
+def test_the_registry_file_is_the_registry_and_the_live_file_is_never_read(tmp_path):
     root, devkit = _tree(tmp_path)
     _registry(devkit, 'projects = ["devkit", "radio"]\n')
     _live(root, ["devkit", "other"])
     assert pr.all_projects(devkit) == ["devkit", "radio"]
 
 
-def test_without_a_registry_file_the_workspace_file_is_read(tmp_path):
-    root, devkit = _tree(tmp_path)
-    _live(root, ["devkit", "../elsewhere/radio", "devkit"])
-    assert pr.all_projects(devkit) == ["devkit", "radio"]
-
-
-def test_the_fallback_excludes_nothing(tmp_path, monkeypatch):
-    root, devkit = _tree(tmp_path)
+def test_the_registry_excludes_nothing(tmp_path, monkeypatch):
+    _, devkit = _tree(tmp_path)
     monkeypatch.setattr(sweep, "DEFAULT_EXCLUDE", frozenset({"radio"}))
-    _live(root, ["devkit", "radio"])
+    _registry(devkit, 'projects = ["devkit", "radio"]\n')
     assert pr.all_projects(devkit) == ["devkit", "radio"]
 
 
-def test_a_box_falls_back_to_the_workspace_file_above_its_tier(tmp_path):
+def test_a_box_reads_its_own_copy_of_the_registry(tmp_path):
     root, _ = _tree(tmp_path)
     box = root / sweep.BOXES_DIR_NAME / "devkit--topic"
     box.mkdir(parents=True)
-    _live(root, ["devkit", "radio"])
+    _registry(box, 'projects = ["devkit", "radio"]\n')
     assert pr.all_projects(box) == ["devkit", "radio"]
 
 
-def test_with_neither_file_there_are_no_projects(tmp_path):
-    _, devkit = _tree(tmp_path)
-    assert pr.all_projects(devkit) == []
-    assert pr.projects(repo_root=devkit) == []
+def test_a_missing_registry_file_is_an_error_naming_it_even_with_a_live_file(tmp_path):
+    """No silent empty registry, and no fallback to the retired live file: a checkout
+    without `projects.toml` is broken, and "no projects" would read as "nothing to do"."""
+    root, devkit = _tree(tmp_path)
+    _live(root, ["devkit", "radio"])
+    with pytest.raises(pr.RegistryError, match=r"no projects\.toml at .*projects\.toml"):
+        pr.all_projects(devkit)
+    with pytest.raises(pr.RegistryError, match="no projects.toml"):
+        pr.projects(repo_root=devkit)
 
 
-def test_a_malformed_registry_file_is_not_a_fallback(tmp_path):
+def test_a_malformed_registry_file_raises(tmp_path):
     root, devkit = _tree(tmp_path)
     _registry(devkit, "projects = [\n")
     _live(root, ["devkit"])
@@ -195,12 +194,6 @@ def test_a_pc_holding_none_of_them_has_none(tmp_path):
     assert pr.projects(repo_root=devkit) == []
 
 
-def test_projects_fall_back_to_the_workspace_file(tmp_path):
-    root, devkit = _tree(tmp_path)
-    _live(root, ["devkit", "absent"])
-    assert pr.projects(repo_root=devkit) == ["devkit"]
-
-
 # --- settings --------------------------------------------------------------------------
 
 
@@ -215,24 +208,24 @@ def test_a_machine_key_is_read_from_the_machine_file(tmp_path):
     assert pr.setting("devkit.fixPass", repo_root=devkit) == "dispatch"
 
 
-def test_a_machine_key_the_file_lacks_falls_back_to_the_workspace_file(tmp_path):
+def test_a_machine_key_the_file_lacks_is_the_default_whatever_the_live_file_says(tmp_path):
     root, devkit = _tree(tmp_path)
     _machine(root, {"devkit.fixPass": "plan"})
     _live(root, ["devkit"], {"devkit.onHold": ["radio"]})
-    assert pr.setting("devkit.onHold", repo_root=devkit) == ["radio"]
+    assert pr.setting("devkit.onHold", [], repo_root=devkit) == []
 
 
-def test_without_a_machine_file_the_workspace_file_is_read(tmp_path):
+def test_without_a_machine_file_a_machine_key_is_the_default(tmp_path):
+    """A PC that never set anything; the live file is `migrate_machine_settings`'s alone."""
     root, devkit = _tree(tmp_path)
     _live(root, ["devkit"], {"devkit.machineRole": "worker"})
-    assert pr.setting("devkit.machineRole", repo_root=devkit) == "worker"
+    assert pr.setting("devkit.machineRole", repo_root=devkit) is None
 
 
 def test_a_machine_key_is_never_read_from_the_shared_file(tmp_path):
-    root, devkit = _tree(tmp_path)
+    _, devkit = _tree(tmp_path)
     _registry(devkit, '[settings]\n"devkit.fixPass" = "dispatch"\n')
-    _live(root, ["devkit"], {"devkit.fixPass": "off"})
-    assert pr.setting("devkit.fixPass", repo_root=devkit) == "off"
+    assert pr.setting("devkit.fixPass", "off", repo_root=devkit) == "off"
 
 
 def test_a_shared_key_is_read_from_the_registry_file(tmp_path):
@@ -244,22 +237,30 @@ def test_a_shared_key_is_read_from_the_registry_file(tmp_path):
 
 def test_a_shared_key_is_never_read_from_the_machine_file(tmp_path):
     root, devkit = _tree(tmp_path)
+    _registry(devkit, 'projects = ["devkit"]\n')
     _machine(root, {"devkit.collectors": {"x": {}}})
     assert pr.setting("devkit.collectors", "unset", repo_root=devkit) == "unset"
 
 
-def test_a_shared_key_the_registry_lacks_falls_back_to_the_workspace_file(tmp_path):
+def test_a_shared_key_the_registry_lacks_is_the_default_whatever_the_live_file_says(tmp_path):
     root, devkit = _tree(tmp_path)
     _registry(devkit, 'projects = ["devkit"]\n[settings]\n')
     _live(root, ["devkit"], {"devkit.remoteControl": {"projects": "all"}})
-    assert pr.setting("devkit.remoteControl", repo_root=devkit) == {"projects": "all"}
+    assert pr.setting("devkit.remoteControl", repo_root=devkit) is None
+
+
+def test_a_shared_key_with_no_registry_file_raises_naming_it(tmp_path):
+    root, devkit = _tree(tmp_path)
+    _live(root, ["devkit"], {"devkit.collectors": {}})
+    with pytest.raises(pr.RegistryError, match="no projects.toml"):
+        pr.setting("devkit.collectors", repo_root=devkit)
 
 
 def test_a_setting_nothing_sets_is_the_default(tmp_path):
-    root, devkit = _tree(tmp_path)
+    _, devkit = _tree(tmp_path)
+    _registry(devkit, 'projects = ["devkit"]\n')
     assert pr.setting("devkit.onHold", [], repo_root=devkit) == []
     assert pr.setting("devkit.collectors", repo_root=devkit) is None
-    _live(root, ["devkit"], {})
     assert pr.setting("devkit.reapStale", {"days": 3}, repo_root=devkit) == {"days": 3}
 
 
@@ -285,16 +286,29 @@ def test_the_watchdogs_pattern_reads_the_machine_file_unchanged():
     assert found and found.group(1) == "dispatch"
 
 
-def test_a_workspace_handed_in_is_the_fallback_and_locates_the_machine_file(tmp_path):
-    """A `--workspace` the caller was given, not the one `repo_root` resolves to."""
+def test_a_root_handed_in_locates_the_machine_file(tmp_path):
+    """A `--root` the caller was given, not the one `repo_root` resolves to."""
     _, devkit = _tree(tmp_path)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
+    _machine(elsewhere, {"devkit.onHold": ["b"]})
+    assert pr.setting("devkit.onHold", repo_root=devkit, root=elsewhere) == ["b"]
+    assert pr.setting("devkit.onHold", [], repo_root=devkit) == []
+
+
+def test_a_deprecated_workspace_handed_in_names_only_a_directory(tmp_path):
+    """The file a `--workspace` names is never read; only where it would be counts."""
+    _, devkit = _tree(tmp_path)
+    _registry(devkit, 'projects = ["devkit"]\n')
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
     handed = _live(elsewhere, [], {"devkit.onHold": ["a"], "devkit.collectors": {"x": {}}})
-    assert pr.setting("devkit.onHold", repo_root=devkit, workspace=handed) == ["a"]
-    assert pr.setting("devkit.collectors", repo_root=devkit, workspace=handed) == {"x": {}}
+    assert pr.setting("devkit.onHold", repo_root=devkit, workspace=handed) is None
+    assert pr.setting("devkit.collectors", repo_root=devkit, workspace=handed) is None
     _machine(elsewhere, {"devkit.onHold": ["b"]})
     assert pr.setting("devkit.onHold", repo_root=devkit, workspace=handed) == ["b"]
+    absent = tmp_path / "gone" / sweep.WORKSPACE_FILE_NAME
+    assert pr.setting("devkit.onHold", "none", repo_root=devkit, workspace=absent) == "none"
 
 
 # --- writing the machine file -----------------------------------------------------------
@@ -315,6 +329,15 @@ def test_set_machine_setting_keeps_the_other_keys(tmp_path):
     assert path == pr.machine_path(devkit)
     assert pr.setting("devkit.machineRole", repo_root=devkit) == "worker"
     assert pr.setting("devkit.fixPass", repo_root=devkit) == "dispatch"
+
+
+def test_set_machine_setting_writes_where_root_says(tmp_path):
+    _, devkit = _tree(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    path = pr.set_machine_setting("devkit.fixPass", "plan", repo_root=devkit, root=elsewhere)
+    assert path == elsewhere / pr.MACHINE_FILE_NAME
+    assert not pr.machine_path(devkit).exists()
 
 
 def test_set_machine_setting_refuses_a_shared_key_and_a_malformed_file(tmp_path):
@@ -354,6 +377,17 @@ def test_migrate_with_nothing_to_copy_writes_nothing(tmp_path):
     assert not pr.machine_path(devkit).exists()
 
 
+def test_migrate_reads_the_live_file_in_the_root_it_is_handed(tmp_path):
+    _, devkit = _tree(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _live(elsewhere, [], {"devkit.fixPass": "plan"})
+    assert pr.migrate_machine_settings(repo_root=devkit, root=elsewhere) == ["devkit.fixPass"]
+    assert json.loads((elsewhere / pr.MACHINE_FILE_NAME).read_text(encoding="utf-8")) == {
+        "devkit.fixPass": "plan"
+    }
+
+
 def test_migrate_leaves_a_malformed_machine_file_as_found(tmp_path):
     root, devkit = _tree(tmp_path)
     _live(root, ["devkit"], {"devkit.fixPass": "plan"})
@@ -390,6 +424,7 @@ SHARED_KEYS = (
     "devkit.localE2e",
     "devkit.installers",
     "devkit.reapStale",
+    "devkit.dashboards",
 )
 
 

@@ -268,8 +268,8 @@ def spawn(
         slug or project,
         "--yes",
         "--json",
-        "--workspace",
-        str(workspace),
+        "--root",
+        str(workspace.parent),
     ]
     if base:
         argv += ["--base", base]
@@ -365,8 +365,8 @@ def delete(project: str, workspace: Path, branch: str, runner=subprocess.run, re
             candidate.name,
             "--force",
             "--yes",
-            "--workspace",
-            str(workspace),
+            "--root",
+            str(workspace.parent),
         ],
         check=False,
     )
@@ -423,13 +423,12 @@ def main(argv: list[str] | None = None) -> int:
     gone.add_argument("--branch", default="")
 
     for one in (new, run, out, gone):
-        one.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
+        one.add_argument("--root", type=Path, default=None, help="the projects root")
+        one.add_argument("--workspace", type=Path, default=None, help=worktree.WORKSPACE_HELP)
 
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    workspace = args.workspace.resolve()
-    if not workspace.is_file():
-        print(f"agent-box: no workspace file at {workspace}", file=sys.stderr)
-        return EXIT_USAGE
+    # Only its directory is read; no workspace file need exist.
+    workspace = worktree.workspace_from(args.root, args.workspace)
 
     try:
         if args.verb in ("spawn", "attach"):

@@ -104,76 +104,54 @@ def test_an_installer_with_no_task_name_reports_none(tmp_path, text):
 # --- the options an installer should keep ----------------------------------------
 
 
-def test_options_are_read_per_installer_from_the_workspace_settings():
-    text = (
-        '{"folders": [], "settings": {"devkit.installers": '
-        '{"install-reconcile-task.py": ["--merge"], "install-tray.py": []}}}'
-    )
-    assert installers.parse_options(text) == {
-        "install-reconcile-task.py": ["--merge"],
-        "install-tray.py": [],
-    }
-
-
-def test_options_survive_the_comments_a_workspace_file_carries():
-    text = '{\n  // why\n  "settings": {"devkit.installers": {"install-x.py": ["--a", "b"]}},\n}'
-    assert installers.parse_options(text) == {"install-x.py": ["--a", "b"]}
-
-
 @pytest.mark.parametrize(
-    "text",
+    "value",
     [
-        "",
-        "not json",
-        '{"settings": {}}',
-        '{"settings": {"devkit.installers": ["--merge"]}}',
-        '{"settings": {"devkit.installers": {"install-x.py": "--merge"}}}',
-        '{"settings": {"devkit.installers": {"install-x.py": ["--merge", 3]}}}',
+        None,
+        ["--merge"],
+        {"install-x.py": "--merge"},
+        {"install-x.py": ["--merge", 3]},
     ],
-    ids=["empty", "not-json", "no-setting", "not-a-map", "not-a-list", "not-strings"],
+    ids=["unset", "not-a-map", "not-a-list", "not-strings"],
 )
-def test_anything_but_a_map_of_string_lists_yields_no_options(text):
+def test_anything_but_a_map_of_string_lists_yields_no_options(value):
     """A scheduled task whose stdout goes nowhere must not crash on a hand-edited file,
     and must not hand an installer an argument that is not a string either."""
-    assert installers.parse_options(text) == {}
+    assert installers.options_of(value) == {}
 
 
-def test_options_of_reads_a_stored_value_as_the_text_reader_does():
-    value = {"install-x.py": ["--a"], "install-y.py": "--b"}
-    assert installers.options_of(value) == {"install-x.py": ["--a"]}
-    assert installers.options_of(["--a"]) == {}
+def test_options_of_keeps_only_the_entries_that_are_string_lists():
+    value = {"install-x.py": ["--a"], "install-y.py": "--b", "install-z.py": []}
+    assert installers.options_of(value) == {"install-x.py": ["--a"], "install-z.py": []}
 
 
-def test_a_machine_with_neither_file_has_no_options(tmp_path):
+def test_a_checkout_without_projects_toml_has_no_options(tmp_path):
     root = tmp_path / "devkit"
     root.mkdir()
-    assert installers.read_options(None, root) == {}
-    assert installers.read_options(tmp_path / "absent.code-workspace", root) == {}
-    present = tmp_path / "w.code-workspace"
-    present.write_text('{"settings": {"devkit.installers": {"a.py": ["-x"]}}}', encoding="utf-8")
-    assert installers.read_options(present, root) == {"a.py": ["-x"]}
+    assert installers.read_options(root) == {}
 
 
-def test_options_are_read_from_projects_toml_over_the_workspace_file(tmp_path):
+def test_options_are_read_from_projects_toml_never_the_workspace_file(tmp_path):
     root = tmp_path / "devkit"
     root.mkdir()
     (root / "projects.toml").write_text(
         '[settings."devkit.installers"]\n"a.py" = ["--merge"]\n', encoding="utf-8"
     )
-    present = tmp_path / "w.code-workspace"
-    present.write_text('{"settings": {"devkit.installers": {"a.py": ["-x"]}}}', encoding="utf-8")
-    assert installers.read_options(present, root) == {"a.py": ["--merge"]}
+    (tmp_path / installers.sweep.WORKSPACE_FILE_NAME).write_text(
+        '{"settings": {"devkit.installers": {"a.py": ["-x"], "b.py": []}}}', encoding="utf-8"
+    )
+    assert installers.read_options(root) == {"a.py": ["--merge"]}
 
 
 def test_a_malformed_projects_toml_yields_no_options(tmp_path):
     root = tmp_path / "devkit"
     root.mkdir()
     (root / "projects.toml").write_text("[settings\n", encoding="utf-8")
-    assert installers.read_options(None, root) == {}
+    assert installers.read_options(root) == {}
 
 
 def test_the_committed_registry_keeps_reconcile_off_merge():
-    assert installers.read_options(None, REPO_ROOT)["install-reconcile-task.py"] == []
+    assert installers.read_options(REPO_ROOT)["install-reconcile-task.py"] == []
 
 
 def test_the_options_follow_the_mode_on_both_spellings():
@@ -423,7 +401,21 @@ def test_main_in_status_mode_exits_one_on_a_pending_install(tmp_path, monkeypatc
     assert "install-a.py: stale" in (root / installers.ARTIFACT).read_text(encoding="utf-8")
 
 
-def test_main_passes_the_workspace_file_s_options_through(tmp_path, monkeypatch):
+def test_main_passes_the_registry_s_options_through(tmp_path, monkeypatch):
+    root = a_checkout(tmp_path, "install-a.py")
+    (root / "projects.toml").write_text(
+        '[settings."devkit.installers"]\n"install-a.py" = ["--merge"]\n', encoding="utf-8"
+    )
+    runner = Answers({"install-a.py": 0})
+    monkeypatch.setattr(installers, "run_command", runner)
+    monkeypatch.setattr(installers.harness_state, "stood_down", lambda: frozenset())
+    assert installers.main(["--devkit", str(root)]) == 0
+    assert runner.calls[0][2:] == ["--check", "--merge"]
+
+
+def test_main_still_accepts_and_ignores_a_deprecated_workspace(tmp_path, monkeypatch):
+    """`fix-pass.py` and older registrations pass `--workspace`; a usage error would
+    stop the job before its artifact. The file it names is never read."""
     root = a_checkout(tmp_path, "install-a.py")
     workspace = tmp_path / "w.code-workspace"
     workspace.write_text(
@@ -433,7 +425,7 @@ def test_main_passes_the_workspace_file_s_options_through(tmp_path, monkeypatch)
     monkeypatch.setattr(installers, "run_command", runner)
     monkeypatch.setattr(installers.harness_state, "stood_down", lambda: frozenset())
     assert installers.main(["--devkit", str(root), "--workspace", str(workspace)]) == 0
-    assert runner.calls[0][2:] == ["--check", "--merge"]
+    assert runner.calls[0][2:] == ["--check"]
 
 
 def test_run_command_captures_and_reports_a_spawn_failure_as_a_code(tmp_path):

@@ -771,12 +771,21 @@ def test_one_refusal_does_not_hide_the_removals_beside_it(workspace, monkeypatch
 # --- the menu and the entry point ----------------------------------------------------
 
 
-def test_a_missing_registry_is_a_usage_error_rather_than_a_traceback(tmp_path, capsys):
+def test_a_missing_registry_is_a_usage_error_rather_than_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
     """The picker runs this; a traceback would reach the quick-pick as no options at all,
-    which is indistinguishable from a machine with no worktrees."""
-    missing = tmp_path / "nothing.code-workspace"
-    assert agent_worktree.main(["rows", "--workspace", str(missing)]) == agent_worktree.EXIT_USAGE
-    assert "no workspace file" in capsys.readouterr().err
+    which is indistinguishable from a machine with no worktrees. The registry is
+    `projects.toml`; a workspace file that is not there is no longer an error."""
+    registry = agent_worktree.devkit_project.project_registry
+
+    def missing(*_args, **_kwargs):
+        raise registry.RegistryError("no projects.toml at x")
+
+    monkeypatch.setattr(registry, "all_projects", missing)
+    absent = tmp_path / "nothing.code-workspace"
+    assert agent_worktree.main(["list", "--workspace", str(absent)]) == agent_worktree.EXIT_USAGE
+    assert "no projects.toml" in capsys.readouterr().err
 
 
 def test_a_registry_with_nothing_here_still_draws_the_sentinel(tmp_path, monkeypatch, capsys):

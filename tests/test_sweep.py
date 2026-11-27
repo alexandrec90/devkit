@@ -137,33 +137,70 @@ def test_the_real_workspace_file_still_lists_checkouts():
     assert parse_workspace(text), "sweep reads no checkouts from the real workspace file"
 
 
-def test_on_hold_reads_the_setting_beside_vscodes_own():
-    text = """{
-        // the checkouts this sweep manages
-        "folders": [{ "path": "carameli" }, { "path": "ibkr_trader" }],
-        "settings": {
-            "powershell.cwd": "carameli",
-            "devkit.onHold": ["ibkr_trader", "data-lake"],
-        }
-    }"""
-    assert sweep.on_hold(text) == frozenset({"ibkr_trader", "data-lake"})
-    assert sweep.ON_HOLD_SETTING == "devkit.onHold"
-
-
-def test_on_hold_is_empty_for_every_workspace_that_predates_it():
+def test_held_reads_a_stored_value_and_is_empty_for_any_other_shape():
     """An absent or misshapen setting is "nothing on hold", never an error: the pass
     that reads it runs unattended and must not stop over a config it does not need."""
-    assert sweep.on_hold(WORKSPACE) == frozenset()
-    assert sweep.on_hold("{not json") == frozenset()
-    assert sweep.on_hold("[]") == frozenset()
-    assert sweep.on_hold(json.dumps({"settings": {"devkit.onHold": "ibkr_trader"}})) == frozenset()
-    assert sweep.on_hold(json.dumps({"settings": []})) == frozenset()
-    assert sweep.on_hold(json.dumps({"settings": {"devkit.onHold": ["", 3, "x"]}})) == {"x"}
-
-
-def test_held_reads_a_stored_value_as_the_text_reader_does():
+    assert sweep.ON_HOLD_SETTING == "devkit.onHold"
     assert sweep.held(["a", "", 3]) == frozenset({"a"})
-    assert sweep.held("a") == sweep.held(None) == frozenset()
+    assert sweep.held("a") == sweep.held(None) == sweep.held({"a": 1}) == frozenset()
+
+
+# --- main: the checkouts come off the registry --------------------------------------
+
+
+def _no_git(monkeypatch):
+    """Every checkout inspected as a directory that is not a repository."""
+    monkeypatch.setattr(sweep, "sweep", lambda root, names, fetch=True: [
+        sweep.Result(sweep.State(name=name), sweep.SKIPPED, "not a git checkout", [])
+        for name in names
+    ])
+
+
+def test_main_sweeps_the_registry_under_the_root_with_no_workspace_file(
+    tmp_path, monkeypatch, capsys
+):
+    seen = {}
+    monkeypatch.setattr(sweep.project_registry, "all_projects", lambda: ["devkit", "radio"])
+
+    def fake(root, names, fetch=True):
+        seen.update(root=root, names=names)
+        return []
+
+    monkeypatch.setattr(sweep, "sweep", fake)
+    assert not (tmp_path / sweep.WORKSPACE_FILE_NAME).exists()
+    assert sweep.main(["--root", str(tmp_path), "--no-fetch", "--json"]) == 0
+    assert seen == {"root": tmp_path, "names": ["devkit", "radio"]}
+
+
+def test_main_takes_a_deprecated_workspace_as_its_directory(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(sweep.project_registry, "all_projects", lambda: ["devkit"])
+    monkeypatch.setattr(
+        sweep, "sweep", lambda root, names, fetch=True: seen.update(root=root) or []
+    )
+    gone = tmp_path / "ws" / sweep.WORKSPACE_FILE_NAME
+    assert sweep.main(["--workspace", str(gone), "--no-fetch", "--json"]) == 0
+    assert seen["root"] == tmp_path / "ws"
+
+
+def test_main_stops_on_an_unreadable_or_empty_registry(tmp_path, monkeypatch, capsys):
+    def broken():
+        raise sweep.project_registry.RegistryError("no projects.toml at x")
+
+    monkeypatch.setattr(sweep.project_registry, "all_projects", broken)
+    _no_git(monkeypatch)
+    assert sweep.main(["--root", str(tmp_path)]) == 2
+    assert "no projects.toml at x" in capsys.readouterr().err
+    monkeypatch.setattr(sweep.project_registry, "all_projects", lambda: [])
+    assert sweep.main(["--root", str(tmp_path)]) == 2
+    assert "no checkouts registered" in capsys.readouterr().err
+
+
+def test_main_refuses_an_only_name_the_registry_lacks(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sweep.project_registry, "all_projects", lambda: ["devkit"])
+    _no_git(monkeypatch)
+    assert sweep.main(["--root", str(tmp_path), "--only", "devkt"]) == 2
+    assert "devkt, which is not registered" in capsys.readouterr().err
 
 
 def test_only_restricts_the_sweep_to_the_named_checkouts():

@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 from support import load_script
@@ -89,18 +90,14 @@ def verdicts(findings):
 # --- settings -----------------------------------------------------------------------
 
 
-def workspace_text(setting):
-    return json.dumps({"folders": [], "settings": {reap.SETTING: setting}})
-
-
 def test_settings_default_when_absent_or_malformed():
-    for text in ("", "not json", "{}", json.dumps({"settings": {reap.SETTING: [1]}})):
-        assert reap.parse_settings(text) == reap.Settings()
+    for value in (None, "", [1], {"sessionIdleMinutes": None}):
+        assert reap.settings_of(value) == reap.Settings()
 
 
 def test_settings_read_the_idle_window_the_switch_and_the_pattern():
-    parsed = reap.parse_settings(
-        workspace_text({"sessionIdleMinutes": 45, "devServers": False, "devServerPattern": "x"})
+    parsed = reap.settings_of(
+        {"sessionIdleMinutes": 45, "devServers": False, "devServerPattern": "x"}
     )
     assert parsed == reap.Settings(
         session_idle_minutes=45, dev_servers=False, dev_server_pattern="x"
@@ -109,33 +106,28 @@ def test_settings_read_the_idle_window_the_switch_and_the_pattern():
 
 @pytest.mark.parametrize("bad", [0, -5, True, "60", 1.5])
 def test_an_unusable_idle_window_falls_back(bad):
-    parsed = reap.parse_settings(workspace_text({"sessionIdleMinutes": bad}))
+    parsed = reap.settings_of({"sessionIdleMinutes": bad})
     assert parsed.session_idle_minutes == reap.DEFAULT_SESSION_IDLE_MINUTES
 
 
 def test_only_a_bare_false_switches_dev_servers_off():
-    assert reap.parse_settings(workspace_text({"devServers": "false"})).dev_servers
-    assert not reap.parse_settings(workspace_text({"devServers": False})).dev_servers
+    assert reap.settings_of({"devServers": "false"}).dev_servers
+    assert not reap.settings_of({"devServers": False}).dev_servers
 
 
-def test_settings_of_reads_a_stored_value_as_the_text_reader_does():
-    value = {"sessionIdleMinutes": 45, "dockerClis": False}
-    assert reap.settings_of(value) == reap.parse_settings(workspace_text(value))
-    assert reap.settings_of(None) == reap.Settings()
-
-
-def test_read_settings_prefers_projects_toml_and_defaults_for_a_malformed_one(tmp_path):
+def test_read_settings_reads_projects_toml_and_never_the_workspace_file(tmp_path):
     root = tmp_path / "devkit"
     root.mkdir()
-    workspace = tmp_path / "w.code-workspace"
-    workspace.write_text(workspace_text({"sessionIdleMinutes": 45}), encoding="utf-8")
-    assert reap.read_settings(workspace, root).session_idle_minutes == 45
+    (tmp_path / reap.sweep.WORKSPACE_FILE_NAME).write_text(
+        json.dumps({"settings": {reap.SETTING: {"sessionIdleMinutes": 45}}}), encoding="utf-8"
+    )
+    assert reap.read_settings(root) == reap.Settings(), "no projects.toml: the defaults"
     (root / "projects.toml").write_text(
         '[settings."devkit.reapStale"]\nsessionIdleMinutes = 30\n', encoding="utf-8"
     )
-    assert reap.read_settings(workspace, root).session_idle_minutes == 30
+    assert reap.read_settings(root).session_idle_minutes == 30
     (root / "projects.toml").write_text("[settings\n", encoding="utf-8")
-    assert reap.read_settings(workspace, root) == reap.Settings()
+    assert reap.read_settings(root) == reap.Settings()
 
 
 def test_the_default_window_is_longer_than_the_restart_window():
@@ -256,8 +248,8 @@ def test_assess_ends_with_the_docker_clis(tmp_path, store):
 
 
 def test_only_a_bare_false_switches_docker_clis_off():
-    assert reap.parse_settings(workspace_text({"dockerClis": "no"})).docker_clis
-    assert not reap.parse_settings(workspace_text({"dockerClis": False})).docker_clis
+    assert reap.settings_of({"dockerClis": "no"}).docker_clis
+    assert not reap.settings_of({"dockerClis": False}).docker_clis
 
 
 def test_assess_puts_sessions_before_strays_before_dev_servers(tmp_path, store):
@@ -446,23 +438,24 @@ def test_the_artifact_lands_under_logs_in_the_named_root(tmp_path):
     assert (tmp_path / reap.ARTIFACT).read_text(encoding="utf-8") == "x\n"
 
 
-def write_workspace(tmp_path, settings):
-    path = tmp_path / "alex-projects.code-workspace"
-    path.write_text(
-        json.dumps({"folders": [{"path": "carameli"}], "settings": settings}), encoding="utf-8"
-    )
-    return path
+def write_settings(tmp_path, serving=("carameli",), idle: int | None = None) -> Path:
+    """`tmp_path` as both devkit checkout and projects root: its `projects.toml` serves
+    `serving` and sets the idle window when `idle` is given. The root, which is what the
+    pass is handed; no workspace file is written."""
+    names = ", ".join(f'"{name}"' for name in serving)
+    text = f'[settings]\n"{rc_config.RC_SETTING}" = [{names}]\n'
+    if idle is not None:
+        text += f'"{reap.SETTING}" = {{sessionIdleMinutes = {idle}}}\n'
+    (tmp_path / "projects.toml").write_text(text, encoding="utf-8")
+    return tmp_path
 
 
-def test_the_plan_reads_the_workspace_and_the_state_file(tmp_path, store):
-    workspace = write_workspace(
-        tmp_path,
-        {rc_config.RC_SETTING: ["carameli"], reap.SETTING: {"sessionIdleMinutes": 30}},
-    )
+def test_the_plan_reads_the_registry_settings_and_the_state_file(tmp_path, store):
+    checkouts = write_settings(tmp_path, idle=30)
     (tmp_path / reap.RC_STATE).parent.mkdir()
     rc_machine.State(servers={"carameli": 20}).save(tmp_path / reap.RC_STATE)
     report = reap.Pass()
-    plan = reap.build_plan(table(), workspace, tmp_path, report, store)
+    plan = reap.build_plan(table(), checkouts, tmp_path, report, store)
     assert plan.projects == ("carameli",)
     assert plan.known == frozenset({20})
     assert plan.settings.session_idle_minutes == 30
@@ -470,18 +463,18 @@ def test_the_plan_reads_the_workspace_and_the_state_file(tmp_path, store):
     assert report.lines == []
 
 
-def test_a_missing_workspace_is_reported_and_leaves_the_pass_stray_blind(tmp_path, store):
+def test_nothing_served_is_reported_and_leaves_the_pass_stray_blind(tmp_path, store):
     report = reap.Pass()
-    plan = reap.build_plan(table(), tmp_path / "nope.code-workspace", tmp_path, report, store)
-    assert plan.projects == () and plan.root is None
-    assert report.lines and "no workspace file" in report.lines[0]
+    plan = reap.build_plan(table(), tmp_path, tmp_path, report, store)
+    assert plan.projects == ()
+    assert report.lines and "no served projects" in report.lines[0]
     assert reap.assess_strays(plan, []) == []
     # Sessions filed under a bridge directory are still assessable by id alone.
     assert verdicts(reap.assess_sessions(plan))[21] is True
 
 
 def test_the_plan_defaults_the_store_to_claudes(tmp_path):
-    plan = reap.build_plan([], None, tmp_path, reap.Pass())
+    plan = reap.build_plan([], tmp_path, tmp_path, reap.Pass())
     assert plan.store == rc_machine.sessions_store()
     assert plan.now == pytest.approx(time.time(), abs=5)
 
@@ -497,12 +490,12 @@ def test_parse_args_defaults_to_the_read_only_mode():
 
 
 def test_status_reports_and_never_stops(tmp_path, store, monkeypatch, capsys):
-    workspace = write_workspace(tmp_path, {rc_config.RC_SETTING: ["carameli"]})
+    checkouts = write_settings(tmp_path)
     monkeypatch.setattr(reap_machine, "read_table", lambda: (table(), ""))
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     stopped = []
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: stopped.append(pid) or "")
-    code = reap.main(["status", "--workspace", str(workspace), "--devkit", str(tmp_path)])
+    code = reap.main(["status", "--root", str(checkouts), "--devkit", str(tmp_path)])
     assert code == 0
     assert stopped == []
     out = capsys.readouterr().out
@@ -512,7 +505,9 @@ def test_status_reports_and_never_stops(tmp_path, store, monkeypatch, capsys):
 
 
 def test_maintain_stops_what_status_would_and_records_it(tmp_path, store, monkeypatch, capsys):
-    workspace = write_workspace(tmp_path, {rc_config.RC_SETTING: ["carameli"]})
+    """Handed a deprecated `--workspace` that names no file: only its directory is read."""
+    write_settings(tmp_path)
+    workspace = tmp_path / reap.sweep.WORKSPACE_FILE_NAME
     monkeypatch.setattr(reap_machine, "read_table", lambda: (table(), ""))
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     stopped = []
@@ -541,16 +536,16 @@ def test_an_unreadable_table_assesses_nothing_and_exits_red(tmp_path, monkeypatc
 
 def test_a_quiet_machine_says_so(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(reap_machine, "read_table", lambda: ([P(1, 0, "explorer", "")], ""))
-    assert reap.main(["maintain", "--devkit", str(tmp_path)]) == 0
+    assert reap.main(["maintain", "--root", str(tmp_path), "--devkit", str(tmp_path)]) == 0
     assert "nothing left behind" in capsys.readouterr().out
 
 
 def test_a_failed_stop_reddens_the_pass(tmp_path, store, monkeypatch):
-    workspace = write_workspace(tmp_path, {rc_config.RC_SETTING: ["carameli"]})
+    checkouts = write_settings(tmp_path)
     monkeypatch.setattr(reap_machine, "read_table", lambda: (table(), ""))
     monkeypatch.setattr(rc_machine, "sessions_store", lambda: store)
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: "denied")
-    assert reap.main(["reap", "--workspace", str(workspace), "--devkit", str(tmp_path)]) == 2
+    assert reap.main(["reap", "--root", str(checkouts), "--devkit", str(tmp_path)]) == 2
 
 
 def test_maintain_reaps_an_orphaned_docker_cli_and_records_it(tmp_path, monkeypatch, capsys):
@@ -566,7 +561,7 @@ def test_maintain_reaps_an_orphaned_docker_cli_and_records_it(tmp_path, monkeypa
     stopped = []
     monkeypatch.setattr(reap_machine, "read_table", lambda: (rows, ""))
     monkeypatch.setattr(reap_machine, "stop_tree", lambda pid: stopped.append(pid) or "")
-    assert reap.main(["maintain", "--devkit", str(tmp_path)]) == 0
+    assert reap.main(["maintain", "--root", str(tmp_path), "--devkit", str(tmp_path)]) == 0
     assert stopped == [70]
     assert "docker cli pid 70" in capsys.readouterr().out
     history = (tmp_path / reap.HISTORY).read_text(encoding="utf-8")

@@ -158,17 +158,26 @@ REAP_LOCK_STALE = 900.0
 # `sweep.source_checkout` parses a box name and this module imports that one.
 NAME_SEP = sweep.NAME_SEP
 
-# The workspace file sits beside the checkouts, one level above this repo — unless this
-# repo IS a box, in which case it sits one level above `.worktrees/` instead. This module
-# was the only one resolving both; `sweep.default_workspace` is that logic, moved down so
-# every workspace-aware script gets it instead of its own naive copy.
+# A path whose directory is the projects root, for the code here and in the CLIs beside
+# it that still thread a `workspace` and read only its `.parent` -- never a file anything
+# opens (`projects_root.legacy_workspace`). Goes once those take the root itself.
 DEFAULT_WORKSPACE = sweep.default_workspace(REPO_ROOT)
 # `--workspace` survives as a deprecated spelling of the projects root: the registry is
-# `project_registry`'s, and installed scheduled tasks still pass the flag.
+# `project_registry`'s, and installed scheduled tasks still pass the flag. `--root` is
+# the spelling new registrations carry.
 WORKSPACE_HELP = (
     "deprecated: names the projects root (this file's directory); the project list "
-    "comes from projects.toml"
+    "comes from projects.toml, and the file is never read"
 )
+
+
+def workspace_from(root: Path | None, workspace: Path | None) -> Path:
+    """The workspace path a CLI handed `--root` and/or the deprecated `--workspace`
+    threads, resolved: `--workspace` as given, else a path in `--root`, else
+    `DEFAULT_WORKSPACE`. Only its directory is ever read; no file need be there."""
+    if root is None and workspace is None:
+        workspace = DEFAULT_WORKSPACE
+    return sweep.projects_root.legacy_workspace(root, workspace).resolve()
 
 # Verdicts that mean the work has left the box, so the box is free to destroy.
 #   spent-branch  nothing beyond the base — nothing to lose
@@ -485,7 +494,7 @@ NEWBORN_GRACE_DAYS = 1.0 / 24.0
 # that said "ship it" to nobody. Stranded is not a reap: `reconcile` still holds the box,
 # but it says *stranded* rather than *holding*, and the remedy it names is
 # `/triage-boxes` -- an agent reading each one and shipping (`rescue --ship`) or reaping
-# it -- rather than the user. A project on hold (`sweep.on_hold`) is stranded at any
+# it -- rather than the user. A project on hold (`on_hold_projects`) is stranded at any
 # age, since nothing is meant to be in flight there at all.
 STRANDED_AGE_DAYS = 1.0
 
@@ -513,10 +522,10 @@ def stranded(
 
 
 def on_hold_projects(workspace: Path) -> frozenset[str]:
-    """`devkit.onHold` for the machine whose live workspace file is `workspace` -- the
-    machine file beside it, else that file -- or nothing when neither can be read."""
+    """`devkit.onHold` for the machine whose projects root is `workspace`'s directory --
+    its machine file, and nothing else -- or nothing when that cannot be read."""
     try:
-        return sweep.held(project_registry.setting(sweep.ON_HOLD_SETTING, workspace=workspace))
+        return sweep.held(project_registry.setting(sweep.ON_HOLD_SETTING, root=workspace.parent))
     except (project_registry.RegistryError, OSError):
         return frozenset()
 
@@ -6267,7 +6276,8 @@ def add_common_args(parser: argparse.ArgumentParser, dry_run: bool = True) -> No
 
     One function called per subparser is the version with neither failure mode.
     """
-    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE, help=WORKSPACE_HELP)
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument("--workspace", type=Path, default=None, help=WORKSPACE_HELP)
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     apply_mode = parser.add_mutually_exclusive_group()
     apply_mode.add_argument(
@@ -6640,14 +6650,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
-    if not args.workspace.is_file():
-        print(f"worktree: no workspace file at {args.workspace}", file=sys.stderr)
-        return 2
-    # Every path this tool prints is derived from the workspace's parent, and most of
-    # them are paths someone else has to act on -- an agent re-issuing an edit, a `cd`
-    # before /ship. A relative `--workspace` made all of them relative to a cwd the
-    # reader does not necessarily share.
-    args.workspace = args.workspace.resolve()
+    # Every path this tool prints is derived from the projects root, and most of them are
+    # paths someone else has to act on -- an agent re-issuing an edit, a `cd` before
+    # /ship. A relative root made all of them relative to a cwd the reader does not
+    # necessarily share. No workspace file need exist: only its directory is read.
+    args.workspace = workspace_from(args.root, args.workspace)
 
     try:
         if args.mode == "list":

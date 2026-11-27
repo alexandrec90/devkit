@@ -353,7 +353,22 @@ def test_attach_opens_nothing_when_no_box_was_chosen(monkeypatch):
     assert box.attach("p", Path("C:/ws"), "", "claude", runner=_never) == box.EXIT_FAILED
 
 
-def test_a_missing_workspace_file_is_a_usage_error(tmp_path, capsys):
-    argv = ["ship", "--project", "p", "--workspace", str(tmp_path / "absent.code-workspace")]
-    assert box.main(argv) == box.EXIT_USAGE
-    assert "no workspace file" in capsys.readouterr().err
+def test_no_workspace_file_is_needed_and_a_deprecated_one_names_the_root(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(box, "ship", lambda project, ws, branch: seen.append(ws) or box.EXIT_OK)
+    absent = tmp_path / "absent.code-workspace"
+    assert box.main(["ship", "--project", "p", "--workspace", str(absent)]) == box.EXIT_OK
+    assert box.main(["ship", "--project", "p", "--root", str(tmp_path / "r")]) == box.EXIT_OK
+    assert [ws.parent for ws in seen] == [tmp_path.resolve(), (tmp_path / "r").resolve()]
+
+
+def test_the_box_is_cut_and_reaped_under_the_root_never_a_workspace_file():
+    calls = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    launch = box.agent_models.Launch.parse("claude", None, None)
+    assert box.spawn("p", Path("ws") / "w.code-workspace", "s", "", launch, runner) != 0
+    assert calls[0][-2:] == ["--root", "ws"] and "--workspace" not in calls[0]

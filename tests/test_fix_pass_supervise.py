@@ -524,7 +524,7 @@ def test_the_pass_is_run_through_the_watchdog(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(supervise, "WATCHDOG", script)
     code, output = supervise.run_pass(tmp_path / "w", "plan")
-    assert code == 0 and output.startswith("--mode plan --workspace")
+    assert code == 0 and output.startswith(f"--mode plan --root {tmp_path}")
     assert output.rstrip().endswith(" 1 \u201d"), "UTF-8 end to end, as the pass runs"
     assert supervise.utc_now().tzinfo is not None
 

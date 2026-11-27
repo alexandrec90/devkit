@@ -144,7 +144,7 @@ def console(python: str) -> str:
     return candidate if os.path.isfile(candidate) else python
 
 
-def release_arguments(python: str, root: Path = REPO_ROOT, workspace: str = "") -> str:
+def release_arguments(python: str, root: Path = REPO_ROOT, checkouts: str = "") -> str:
     """The arguments the scheduled task runs, as one string -- interpreter excluded.
 
     Nested `log-wrap.py --always <label> -- <python> release-pipeline.py ...`, the same
@@ -155,9 +155,9 @@ def release_arguments(python: str, root: Path = REPO_ROOT, workspace: str = "") 
     `pythonw.exe` here would leave every `gh` and `git` the pipeline runs with a fresh
     visible console.
 
-    `--workspace` is passed explicitly, as the sibling jobs do: a scheduled task has no
-    cwd worth relying on, and the registered command is the only record of what the
-    job's adoption pass will reach.
+    `--root`, the projects root `checkouts`, is passed explicitly, as the sibling jobs
+    do: a scheduled task has no cwd worth relying on, and the registered command is the
+    only record of what the job's adoption pass will reach.
 
     Every path is quoted: this workspace lives under a user profile, and profile names
     contain spaces on most machines that are not this one.
@@ -171,8 +171,8 @@ def release_arguments(python: str, root: Path = REPO_ROOT, workspace: str = "") 
         f'"{pipeline_script(root).resolve()}"',
         *PIPELINE_ARGS,
     ]
-    if workspace:
-        parts += ["--workspace", f'"{workspace}"']
+    if checkouts:
+        parts += ["--root", f'"{checkouts}"']
     return " ".join(parts)
 
 
@@ -184,7 +184,7 @@ class Schedule:
     python: str
     root: Path
     at: str
-    workspace: str = ""
+    checkouts: str = ""
 
     @property
     def script(self) -> str:
@@ -193,7 +193,7 @@ class Schedule:
 
     @property
     def arguments(self) -> str:
-        return release_arguments(self.python, self.root, self.workspace)
+        return release_arguments(self.python, self.root, self.checkouts)
 
     @property
     def command(self) -> str:
@@ -210,13 +210,12 @@ def schedule_for(at: str = DEFAULT_AT, root: Path = REPO_ROOT, python: str = "")
     right by construction: a scheduled task has no activated virtualenv, and
     `release-pipeline.py` imports `release`, `sweep` and `task_branch` from beside it.
     """
-    workspace = sweep.default_workspace(root)
     return Schedule(
         name=TASK_NAME,
         python=python or sys.executable,
         root=root,
         at=at,
-        workspace=str(workspace) if workspace else "",
+        checkouts=str(sweep.projects_root.projects_root(root)),
     )
 
 

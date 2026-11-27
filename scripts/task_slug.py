@@ -196,6 +196,27 @@ def prune(workspace_root: Path, keep: int = 200) -> int:
     return dropped
 
 
+def workspace_arg(args: list[str]) -> Path:
+    """The workspace path the hook was pointed at, resolved: `--root` (a path in it), else
+    the deprecated `--workspace`, else `worktree.DEFAULT_WORKSPACE`. Off the raw argv: a
+    hook takes no parser. Only its directory is read."""
+
+    def flag(name: str) -> Path | None:
+        return Path(args[args.index(name) + 1]) if name in args[:-1] else None
+
+    return worktree.workspace_from(flag("--root"), flag("--workspace"))
+
+
+def serves_checkouts(root: Path) -> bool:
+    """Whether any registered project is checked out under the projects root `root`;
+    False for a registry that cannot be read, which is a machine with no box tier."""
+    try:
+        names = worktree.known_projects()
+    except worktree.sweep.project_registry.RegistryError:
+        return False
+    return any((root / name).is_dir() for name in names)
+
+
 def main(argv: list[str] | None = None) -> int:
     # The slug exists to name the box `worktree-guard.py` cuts, so it is switched off by
     # the same name: a recorded slug with no guard to spend it is a file written before
@@ -203,12 +224,11 @@ def main(argv: list[str] | None = None) -> int:
     if harness_config.hooks_off("branch-tier"):
         return 0
 
-    args = sys.argv[1:] if argv is None else argv
-    workspace = Path(args[args.index("--workspace") + 1]) if "--workspace" in args else None
-    workspace = (workspace or worktree.DEFAULT_WORKSPACE).resolve()
-    # No multi-root registry means no box tier to name anything for: a CI runner, a
-    # fresh clone, anyone else's machine. Silence is correct, not an error.
-    if not workspace.is_file():
+    workspace = workspace_arg(sys.argv[1:] if argv is None else argv)
+    # No registered checkout beside this one means no box tier to name anything for: a
+    # CI runner, a fresh clone, anyone else's machine. Silence is correct, not an error.
+    # Only the workspace path's directory is read.
+    if not serves_checkouts(workspace.parent):
         return 0
 
     # UTF-8, never the platform codec: the payload this reads is a *prompt*, which is

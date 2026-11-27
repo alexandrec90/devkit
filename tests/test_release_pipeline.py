@@ -515,6 +515,41 @@ def test_a_tag_run_that_lost_to_another_pushing_the_same_tag_is_no_failure(monke
     assert "another run pushed v1.0.0" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("root", [None, Path("projects")], ids=["unnamed", "named"])
+def test_the_adoption_pass_is_handed_the_root_never_a_workspace_file(monkeypatch, tmp_path, root):
+    calls = []
+
+    class Upgrade:
+        REPO_ROOT = tmp_path
+        ARTIFACT = Path("upgrade.log")
+
+        @staticmethod
+        def write_artifact(_root, _text):
+            return None
+
+    monkeypatch.setattr(rp, "main_fallback", lambda _devkit: "v1.0.0")
+    monkeypatch.setattr(rp, "tag_run_in_flight", lambda _devkit: None)
+    monkeypatch.setattr(rp, "push_tag", lambda *_args: None)
+    monkeypatch.setattr(rp, "upgrade_module", lambda: Upgrade)
+    monkeypatch.setattr(rp, "read_text", lambda _path: "")
+    monkeypatch.setattr(rp, "adoption_outcome", lambda *_args: 0)
+    monkeypatch.setattr(
+        rp, "_run", lambda cmd, *_a, **_k: calls.append(list(cmd)) or subprocess.CompletedProcess(cmd, 0)
+    )
+    assert rp.run_pipeline(Path("devkit"), "v1.0.0", True, root) == 0
+    [command] = calls
+    assert "--workspace" not in command
+    assert (command[-2:] == ["--root", str(root)]) if root else "--root" not in command
+
+
+def test_the_adoption_root_is_root_else_a_deprecated_workspace_s_directory(tmp_path):
+    parse = rp.build_parser().parse_args
+    assert rp.adoption_root(parse(["--root", str(tmp_path)])) == tmp_path
+    workspace = tmp_path / "w.code-workspace"
+    assert rp.adoption_root(parse(["--workspace", str(workspace)])) == tmp_path
+    assert rp.adoption_root(parse([])) is None
+
+
 def test_push_tag_goes_on_only_once_the_tag_landed(monkeypatch):
     _tag_step(monkeypatch, tagged=True)
     assert rp.push_tag(Path("devkit"), "v1.0.0") is None

@@ -922,7 +922,10 @@ def build_parser() -> argparse.ArgumentParser:
         # exception list: the word belongs to this file's prose, not to its code.
         description="Serve picked branches' frontends from host Vite -- no containers, no backend.",
     )
-    parser.add_argument("--workspace", type=Path, default=None, help="the .code-workspace registry")
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
+    )
     parser.add_argument(
         "--picks",
         default="",
@@ -1002,10 +1005,8 @@ def narrowed(candidates: list, checkouts: str) -> list:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    workspace = args.workspace or sweep.default_workspace(REPO_ROOT)
-    if not workspace.is_file():
-        echo(f"no workspace registry at {workspace}")
-        return 2
+    # Only its directory is read; no workspace file need exist.
+    workspace = sweep.projects_root.legacy_workspace(args.root, args.workspace, REPO_ROOT)
     root = workspace.parent
 
     if args.stop:

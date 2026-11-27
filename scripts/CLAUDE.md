@@ -333,7 +333,7 @@ it solves.** What stays per machine, and is not papered over:
 
 **Which PC takes a heavy job is a per-machine role, not a race** (`machine_role.py`,
 `devkit.machineRole` in `<projects-root>/.devkit-machine.json` beside `devkit.fixPass` and
-`devkit.onHold` -- `project_registry.MACHINE_KEYS`, the live workspace file the fallback).
+`devkit.onHold` -- `project_registry.MACHINE_KEYS`, read from that file alone).
 Free memory alone handed heavy work to the desk a person works at whenever it had a
 moment free. A `workstation` waits `job_claims.WORKER_FIRST` from its first sight of a job
 (`job_claims.Sightings`, under `logs/claims/`) before claiming; a `worker` claims at once;

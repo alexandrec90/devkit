@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+from pathlib import Path
 
 import project_registry
 import pytest
@@ -36,7 +37,7 @@ def plan_for(tmp_path, names=("devkit",), servers=None, config=None):
     )
 
 
-# The project registry the plan validates against, as the last `workspace` set it:
+# The project registry the plan validates against, as the last `opted` set it:
 # `folders` stands for the machine's registered projects.
 REGISTERED: list[str] = []
 
@@ -47,14 +48,28 @@ def _registry(monkeypatch):
     monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
 
 
-def workspace(tmp_path, setting=None, folders=("devkit", "carameli")):
+def _toml(value) -> str:
+    """`value` as a TOML value: the strings, lists, tables, ints and bools a setting holds."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml(item) for item in value) + "]"
+    return "{" + ", ".join(f"{json.dumps(k)} = {_toml(v)}" for k, v in value.items()) + "}"
+
+
+def opted(tmp_path, setting=None, folders=("devkit", "carameli")) -> Path:
+    """`tmp_path` as both the devkit checkout and the projects root, its `projects.toml`
+    carrying `setting` as `RC_SETTING`; the root, which is what the pass is handed."""
     REGISTERED[:] = folders
-    payload: dict = {"folders": [{"path": name} for name in folders], "settings": {}}
+    text = "[settings]\n"
     if setting is not None:
-        payload["settings"][rc_config.RC_SETTING] = setting
-    path = tmp_path / "alex-projects.code-workspace"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    return path
+        text += f'"{rc_config.RC_SETTING}" = {_toml(setting)}\n'
+    (tmp_path / "projects.toml").write_text(text, encoding="utf-8")
+    return tmp_path
 
 
 class Outcome:
@@ -339,28 +354,34 @@ def test_write_artifact_creates_the_logs_directory(tmp_path):
 # --- build_plan and the CLI --------------------------------------------------
 
 
-def test_build_plan_reports_a_workspace_that_opts_nothing_in(tmp_path):
+def test_build_plan_reports_a_registry_that_opts_nothing_in(tmp_path):
     report = rc.Pass()
-    assert rc.build_plan(workspace(tmp_path), tmp_path, report) is None
+    assert rc.build_plan(opted(tmp_path), tmp_path, report) is None
     assert report.failures == 0 and "nothing to serve" in report.lines[0]
 
 
 def test_build_plan_resolves_the_projects_that_opted_in(tmp_path):
-    plan = rc.build_plan(workspace(tmp_path, ["devkit"]), tmp_path, rc.Pass())
+    plan = rc.build_plan(opted(tmp_path, ["devkit"]), tmp_path, rc.Pass())
     assert plan is not None and plan.names == ["devkit"]
     assert plan.root == tmp_path
 
 
+def test_build_plan_serves_under_the_root_it_is_handed(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    plan = rc.build_plan(elsewhere, opted(tmp_path, ["devkit"]), rc.Pass())
+    assert plan is not None and plan.root == elsewhere
+
+
 def test_build_plan_fails_when_every_named_project_is_unknown(tmp_path):
     report = rc.Pass()
-    assert rc.build_plan(workspace(tmp_path, ["typo"]), tmp_path, report) is None
+    assert rc.build_plan(opted(tmp_path, ["typo"]), tmp_path, report) is None
     assert report.failures == 1
 
 
 def test_build_plan_serves_only_what_hosts_assigns_this_machine(tmp_path):
     setting = {"projects": "all", "hosts": {"*": "desktop-a", "carameli": "desktop-b"}}
     report = rc.Pass()
-    plan = rc.build_plan(workspace(tmp_path, setting), tmp_path, report, host="desktop-b")
+    plan = rc.build_plan(opted(tmp_path, setting), tmp_path, report, host="desktop-b")
     assert plan is not None and plan.names == ["carameli"]
     assert report.failures == 0
     assert report.lines == ["devkit: served by desktop-a, not here (desktop-b)"]
@@ -370,7 +391,7 @@ def test_a_machine_hosts_assigns_nothing_still_gets_a_plan_to_retire_with(tmp_pa
     """`None` would end the pass before `retire`, leaving the servers it ran before the
     assignment moved up for good."""
     setting = {"projects": "all", "hosts": "desktop-a"}
-    plan = rc.build_plan(workspace(tmp_path, setting), tmp_path, rc.Pass(), host="desktop-b")
+    plan = rc.build_plan(opted(tmp_path, setting), tmp_path, rc.Pass(), host="desktop-b")
     assert plan is not None and plan.names == []
 
 
@@ -415,23 +436,28 @@ def test_a_deferred_cycle_does_not_record_the_day(monkeypatch, tmp_path):
     assert plan.state.last_update == ""
 
 
-def test_main_writes_the_artifact_when_there_is_no_workspace_file(tmp_path, capsys):
-    code = rc.main(["status", "--workspace", str(tmp_path / "nope"), "--devkit", str(tmp_path)])
-    assert code == 2
-    assert "no workspace file" in (tmp_path / rc.ARTIFACT).read_text(encoding="utf-8")
+def test_main_needs_no_workspace_file_and_reads_a_deprecated_one_as_the_root(
+    monkeypatch, tmp_path
+):
+    """A task registered before `--root` passes `--workspace`; only its directory is
+    used, and a live file that is gone stops nothing."""
+    monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: False)
+    root = opted(tmp_path, ["devkit"])
+    gone = tmp_path / rc.sweep.WORKSPACE_FILE_NAME
+    code = rc.main(["status", "--workspace", str(gone), "--devkit", str(root)])
+    assert code == 0
+    assert "no workspace file" not in (tmp_path / rc.ARTIFACT).read_text(encoding="utf-8")
 
 
-def test_main_is_a_no_op_on_a_workspace_that_opted_nothing_in(tmp_path):
-    code = rc.main(["status", "--workspace", str(workspace(tmp_path)), "--devkit", str(tmp_path)])
+def test_main_is_a_no_op_on_a_registry_that_opted_nothing_in(tmp_path):
+    code = rc.main(["status", "--root", str(opted(tmp_path)), "--devkit", str(tmp_path)])
     assert code == 0
     assert "nothing to serve" in (tmp_path / rc.ARTIFACT).read_text(encoding="utf-8")
 
 
 def test_main_refuses_to_start_anything_without_a_cli(monkeypatch, tmp_path):
     monkeypatch.setattr(rc_machine, "claude_executable", lambda: "")
-    code = rc.main(
-        ["up", "--workspace", str(workspace(tmp_path, ["devkit"])), "--devkit", str(tmp_path)]
-    )
+    code = rc.main(["up", "--root", str(opted(tmp_path, ["devkit"])), "--devkit", str(tmp_path)])
     assert code == 2
     assert "claude is not on PATH" in (tmp_path / rc.ARTIFACT).read_text(encoding="utf-8")
 
@@ -441,7 +467,7 @@ def test_status_needs_no_cli_at_all(monkeypatch, tmp_path):
     monkeypatch.setattr(rc_machine, "claude_executable", lambda: "")
     monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: False)
     code = rc.main(
-        ["status", "--workspace", str(workspace(tmp_path, ["devkit"])), "--devkit", str(tmp_path)]
+        ["status", "--root", str(opted(tmp_path, ["devkit"])), "--devkit", str(tmp_path)]
     )
     assert code == 0
 
@@ -449,9 +475,7 @@ def test_status_needs_no_cli_at_all(monkeypatch, tmp_path):
 def test_a_status_run_never_rewrites_the_state_file(monkeypatch, tmp_path):
     """`status` is the default mode, so it is the one most likely to run by accident."""
     monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: False)
-    rc.main(
-        ["status", "--workspace", str(workspace(tmp_path, ["devkit"])), "--devkit", str(tmp_path)]
-    )
+    rc.main(["status", "--root", str(opted(tmp_path, ["devkit"])), "--devkit", str(tmp_path)])
     assert not (tmp_path / rc.STATE).exists()
 
 

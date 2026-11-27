@@ -134,12 +134,21 @@ def test_a_repo_with_no_tags_reports_nothing(tmp_path):
 # --- it must never break a session -------------------------------------------
 
 
-def test_an_absent_workspace_is_silent_and_successful(tmp_path, monkeypatch, capsys):
-    """The registry is workstation-local: on CI or a fresh clone there is simply
-    nothing to report, which is not an error."""
+def test_an_empty_registry_is_silent_and_successful(tmp_path, monkeypatch, capsys):
+    """Nothing registered is simply nothing to report, which is not an error."""
     monkeypatch.setattr(ws, "DEFAULT_WORKSPACE", tmp_path / "nope.code-workspace")
+    monkeypatch.setattr(ws.project_registry, "all_projects", lambda *_a, **_k: [])
     assert ws.main([]) == 0
     assert capsys.readouterr().out == ""
+
+
+def test_an_absent_workspace_file_still_reports(tmp_path, monkeypatch, capsys):
+    """The pass used to stop at a missing live file; only its directory is read now."""
+    _workspace_reporting(monkeypatch, tmp_path, "[workspace] something to say")
+    monkeypatch.setattr(ws, "SOURCE_ROOT", tmp_path)
+    (tmp_path / "w.code-workspace").unlink()
+    assert ws.main([]) == 0
+    assert "something to say" in capsys.readouterr().out
 
 
 def _crashing(monkeypatch, tmp_path) -> None:

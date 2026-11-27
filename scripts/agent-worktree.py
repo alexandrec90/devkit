@@ -526,7 +526,8 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
     for one in (new, gone, again, from_refs, tree_scope, base_scope, shown):
-        one.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
+        one.add_argument("--root", type=Path, default=None, help="the projects root")
+        one.add_argument("--workspace", type=Path, default=None, help=worktree.WORKSPACE_HELP)
     return parser
 
 
@@ -626,10 +627,8 @@ def main(argv: list[str] | None = None, runner=subprocess.run) -> int:
         return EXIT_OK
 
     args = build_parser().parse_args(raw)
-    workspace = args.workspace.resolve()
-    if not workspace.is_file():
-        print(f"agent-worktree: no workspace file at {workspace}", file=sys.stderr)
-        return EXIT_USAGE
+    # Only its directory is read; no workspace file need exist.
+    workspace = worktree.workspace_from(args.root, args.workspace)
 
     try:
         if args.verb in PICKER_VERBS:
@@ -660,7 +659,7 @@ def main(argv: list[str] | None = None, runner=subprocess.run) -> int:
             print(stray_report(strayed, "worktrees"), file=sys.stderr)
             return EXIT_USAGE
         return remove(picks, workspace, args.force == "force", runner)
-    except devkit_project.ProjectError as exc:
+    except (devkit_project.ProjectError, devkit_project.project_registry.RegistryError) as exc:
         print(f"agent-worktree: {exc}", file=sys.stderr)
         return EXIT_USAGE
 

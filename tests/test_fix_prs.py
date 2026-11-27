@@ -1706,9 +1706,13 @@ def test_the_default_rows_reach_the_cli_as_no_flags_at_all(workspace, monkeypatc
     assert seen["o"].flags("claude") == [] and seen["o"].flags("codex") == []
 
 
-def test_a_missing_workspace_file_is_a_usage_error(tmp_path, capsys):
-    assert fix_prs.main(["--workspace", str(tmp_path / "nope")]) == fix_prs.EXIT_USAGE
-    assert "no workspace file" in capsys.readouterr().err
+def test_no_workspace_file_is_needed_and_root_names_the_same_place(tmp_path, monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(menu, "scan", lambda ws: seen.append(ws) or {})
+    assert fix_prs.main(["--list", "--workspace", str(tmp_path / "nope")]) == 0
+    assert fix_prs.main(["--list", "--root", str(tmp_path / "r")]) == 0
+    assert [ws.parent for ws in seen] == [tmp_path.resolve(), (tmp_path / "r").resolve()]
+    assert "no workspace file" not in capsys.readouterr().err
 
 
 def test_list_prints_what_is_red_per_checkout(workspace, monkeypatch, capsys):

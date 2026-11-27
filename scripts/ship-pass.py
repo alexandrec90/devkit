@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_project
 import fix_cycle
 import git_trust
+import projects_root
 import ship_intent
 import ship_step
 import worktree
@@ -131,9 +132,11 @@ def ship(root: Path, intents: list[ship_intent.Intent], mode: str) -> tuple[list
 
 
 def run(workspace: Path) -> int:
-    """One fire. Exits quietly when another fire holds the lock or there is nothing to do."""
+    """One fire. Exits quietly when another fire holds the lock or there is nothing to do.
+
+    Only `workspace`'s directory, the projects root, is read; no file need be there."""
     root = workspace.parent
-    mode = fix_cycle.mode_here(workspace)
+    mode = fix_cycle.mode_here(root)
     projects = devkit_project.known_projects()  # the registry, not the workspace file
     lock = ship_step.SHIP_LOCK_NAME
     with worktree.named_lock(root, lock, 0.0, ship_step.SHIP_LOCK_STALE) as held:
@@ -154,17 +157,16 @@ def run(workspace: Path) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--workspace", type=Path, default=worktree.DEFAULT_WORKSPACE)
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
-    workspace = args.workspace.resolve()
-    if not workspace.is_file():
-        write_artifact(f"ship-pass: FAILED -- no workspace file at {workspace}")
-        print(f"ship-pass: no workspace file at {workspace}", file=sys.stderr)
-        return EXIT_USAGE
+    workspace = projects_root.legacy_workspace(args.root, args.workspace, REPO_ROOT).resolve()
     # In this process only, before any git call: a tree an elevated session made is one
     # git otherwise refuses. Writing git's global config stays the dispatching pass's.
     git_trust.adopt(workspace.parent, write=False)

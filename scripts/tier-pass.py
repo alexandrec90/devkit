@@ -544,7 +544,7 @@ def run_pass(
     # A result stays on the PC that made it, so a red here reaches a fixer only if this
     # PC's own fix pass dispatches. Every free PC becomes right once each PC can dispatch,
     # the lead's rollout step, and this check goes then.
-    mode = fix_switch.workspace_mode(workspace)
+    mode = fix_switch.root_mode(workspace.parent)
     if mode != fix_switch.DISPATCH:
         print(f"tier-pass: devkit.fixPass is {mode} here, so a red would reach no fixer; not run")
         return 0
@@ -585,10 +585,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    # Only its directory -- the projects root -- is read; no file need be there.
     workspace = sweep.default_workspace(REPO_ROOT)
-    if not workspace.is_file():
-        print(f"tier-pass: no workspace file at {workspace}", file=sys.stderr)
-        return 2
     if args.verb == "status":
         return status(workspace)
     low_priority.lower()

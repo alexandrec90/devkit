@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The project registry and devkit's settings, read without a VS Code workspace file.
 
-Today the registry is `folders` in `<projects-root>/alex-projects.code-workspace` and
-the settings sit under its `settings`, beside VS Code's own. That file is being retired,
-so this module is where both move to, as two files with different owners:
+The registry was `folders` in `<projects-root>/alex-projects.code-workspace` and the
+settings sat under its `settings`, beside VS Code's own. That file is retired, and both
+live here now, as two files with different owners:
 
 - **`projects.toml`, at devkit's root, committed.** The checkouts devkit manages, and
   the settings every PC shares. Shared, so it is versioned with the code that reads it
@@ -20,18 +20,22 @@ so this module is where both move to, as two files with different owners:
   flat `{"devkit.fixPass": "off"}` keeps `fix_switch.py`'s parser-free pattern valid
   against the new file unchanged.
 
-**Until every caller has switched, the live workspace file is the fallback** -- per
-file for the registry, per key for a setting -- so introducing the module changes what
-nothing reads. A missing file is the fallback; a malformed one raises `RegistryError`,
-because a committed file is gated by its tests and a silent empty registry is the
-failure `sweep.parse_workspace`'s docstring describes.
+**The live workspace file is read by nothing here but `migrate_machine_settings`**, the
+one-shot that copies a PC's machine keys out of it if it is still there. A missing or
+malformed `projects.toml` raises `RegistryError` naming the file: it is committed in
+every checkout, box and agent tree, so its absence is a broken checkout, and a silent
+empty registry is the failure that reads as "nothing to do". A missing machine file is
+a PC that never set anything, so its keys read as their defaults.
 
 Every function takes `repo_root` -- the checkout the caller runs in, which may be a box
-or an agent CLI's worktree -- and resolves the rest through `sweep.default_workspace`
-rather than a copy of its box arithmetic.
+or an agent CLI's worktree -- and resolves the rest through `projects_root.py` rather
+than a copy of its box arithmetic.
 
 Unit-tested in `tests/test_project_registry.py`, which also holds `projects.toml` to
 the `folders` of `workspace.jsonc` while both exist.
+
+Imports nothing of devkit's but `devkit_jsonc` and `projects_root`, so `sweep` and the
+rest can read the registry without an import cycle.
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_jsonc
-import sweep
+import projects_root as _roots
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,8 +63,6 @@ MACHINE_FILE_NAME = ".devkit-machine.json"
 # spellings to the owners'.
 MACHINE_KEYS: frozenset[str] = frozenset({"devkit.fixPass", "devkit.onHold", "devkit.machineRole"})
 
-_MISSING = object()
-
 
 class RegistryError(ValueError):
     """A registry or settings file exists but cannot be read as one."""
@@ -70,18 +72,20 @@ class RegistryError(ValueError):
 
 
 def projects_root(repo_root: Path = REPO_ROOT) -> Path:
-    """The directory the checkouts sit in, whether or not a workspace file is there.
-
-    The workspace file's directory, which is all `workspace.parent` ever meant to its
-    callers -- `sweep.default_workspace` already walks out of a box or an agent CLI's
-    worktree to it, and is pure, so the answer needs no file to exist.
-    """
-    return sweep.default_workspace(repo_root).parent
+    """The directory the checkouts sit in (`projects_root.projects_root`), which is all
+    `workspace.parent` ever meant to its callers. Pure: no file has to exist."""
+    return _roots.projects_root(repo_root)
 
 
 def live_workspace(repo_root: Path = REPO_ROOT) -> Path:
-    """The live `.code-workspace` file: the fallback until every caller has switched."""
-    return sweep.default_workspace(repo_root)
+    """The retired live `.code-workspace` file, read only by `migrate_machine_settings`."""
+    return _roots.default_workspace(repo_root)
+
+
+def _machine_dir(repo_root: Path, root: Path | None, workspace: Path | None) -> Path:
+    """Where the machine file is: `root`, a deprecated `workspace`'s directory, else
+    `projects_root(repo_root)`."""
+    return _roots.from_flags(root, workspace, repo_root)
 
 
 def registry_path(repo_root: Path = REPO_ROOT) -> Path:
@@ -140,8 +144,8 @@ def parse_machine(text: str) -> dict[str, object]:
 def workspace_settings(text: str) -> dict[str, object]:
     """The live workspace file's `settings`; empty for text that is not one.
 
-    Silent on malformed text, as every reader of the live file is today -- this is the
-    fallback, and it keeps their behaviour rather than improving it.
+    Silent on malformed text: its one reader is `migrate_machine_settings`, for which a
+    frozen file it cannot read simply has nothing left to copy.
     """
     try:
         payload = devkit_jsonc.loads(text)
@@ -162,18 +166,24 @@ def _read(path: Path) -> str | None:
 # --- the registry ----------------------------------------------------------------------
 
 
+def _registry_text(repo_root: Path) -> str:
+    """`projects.toml`'s text; `RegistryError` naming the file when it is not there."""
+    path = registry_path(repo_root)
+    text = _read(path)
+    if text is None:
+        raise RegistryError(f"no {REGISTRY_NAME} at {path}")
+    return text
+
+
 def all_projects(repo_root: Path = REPO_ROOT) -> list[str]:
     """Every registered project, checked out here or not, in registry order.
 
-    `projects.toml` when it exists; otherwise the live workspace file's `folders`, read
-    by `sweep.parse_workspace` with nothing excluded -- the raw registry, before
-    `devkit_project.NOT_PROJECTS` -- and empty when neither file is there.
+    `projects.toml`'s `projects`, nothing excluded -- the raw registry, before
+    `devkit_project.NOT_PROJECTS`. Raises `RegistryError` when the file is missing or
+    malformed: an empty answer there would read as "no projects", which is the one
+    answer a sweep over them must never give wrongly.
     """
-    text = _read(registry_path(repo_root))
-    if text is not None:
-        return parse_registry(text)
-    live = _read(live_workspace(repo_root))
-    return sweep.parse_workspace(live, frozenset()) if live is not None else []
+    return parse_registry(_registry_text(repo_root))
 
 
 def projects(root: Path | None = None, *, repo_root: Path = REPO_ROOT) -> list[str]:
@@ -194,33 +204,25 @@ def setting(
     default: object = None,
     *,
     repo_root: Path = REPO_ROOT,
+    root: Path | None = None,
     workspace: Path | None = None,
 ) -> object:
-    """A devkit setting's value, or `default` where no file sets it.
+    """A devkit setting's value, or `default` where its file does not set it.
 
-    A key in `MACHINE_KEYS` is read from the machine file, any other from
-    `projects.toml`'s `[settings]`. A key that file does not set -- or a file that is
-    not there -- falls back to the live workspace file's `settings`, so settings can
-    move one key at a time. The value is returned as stored; validating it stays with
-    the setting's owner.
+    A key in `MACHINE_KEYS` is read from the machine file -- a PC with none has set
+    nothing, so every key reads as `default` -- any other from `projects.toml`'s
+    `[settings]`, whose absence raises `RegistryError` as `all_projects` does. The value
+    is returned as stored; validating it stays with the setting's owner.
 
-    `workspace` is the live file a caller was handed (`--workspace`, a test's), when it
-    is not the one `repo_root` resolves to: it is then both the fallback and the
-    directory the machine file is looked for in, since that file sits beside it.
+    `root` is the projects root a caller was pointed at (`--root`, a test's), when it is
+    not the one `repo_root` resolves to: the machine file is looked for there.
+    `workspace` is the deprecated spelling of the same thing, whose directory is used;
+    the file itself is never read.
     """
-    live_path = live_workspace(repo_root) if workspace is None else workspace
     if key in MACHINE_KEYS:
-        text = _read(live_path.parent / MACHINE_FILE_NAME)
-        found = parse_machine(text).get(key, _MISSING) if text is not None else _MISSING
-    else:
-        text = _read(registry_path(repo_root))
-        found = parse_shared_settings(text).get(key, _MISSING) if text is not None else _MISSING
-    if found is not _MISSING:
-        return found
-    live = _read(live_path)
-    if live is None:
-        return default
-    return workspace_settings(live).get(key, default)
+        text = _read(_machine_dir(repo_root, root, workspace) / MACHINE_FILE_NAME)
+        return parse_machine(text).get(key, default) if text is not None else default
+    return parse_shared_settings(_registry_text(repo_root)).get(key, default)
 
 
 # --- writing the machine file -----------------------------------------------------------
@@ -238,18 +240,23 @@ def write_machine(path: Path, values: dict[str, object]) -> None:
 
 
 def set_machine_setting(
-    key: str, value: object, *, repo_root: Path = REPO_ROOT, workspace: Path | None = None
+    key: str,
+    value: object,
+    *,
+    repo_root: Path = REPO_ROOT,
+    root: Path | None = None,
+    workspace: Path | None = None,
 ) -> Path:
     """Set one `MACHINE_KEYS` setting in the machine file, keeping the others; the path.
 
     Raises `ValueError` for a key that is not this PC's alone -- a shared one written
     here would be read by nothing -- and `RegistryError` for a machine file that is
-    there and malformed, which is left as found rather than overwritten.
+    there and malformed, which is left as found rather than overwritten. `root` and the
+    deprecated `workspace` say where, as for `setting`.
     """
     if key not in MACHINE_KEYS:
         raise ValueError(f"{key} is not a machine setting ({', '.join(sorted(MACHINE_KEYS))})")
-    live_path = live_workspace(repo_root) if workspace is None else workspace
-    path = live_path.parent / MACHINE_FILE_NAME
+    path = _machine_dir(repo_root, root, workspace) / MACHINE_FILE_NAME
     text = _read(path)
     values = parse_machine(text) if text is not None else {}
     values[key] = value
@@ -258,17 +265,26 @@ def set_machine_setting(
 
 
 def migrate_machine_settings(
-    *, repo_root: Path = REPO_ROOT, workspace: Path | None = None
+    *, repo_root: Path = REPO_ROOT, root: Path | None = None, workspace: Path | None = None
 ) -> list[str]:
     """Copy each `MACHINE_KEYS` setting the live workspace file holds and the machine
     file lacks into the machine file; the keys copied, sorted.
+
+    The one reader of the retired live file left, and only while a PC may not have run
+    it yet: no live file is nothing to copy. `root` is the directory both files sit in;
+    `workspace`, when given, names the live file itself.
 
     One-shot by construction: a key already in the machine file is never overwritten,
     so a second run copies nothing and a value set since with `machine_role.py --set`
     survives. Nothing to copy writes nothing. Raises `RegistryError` for a malformed
     machine file, which is left as found.
     """
-    live_path = live_workspace(repo_root) if workspace is None else workspace
+    if workspace is not None:
+        live_path = workspace
+    elif root is not None:
+        live_path = root / _roots.WORKSPACE_FILE_NAME
+    else:
+        live_path = live_workspace(repo_root)
     live = _read(live_path)
     if live is None:
         return []
@@ -446,9 +462,8 @@ def unregister_text(text: str, *names: str) -> str:
 def _write_edit(path: Path, edit: Callable[[str], str]) -> bool:
     """Apply `edit` to the registry at `path`; whether the file changed.
 
-    A missing file is left missing: while `projects.toml` is absent the live workspace
-    file is the registry (`all_projects`), and a file created here holding only the new
-    name would shadow every other project.
+    A missing file is left missing: a file created here holding only the new name would
+    read as a registry of one, and `all_projects` names the missing one instead.
     """
     text = _read(path)
     if text is None:

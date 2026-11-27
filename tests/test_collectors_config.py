@@ -16,7 +16,13 @@ from support import REPO_ROOT, load_script
 config = load_script("scripts/collectors_config.py")
 
 
-def workspace(settings: dict) -> str:
+def workspace(settings: dict):
+    """`SETTING`'s value out of `settings`, as `project_registry.setting` hands it over."""
+    return settings.get(config.SETTING)
+
+
+def live_file(settings: dict) -> str:
+    """A retired live workspace file carrying `settings`, which nothing may read."""
     return "// a comment, as the real file has\n" + json.dumps(
         {"folders": [], "settings": settings}
     )
@@ -29,13 +35,13 @@ def committed() -> list:
     return found
 
 
-# --- the workspace setting -------------------------------------------------------
+# --- the setting -----------------------------------------------------------------
 
 
 @pytest.mark.parametrize("kind", [{"service": "app"}, {"command": ["x"], "minutes": 5}])
 def test_either_kind_may_declare_its_placement(kind):
     entry = {**kind, "handoff": ["x"], "memoryGb": 1.5, "rebalance": True}
-    collectors, errors = config.parse_setting(workspace({config.SETTING: {"p": entry}}))
+    collectors, errors = config.parse_value(workspace({config.SETTING: {"p": entry}}))
     assert errors == []
     assert (collectors[0].memory_gb, collectors[0].rebalance) == (1.5, True)
 
@@ -53,7 +59,7 @@ def test_either_kind_may_declare_its_placement(kind):
 @pytest.mark.parametrize("kind", [{"service": "app"}, {"command": ["x"], "minutes": 5}])
 def test_a_malformed_placement_is_refused(kind, placement, refused):
     entry = {**kind, **placement}
-    collectors, errors = config.parse_setting(workspace({config.SETTING: {"p": entry}}))
+    collectors, errors = config.parse_value(workspace({config.SETTING: {"p": entry}}))
     assert collectors == []
     assert refused in errors[0]
 
@@ -62,13 +68,13 @@ def test_a_declared_collector_is_read_with_its_health_command():
     text = workspace(
         {config.SETTING: {"ibkr_trader": {"service": "app", "health": ["ibkr-trader", "health"]}}}
     )
-    found, notes = config.parse_setting(text)
+    found, notes = config.parse_value(text)
     assert found == [config.Collector("ibkr_trader", "app", ("ibkr-trader", "health"))]
     assert notes == []
 
 
 def test_health_is_optional():
-    found, _ = config.parse_setting(workspace({config.SETTING: {"p": {"service": "s"}}}))
+    found, _ = config.parse_value(workspace({config.SETTING: {"p": {"service": "s"}}}))
     assert found == [config.Collector("p", "s", ())]
     assert found[0].settle == config.DEFAULT_SETTLE
 
@@ -76,13 +82,13 @@ def test_health_is_optional():
 @pytest.mark.parametrize("settle", [0, 180])
 def test_a_container_collector_may_set_its_settle(settle):
     text = workspace({config.SETTING: {"p": {"service": "s", "settle": settle}}})
-    found, notes = config.parse_setting(text)
+    found, notes = config.parse_value(text)
     assert found == [config.Collector("p", "s", (), settle=settle)] and notes == []
 
 
 def test_a_container_collector_may_name_the_checkouts_its_image_copies():
     text = workspace({config.SETTING: {"p": {"service": "s", "buildsFrom": ["data-lake"]}}})
-    found, notes = config.parse_setting(text)
+    found, notes = config.parse_value(text)
     assert found == [config.Collector("p", "s", (), builds_from=("data-lake",))] and notes == []
 
 
@@ -95,14 +101,14 @@ def test_the_workspace_declares_what_ibkr_trader_s_image_copies():
 def test_a_container_collector_may_declare_its_handoff():
     handoff = ["uv", "run", "python", "scripts/handoff.py"]
     text = workspace({config.SETTING: {"p": {"service": "s", "handoff": handoff}}})
-    found, notes = config.parse_setting(text)
+    found, notes = config.parse_value(text)
     assert found == [config.Collector("p", "s", (), handoff=tuple(handoff))] and notes == []
 
 
 def test_no_handoff_is_a_collector_moved_by_hand():
-    found, _ = config.parse_setting(workspace({config.SETTING: {"p": {"service": "s"}}}))
+    found, _ = config.parse_value(workspace({config.SETTING: {"p": {"service": "s"}}}))
     assert found[0].handoff == ()
-    found, _ = config.parse_setting(
+    found, _ = config.parse_value(
         workspace({config.SETTING: {"p": {"command": ["x"], "minutes": 5}}})
     )
     assert found[0].handoff == ()
@@ -113,7 +119,7 @@ def test_a_scheduled_collector_may_declare_its_handoff():
     task is removed for the export rather than a service stopped (`collectors.stop_task`)."""
     handoff = ["uv", "run", "python", "scripts/handoff.py"]
     entry = {"command": ["uv", "run", "s"], "minutes": 30, "needs": ["db"], "handoff": handoff}
-    found, notes = config.parse_setting(workspace({config.SETTING: {"s": entry}}))
+    found, notes = config.parse_value(workspace({config.SETTING: {"s": entry}}))
     assert notes == []
     assert found == [
         config.Collector(
@@ -151,7 +157,7 @@ def test_the_workspace_declares_ibkr_trader_s_handoff_with_the_extra_boto3_needs
 
 
 def test_no_setting_declares_nothing_and_says_nothing():
-    assert config.parse_setting(workspace({})) == ([], [])
+    assert config.parse_value(workspace({})) == ([], [])
 
 
 @pytest.mark.parametrize(
@@ -185,7 +191,7 @@ def test_no_setting_declares_nothing_and_says_nothing():
 def test_a_malformed_entry_is_a_note_not_silence(entry, reason):
     """Hand-edited: an entry that silently declared nothing would read, on the machine
     meant to run it, exactly like a collector nobody asked for."""
-    found, notes = config.parse_setting(
+    found, notes = config.parse_value(
         workspace({config.SETTING: {"bad": entry, "good": {"service": "s"}}})
     )
     assert [c.project for c in found] == ["good"]
@@ -204,7 +210,7 @@ def test_a_scheduled_collector_is_read_with_its_cadence_and_needs():
             }
         }
     )
-    (found,), notes = config.parse_setting(text)
+    (found,), notes = config.parse_value(text)
     assert notes == []
     assert found == config.Collector(
         "social-scraper",
@@ -218,30 +224,15 @@ def test_a_scheduled_collector_is_read_with_its_cadence_and_needs():
 def test_a_scheduled_collector_may_not_take_devkits_task_namespace():
     """Its task is named after it, and a `devkit-` task is read as one of devkit's own
     jobs -- by the fix pass too, which would file the project's failures as devkit's."""
-    found, notes = config.parse_setting(
+    found, notes = config.parse_value(
         workspace({config.SETTING: {"devkit-scraper": {"command": ["x"], "minutes": 5}}})
     )
     assert found == [] and "may not start with `devkit-`" in notes[0]
 
 
 def test_a_setting_of_the_wrong_shape_is_reported():
-    found, notes = config.parse_setting(workspace({config.SETTING: ["ibkr_trader"]}))
+    found, notes = config.parse_value(workspace({config.SETTING: ["ibkr_trader"]}))
     assert found == [] and "keyed by project" in notes[0]
-
-
-def test_an_unparseable_workspace_file_is_reported_rather_than_raised():
-    assert config.parse_setting("{ not json") == ([], ["the workspace file does not parse"])
-
-
-def test_with_neither_file_the_missing_declaration_is_reported(tmp_path):
-    found, notes = config.declared(tmp_path / "devkit")
-    assert found == [] and "no projects.toml" in notes[0] and "no workspace file" in notes[0]
-
-
-def test_the_value_parser_reads_a_stored_setting_as_the_text_parser_does():
-    value = {"p": {"service": "s"}, "bad": "x"}
-    assert config.parse_value(value) == config.parse_setting(workspace({config.SETTING: value}))
-    assert config.parse_value(None) == ([], [])
 
 
 def _checkout(tmp_path: Path, registry: str | None, live: dict | None) -> Path:
@@ -250,11 +241,21 @@ def _checkout(tmp_path: Path, registry: str | None, live: dict | None) -> Path:
     if registry is not None:
         (devkit / "projects.toml").write_text(registry, encoding="utf-8")
     if live is not None:
-        (tmp_path / "alex-projects.code-workspace").write_text(workspace(live), encoding="utf-8")
+        (tmp_path / "alex-projects.code-workspace").write_text(live_file(live), encoding="utf-8")
     return devkit
 
 
-def test_declared_reads_projects_toml_over_the_workspace_file(tmp_path):
+def test_a_missing_projects_toml_is_reported_even_beside_a_live_file(tmp_path):
+    devkit = _checkout(tmp_path, None, {config.SETTING: {"b": {"service": "s"}}})
+    found, notes = config.declared(devkit)
+    assert found == [] and len(notes) == 1 and "no projects.toml" in notes[0]
+
+
+def test_the_value_parser_reads_nothing_as_nothing():
+    assert config.parse_value(None) == ([], [])
+
+
+def test_declared_reads_projects_toml_and_never_the_workspace_file(tmp_path):
     devkit = _checkout(
         tmp_path,
         '[settings."devkit.collectors".a]\nservice = "app"\n',
@@ -263,9 +264,9 @@ def test_declared_reads_projects_toml_over_the_workspace_file(tmp_path):
     assert config.declared(devkit) == ([config.Collector("a", "app")], [])
 
 
-def test_declared_falls_back_to_the_workspace_file(tmp_path):
+def test_a_registry_without_the_setting_declares_nothing_whatever_the_live_file_says(tmp_path):
     devkit = _checkout(tmp_path, "projects = []\n", {config.SETTING: {"b": {"service": "s"}}})
-    assert config.declared(devkit) == ([config.Collector("b", "s")], [])
+    assert config.declared(devkit) == ([], [])
 
 
 def test_a_malformed_projects_toml_is_a_note_not_a_crash(tmp_path):

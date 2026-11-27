@@ -1830,7 +1830,7 @@ def test_a_reap_blocked_by_a_live_process_evicts_it_and_finishes(tmp_path, monke
         ["list", "--no-fetch"],
     ],
 )
-def test_flags_are_accepted_after_the_subcommand(args, tmp_path):
+def test_flags_are_accepted_after_the_subcommand(args, tmp_path, monkeypatch):
     """Regression: `--yes` used to be a top-level-only flag.
 
     argparse accepts a top-level option only *before* the subcommand, so
@@ -1839,11 +1839,38 @@ def test_flags_are_accepted_after_the_subcommand(args, tmp_path):
     arguments: --yes". The dry run had already printed a plan by then, so it read as
     the tool refusing to do the thing it had just described.
 
-    Reaching the "no workspace file" return proves argparse accepted the argv:
-    an argparse rejection raises SystemExit instead of returning.
+    Reaching the root's resolution, the first thing after parsing, proves argparse
+    accepted the argv: an argparse rejection raises SystemExit instead.
     """
+
+    class Parsed(Exception):
+        pass
+
+    def parsed(*_args, **_kwargs):
+        raise Parsed
+
+    monkeypatch.setattr(worktree.sweep.projects_root, "legacy_workspace", parsed)
+    with pytest.raises(Parsed):
+        worktree.main([*args, "--root", str(tmp_path)])
+
+
+def test_workspace_from_takes_a_workspace_then_a_root_then_the_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktree, "DEFAULT_WORKSPACE", tmp_path / "d" / "w.code-workspace")
+    given = tmp_path / "g" / "w.code-workspace"
+    assert worktree.workspace_from(tmp_path / "r", given) == given.resolve()
+    assert worktree.workspace_from(tmp_path / "r", None).parent == (tmp_path / "r").resolve()
+    assert worktree.workspace_from(None, None) == (tmp_path / "d" / "w.code-workspace").resolve()
+
+
+def test_no_workspace_file_is_needed_and_a_deprecated_one_names_the_root(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(worktree, "survey", lambda ws, **_k: seen.append(ws) or [])
+    monkeypatch.setattr(worktree, "load_registry", lambda _ws: {})
+    monkeypatch.setattr(worktree, "render_survey", lambda rows, registry: "")
     missing = tmp_path / "nope.code-workspace"
-    assert worktree.main([*args, "--workspace", str(missing)]) == 2
+    assert worktree.main(["list", "--no-fetch", "--workspace", str(missing)]) == 0
+    assert worktree.main(["list", "--no-fetch", "--root", str(tmp_path / "r")]) == 0
+    assert [ws.parent for ws in seen] == [tmp_path.resolve(), (tmp_path / "r").resolve()]
 
 
 def test_reap_uses_the_same_classifier_as_the_sweep():
@@ -7145,17 +7172,17 @@ def test_a_box_for_a_project_on_hold_is_stranded_at_any_age():
     assert not worktree.stranded(worktree.HOLD, pr_open=True, age_days=0.0, on_hold=True)
 
 
-def test_on_hold_projects_reads_the_workspace_file_or_answers_nothing(tmp_path):
+def test_on_hold_projects_never_reads_the_workspace_file(tmp_path):
     path = tmp_path / "ws.code-workspace"
     assert worktree.on_hold_projects(path) == frozenset()
     path.write_text(
         json.dumps({"folders": [], "settings": {sweep.ON_HOLD_SETTING: ["ibkr_trader"]}}),
         encoding="utf-8",
     )
-    assert worktree.on_hold_projects(path) == frozenset({"ibkr_trader"})
+    assert worktree.on_hold_projects(path) == frozenset()
 
 
-def test_on_hold_projects_prefers_the_machine_file_and_a_broken_one_holds_nothing(tmp_path):
+def test_on_hold_projects_reads_the_machine_file_and_a_broken_one_holds_nothing(tmp_path):
     path = tmp_path / "ws.code-workspace"
     path.write_text(
         json.dumps({"folders": [], "settings": {sweep.ON_HOLD_SETTING: ["ibkr_trader"]}}),
@@ -7198,9 +7225,8 @@ def test_reconcile_does_not_strand_a_fresh_hold_or_one_with_an_open_pr(workspace
 
 def test_reconcile_strands_a_hold_for_a_project_on_hold_at_once(workspace, monkeypatch):
     _reconcilable(workspace, monkeypatch, "demo--fresh-0806", sweep.READY, "2 uncommitted", "")
-    workspace.write_text(
-        json.dumps({"folders": [{"path": "demo"}], "settings": {sweep.ON_HOLD_SETTING: ["demo"]}}),
-        encoding="utf-8",
+    (workspace.parent / ".devkit-machine.json").write_text(
+        json.dumps({sweep.ON_HOLD_SETTING: ["demo"]}), encoding="utf-8"
     )
     _, report = worktree.reconcile(workspace, apply=False)
     assert report["boxes"][0]["stranded"] is True

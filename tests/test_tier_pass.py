@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import json
 import shutil
 import subprocess
 import tomllib
@@ -105,20 +106,25 @@ REGISTERED: list[str] = []
 @pytest.fixture(autouse=True)
 def _registry(monkeypatch):
     """The project registry, as `_workspace` last set it: the pass reads its projects
-    there, and the workspace file only for `devkit.fixPass`."""
+    there, and the machine file at the root only for `devkit.fixPass`."""
     REGISTERED.clear()
     monkeypatch.setattr(project_registry, "all_projects", lambda *_a, **_k: list(REGISTERED))
 
 
+def _switch(root: Path, mode: str) -> None:
+    """This PC's machine file at `root`, with `devkit.fixPass` set to `mode` ("" unset)."""
+    values = {"devkit.fixPass": mode} if mode else {}
+    (root / project_registry.MACHINE_FILE_NAME).write_text(json.dumps(values), encoding="utf-8")
+
+
 def _workspace(tmp_path: Path, names: list[str], mode: str = "dispatch") -> Path:
+    """A projects root at `tmp_path` registering `names`; the returned path is the
+    workspace the pass still threads, whose directory alone is read -- no file is there."""
     REGISTERED[:] = names
-    folders = ",".join(f'{{"path": "{name}"}}' for name in names)
-    workspace = tmp_path / "w.code-workspace"
-    switch = f'"devkit.fixPass": "{mode}"' if mode else ""
-    workspace.write_text(f'{{"folders": [{folders}], "settings": {{{switch}}}}}', encoding="utf-8")
+    _switch(tmp_path, mode)
     for name in names:
         (tmp_path / name / ".git").mkdir(parents=True)
-    return workspace
+    return tmp_path / "w.code-workspace"
 
 
 def _args(**fields) -> argparse.Namespace:
@@ -580,15 +586,15 @@ def test_held_for_worker_reads_the_role_beside_the_devkit_checkout(tmp_path, mon
 
     monkeypatch.setattr(claims, "workers_alive", alive)
     root = tmp_path / "devkit"
-    workspace = tier_pass.sweep.default_workspace(root)
-    workspace.parent.mkdir(parents=True, exist_ok=True)
-    workspace.write_text('{"settings": {"devkit.machineRole": "workstation"}}', encoding="utf-8")
+    machine = tier_pass.sweep.projects_root.projects_root(root) / ".devkit-machine.json"
+    machine.parent.mkdir(parents=True, exist_ok=True)
+    machine.write_text('{"devkit.machineRole": "workstation"}', encoding="utf-8")
     assert tier_pass.held_for_worker("tier-a-1", root).startswith("held for a worker")
-    workspace.write_text('{"settings": {"devkit.machineRole": "worker"}}', encoding="utf-8")
+    machine.write_text('{"devkit.machineRole": "worker"}', encoding="utf-8")
     assert tier_pass.held_for_worker("tier-a-2", root) == ""
     assert asked == [root], "the heartbeats are read off the devkit checkout, by a workstation"
     monkeypatch.setattr(claims, "workers_alive", lambda *_a: None)
-    workspace.write_text('{"settings": {"devkit.machineRole": "workstation"}}', encoding="utf-8")
+    machine.write_text('{"devkit.machineRole": "workstation"}', encoding="utf-8")
     assert tier_pass.held_for_worker("tier-a-3", root) == "", "no worker seen, so it runs here"
 
 
@@ -947,10 +953,12 @@ def test_the_cli_takes_the_pass_s_bounds():
     assert args.pass_minutes == tier_pass.DEFAULT_PASS_MINUTES
 
 
-def test_main_refuses_a_machine_with_no_workspace_file(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(tier_pass.sweep, "default_workspace", lambda _r: tmp_path / "absent")
-    assert tier_pass.main(["status"]) == 2
-    assert "no workspace file" in capsys.readouterr().err
+def test_main_runs_on_a_machine_with_no_workspace_file(tmp_path, monkeypatch, capsys):
+    REGISTERED[:] = []
+    absent = tmp_path / "absent" / "w.code-workspace"
+    monkeypatch.setattr(tier_pass.sweep, "default_workspace", lambda _r: absent)
+    assert tier_pass.main(["status"]) == 0
+    assert "no workspace file" not in capsys.readouterr().err
 
 
 def test_main_dispatches_each_verb(tmp_path, monkeypatch):
@@ -1005,10 +1013,7 @@ def test_a_real_run_at_origin_s_tip_leaves_the_static_checkout_as_it_was(tmp_pat
     suite = 'import sys\nprint("FAILED tests/test_a.py::test_x - no")\nsys.exit(1)\n'
     checkout, tip = _project(tmp_path, "carameli", suite)
     workspace = tmp_path / "w.code-workspace"
-    workspace.write_text(
-        '{"folders": [{"path": "carameli"}], "settings": {"devkit.fixPass": "dispatch"}}',
-        encoding="utf-8",
-    )
+    _switch(tmp_path, "dispatch")
     REGISTERED[:] = ["carameli"]
     head_before = _git(checkout, "rev-parse", "HEAD")
     seams = tier_pass.Seams(

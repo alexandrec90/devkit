@@ -295,8 +295,8 @@ def test_the_start_is_the_nightly_command_under_the_passs_own_label(tmp_path):
     pipeline = argv.index(str(tmp_path / "scripts" / "release-pipeline.py"))
     assert argv[pipeline + 1 :] == [
         *fix_release.release_schedule.PIPELINE_ARGS,
-        "--workspace",
-        str(workspace),
+        "--root",
+        str(tmp_path),
     ]
     assert fix_release.LABEL != fix_release.release_schedule.LABEL, (
         "the nightly run's record is the one a start must not overwrite"

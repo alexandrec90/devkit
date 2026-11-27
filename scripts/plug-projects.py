@@ -93,8 +93,8 @@ import task_branch
 import worktree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LIVE_WORKSPACE = devkit_project.DEFAULT_WORKSPACE
-WORKSPACE_ROOT = LIVE_WORKSPACE.parent
+# The projects root, where the checkouts are cloned and plugged.
+WORKSPACE_ROOT = project_registry.projects_root(REPO_ROOT)
 ARTIFACT = REPO_ROOT / "logs" / "plug-projects.log"
 
 # The GitHub account these checkouts live under. Hard-coded exactly as

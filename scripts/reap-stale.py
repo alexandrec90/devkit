@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
-import json
 import re
 import sys
 import time
@@ -48,7 +47,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import devkit_jsonc
 import elevated_writes
 import project_registry
 import rc_config
@@ -97,34 +95,21 @@ class Settings:
     docker_clis: bool = True
 
 
-def parse_settings(text: str) -> Settings:
-    """Read `SETTING` out of a workspace file, defaults for anything missing or malformed.
-
-    Same leniency as `rc_config.parse_config`, for its reason: a scheduled task whose
-    stdout goes nowhere must not crash on a hand-edited file. `devServers` and
-    `dockerClis` are bare bools only, so a string cannot switch a reap off.
-    """
+def read_settings(root: Path) -> Settings:
+    """`SETTING` off the `projects.toml` of the devkit checkout at `root`; defaults for a
+    missing or malformed file, since a scheduled task whose stdout goes nowhere must not
+    crash on a hand-edited one."""
     try:
-        payload = devkit_jsonc.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return Settings()
-    settings = payload.get("settings") if isinstance(payload, dict) else None
-    return settings_of(settings.get(SETTING) if isinstance(settings, dict) else None)
-
-
-def read_settings(workspace: Path, root: Path) -> Settings:
-    """`SETTING` as `project_registry.setting` reads it for the devkit checkout at
-    `root` -- its `projects.toml`, else `workspace`. Defaults for a malformed file, as
-    `parse_settings` gives them for a broken workspace file."""
-    try:
-        raw = project_registry.setting(SETTING, repo_root=root, workspace=workspace)
+        raw = project_registry.setting(SETTING, repo_root=root)
     except (project_registry.RegistryError, OSError):
         return Settings()
     return settings_of(raw)
 
 
 def settings_of(raw: object) -> Settings:
-    """`SETTING`'s value, as stored, as `Settings`; defaults for anything malformed."""
+    """`SETTING`'s value, as stored, as `Settings`; defaults for anything malformed.
+    `devServers` and `dockerClis` are bare bools only, so a string cannot switch a reap
+    off."""
     if not isinstance(raw, dict):
         return Settings()
     idle = raw.get("sessionIdleMinutes")
@@ -376,29 +361,29 @@ def write_artifact(text: str, root: Path = REPO_ROOT) -> None:
 
 def build_plan(
     table: list[reap_machine.Process],
-    workspace: Path | None,
+    checkouts: Path,
     root: Path,
     report: Pass,
     store: Path | None = None,
 ) -> Plan:
-    """Resolve the workspace file and the state file into a `Plan`.
+    """Resolve the settings of the devkit checkout at `root` and its state file into a
+    `Plan` for the checkouts under the projects root `checkouts`.
 
-    A missing workspace is reported and the pass goes on with what needs no workspace:
-    dev servers, and sessions whose store directory carries their id. Strays need the
-    served-project list, so none are found without one -- reported, not assumed.
+    No served projects -- the setting unset, or `projects.toml` missing or malformed --
+    is said, and the pass goes on with what needs none: dev servers, and sessions whose
+    store directory carries their id. Strays need the served-project list, so none are
+    found without one -- reported, not assumed.
     """
     plan = Plan(
         table=table,
         store=rc_machine.sessions_store() if store is None else store,
-        settings=Settings(),
+        settings=read_settings(root),
         known=frozenset(rc_machine.State.load(root / RC_STATE).servers.values()),
+        root=checkouts,
+        projects=rc_config.read_config(root).projects,
     )
-    if workspace is None or not workspace.is_file():
-        report.say(f"no workspace file at {workspace} -- no served projects, no stray servers")
-        return plan
-    plan.settings = read_settings(workspace, root)
-    plan.root = workspace.parent
-    plan.projects = rc_config.read_config(workspace, root).projects
+    if not plan.projects:
+        report.say(f"no `{rc_config.RC_SETTING}` projects -- no served projects, no stray servers")
     return plan
 
 
@@ -415,7 +400,10 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "silently make the job a no-op."
         ),
     )
-    parser.add_argument("--workspace", type=Path, default=None)
+    parser.add_argument("--root", type=Path, default=None, help="the projects root")
+    parser.add_argument(
+        "--workspace", type=Path, default=None, help="deprecated: its directory is the root"
+    )
     parser.add_argument(
         "--devkit",
         type=Path,
@@ -428,7 +416,10 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     root = args.devkit.expanduser().resolve()
-    workspace = args.workspace or sweep.default_workspace(root)
+    # `session_trees` and `elevated_writes` still take a workspace path and read only
+    # its directory; no file need be there.
+    workspace = sweep.projects_root.legacy_workspace(args.root, args.workspace, root)
+    checkouts = workspace.parent
     now = _dt.datetime.now()
     report = Pass()
 
@@ -443,7 +434,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report.fail(f"{NO_TABLE} ({why}) -- nothing assessed")
         return finish(2)
 
-    plan = build_plan(table, Path(workspace) if workspace else None, root, report)
+    plan = build_plan(table, checkouts, root, report)
     findings = assess(plan)
     if not findings:
         report.say("nothing left behind")
@@ -453,11 +444,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         stopped = act(plan, findings, report, reap_machine.stop_tree, root / HISTORY, now)
         report.say(f"stopped {stopped} process tree(s)")
-    if workspace and Path(workspace).is_file():
-        report.failures += session_trees.sweep_workspace(Path(workspace), apply, report.say)
-        # Filed on the ledger once each, not counted: an administrator clears it, and
-        # a failure every run would send a fixer at it every run.
-        elevated_writes.check(Path(workspace), root, apply, report.say)
+    report.failures += session_trees.sweep_workspace(workspace, apply, report.say)
+    # Filed on the ledger once each, not counted: an administrator clears it, and a
+    # failure every run would send a fixer at it every run.
+    elevated_writes.check(workspace, root, apply, report.say)
     return finish(2 if report.failures else 0)
 
 

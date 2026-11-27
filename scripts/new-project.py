@@ -773,7 +773,7 @@ def git_init(plan: Plan, dry_run: bool) -> None:
 
 
 def register_in_workspace(plan: Plan, dry_run: bool) -> None:
-    """Add the project to `projects.toml`, `workspace.jsonc` and the live workspace file.
+    """Add the project to `projects.toml` and `workspace.jsonc`, devkit's two registries.
 
     This used to write a *new* `<name>.code-workspace` per project, to keep the task
     quick-pick free of every other repo's tasks. Two things made that wrong. The task
@@ -797,27 +797,27 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     under a temp path into `sweep.py`'s registry, and it survives the `rm -rf` that
     ends the acceptance test.
 
-    **Both copies, committed first.** Registering in the live file alone left the
-    committed registry without the project (8a1c0927). The committed edit is a registry
-    change every machine shares, so it goes through a branch and a review like any
-    other: `hand_off_registration` puts it on a task branch with a ship intent and
-    restores devkit's static checkout, which the fix pass runs from and will not update
-    while it is dirty (851308ef). The live write stays until the live file's readers
-    are gone, so the project is in the sweep's registry from the moment it exists.
+    **Committed, and nowhere else.** Registering in the live file alone once left the
+    committed registry without the project (8a1c0927); the live file is retired now and
+    read by nothing, so it is not written. The committed edit is a registry change every
+    machine shares, so it goes through a branch and a review like any other:
+    `hand_off_registration` puts it on a task branch with a ship intent and restores
+    devkit's static checkout, which the fix pass runs from and will not update while it
+    is dirty (851308ef). The registry is read from the checkout that holds the edit, so
+    the project is registered here from the moment it exists.
     """
     if not plan.register:
         print("  skip    workspace registration (--no-register)")
         return
     names = [plan.name]
-    live = devkit_project.DEFAULT_WORKSPACE
-    # The registry names each folder relative to the live file's directory, the
-    # projects root. A project generated anywhere else would be
-    # registered in both as a folder that does not exist, and every reader of the
-    # registry -- `rc-servers.py`, the fix pass's collect step -- then fails on it rather
-    # than skipping it (b42a921e, 79505f2b).
-    if plan.root.parent != live.parent.resolve():
-        print(f"  WARNING {plan.root} is not beside {live}: not registered")
-        print(f"          move it to {live.parent} and add {plan.name} to its folders by hand")
+    root = devkit_project.DEFAULT_WORKSPACE.parent
+    # The registry names each project by its directory under the projects root. A project
+    # generated anywhere else would be registered as a checkout that does not exist, and
+    # every reader of the registry -- `rc-servers.py`, the fix pass's collect step -- then
+    # fails on it rather than skipping it (b42a921e, 79505f2b).
+    if plan.root.parent != root.resolve():
+        print(f"  WARNING {plan.root} is not in the projects root {root}: not registered")
+        print(f"          move it to {root} and add {plan.name} to projects.toml by hand")
         return
     canonical = devkit_project.CANONICAL_WORKSPACE
     toml = canonical.parent / project_registry.REGISTRY_NAME
@@ -827,24 +827,28 @@ def register_in_workspace(plan: Plan, dry_run: bool) -> None:
     registered: set[Path] = set()
     if register_in_registry(toml, names, dry_run):
         registered.add(toml)
-    for path in (canonical, live):
-        shown = path.name if path == canonical else f"../{path.name}"
-        if dry_run:
-            print(f"  update  {shown} (folders + project picker: {', '.join(names)})")
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-            path.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
-        except (OSError, devkit_project.RegistryEditError) as exc:
-            print(f"  WARNING could not register in {path.name}: {exc}")
-            print(
-                f"          add {', '.join(names)} to its folders list and project picker by hand"
-            )
-            continue
-        registered.add(path)
-        print(f"  update  {shown} (folders + project picker)")
+    if register_in_canonical(canonical, names, dry_run):
+        registered.add(canonical)
     if not dry_run:
         _hand_off_or_carry_slot(plan, canonical, registered, clean_before=clean_before)
+
+
+def register_in_canonical(canonical: Path, names: list[str], dry_run: bool) -> bool:
+    """Add `names` to the canonical `workspace.jsonc`'s folders and project picker;
+    whether the file was written. Kept, beside `projects.toml`, until that file is
+    deleted: `tests/test_project_registry.py` fails the two the moment they disagree."""
+    if dry_run:
+        print(f"  update  {canonical.name} (folders + project picker: {', '.join(names)})")
+        return False
+    try:
+        text = canonical.read_text(encoding="utf-8")
+        canonical.write_text(devkit_project.register(text, names), encoding="utf-8", newline="\n")
+    except (OSError, devkit_project.RegistryEditError) as exc:
+        print(f"  WARNING could not register in {canonical.name}: {exc}")
+        print(f"          add {', '.join(names)} to its folders list and project picker by hand")
+        return False
+    print(f"  update  {canonical.name} (folders + project picker)")
+    return True
 
 
 def register_in_registry(registry: Path, names: list[str], dry_run: bool) -> bool:
@@ -907,8 +911,7 @@ def _hand_off_or_carry_slot(
     # cut failed -- so the registration stays where it was written, and the slot goes
     # beside it. As a printed hint alone it was skipped twice: tvshell (#778) and radio
     # (#779) each reached a PR with `workspace.jsonc` and no slot, red on
-    # `test_every_checkout_either_holds_a_slot_or_says_why_not`, and the live file's extra
-    # folder made every render refuse until the PR merged. Only with the folder entry,
+    # `test_every_checkout_either_holds_a_slot_or_says_why_not`. Only with the folder entry,
     # though: a slot for a checkout no picker names is a number spent on nothing.
     registry = canonical.parent / devkit_ports.REGISTRY_NAME
     beside = canonical in registered and _carry_slot(registry, plan.name, slot)
@@ -922,9 +925,8 @@ def _hand_off_or_carry_slot(
 
 REGISTRATION_INTENT = """Register {name} in the workspace registry
 
-`scripts/new-project.py` generated `{name}` and registered it in the live workspace file
-and in devkit's `projects.toml` and canonical `workspace.jsonc`. The live half is in
-effect already; this is the canonical half, which every machine shares and so goes
+`scripts/new-project.py` generated `{name}` and registered it in devkit's `projects.toml`
+and canonical `workspace.jsonc`. Every machine shares that registry, so the change goes
 through a PR.
 
 The generator cut this branch itself rather than leave the edit uncommitted in devkit's
