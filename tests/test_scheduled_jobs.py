@@ -382,6 +382,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/disposable_tree.py": "the git worktree add and remove that pass makes per run",
     "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
     "scripts/dashboards.py": "devkit-dashboards runs its gateway from logon; it spawns each dashboard",
+    "scripts/node_toolchain.py": "dashboards.py and worktree.py import it; it spawns `node --version`",
     "scripts/collector_tasks.py": "the schtasks that pass makes, and each scheduled collector's fire",
     "scripts/collector_handoff.py": "the project's handoff command that pass asks and imports through",
     "scripts/docker_memory.py": "collectors.py imports it; its _spawn serves the by-hand report",

@@ -860,7 +860,8 @@ def test_clean_reports_a_copy_git_refuses_to_remove(tmp_path, capsys):
 def test_build_parser_defaults():
     args = host.build_parser().parse_args([])
     assert args.picks == "" and args.fetch and args.open
-    assert not args.rows and not args.clean and args.workspace is None
+    assert not args.clean and args.workspace is None and args.root is None
+    assert not hasattr(args, "rows")
     assert not args.stop
 
 
@@ -916,13 +917,13 @@ def test_main_dispatches_clean(workspace, monkeypatch):
     assert host.main(["--workspace", str(workspace), "--clean"]) == 5
 
 
-def test_a_picker_literal_is_no_longer_read_as_a_cancel(
-    workspace, quiet_scan, monkeypatch, capsys
-):
+def test_a_picker_literal_is_no_longer_read_as_a_cancel(workspace, quiet_scan, monkeypatch, capsys):
     """With the task layer gone, `${input:...}` is a pick like any other, so the run goes
     on to its ordinary checks -- here the first of them -- instead of exiting 0."""
     monkeypatch.setattr(host.shutil, "which", lambda name: None)
-    code = host.main(["--workspace", str(workspace), "--no-fetch", "--picks", "${input:previewRow}"])
+    code = host.main(
+        ["--workspace", str(workspace), "--no-fetch", "--picks", "${input:previewRow}"]
+    )
     assert code == 2
     out = capsys.readouterr().out
     assert "npm is not on PATH" in out and "cancelled" not in out

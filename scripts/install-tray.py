@@ -118,6 +118,8 @@ TRAY_MODULES = (
     "machine_role",
     # `collectors_config` and `machine_role` read their settings through it.
     "project_registry",
+    # `project_registry` resolves the projects root through it.
+    "projects_root",
     "devkit_jsonc",
     "sweep",
     "task_branch",

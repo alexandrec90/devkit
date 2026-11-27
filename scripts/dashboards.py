@@ -34,7 +34,12 @@ A connection wakes nothing until the client sends a byte, so a port scan, a `sta
 check or a browser's speculative preconnect leaves an asleep dashboard asleep. A request
 that cannot be served gets a `503` that names why, and the same line goes to
 `logs/dashboards.log`. A dashboard's own output from its latest wake is in
-`logs/dashboards/<project>.log`.
+`logs/dashboards/<project>.log`, and a wake that dies before serving names the line of it
+that says why (`build_cause`).
+
+A host command runs under the Node its checkout's frontend asks for
+(`node_toolchain.ensure`): PATH's when it satisfies the pin or `engines.node`, else a
+per-user copy, fetched once. When none can be had the 503 says `node <have> < <need>`.
 
 On Windows the gateway puts itself in a job object that kills its children when it ends,
 so a dashboard never outlives its gateway holding memory on a port nothing forwards to.
@@ -54,6 +59,7 @@ import datetime as _dt
 import http.client
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -67,6 +73,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import devkit_ports
+import node_toolchain
 import project_registry
 import sweep
 
@@ -392,13 +399,17 @@ def probe_http(port: int, path: str, timeout: float = PROBE_TIMEOUT) -> bool:
     return True
 
 
-def spawn(argv: Sequence[str], cwd: Path, output: Path) -> subprocess.Popen:
-    """A host dashboard, windowless, its output in `output` (this wake's only)."""
+def spawn(
+    argv: Sequence[str], cwd: Path, output: Path, env: Mapping[str, str] | None = None
+) -> subprocess.Popen:
+    """A host dashboard, windowless, its output in `output` (this wake's only).
+    `env` None inherits the gateway's; `Backend` passes one only to put a Node first."""
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("wb") as sink:
         return subprocess.Popen(
             list(argv),
             cwd=cwd,
+            env=None if env is None else dict(env),
             stdin=subprocess.DEVNULL,
             stdout=sink,
             stderr=subprocess.STDOUT,
@@ -526,17 +537,55 @@ class WakeError(RuntimeError):
     """A dashboard that could not be started; the message says why."""
 
 
+# How much of a failed wake's output `build_cause` reads, from the end.
+CAUSE_TAIL_BYTES = 64 * 1024
+# Lines that say why a build died, strongest first: an engine refusal names the Node
+# that was too old, and an error line beats whatever npm printed after it.
+_CAUSE_PATTERNS = (
+    re.compile(r"EBADENGINE|Unsupported engine|engine \"node\"|requires? node", re.IGNORECASE),
+    re.compile(r"\b(?:\w*Error|ERR!|error)\b[:\s]"),
+)
+# npm's closing lines point at its own log and name no cause.
+_NOISE = re.compile(r"A complete log of this run|npm (?:ERR!|error) *$|^\s*at ", re.IGNORECASE)
+
+
+def build_cause(output: Path) -> str:
+    """The line in a failed wake's output that says why, "" when it holds none.
+
+    A dashboard that dies before serving was, at ibkr_trader, a `npm run build` under
+    Node 18 (`node:util` has no `styleText`), and the 503 said only `exited (1)`. The
+    output was on disk all along, so the cause is read from it rather than left to
+    whoever opens the file.
+    """
+    try:
+        with output.open("rb") as source:
+            source.seek(0, os.SEEK_END)
+            source.seek(max(0, source.tell() - CAUSE_TAIL_BYTES))
+            text = source.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [line for line in lines if not _NOISE.search(line)]
+    for pattern in _CAUSE_PATTERNS:
+        hits = [line for line in lines if pattern.search(line)]
+        if hits:
+            return hits[0] if pattern is _CAUSE_PATTERNS[0] else hits[-1]
+    return lines[-1] if lines else ""
+
+
 @dataclass(frozen=True)
 class Machinery:
     """Everything `Backend` asks of the machine, so a test can stand in for any of it.
-    `stop` unset is `kill_tree` through `run`."""
+    `stop` unset is `kill_tree` through `run`. `node` is the Node a host command runs
+    under (`node_toolchain.ensure`): None for a checkout that asks for none."""
 
     run: Run = run_quiet
-    start: Callable[[Sequence[str], Path, Path], subprocess.Popen] = spawn
+    start: Callable[..., subprocess.Popen] = spawn
     stop: Callable[[subprocess.Popen], None] | None = None
     probe: Callable[[int, str], bool] = probe_http
     clock: Callable[[], float] = time.monotonic
     pause: Callable[[float], None] = time.sleep
+    node: Callable[[Path], node_toolchain.Provision | None] = node_toolchain.ensure
 
 
 class Backend:
@@ -567,6 +616,7 @@ class Backend:
         self.start = machinery.start
         self.stop = machinery.stop or (lambda process: kill_tree(process, run))
         self.probe = machinery.probe
+        self.node = machinery.node
         self.clock = machinery.clock
         self.pause = machinery.pause
         self.lock = threading.Lock()
@@ -672,31 +722,54 @@ class Backend:
         dashboard = self.dashboard
         if not self.checkout.is_dir():
             raise WakeError(f"no checkout at {self.checkout}")
-        deadline = self.clock() + dashboard.start_seconds
         if dashboard.container:
-            port = dashboard.backend_port
-            up = self.run(
-                ["docker", "compose", "up", "-d", "--wait", dashboard.service],
-                cwd=self.checkout,
-                timeout=dashboard.start_seconds,
-            )
-            if up.returncode:
-                tail = (up.stderr or up.stdout or "").strip().splitlines()[-1:]
-                raise WakeError(f"docker compose up failed: {' '.join(tail) or up.returncode}")
+            deadline = self.clock() + dashboard.start_seconds
+            port = self._start_container()
         else:
-            port = free_port()
-            head = read_head(self.checkout, self.run)
-            self.started_at = head.sha if head else ""
-            argv = expand(dashboard.command, port, self.python)
-            try:
-                self.process = self.start(argv, self.checkout, self.output)
-            except OSError as exc:
-                raise WakeError(f"could not run {argv[0]}: {exc}") from exc
+            # Before the deadline starts: a first fetch of a Node is not the dashboard
+            # being slow to serve.
+            node = self.node(self.checkout)
+            if node is not None and not node.ok:
+                raise WakeError(node.problem)
+            deadline = self.clock() + dashboard.start_seconds
+            port = self._start_host(node_toolchain.environ(node))
+        self._await(port, deadline)
+
+    def _start_container(self) -> int:
+        dashboard = self.dashboard
+        up = self.run(
+            ["docker", "compose", "up", "-d", "--wait", dashboard.service],
+            cwd=self.checkout,
+            timeout=dashboard.start_seconds,
+        )
+        if up.returncode:
+            tail = (up.stderr or up.stdout or "").strip().splitlines()[-1:]
+            raise WakeError(f"docker compose up failed: {' '.join(tail) or up.returncode}")
+        return dashboard.backend_port
+
+    def _start_host(self, env: Mapping[str, str] | None) -> int:
+        """Run the command on a free port, under `env` when a Node had to be provided."""
+        port = free_port()
+        head = read_head(self.checkout, self.run)
+        self.started_at = head.sha if head else ""
+        argv = expand(self.dashboard.command, port, self.python)
+        extra = {} if env is None else {"env": env}
+        try:
+            self.process = self.start(argv, self.checkout, self.output, **extra)
+        except OSError as exc:
+            raise WakeError(f"could not run {argv[0]}: {exc}") from exc
+        return port
+
+    def _await(self, port: int, deadline: float) -> None:
+        """Probe `port` until it answers, the process dies, or `deadline` passes."""
+        dashboard = self.dashboard
         while True:
             if not self._alive():
                 code = self.process.returncode if self.process else None
                 self.process = None
-                raise WakeError(f"exited ({code}) before serving; see {self.output}")
+                cause = build_cause(self.output)
+                said = f": {cause}" if cause else ""
+                raise WakeError(f"exited ({code}) before serving{said}; see {self.output}")
             if self.probe(port, dashboard.path):
                 self.backend_port = port
                 return

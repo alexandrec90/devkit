@@ -436,9 +436,7 @@ def test_a_deferred_cycle_does_not_record_the_day(monkeypatch, tmp_path):
     assert plan.state.last_update == ""
 
 
-def test_main_needs_no_workspace_file_and_reads_a_deprecated_one_as_the_root(
-    monkeypatch, tmp_path
-):
+def test_main_needs_no_workspace_file_and_reads_a_deprecated_one_as_the_root(monkeypatch, tmp_path):
     """A task registered before `--root` passes `--workspace`; only its directory is
     used, and a live file that is gone stops nothing."""
     monkeypatch.setattr(rc_machine, "pid_is_server", lambda pid: False)

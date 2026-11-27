@@ -2025,6 +2025,74 @@ def test_plan_provision_reads_the_lockfile_off_the_source_checkout(tmp_path):
     assert worktree.plan_provision(tmp_path, windows=False)[-1].argv[1] == "ci"
 
 
+def test_plan_provision_carries_the_frontends_node_requirement(tmp_path):
+    """ibkr_trader: `frontend/package.json` declares `engines.node` `>=24`, and the npm
+    step has to know, or it runs under whatever Node PATH holds (Node 18 on
+    desktop-ml5f3pj, 2026-11-27)."""
+    (tmp_path / ".devkit.toml").write_text(
+        '[frontend]\nenabled = true\ndir = "frontend"\n', encoding="utf-8"
+    )
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    (tmp_path / "frontend").mkdir()
+    assert worktree.plan_provision(tmp_path, windows=False)[-1].node == ""
+    (tmp_path / "frontend" / "package.json").write_text(
+        json.dumps({"engines": {"node": ">=24"}}), encoding="utf-8"
+    )
+    assert worktree.plan_provision(tmp_path, windows=False)[-1].node == ">=24"
+
+
+def _provided(bin_dir):
+    return lambda need: worktree.node_toolchain.Provision(
+        need, have="18.15.0", version="24.5.0", bin_dir=bin_dir
+    )
+
+
+def test_an_npm_step_runs_under_the_node_it_asks_for(tmp_path, monkeypatch):
+    """Node 18 on PATH and a `>=24` frontend: the install runs the provided copy's npm,
+    with that copy first on PATH, so `npm run build` later finds the same Node."""
+    calls = []
+    monkeypatch.setattr(
+        worktree.subprocess,
+        "run",
+        lambda argv, **kwargs: calls.append((argv, kwargs.get("env"))) or _completed(),
+    )
+    copy = tmp_path / "node-v24"
+    step = worktree.frontend_step(
+        "frontend", True, windows=False, after_install_command=False, node_need=">=24"
+    )
+    ok, notes = worktree.run_provision(tmp_path, (step,), provide_node=_provided(copy))
+    assert ok, notes
+    argv, env = calls[0]
+    assert Path(argv[0]).parent == copy and Path(argv[0]).stem == "npm"
+    path = next(value for key, value in env.items() if key.upper() == "PATH")
+    assert path.split(os.pathsep)[0] == str(copy)
+
+
+def test_a_node_nothing_can_provide_fails_the_step_naming_the_shortfall(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(worktree.subprocess, "run", lambda argv, **k: calls.append(argv))
+    step = worktree.ProvisionStep("npm ci (frontend)", ("npm", "ci"), node=">=24")
+
+    def refuse(need):
+        return worktree.node_toolchain.Provision(
+            need, have="18.15.0", problem="node 18.15.0 < >=24, and no Node could be fetched"
+        )
+
+    ok, notes = worktree.run_provision(tmp_path, (step,), provide_node=refuse)
+    assert ok is False and calls == []
+    assert notes == [
+        "FAILED provision: npm ci (frontend): node 18.15.0 < >=24, and no Node could be fetched"
+    ]
+
+
+def test_a_step_asking_for_no_node_or_one_path_has_runs_unchanged(tmp_path):
+    step = worktree.ProvisionStep("npm ci", ("npm", "ci"))
+    assert worktree.step_node(step, None) == (step, None, "")
+    asks = worktree.ProvisionStep("npm ci", ("npm", "ci"), node=">=24")
+    on_path = worktree.node_toolchain.Provision(">=24", have="24.1.0", version="24.1.0")
+    assert worktree.step_node(asks, None, lambda _n: on_path) == (asks, None, "")
+
+
 def test_an_unpinned_project_gets_a_venv_from_the_running_interpreter():
     """No `[python] version` is the common case and must stay exactly as it was: the
     interpreter running the provisioner, with no dependency on uv for the venv itself."""

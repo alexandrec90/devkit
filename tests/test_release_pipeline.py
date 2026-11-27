@@ -534,7 +534,9 @@ def test_the_adoption_pass_is_handed_the_root_never_a_workspace_file(monkeypatch
     monkeypatch.setattr(rp, "read_text", lambda _path: "")
     monkeypatch.setattr(rp, "adoption_outcome", lambda *_args: 0)
     monkeypatch.setattr(
-        rp, "_run", lambda cmd, *_a, **_k: calls.append(list(cmd)) or subprocess.CompletedProcess(cmd, 0)
+        rp,
+        "_run",
+        lambda cmd, *_a, **_k: calls.append(list(cmd)) or subprocess.CompletedProcess(cmd, 0),
     )
     assert rp.run_pipeline(Path("devkit"), "v1.0.0", True, root) == 0
     [command] = calls

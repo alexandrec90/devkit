@@ -2196,20 +2196,32 @@ def test_a_stop_row_is_green_unless_the_collector_is_running_here(tmp_path):
     assert collectors.row(stop, [ours(tmp_path)], {})[0] == collectors.WARN
 
 
+def toml_value(value) -> str:
+    """`value` as a TOML value: the strings, lists, tables, ints and bools a setting holds."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    return "{" + ", ".join(f"{json.dumps(k)} = {toml_value(v)}" for k, v in value.items()) + "}"
+
+
 def devkit_home(tmp_path, monkeypatch, assignment=None, setting=None):
-    """A static devkit checkout beside a workspace file, as `home` resolves it."""
+    """A static devkit checkout whose `projects.toml` declares the collectors, as `home`
+    resolves it: `collectors_config` reads the setting off that file and nothing else."""
     root = tmp_path / "devkit"
     root.mkdir()
     monkeypatch.setenv("DEVKIT_DIR", str(root))
-    settings = {
-        config.SETTING: setting
-        or {
-            "ibkr_trader": {"service": "app", "health": ["h"]},
-            "sports_betting": {"service": "collector"},
-        }
+    value = setting or {
+        "ibkr_trader": {"service": "app", "health": ["h"]},
+        "sports_betting": {"service": "collector"},
     }
-    (tmp_path / "alex-projects.code-workspace").write_text(
-        json.dumps({"folders": [], "settings": settings}), encoding="utf-8"
+    (root / "projects.toml").write_text(
+        f'projects = []\n\n[settings]\n"{config.SETTING}" = {toml_value(value)}\n',
+        encoding="utf-8",
     )
     for name in ("ibkr_trader", "sports_betting"):
         (tmp_path / name / ".git").mkdir(parents=True)
@@ -2932,7 +2944,9 @@ def test_run_once_runs_by_hand_whatever_this_machine_is_set_to(tmp_path, monkeyp
         seen.append((list(argv)[1:], Path(cwd).name))
         return 0
 
-    assert collectors.main(["run-once:social-scraper"], run=FakeSchtasks(), streamer=streamer) == 0
+    assert (
+        collectors.main(["run-once", "social-scraper"], run=FakeSchtasks(), streamer=streamer) == 0
+    )
     assert seen == [(["run", "social-scraper", "scrape"], "social-scraper")]
     assert "social-scraper exited 0" in capsys.readouterr().out
 

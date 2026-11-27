@@ -159,7 +159,7 @@ def test_a_missing_registry_file_is_an_error_naming_it_even_with_a_live_file(tmp
     _live(root, ["devkit", "radio"])
     with pytest.raises(pr.RegistryError, match=r"no projects\.toml at .*projects\.toml"):
         pr.all_projects(devkit)
-    with pytest.raises(pr.RegistryError, match="no projects.toml"):
+    with pytest.raises(pr.RegistryError, match=r"no projects\.toml"):
         pr.projects(repo_root=devkit)
 
 
@@ -252,7 +252,7 @@ def test_a_shared_key_the_registry_lacks_is_the_default_whatever_the_live_file_s
 def test_a_shared_key_with_no_registry_file_raises_naming_it(tmp_path):
     root, devkit = _tree(tmp_path)
     _live(root, ["devkit"], {"devkit.collectors": {}})
-    with pytest.raises(pr.RegistryError, match="no projects.toml"):
+    with pytest.raises(pr.RegistryError, match=r"no projects\.toml"):
         pr.setting("devkit.collectors", repo_root=devkit)
 
 

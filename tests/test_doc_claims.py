@@ -363,6 +363,9 @@ def _instruction_files() -> list:
 ALLOWED_MISSING = {
     "feature/x:./.devkit.toml": "a git revision spec, not a path: engineering.md spells "
     "it out because Git Bash rewrites the bare `rev:path` form into a Windows path list",
+    "package.json": "a generated frontend's own file (devkit ships it only as "
+    "`templates/features/electron/frontend/package.json.tmpl`): devkit has no frontend, "
+    "and the README names it as what a consumer's Node pin and Electron recipe read",
     ".vscode/tasks.json": "the file devkit does NOT own -- its absence is the rule, and "
     "test_devkit_ships_no_project_level_tasks enforces it",
     "logs/ship-intent.md": "written by a session into its own worktree when it is done, "

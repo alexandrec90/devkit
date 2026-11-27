@@ -1518,6 +1518,20 @@ def test_the_default_parent_is_the_projects_root(tmp_path, monkeypatch):
     assert the_plan.root == (tmp_path / "ws").resolve() / the_plan.name
 
 
+def test_projects_root_asks_the_registry_about_devkits_own_checkout(monkeypatch, tmp_path):
+    """Run from a box, `DEVKIT_ROOT.parent` is `.worktrees/`; the registry knows better,
+    so the answer is whatever it gives for devkit's root, passed through unchanged."""
+    seen = []
+
+    def resolved(repo_root):
+        seen.append(repo_root)
+        return tmp_path / "checkouts"
+
+    monkeypatch.setattr(new_project.project_registry, "projects_root", resolved)
+    assert new_project.projects_root() == tmp_path / "checkouts"
+    assert seen == [new_project.DEVKIT_ROOT]
+
+
 def test_a_project_outside_the_projects_root_is_not_registered(tmp_path, capsys, monkeypatch):
     """The registry names a checkout by its directory under the projects root, so
     registering a project generated anywhere else writes an entry that points at nothing."""

@@ -454,7 +454,9 @@ def _assigned(workspace: Path, hosts) -> None:
     if isinstance(hosts, str):
         value = json.dumps(hosts)
     else:
-        value = "{" + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in hosts.items()) + "}"
+        value = (
+            "{" + ", ".join(f"{json.dumps(k)} = {json.dumps(v)}" for k, v in hosts.items()) + "}"
+        )
     (devkit / "projects.toml").write_text(
         f'[settings."{e2e_pass.SETTING}"]\nhosts = {value}\n', encoding="utf-8"
     )
@@ -678,9 +680,7 @@ def test_run_contract_hands_the_runner_the_timeout_it_was_given(tmp_path):
     assert seen["argv"][-1] == str(tmp_path / "scripts" / "e2e.py")
 
 
-def test_main_reports_each_last_result_and_needs_no_workspace_file(
-    tmp_path, monkeypatch, capsys
-):
+def test_main_reports_each_last_result_and_needs_no_workspace_file(tmp_path, monkeypatch, capsys):
     workspace = _workspace(tmp_path, ["carameli"], opted=["carameli"])
     workspace.unlink()
     monkeypatch.setattr(e2e_pass.sweep, "default_workspace", lambda _root: workspace)

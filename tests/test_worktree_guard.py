@@ -847,9 +847,7 @@ def test_holds_a_checkout_is_any_registered_directory_under_the_root(tmp_path):
 def test_no_workspace_file_is_needed_to_guard_a_registered_root(root, monkeypatch):
     """The check that used to stop at a missing file: the same block as with one."""
     _workspace(root).unlink()
-    monkeypatch.setattr(
-        "sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py")))
-    )
+    monkeypatch.setattr("sys.stdin", _stdin(payload(path=str(root / "carameli" / "a.py"))))
     assert guard.main(["--root", str(root)]) == guard.main(
         ["--workspace", str(root / guard.worktree.sweep.WORKSPACE_FILE_NAME)]
     )

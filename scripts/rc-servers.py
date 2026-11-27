@@ -250,9 +250,7 @@ def write_artifact(text: str, root: Path = REPO_ROOT) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def build_plan(
-    checkouts: Path, root: Path, report: Pass, host: str | None = None
-) -> Plan | None:
+def build_plan(checkouts: Path, root: Path, report: Pass, host: str | None = None) -> Plan | None:
     """Resolve the setting in the devkit checkout at `root` into a `Plan` serving the
     checkouts under the projects root `checkouts`, or `None` with the reason reported.
 
