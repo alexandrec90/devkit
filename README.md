@@ -983,7 +983,7 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-worktree-reconcile` | `scripts/install-reconcile-task.py` | every 15 min | `logs/reconcile.log` |
 | `devkit-local-e2e` | `scripts/install-e2e-schedule.py` | every 30 min, what moved, only while the PC is idle | `logs/scheduled-local-e2e.log`, results under `logs/e2e/` |
 | `devkit-medium-tier` | `scripts/install-tier-schedule.py` | every 15 min, whatever the person is doing, behind `devkit.fixPass` being `dispatch` | `logs/scheduled-medium-tier.log`, results under `logs/medium-tier/` |
-| `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00, the backstop: a fix pass cuts an owed release once devkit's gate passes (`scripts/fix_release.py`) | `logs/scheduled-devkit-release.log` |
+| `devkit-release` | `scripts/install-release-schedule.py` | daily 02:00, the backstop: a fix pass cuts an owed release from `green`, the newest commit whose gate passed, whatever main's tip is doing (`scripts/fix_release.py`, `RELEASING.md`) | `logs/scheduled-devkit-release.log` |
 | `devkit-upgrade-projects` | `scripts/install-upgrade-schedule.py` | daily 03:00 | `logs/upgrade.log` |
 | `devkit-docker-stop-idle` | `scripts/install-docker-stop-idle.py` | daily 03:30 | `logs/scheduled-docker-stop-idle.log` |
 | `devkit-docker-prune` | `scripts/install-docker-prune.py` | daily 04:00 | `logs/scheduled-docker-prune.log` |

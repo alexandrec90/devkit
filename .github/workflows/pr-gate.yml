@@ -72,6 +72,11 @@ jobs:
           # back to FALLBACK_DEVKIT_REF — the exact staleness the tag tests exist to
           # catch, invisible on a runner that cannot see a tag at all.
           fetch-depth: 0
+          # A release PR is judged as its own head -- `green` plus the bump, the exact
+          # commit `release.yml` will tag -- not as GitHub's merge with main, which
+          # carries whatever main's tip is red on and would hold every release behind
+          # it. Every job below says the same; every other PR keeps the merge ref.
+          ref: ${{ startsWith(github.head_ref, 'release/') && github.event.pull_request.head.sha || '' }}
       - uses: ./.github/actions/setup-python-env
         # Every check after the first runs once this has, whatever the check before it
         # said: a red lint here once hid both test tiers, so main's log named 2 of its 4
@@ -170,6 +175,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ startsWith(github.head_ref, 'release/') && github.event.pull_request.head.sha || '' }}
       - uses: ./.github/actions/setup-python-env
         with:
           python-version: "3.12"
@@ -197,6 +203,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ startsWith(github.head_ref, 'release/') && github.event.pull_request.head.sha || '' }}
       - uses: ./.github/actions/setup-python-env
         with:
           python-version: "3.12"
@@ -221,6 +228,8 @@ jobs:
     # lint job — and a network hiccup there should not read as a lint failure.
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ startsWith(github.head_ref, 'release/') && github.event.pull_request.head.sha || '' }}
       - uses: ./.github/actions/setup-python-env
         with:
           python-version: "3.12"
@@ -262,6 +271,7 @@ jobs:
           # vendored harness against the pinned tag, which it can only do with the
           # tagged commits present. Shallow, that check degrades to a printed note.
           fetch-depth: 0
+          ref: ${{ startsWith(github.head_ref, 'release/') && github.event.pull_request.head.sha || '' }}
       # Deliberately NOT `./.github/actions/setup-python-env`: that action syncs
       # devkit's own environment, and this job never runs devkit's suite. It needs the
       # bare tools on PATH so the *generated* projects can be linted and tested inside
@@ -328,6 +338,7 @@ jobs:
           # Full history and tags: the previous release is found by tag, and the
           # generator at that tag pins the newest tag it can see.
           fetch-depth: 0
+          ref: ${{ startsWith(github.head_ref, 'release/') && github.event.pull_request.head.sha || '' }}
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"

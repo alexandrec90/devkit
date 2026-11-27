@@ -20,7 +20,7 @@ generator change or a test is not a thing any consumer can adopt, and tagging on
 spends a release plus an adoption PR in every project to deliver nothing.
 
 But **"release what a consumer cannot otherwise reach" is not a judgement at all.**
-`release_needed` computes it from the diff between the newest tag and `origin/main`,
+`release_needed` computes it from the diff between the newest tag and `origin/green`,
 restricted to the two tiers a consumer actually receives -- the vendored `MANIFEST`
 and the published pre-commit channel. That is the same condition `upgrade-project.py`
 already detects and warns about, so the nightly pass was in the position of announcing
@@ -30,14 +30,17 @@ flag, and it is the entire difference between the click and the 2am pass.
 What it does, in order:
 
 1.  pick the version (`patch`/`minor`/`major` off the newest tag, or an explicit `vX.Y.Z`)
-2.  bump `FALLBACK_DEVKIT_REF` on a `release/vX.Y.Z` branch cut from `origin/main`
+2.  bump `FALLBACK_DEVKIT_REF` on a `release/vX.Y.Z` branch cut from `origin/green`
+    (`release_base`: the newest commit whose gate passed, so a red main tip holds no
+    release; `origin/main` only where there is no `green`)
 3.  open its PR **as the authenticated user**, never as a token -- a bot-authored PR
     gets no PR Gate, which is the trap `RELEASING.md` warns about
-4.  wait for the gate in one blocking call
+4.  wait for the gate in one blocking call -- on a `release/` PR it judges the branch's
+    own head, not GitHub's merge with main (`pr-gate.yml`)
 5.  **verify the red is the expected red** -- see `gate_verdict`
-6.  squash-merge it
-7.  dispatch `release.yml phase=tag`, which runs the suite against the tagged commit
-    before pushing the tag, and wait for it
+6.  merge it as a merge commit (`merge_argv`), so the bump commit is in main's history
+7.  dispatch `release.yml phase=tag` at that bump commit (`release_tag_commit`), which
+    runs the suite against it before pushing the tag, and wait for it
 8.  fetch the new tag, re-run the gate on the default branch (the merge's own run
     predates the tag, so it is red by construction), and hand off to
     `upgrade-project.py`, which opens an adoption PR
@@ -54,7 +57,7 @@ release's own chicken-and-egg -- and a judgement typed at 1am against a red PR i
 genuinely broken release gets merged. Encoded, it is also the only step that can refuse.
 
 **Nothing here touches the static checkout's working tree.** The bump happens in a
-throwaway worktree cut from `origin/main`, so a release can be cut while the checkout
+throwaway worktree cut from `origin/green`, so a release can be cut while the checkout
 sits on someone else's branch with uncommitted work -- unlike `release.py --yes`, which
 runs `git checkout -b` in place. It writes no artifact of its own, because both of its
 callers wrap it in `log-wrap.py`: `devkit_project.plan_command` does it for the click,
@@ -386,13 +389,15 @@ def adoption_scope(projects: Sequence[str]) -> str:
 def plan_steps(version: str, adopt: bool, projects: Sequence[str] = ()) -> list[str]:
     """The dry run's account of itself: what `--yes` would do, in order."""
     steps = [
-        f"cut {release.branch_for(version)} from origin/main in a throwaway worktree",
+        f"cut {release.branch_for(version)} from origin/green (origin/main if there is no "
+        "green) in a throwaway worktree",
         f"set {release.FALLBACK_CONST} = {version!r} in scripts/new-project.py, and commit it",
         f"push {release.branch_for(version)} (SKIP={release.SKIP_PUSH_GATE}: CI is its "
         "gate) and open its PR against main",
         f"wait for PR Gate, then verify {EXPECTED_RED_TEST} is its only failure",
-        "squash-merge the PR",
-        f"dispatch {RELEASE_WORKFLOW} phase=tag, which tests the tagged commit then pushes {version}",
+        "merge the PR as a merge commit",
+        f"dispatch {RELEASE_WORKFLOW} phase=tag at the bump commit, which tests it then "
+        f"pushes {version}",
         "fetch the new tag",
     ]
     if adopt:
@@ -544,22 +549,33 @@ def vendored_paths() -> list[str]:
     return list(upgrade_module().manifest_paths())
 
 
-def changed_since_tag(devkit: Path, tag: str) -> list[str]:
-    """Repo-relative paths `origin/<default>` carries that `tag` does not; [] on error."""
+def release_base(devkit: Path) -> str:
+    """What a release is cut from: `origin/green`, or `origin/main` with no `green`."""
+    return release.release_base(devkit, _run)
+
+
+def changed_since_tag(devkit: Path, tag: str, ref: str = "") -> list[str]:
+    """Repo-relative paths `ref` (`origin/<default>` by default) carries that `tag` does
+    not; [] on error."""
     git = sweep.git_for(devkit)
     default_branch = task_branch.detect_default_branch(git, fallback="main")
     if not default_branch:
         return []
-    result = git("diff", "--name-only", f"{tag}..origin/{default_branch}")
+    result = git("diff", "--name-only", f"{tag}..{ref or f'origin/{default_branch}'}")
     if result.returncode != 0:
         return []
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def release_needed(devkit: Path, tag: str) -> list[str]:
-    """What `tag` cannot deliver that `origin/main` has: the `--if-needed` predicate.
+def release_needed(devkit: Path, tag: str, base: str = "") -> list[str]:
+    """What `tag` cannot deliver that `base` has: the `--if-needed` predicate.
 
-    Empty means every change on main since the last release is devkit's own -- a doc,
+    `base` is what the release would be cut from (`release_base`): `green`, the newest
+    commit whose gate passed, whatever main's tip is doing -- a red main holds no
+    release. A `green` that has not reached what `tag` released owes nothing: its diff
+    against the tag would read older work as changes (`release.base_is_past`).
+
+    Empty means every change on `base` since the last release is devkit's own -- a doc,
     a generator change, a test, this file -- and cutting a tag for it would spend an
     adoption PR in every consumer to deliver nothing they can run.
 
@@ -574,7 +590,10 @@ def release_needed(devkit: Path, tag: str) -> list[str]:
     repository state this could not read.
     """
     try:
-        return deliverable_changes(changed_since_tag(devkit, tag), vendored_paths())
+        base = base or release_base(devkit)
+        if base == release.GREEN and not release.base_is_past(devkit, tag, base, _run):
+            return []
+        return deliverable_changes(changed_since_tag(devkit, tag, base), vendored_paths())
     except Exception:
         return []
 
@@ -661,17 +680,23 @@ def prepare_outcome(number: int, failure: str) -> int:
     return 2
 
 
-def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
+def prepare_pr(devkit: Path, version: str, base: str = release.MAIN) -> tuple[int, str]:
     """The prepare PR's number, pushing and opening it as needed; `(0, why)` on failure.
 
     Reuses an open PR; otherwise opens one for a branch an earlier run pushed and died
     before its PR (`resume_refusal` says when that branch is safe to reuse), and
-    only failing both cuts the branch afresh. A branch whose PR was *closed* is never
-    resumed: closing it was somebody's decision, and `prepare` refuses it out loud.
-    `(ANOTHER_RUN, why)` when a concurrent run pushed the branch first.
+    only failing both cuts the branch afresh off `base`. A branch whose PR was *closed*
+    is never resumed: closing it was somebody's decision, and `prepare` refuses it out
+    loud. `(ANOTHER_RUN, why)` when a concurrent run pushed the branch first.
     """
     branch = release.branch_for(version)
     number, state = release_pr(devkit, branch)
+    if state == "OPEN" and base == release.GREEN:
+        # Cut from a commit whose gate passed, and judged as that commit plus the bump:
+        # bringing main in would hand it main's red, which is what `green` is there to
+        # keep out of a release.
+        _say(f"reusing the open prepare PR #{number} for {branch}, cut from green")
+        return number, ""
     if state == "OPEN":
         _say(f"reusing the open prepare PR #{number} for {branch}")
         # A PR left open by an earlier run carries the main it was cut from. Its gate
@@ -684,8 +709,8 @@ def prepare_pr(devkit: Path, version: str) -> tuple[int, str]:
     if not (refusal := resume_refusal(devkit, version, state)):
         _say(f"{branch} is on origin with no PR -- an earlier run stopped before opening it")
     else:
-        _say(f"preparing {branch}")
-        ok, detail = release.prepare(devkit, version, _run, _say)
+        _say(f"preparing {branch} from {base}")
+        ok, detail = release.prepare(devkit, version, _run, _say, base)
         if not ok and lost_the_push_race(devkit, branch, refusal):
             return ANOTHER_RUN, f"another run pushed {branch} while this one prepared it"
         if not ok:
@@ -828,8 +853,35 @@ def tag_run_in_flight(devkit: Path) -> int:
     return 0
 
 
-def dispatch_tag_workflow(devkit: Path, version: str) -> tuple[int, str]:
-    """Dispatch `release.yml phase=tag` and return `(run_id, error)`.
+def release_tag_commit(devkit: Path, version: str) -> str:
+    """The commit `version`'s tag names (`release.release_commit`), read off main after
+    a fetch: the bump on top of `green` the release PR merged. "" when no release commit
+    is found, and the tag workflow tags main's tip as it always did -- whose suite, run
+    on that commit before any push, still refuses a red one."""
+    _run(["git", "-C", str(devkit), "fetch", "--quiet", "origin"])
+    log = _run(
+        [
+            "git",
+            "-C",
+            str(devkit),
+            "log",
+            "--first-parent",
+            f"--format={release.RELEASE_LOG_FORMAT}",
+            f"-{release.RELEASE_LOG_DEPTH}",
+            release.MAIN,
+        ]
+    )
+    return release.release_commit(log.stdout or "", version) if log.returncode == 0 else ""
+
+
+def tag_inputs(version: str, commit: str) -> list[str]:
+    """The `-f` inputs of the tag dispatch; `commit` only when there is one to name."""
+    named = ["-f", f"commit={commit}"] if commit else []
+    return ["-f", f"version={version}", "-f", "phase=tag", *named]
+
+
+def dispatch_tag_workflow(devkit: Path, version: str, commit: str = "") -> tuple[int, str]:
+    """Dispatch `release.yml phase=tag` at `commit` and return `(run_id, error)`.
 
     The tag is pushed **by the workflow**, never from here. `git_policy` refuses a
     hand-pushed release tag outright, and the reason is the point rather than the
@@ -839,17 +891,7 @@ def dispatch_tag_workflow(devkit: Path, version: str) -> tuple[int, str]:
     """
     before = newest_workflow_run(devkit)
     dispatch = _run(
-        [
-            "gh",
-            "workflow",
-            "run",
-            RELEASE_WORKFLOW,
-            "-f",
-            f"version={version}",
-            "-f",
-            "phase=tag",
-        ],
-        cwd=devkit,
+        ["gh", "workflow", "run", RELEASE_WORKFLOW, *tag_inputs(version, commit)], cwd=devkit
     )
     if dispatch.returncode != 0:
         return 0, (dispatch.stderr or dispatch.stdout).strip()
@@ -877,8 +919,10 @@ def _stop(message: str) -> int:
 def push_tag(devkit: Path, version: str) -> int | None:
     """Have `release.yml` tag `version` and see it through: None once it did, else the
     code the pipeline ends on -- 0 when another run got there first."""
-    _say(f"dispatching {RELEASE_WORKFLOW} phase=tag -- it tests the tagged commit before pushing")
-    run_id, error = dispatch_tag_workflow(devkit, version)
+    commit = release_tag_commit(devkit, version)
+    at = commit[:12] if commit else f"{release.MAIN}, no release commit being found"
+    _say(f"dispatching {RELEASE_WORKFLOW} phase=tag at {at} -- it tests that commit first")
+    run_id, error = dispatch_tag_workflow(devkit, version, commit)
     if error:
         print(f"release-pipeline: {error}", file=sys.stderr)
         return 2
@@ -900,6 +944,53 @@ def push_tag(devkit: Path, version: str) -> int | None:
     return None
 
 
+def merge_argv(number: int, version: str) -> list[str]:
+    """How the release PR merges: a merge commit, never a squash, so the commit the tag
+    names -- the bump on top of `green` -- is in main's history and `git describe`
+    there finds it. Its subject is the squash's would have been, which is what every
+    reader of a release commit matches (`fix_revert.RELEASE_SUBJECT`, the newest-tag
+    test's `_release_subject`)."""
+    subject = f"Release {version} (#{number})"
+    return ["gh", "pr", "merge", str(number), "--merge", "--subject", subject, "--delete-branch"]
+
+
+def prepare_and_merge(devkit: Path, version: str, base: str) -> int | None:
+    """Steps 2-6: the release PR cut off `base`, its gate read, and its merge; None once
+    it merged, else the code the pipeline ends on."""
+    number, failure = prepare_pr(devkit, version, base)
+    if number <= 0:
+        return prepare_outcome(number, failure)
+
+    _say(f"waiting for the gate on #{number} (one blocking call; this takes minutes)")
+    wait_for_checks(devkit, number)
+    rollup = pr_rollup(devkit, number)
+    gate = gate_state(rollup)
+    failing = (
+        download_failing_tests(devkit, failed_run_id(devkit, rollup))
+        if gate.state == "FAILED"
+        else []
+    )
+    verdict, reason = gate_verdict(gate, failing)
+    _say(f"gate {gate.state}: {reason}")
+    if verdict != VERDICT_PROCEED:
+        return _stop(f"not merging #{number} -- {reason}")
+
+    merged = _run(merge_argv(number, version), cwd=devkit)
+    # `--delete-branch` exits 1 when only the *local* branch delete fails, which is
+    # routine here: the branch was pushed from a worktree that no longer exists. The
+    # PR's own state is the authority on whether the merge happened.
+    state = _gh_json(["pr", "view", str(number), "--json", "state"], devkit)
+    if not (isinstance(state, dict) and state.get("state") == "MERGED"):
+        print(
+            f"release-pipeline: merge of #{number} failed: "
+            f"{(merged.stderr or merged.stdout).strip()}",
+            file=sys.stderr,
+        )
+        return 2
+    _say(f"merged #{number}")
+    return None
+
+
 def run_pipeline(
     devkit: Path,
     version: str,
@@ -916,38 +1007,8 @@ def run_pipeline(
         if another := tag_run_in_flight(devkit):
             _say(f"{RELEASE_WORKFLOW} run {another} is already at it -- leaving the rest to that")
             return 0
-    else:
-        number, failure = prepare_pr(devkit, version)
-        if number <= 0:
-            return prepare_outcome(number, failure)
-
-        _say(f"waiting for the gate on #{number} (one blocking call; this takes minutes)")
-        wait_for_checks(devkit, number)
-        rollup = pr_rollup(devkit, number)
-        gate = gate_state(rollup)
-        failing = (
-            download_failing_tests(devkit, failed_run_id(devkit, rollup))
-            if gate.state == "FAILED"
-            else []
-        )
-        verdict, reason = gate_verdict(gate, failing)
-        _say(f"gate {gate.state}: {reason}")
-        if verdict != VERDICT_PROCEED:
-            return _stop(f"not merging #{number} -- {reason}")
-
-        merged = _run(["gh", "pr", "merge", str(number), "--squash", "--delete-branch"], cwd=devkit)
-        # `--delete-branch` exits 1 when only the *local* branch delete fails, which is
-        # routine here: the branch was pushed from a worktree that no longer exists. The
-        # PR's own state is the authority on whether the merge happened.
-        state = _gh_json(["pr", "view", str(number), "--json", "state"], devkit)
-        if not (isinstance(state, dict) and state.get("state") == "MERGED"):
-            print(
-                f"release-pipeline: merge of #{number} failed: "
-                f"{(merged.stderr or merged.stdout).strip()}",
-                file=sys.stderr,
-            )
-            return 2
-        _say(f"merged #{number}")
+    elif (ended := prepare_and_merge(devkit, version, release_base(devkit))) is not None:
+        return ended
 
     if (ended := push_tag(devkit, version)) is not None:
         return ended
@@ -1145,7 +1206,7 @@ def main(argv: list[str] | None = None) -> int:
             # job that never fired look identical in `schtasks`, so the quiet night has
             # to be a sentence in the artifact rather than an absence of one.
             print(
-                f"release-pipeline: nothing to release -- every change on main since "
+                f"release-pipeline: nothing to release -- every change on green since "
                 f"{current} is devkit's own (docs, tests, generator). A consumer can "
                 f"already reach everything {current} delivers."
             )

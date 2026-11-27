@@ -123,12 +123,15 @@ def prepare_plan(version: str, previous: str, existing_tags: set[str]) -> tuple[
     )
 
 
-def tag_plan(version: str, main_fallback: str, existing_tags: set[str]) -> tuple[list[str], str]:
-    """`(steps, refusal)` for phase 2: tag `main` once the bump has landed there.
+def tag_plan(
+    version: str, main_fallback: str, existing_tags: set[str], commit: str = MAIN
+) -> tuple[list[str], str]:
+    """`(steps, refusal)` for phase 2: tag `commit` once the bump has landed on main.
 
     Refuses unless `main` already carries the bump. Tagging a `main` whose constant
     still names the previous release is the failure mode in `prepare_plan`'s note,
-    just reached from the other direction.
+    just reached from the other direction. `commit` is `release_commit`'s answer -- the
+    bump on top of `green` -- and main's tip only where there is none.
     """
     if not valid_version(version):
         return [], f"{version!r} is not a vMAJOR.MINOR.PATCH tag"
@@ -141,7 +144,7 @@ def tag_plan(version: str, main_fallback: str, existing_tags: set[str]) -> tuple
         )
     return (
         [
-            f"git tag {version} origin/main",
+            f"git tag {version} {commit}",
             f"git push origin {version}",
         ],
         "",
@@ -150,6 +153,57 @@ def tag_plan(version: str, main_fallback: str, existing_tags: set[str]) -> tuple
 
 def branch_for(version: str) -> str:
     return f"release/{version}"
+
+
+# --- what a release is cut from, and which commit its tag names -----------------
+#
+# A release is cut from `green` -- the branch `green-ref.py` and the fix trigger move to
+# the newest default-branch commit whose gate passed -- not from main's tip. On 2026-11-26
+# main stayed red for over an hour while merges each added a red, and a release cut from
+# the tip could only carry that red, so none went out and five projects waited on one.
+# The release branch is `green` plus the bump; it merges into main as a merge commit, so
+# that exact commit -- the one `release.yml` tests and tags -- is in main's history and
+# `git describe` there still finds it. Main absent a `green` is the old behaviour.
+GREEN = "origin/green"
+MAIN = "origin/main"
+
+
+def release_base(devkit: Path, run: GitRunner) -> str:
+    """`GREEN` when the checkout has it, else `MAIN`."""
+    ref = f"{GREEN}^{{commit}}"
+    found = run(["git", "-C", str(devkit), "rev-parse", "--verify", "--quiet", ref])
+    return GREEN if found.returncode == 0 else MAIN
+
+
+def base_is_past(devkit: Path, tag: str, base: str, run: GitRunner) -> bool:
+    """Whether `base` carries everything `tag` released: the commit the tag's bump was
+    made on is in `base`'s history. Every release commit is one parent plus the bump, so
+    the parent is the release's content; a `green` that has not reached it would release
+    *older* work than the tag, and the diff would read that as changes owed."""
+    asked = run(["git", "-C", str(devkit), "merge-base", "--is-ancestor", f"{tag}~1", base])
+    return asked.returncode == 0
+
+
+# One record per first-parent commit of main, newest first: sha, parents, subject.
+RELEASE_LOG_FORMAT = "%H%x1f%P%x1f%s"
+RELEASE_LOG_DEPTH = 400
+
+
+def release_commit(log: str, version: str) -> str:
+    """The commit `version`'s tag names, from `RELEASE_LOG_FORMAT` lines of main; "".
+
+    The newest `Release <version>` commit on main's first-parent line. A merge commit is
+    a release cut from `green`, and its tag goes on the second parent -- the bump on top
+    of `green`, which is what the release PR's gate judged; anything else (a release
+    squashed before this, or merged when main was green) is tagged as itself."""
+    pattern = re.compile(rf"Release {re.escape(version)}( \(#\d+\))?")
+    for line in log.splitlines():
+        sha, _, rest = line.partition("\x1f")
+        parents, _, subject = rest.partition("\x1f")
+        if sha and pattern.fullmatch(subject.strip()):
+            listed = parents.split()
+            return listed[1] if len(listed) > 1 else sha
+    return ""
 
 
 # `unresumable`'s answer for a branch origin does not hold: the one state in which a
@@ -366,9 +420,10 @@ def unprovisioned_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
 
 
 def prepare(
-    devkit: Path, version: str, run: GitRunner, say: Callable[[str], None]
+    devkit: Path, version: str, run: GitRunner, say: Callable[[str], None], base: str = MAIN
 ) -> tuple[bool, str]:
-    """Bump, commit and push `release/<version>`, in a worktree cut from origin/main."""
+    """Bump, commit and push `release/<version>`, in a worktree cut from `base`
+    (`release_base`: `green` when there is one)."""
     branch = branch_for(version)
     cleared, note = discard_stale_branch(devkit, branch, run)
     if not cleared:
@@ -385,7 +440,7 @@ def prepare(
     with tempfile.TemporaryDirectory(prefix="devkit-release-", ignore_cleanup_errors=True) as tmp:
         path = Path(tmp) / branch.replace("/", "-")
         add = run(
-            ["git", "-C", str(devkit), "worktree", "add", "-b", branch, str(path), "origin/main"],
+            ["git", "-C", str(devkit), "worktree", "add", "-b", branch, str(path), base],
             env=unprovisioned_env(),
         )
         if add.returncode != 0:
@@ -472,7 +527,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tag",
         action="store_true",
-        help="phase 2: tag origin/main, once the phase-1 PR has merged",
+        help="phase 2: tag the release commit, once the phase-1 PR has merged",
+    )
+    parser.add_argument(
+        "--commit",
+        default=MAIN,
+        help="phase 2: the commit to tag -- the release branch's bump; origin/main by default",
     )
     apply_mode = parser.add_mutually_exclusive_group()
     apply_mode.add_argument("--dry-run", dest="dry_run", action="store_true", default=True)
@@ -489,7 +549,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.tag:
-        steps, refusal = tag_plan(args.version, landed, tags)
+        steps, refusal = tag_plan(args.version, landed, tags, args.commit)
     else:
         source = NEW_PROJECT.read_text(encoding="utf-8")
         updated, previous = bump_fallback(source, args.version)
@@ -510,11 +570,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.tag:
-        # Tagging `origin/main` by name, not HEAD: the merge happened on the remote,
-        # and a stale local checkout would otherwise tag the wrong commit.
-        code = _run((("tag", args.version, "origin/main"), ("push", "origin", args.version)))
+        # Tagging a remote ref or a sha by name, not HEAD: the merge happened on the
+        # remote, and a stale local checkout would otherwise tag the wrong commit.
+        code = _run((("tag", args.version, args.commit), ("push", "origin", args.version)))
         if code == 0:
-            print(f"release: {args.version} tagged on main. Consumers can adopt it now.")
+            print(f"release: {args.version} tagged at {args.commit}. Consumers can adopt it now.")
         return code
 
     branch = branch_for(args.version)

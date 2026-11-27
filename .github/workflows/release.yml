@@ -36,11 +36,19 @@ on:
         required: true
         type: string
       phase:
-        description: "prepare = bump + open the PR; tag = tag main after that PR merges"
+        description: "prepare = bump + open the PR; tag = tag the release commit after that PR merges"
         required: true
         default: prepare
         type: choice
         options: [prepare, tag]
+      # The tag phase's commit: the release branch's bump, cut from `green` and merged
+      # into main as a merge commit (`release-pipeline.release_tag_commit`), so a red
+      # main tip is never what is tagged. Empty tags main's tip, as before.
+      commit:
+        description: "tag phase: the commit to tag (default: main's tip)"
+        required: false
+        default: ""
+        type: string
 
 # `contents: write` pushes the release branch and the tag. There is deliberately no
 # `pull-requests: write`: this workflow never opens the release PR itself, because a
@@ -68,11 +76,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Full history and tags: release.py refuses a version that already exists, and
-      # a shallow clone would hide every existing tag from that check.
+      # a shallow clone would hide every existing tag from that check. The tag phase
+      # checks out the commit it tags, so the suite below judges exactly that tree.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: main
+          ref: ${{ inputs.phase == 'tag' && inputs.commit || 'main' }}
 
       # The repo's own provisioning action, not a bare `setup-python`: it installs uv
       # and syncs from the committed lock, which is what puts pytest, ruff and mypy on
@@ -81,7 +90,9 @@ jobs:
       - uses: ./.github/actions/setup-python-env
 
       - name: Show what this phase would do
-        run: uv run python scripts/release.py "${{ inputs.version }}" ${{ inputs.phase == 'tag' && '--tag' || '' }}
+        env:
+          COMMIT: ${{ inputs.commit || 'origin/main' }}
+        run: uv run python scripts/release.py "${{ inputs.version }}" ${{ inputs.phase == 'tag' && '--tag --commit "$COMMIT"' || '' }}
 
       # Phase 2 needs the candidate tag to exist locally before the suite runs:
       # `test_fallback_devkit_ref_tracks_the_newest_tag` compares the committed
@@ -89,7 +100,9 @@ jobs:
       # so a red commit can never acquire a published release tag.
       - name: Stage the release tag locally
         if: inputs.phase == 'tag'
-        run: git tag "${{ inputs.version }}" origin/main
+        env:
+          COMMIT: ${{ inputs.commit || 'origin/main' }}
+        run: git tag "${{ inputs.version }}" "$COMMIT"
 
       # The gate. A tag is what every consumer pins, so it must never name a commit
       # whose suite was red — that is the "one bad commit reddens every consumer"
