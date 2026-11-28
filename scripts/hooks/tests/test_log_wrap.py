@@ -1107,3 +1107,46 @@ def test_a_kept_copy_that_could_not_be_written_falls_back_to_the_per_run_path(
     lw.main(["--always", "N", "--", "x"], run=lambda _c: (2, "boom"), root=tmp_path)
 
     assert _fields(ledger)[0]["artifact"] == "logs/n.log"
+
+
+# --- the run history ------------------------------------------------------------------
+
+
+def _runs(root: Path) -> list[dict]:
+    path = root / "logs" / lw.RUNS_FILE
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_every_run_passed_or_failed_is_one_history_line(tmp_path, monkeypatch):
+    """The artifact keeps one run and the ledger keeps failures; this is the only place
+    a job's duration and its last runs survive, for `devkit_dashboard.py` to draw."""
+    _ledger(tmp_path, monkeypatch)
+    lw.main(["--always", "Scheduled: Prune", "--", "x"], run=lambda _c: (0, "a\nb\n"), root=tmp_path)
+    lw.main(["Clicked", "--", "x"], run=lambda _c: (3, "error: the disk is full"), root=tmp_path)
+
+    passed, failed = _runs(tmp_path)
+    assert passed["task"] == "Scheduled: Prune" and passed["slug"] == "scheduled-prune"
+    assert passed["exit"] == 0 and passed["unattended"] is True and passed["cause"] == ""
+    assert passed["output_lines"] == 2 and passed["output_bytes"] == 4
+    assert passed["seconds"] >= 0 and passed["started"].endswith("+00:00")
+    assert failed["exit"] == 3 and failed["unattended"] is False
+    assert "disk is full" in failed["cause"]
+
+
+def test_a_run_row_counts_the_plain_output_and_never_a_negative_duration():
+    row = lw.run_row("T", 100.0, 99.0, 0, "\x1b[31mred\x1b[0m\n", True)
+    assert row["seconds"] == 0.0
+    assert row["output_bytes"] == 4 and row["output_lines"] == 1
+
+
+def test_the_history_is_started_over_at_its_newest_lines(tmp_path, monkeypatch):
+    monkeypatch.setattr(lw, "RUNS_MAX_BYTES", 200)
+    monkeypatch.setattr(lw, "RUNS_KEEP", 2)
+    for n in range(6):
+        lw.record_run(tmp_path, {"n": n, "pad": "x" * 40})
+    assert [row["n"] for row in _runs(tmp_path)] == [4, 5]
+
+
+def test_a_history_that_cannot_be_written_changes_nothing(tmp_path):
+    (tmp_path / "logs").write_text("not a directory", encoding="utf-8")
+    assert lw.record_run(tmp_path, {"n": 1}) is None

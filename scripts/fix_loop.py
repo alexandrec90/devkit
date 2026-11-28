@@ -24,8 +24,8 @@ harness-defect ledger, where the devkit session picks it up on the next pass:
   (`friction_pending`).
 - **What has sat too long** (`fix_stall.py`): a hold, a cap or a skip past a day.
 - **What the machine's own jobs say**: a scheduled job the scheduler reports failing
-  (`job_findings`), and an ingestion collector the tray shows as anything but OK
-  (`collector_findings`). The tray is the only other reader of either, and a row only a
+  (`job_findings`), and an ingestion collector the dashboard shows as anything but OK
+  (`collector_findings`). The dashboard is the only other reader of either, and a row only a
   person sees is the ending the pass exists to rule out.
 
 Outside `dispatch` mode nothing is written -- not the ledger, not a tree, not the
@@ -513,7 +513,7 @@ def outran_intent(tree: Path, now: _dt.datetime, runner=ship_intent.run_quiet) -
     return ""
 
 
-# A scheduled job's own failure, read off the scheduler. Every job but the resident tray
+# A scheduled job's own failure, read off the scheduler. Every job but the resident ones
 # now runs under `log-wrap.py --always`, which files each failed run itself, so what is
 # left here is what only the scheduler can say -- disabled, stale, never ran -- plus a
 # failed run of a job that runs bare (a collector's task, an installer not yet re-run).
@@ -560,11 +560,11 @@ def job_findings(
     Nor one that ran code older than its group's fix (`_ran_before_fix`).
 
     The scheduled collectors (`collectors.scheduled_tasks`, `{task: log}`) are asked about
-    in the same query, as the tray asks: their tasks carry no `devkit-` prefix, so a
-    failing host collector was red in the tray and absent here. Each is filed against
+    in the same query, as the dashboard asks: their tasks carry no `devkit-` prefix, so a
+    failing host collector was red in the tray this replaced and absent here. Each is filed against
     its own project, which is its task's name -- and so is one this machine runs whose
     task the scheduler does not have, which the query can only omit
-    (`tray_state.collector_task_states` paints the same row red).
+    (`devkit_dashboard.jobs_view` paints the same row red).
 
     So are the tasks a project claims in its `.devkit.toml` (`project_tasks.declared`,
     `{task: project}`), each filed against the project claiming it. And a hand-made task
@@ -732,7 +732,7 @@ def unscheduled(ctx: Context, tasks: dict[str, str], listed: frozenset[str]) -> 
     ]
 
 
-# A container collector the tray shows amber or red. Its health check failing is "the
+# A container collector the dashboard shows amber or red. Its health check failing is "the
 # project's verdict, not a failure" to `collectors.py`, so `devkit-collectors` exits 0 and
 # the scheduler reports nothing: ibkr_trader's check failed for a day -- its reddit job
 # 39 runs in, on credentials never set -- with the tray the only thing that knew.
@@ -747,7 +747,7 @@ def collector_findings(
     rows: list[tuple[str, str, str]] | None = None,
     health: dict[str, dict] | None = None,
 ) -> list[Finding]:
-    """A finding per collector row (`collectors.tray_rows`) that is not OK, against the
+    """A finding per collector row (`collectors.status_rows`) that is not OK, against the
     collector's own project, citing `collectors.py`'s log, which holds the health output.
     Bar a failing health verdict taken from code older than its group's fix
     (`_verdict_predates_fix`) or one failing on name lookups lately
@@ -761,7 +761,7 @@ def collector_findings(
     20:19 on 2026-10-08, the first before the checkout moved onto the revive, the second
     during the very restart that brought the engine back at 20:15."""
     if rows is None:
-        rows = collectors.tray_rows(ctx.devkit_dir)
+        rows = collectors.status_rows(ctx.devkit_dir)
         if health is None:
             home = collectors.config.home(ctx.devkit_dir)
             health = collectors.load_health(home / collectors.HEALTH)
@@ -1177,8 +1177,8 @@ def retire_unstalled(ctx: Context) -> list[str]:
     return [f"retired [{item.id}] -- {note}" for item in gone]
 
 
-# Between a person's step and the command that retires its group: the tray cuts there
-# (`tray_state.RESOLVE_TAIL`), showing the step and leaving the command to the record.
+# Between a person's step and the command that retires its group: devkit's dashboard
+# cuts there (`devkit_dashboard.RESOLVE_TAIL`), showing the step, the command beneath it.
 PERSON_RESOLVE_TAIL = " -- then: "
 
 

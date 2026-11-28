@@ -225,25 +225,6 @@ def test_the_scheduled_reap_pass_never_loses_the_mode_that_makes_it_do_anything(
     assert "maintain" in installer.schedule_for(root=REPO_ROOT).command
 
 
-def test_the_tray_writes_the_file_its_installer_advertises():
-    """The tray's artifact is unusual: it is written only when the tray cannot start.
-    That is the one failure with no other signal, because a tray that is not running
-    looks exactly like a tray reporting nothing wrong."""
-    installer = load_script("scripts/install-tray.py")
-    runner = load_script("scripts/tray.py")
-    assert installer.ARTIFACT == runner.ARTIFACT.as_posix()
-
-
-def test_the_tray_is_never_given_an_execution_time_limit():
-    """Every other job here is a pass that should finish in minutes. This one is
-    resident, and the inherited one-hour limit would have Task Scheduler killing it an
-    hour after logon, every day -- surfacing as an icon that "sometimes isn't there"."""
-    installer = load_script("scripts/install-tray.py")
-    xml = installer.task_document(installer.schedule_for(root=REPO_ROOT))
-    assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml
-    assert "<LogonTrigger>" in xml
-
-
 def test_the_dashboard_gateway_writes_the_file_its_installer_advertises():
     installer = load_script("scripts/install-dashboards.py")
     runner = load_script("scripts/dashboards.py")
@@ -251,8 +232,7 @@ def test_the_dashboard_gateway_writes_the_file_its_installer_advertises():
 
 
 def test_the_dashboard_gateway_is_never_given_an_execution_time_limit():
-    """Resident like the tray: an hour's limit would close every dashboard port an hour
-    after logon. The repetition is what restarts a gateway that died."""
+    """Resident: an hour's limit would close every dashboard port an hour after logon. The repetition is what restarts a gateway that died."""
     installer = load_script("scripts/install-dashboards.py")
     script = installer.dashboards_script(REPO_ROOT)
     xml = installer.task_document("pythonw.exe", installer.dashboards_arguments(script), script)
@@ -357,9 +337,8 @@ UNATTENDED: dict[str, str] = {
     "scripts/reap-stale.py": "devkit-reap-stale runs it every 15 minutes",
     "scripts/reap_machine.py": "the process listing, tasklist and taskkill that pass makes",
     "scripts/session_trees.py": "the git, gh and compose down that pass makes per session tree",
-    "scripts/tray.py": "devkit-tray runs it from logon until logoff",
-    "scripts/tray_state.py": "the tray asks it what to draw, on every poll",
-    "scripts/schedule_health.py": "the schtasks the tray spawns every poll, and the status pass",
+    "scripts/devkit_dashboard.py": "the gateway wakes it on a request; it reads the scheduler",
+    "scripts/schedule_health.py": "the schtasks the dashboard spawns every read, and the status pass",
     "scripts/project_tasks.py": "the fix pass reads each project's merged claim with git show",
     "scripts/workspace-status.py": "devkit-workspace-status runs it daily, and it spawns git",
     "scripts/installers.py": "devkit-installers runs it daily and at logon; it spawns every installer",
@@ -373,14 +352,14 @@ UNATTENDED: dict[str, str] = {
     "scripts/broken_pr_menu.py": "the gh the pass scans every checkout through",
     "scripts/fix_release.py": "the release pipeline the pass starts detached when main owes a tag",
     "scripts/git_trust.py": "the git config --global safe.directory a dispatching pass adds",
-    "scripts/log-wrap.py": "the wrapper every job but the tray is launched through",
+    "scripts/log-wrap.py": "the wrapper nearly every job is launched through",
     "scripts/e2e-pass.py": "devkit-local-e2e runs it every half hour; it spawns each project's e2e.py",
     "scripts/after-merge-pass.py": "devkit-after-merge runs it every 5 min; it spawns queued commands",
     "scripts/fleet_ssh.py": "the ssh-keygen, tailscale, whoami and icacls the pass's fleet join makes",
     "scripts/e2e.py": "the pass spawns devkit's own; it spawns pytest over the local tier",
     "scripts/tier-pass.py": "devkit-medium-tier runs it every 15 minutes; it spawns each suite",
     "scripts/disposable_tree.py": "the git worktree add and remove that pass makes per run",
-    "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the tray asks it every poll",
+    "scripts/collectors.py": "devkit-collectors runs it every 15 minutes; the dashboard asks it every read",
     "scripts/dashboards.py": "devkit-dashboards runs its gateway from logon; it spawns each dashboard",
     "scripts/node_toolchain.py": "dashboards.py and worktree.py import it; it spawns `node --version`",
     "scripts/collector_tasks.py": "the schtasks that pass makes, and each scheduled collector's fire",
@@ -397,7 +376,7 @@ UNATTENDED: dict[str, str] = {
     "scripts/policy_runtime.py": "upgrade-project.py runs its policy-reinstall rider once per pass",
     "scripts/release.py": "release-pipeline.py imports it for the version and bump helpers",
     "scripts/worktree_env.py": "worktree.py keeps its provisioned mark; upgrade-project.py its skip var",
-    "scripts/harness_state.py": "the git skip-worktree the tray and installers reach through the switch record",
+    "scripts/harness_state.py": "the git skip-worktree the installers reach through the switch record",
     # `_core` and not the package: the split left `run_command` -- and `NO_WINDOW` with
     # it -- in exactly one module, and `branch`, `framework` and `dispatch` reach git
     # only through the injected runner. Naming the one file that spawns is the point of
@@ -417,8 +396,7 @@ DELEGATES_ITS_SPAWNS: dict[str, str] = {
     "scripts/worktree-guard.py": "scripts/guard_probes.py",
     "scripts/rc-servers.py": "scripts/rc_machine.py",
     "scripts/reap-stale.py": "scripts/reap_machine.py",
-    "scripts/tray.py": "scripts/schedule_health.py",
-    "scripts/tray_state.py": "scripts/schedule_health.py",
+    "scripts/devkit_dashboard.py": "scripts/schedule_health.py",
     "scripts/fix-pass.py": "scripts/ship_intent.py",
     "scripts/fix-prs.py": "scripts/ship_intent.py",
     "scripts/ship-pass.py": "scripts/ship_intent.py",
