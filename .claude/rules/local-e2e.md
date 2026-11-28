@@ -6,7 +6,6 @@ paths:
   - "**/*.test.*"
   - "**/*.spec.*"
   - scripts/e2e.py
-  - scripts/deploy.py
 ---
 
 # Rule: The local end-to-end tier
@@ -54,16 +53,6 @@ job to record the project as run in CI rather than run it.
 **Every project owes the script.** One whose default branch on origin has none is red
 at the next run, as a missing tier, and the fix pass sends its fixer to write one. It is
 never a skip: a skip reads as green, which is the state this tier exists to end.
-
-**What has to be installed to take effect goes in `scripts/deploy.py`, not in this
-tier.** This tier waits for an idle PC and a checkout on its default branch, so an
-install hung off it waits for both: a merged crash fix once sat uninstalled through a day
-of use. The same job runs `scripts/deploy.py`, when origin's default branch has one, on
-every fire, idle or not, in a detached tree at origin's tip, once per tip, with
-`DEVKIT_DEPLOY=1` and the machine's Python (`deploy_merged.py` in devkit). So the script
-is stdlib-only or hands itself to the project's toolchain, does nothing when what is
-installed is already that tip, and is safe while someone is using the PC. Exit non-zero
-for a failed install; it is retried an hour on, and this tier is where it shows red.
 
 By hand: `python scripts/e2e.py` here. From devkit's checkout,
 `python scripts/e2e-pass.py run --no-wait <project>` shows what the night will see.

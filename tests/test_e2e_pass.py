@@ -407,24 +407,13 @@ def _due_run(tmp_path, names, idle: float):
         now=lambda: NOON,
         git_for=lambda _path: fake_git(log=log),
     )
-    deployed: list = []
-    code = e2e_pass.run_due(
-        workspace, _args(due=True), seams, run_one, deploy=lambda _w, n, _s: deployed.append(n)
-    )
-    assert deployed == [names], "what merged is deployed on every fire, before anything else"
+    code = e2e_pass.run_due(workspace, _args(due=True), seams, run_one)
     return code, ran, log
 
 
 def test_a_pc_in_use_is_left_alone_without_so_much_as_a_fetch(tmp_path, capsys):
     assert _due_run(tmp_path, ["carameli"], idle=2) == (0, [], [])
     assert "the PC is in use" in capsys.readouterr().out
-
-
-def test_the_deploy_is_the_real_one_by_default():
-    import inspect
-
-    default = inspect.signature(e2e_pass.run_due).parameters["deploy"].default
-    assert default is e2e_pass.deploy_merged.deploy_all
 
 
 def test_a_tier_that_opens_windows_waits_for_a_pc_that_was_left(tmp_path):
@@ -538,8 +527,7 @@ def _role_run(tmp_path, role: str, disk=None, hosts=None):
         host="pc-a",
         disk=lambda: disk,
     )
-    code = e2e_pass.run_due(workspace, _args(due=True), seams, run_one, deploy=lambda *_a: None)
-    return code, ran, seams
+    return e2e_pass.run_due(workspace, _args(due=True), seams, run_one), ran, seams
 
 
 def test_a_role_with_no_hosts_claims_each_run_and_a_named_host_stands(tmp_path):
