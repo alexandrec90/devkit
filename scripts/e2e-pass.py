@@ -6,7 +6,8 @@ browser, a credential -- run here, on the workstation that has all of them, and
 what they find reaches the fix pass as a red default branch (`e2e_results.py` owns that
 half and says why it is a result file rather than this job's exit code).
 
-    e2e-pass.py run --due             # what `devkit-local-e2e` runs every half hour
+    e2e-pass.py run --due             # what `devkit-local-e2e` runs every half hour,
+                                      # after deploying what merged (`deploy_merged.py`)
     e2e-pass.py run [PROJECT ...]     # by hand: these, once the PC is idle
     e2e-pass.py run --no-wait devkit  # now, by hand, whoever is at the keyboard
     e2e-pass.py status                # each project's last result
@@ -80,6 +81,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import deploy_merged
 import devkit_project
 import e2e_results
 import job_claims
@@ -443,20 +445,23 @@ def run_due(
     args: argparse.Namespace,
     seams: Seams | None = None,
     run_one: Callable[[str, Path, float, Seams | None], e2e_results.Result] = run_project,
+    deploy: Callable[[Path, list[str], Seams], object] = deploy_merged.deploy_all,
 ) -> int:
-    """What the scheduled job runs, every half hour: each project owed a run, for as long
-    as the PC stays idle.
+    """What the scheduled job runs, every half hour: what merged deployed, whoever is at
+    the PC (`deploy_merged.py`), then each project owed a run, for as long as the PC
+    stays idle.
 
     Nothing waits here. A PC in use is the next fire's, a half hour on, so a red is
     re-tested the first time its person steps away rather than the next night. Idle is
-    asked again before each project, and first of all, so a fire at a PC in use fetches
-    nothing.
+    asked again before each project, and before the first, so a fire at a PC in use
+    tests nothing.
     """
     seams = seams or Seams()
+    names = tested_here(workspace, registered(workspace), seams.host, seams.root)
+    deploy(workspace, names, seams)
     if seams.idle() < args.idle_minutes * 60.0:
         print("e2e-pass: the PC is in use; the next fire looks again")
         return 0
-    names = tested_here(workspace, registered(workspace), seams.host, seams.root)
     role = shared(workspace, seams)
     due = []
     tips: dict[str, str] = {}
