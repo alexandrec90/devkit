@@ -95,6 +95,7 @@ def test_origins_tip_is_deployed_from_a_tree_of_its_own_and_recorded(tmp_path):
     runner = Runner()
     result = _deploy(tmp_path, runner)
     assert result == dm.Deployed("tvshell", TIP, dm.PASSED, NOON.isoformat(timespec="seconds"))
+
     def verb(argv: list[str]) -> str:
         return argv[4] if argv[:1] == ["git"] else "contract"
 

@@ -538,9 +538,7 @@ def _role_run(tmp_path, role: str, disk=None, hosts=None):
         host="pc-a",
         disk=lambda: disk,
     )
-    code = e2e_pass.run_due(
-        workspace, _args(due=True), seams, run_one, deploy=lambda *_a: None
-    )
+    code = e2e_pass.run_due(workspace, _args(due=True), seams, run_one, deploy=lambda *_a: None)
     return code, ran, seams
 
 
