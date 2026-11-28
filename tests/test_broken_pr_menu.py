@@ -127,6 +127,58 @@ def test_a_rollup_shape_this_does_not_know_counts_as_zero(rollup):
     assert menu.failing_checks(rollup) == 0
 
 
+def check(name: str, conclusion: str, started: str, workflow: str = "PR Gate") -> dict:
+    return {
+        "__typename": "CheckRun",
+        "name": name,
+        "workflowName": workflow,
+        "conclusion": conclusion,
+        "startedAt": started,
+        "completedAt": started,
+    }
+
+
+def test_a_cancelled_run_superseded_by_a_green_one_is_not_failing():
+    """devkit #888: a run cancelled by `cancel-in-progress` stays in the rollup beside the
+    run that replaced it, and was sent to a fixer as "9 checks failing"."""
+    rollup = [
+        check("Lint", "CANCELLED", "2026-11-28T13:03:17Z"),
+        check("Lint", "SUCCESS", "2026-11-28T13:03:19Z"),
+        check("Tests", "SUCCESS", "2026-11-28T13:03:19Z"),
+        check("Tests", "CANCELLED", "2026-11-28T13:03:18Z"),
+    ]
+    assert menu.failing_checks(rollup) == 0
+    assert menu.broken_reason(pr(statusCheckRollup=rollup)) == ""
+
+
+def test_the_newest_run_of_a_check_decides_even_when_it_is_red():
+    rollup = [
+        check("Lint", "SUCCESS", "2026-11-28T13:03:17Z"),
+        check("Lint", "FAILURE", "2026-11-28T13:03:19Z"),
+    ]
+    assert menu.failing_checks(rollup) == 1
+
+
+def test_the_same_job_name_in_two_workflows_is_two_checks():
+    rollup = [
+        check("Lint", "SUCCESS", "2026-11-28T13:03:19Z", workflow="PR Gate"),
+        check("Lint", "FAILURE", "2026-11-28T13:03:17Z", workflow="Nightly"),
+    ]
+    assert menu.failing_checks(rollup) == 1
+
+
+def test_current_checks_keeps_the_newest_run_and_every_unnamed_node():
+    newer = check("Lint", "SUCCESS", "2026-11-28T13:03:19Z")
+    legacy = {"state": "SUCCESS"}
+    rollup = [check("Lint", "CANCELLED", "2026-11-28T13:03:17Z"), None, legacy, newer]
+    assert menu.current_checks(rollup) == [legacy, newer]
+
+
+def test_unnamed_nodes_are_each_counted():
+    rollup = [{"conclusion": "FAILURE"}, {"conclusion": "FAILURE"}, {"state": "ERROR"}]
+    assert menu.failing_checks(rollup) == 3
+
+
 # --- the source ------------------------------------------------------------------
 
 
