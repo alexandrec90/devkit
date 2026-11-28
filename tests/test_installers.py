@@ -18,6 +18,16 @@ from support import REPO_ROOT, load_script
 installers = load_script("scripts/installers.py")
 
 WHEN = _dt.datetime(2026, 9, 8, 8, 45)
+# What ships, read before `nothing_retired` empties it for every test.
+SHIPPED_RETIRED = dict(installers.RETIRED)
+
+
+@pytest.fixture(autouse=True)
+def nothing_retired(monkeypatch):
+    """`main` also deletes every `RETIRED` job still registered, through the real
+    `schtasks`: off here, so no test deletes a task on the PC it runs on. The tests of
+    `retire` name their own."""
+    monkeypatch.setattr(installers, "RETIRED", {})
 
 
 def a_checkout(root: Path, *names: str) -> Path:
@@ -306,6 +316,60 @@ def test_the_interpreter_is_the_console_one_beside_this_process(tmp_path, monkey
     runner = Answers({"install-a.py": 0})
     installers.reconcile(root, False, {}, runner)
     assert runner.calls[0][0] == r"C:\py\python.exe"
+
+
+class Scheduler:
+    """A `schtasks` that has the tasks `registered`, and deletes them unless `refuses`."""
+
+    def __init__(self, registered: set[str], refuses: bool = False):
+        self.registered, self.refuses = set(registered), refuses
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        verb, name = argv[1], argv[3]
+        if verb == "/Query":
+            code = 0 if name in self.registered else 1
+        elif verb == "/Delete":
+            code = 1 if self.refuses else 0
+            if not self.refuses:
+                self.registered.discard(name)
+        else:
+            code = 0
+        return subprocess.CompletedProcess(list(argv), code, "", "Access is denied." * code)
+
+
+def test_a_retired_job_still_registered_is_ended_and_deleted_by_maintain(monkeypatch):
+    """Deleting `install-tray.py` left `devkit-tray` registered on every PC, firing at a
+    `tray.py` that is gone at every logon."""
+    monkeypatch.setattr(installers, "RETIRED", {"devkit-tray": "replaced", "devkit-gone": "x"})
+    scheduler = Scheduler({"devkit-tray"})
+    [outcome] = installers.retire(True, scheduler)
+    assert (outcome.installer, outcome.verdict) == ("devkit-tray", installers.REMOVED)
+    assert ["schtasks", "/End", "/TN", "devkit-tray"] in scheduler.calls
+    assert scheduler.registered == set()
+    assert installers.retire(True, scheduler) == [], "safe to run again"
+
+
+def test_status_names_a_retired_job_and_deletes_nothing(monkeypatch):
+    monkeypatch.setattr(installers, "RETIRED", {"devkit-tray": "replaced"})
+    scheduler = Scheduler({"devkit-tray"})
+    [outcome] = installers.retire(False, scheduler)
+    assert outcome.verdict == installers.STALE and "replaced" in outcome.detail
+    assert [argv[1] for argv in scheduler.calls] == ["/Query"]
+
+
+def test_a_refused_delete_is_a_failure_naming_why(monkeypatch):
+    monkeypatch.setattr(installers, "RETIRED", {"devkit-tray": "replaced"})
+    [outcome] = installers.retire(True, Scheduler({"devkit-tray"}, refuses=True))
+    assert outcome.verdict == installers.FAILED and "Access is denied." in outcome.detail
+    assert installers.exit_code([outcome]) == 2
+
+
+def test_the_tray_is_retired():
+    """Its installer and scripts are gone; the task they registered is this list's."""
+    assert "devkit-tray" in SHIPPED_RETIRED
+    assert not (REPO_ROOT / "scripts" / "install-tray.py").exists()
 
 
 def test_a_ledger_name_no_installer_registers_is_reported(tmp_path):

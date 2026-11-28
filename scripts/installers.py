@@ -43,6 +43,10 @@ checkout it runs from; `maintain` is what the scheduler runs. The static checkou
 `logs/installers.log` is rewritten by every `maintain`, on a clean one too, so its mtime
 says the job is alive -- and by nothing else (`artifact_root`).
 
+**A job devkit stopped shipping is deleted here too** (`RETIRED`): removing its installer
+leaves the task registered and firing at a missing script, and nothing else would ever
+unregister it.
+
 **`uninstall` is the way back off a machine**, and it is the mode
 `devkit_project.py --project devkit installers uninstall` drives. Dry until `--yes`, and safe to run twice: every
 installer reports a thing that was already gone as removed rather than as a failure, so
@@ -91,6 +95,14 @@ INSTALLER_GLOB = "scripts/install-*.py"
 # `uninstall` could only refuse it. A person installs it by choice; its own `--check` says
 # how it stands, and `fix_elevated.py` asks only when a request is waiting on a PC with none.
 HELD_OUT = frozenset({"install-elevated-worker.py"})
+
+# Jobs devkit no longer ships, by task name, with what replaced each. Deleting an
+# installer leaves its task registered, firing at a script that is gone -- a failure
+# every run, on every PC that ever installed it -- so `maintain` ends and deletes each one
+# still registered, and `status` names it.
+RETIRED: dict[str, str] = {
+    "devkit-tray": "replaced by devkit's dashboard (scripts/devkit_dashboard.py)",
+}
 
 # Per installer. Generous because `install-git-policy.py --yes` reads a tag out of git
 # and the docker installers may wait on `schtasks` behind a busy scheduler; still finite,
@@ -345,6 +357,28 @@ def decommission(
     ]
 
 
+def retire(apply: bool, runner: Runner | None = None) -> list[Outcome]:
+    """An outcome per `RETIRED` job still registered here: deleted under `apply`, else
+    `STALE` saying `maintain` deletes it. A job not registered says nothing."""
+    spawn = runner or run_command
+    found = []
+    for name, why in RETIRED.items():
+        if spawn(["schtasks", "/Query", "/TN", name]).returncode != 0:
+            continue
+        if not apply:
+            found.append(Outcome(name, STALE, f"retired, still registered: {why}"))
+            continue
+        spawn(["schtasks", "/End", "/TN", name])
+        done = spawn(devkit_schtasks.delete_argv(name))
+        said = (done.stderr or done.stdout or "").strip()
+        found.append(
+            Outcome(name, REMOVED, f"retired and deleted: {why}")
+            if done.returncode == 0
+            else Outcome(name, FAILED, f"retired, but the delete failed: {said or 'no output'}")
+        )
+    return found
+
+
 def stood_down_without_installer(names: frozenset[str], root: Path) -> list[str]:
     """Ledger entries no installer here registers -- a job renamed or retired after it
     was stood down, which nothing else would ever mention again."""
@@ -462,6 +496,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         outcomes = decommission(root, args.yes and not args.dry_run, options, only=only)
     else:
         outcomes = reconcile(root, args.mode == "maintain", options, only=only)
+        outcomes += retire(args.mode == "maintain") if not only else []
     orphans = stood_down_without_installer(harness_state.stood_down(), root)
     text = render(outcomes, orphans, _dt.datetime.now(), args.mode)
     write_artifact(text, artifact_root(args.mode, devkit, root))

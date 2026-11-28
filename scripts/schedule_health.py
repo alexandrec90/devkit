@@ -44,8 +44,8 @@ know that reconcile is every 15 minutes and the upgrade is daily. Adding a fourt
 needs no edit.
 
 Windows-only by nature (`schtasks`), and silent everywhere else -- same contract as
-`workspace-status.py`, which is what surfaces this: the tray, on every poll, and the
-daily `devkit-workspace-status` pass, which toasts when there is something to say. It
+`workspace-status.py`, which is what surfaces this: devkit's dashboard
+(`devkit_dashboard.py`), on every read, and the daily `devkit-workspace-status` pass, which toasts when there is something to say. It
 used to say "at session start" here, and in five other files; nothing ever ran it there.
 
 Tested in `tests/test_schedule_health.py`.
@@ -78,10 +78,10 @@ PREFIX = "devkit-"
 
 # This module's one spawn has to be console-less, and for a reason that only arrived
 # with a second caller. Session start runs it from a terminal, where a flashed console
-# is invisible among the output; `tray.py` runs it from a task registered under
-# `pythonw.exe`, on a timer, forever -- and Windows gives a brand new console window to
-# every console child of a console-less parent. Without this the tray would open a black
-# window every poll, which is the exact regression `tests/test_scheduled_jobs.py`
+# is invisible among the output; the scheduled passes and devkit's dashboard run it under
+# `pythonw.exe` or a windowless gateway -- and Windows gives a brand new console window to
+# every console child of a console-less parent. Without this each would open a black
+# window every read, which is the exact regression `tests/test_scheduled_jobs.py`
 # documents twice. Zero off Windows, where the flag does not exist.
 NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -102,8 +102,8 @@ NEVER_RUN_DATE = _dt.date(1999, 11, 30)
 SCHED_S_TASK_HAS_NOT_RUN = 267011  # 0x00041303
 SCHED_S_TASK_RUNNING = 267009  # 0x00041301
 # How a run ended from outside reads: `/End`, a sign-out, the time limit. For a resident
-# job -- every trigger an event, running until something stops it, as `devkit-tray`
-# does -- that is how every run ends, so it is no failure there (23f4ee82). A clocked
+# job -- every trigger an event, running until something stops it, as the retired
+# `devkit-tray` did -- that is how every run ends, so it is no failure there (23f4ee82). A clocked
 # job is ended that way by its own time limit, which is a hung run and stays one.
 SCHED_S_TASK_TERMINATED = 267014  # 0x00041306
 # The same end seen from the process: a sign-out or shutdown closes a resident job's
@@ -138,9 +138,6 @@ NOT_A_FAILURE = frozenset({0, SCHED_S_TASK_HAS_NOT_RUN, SCHED_S_TASK_RUNNING}) |
 # `devkit-medium-tier` is the same by design: a pass works through every project origin
 # moved past, for up to `tier-pass.DEFAULT_PASS_MINUTES`, on a 15-minute cadence, and the
 # next pass reads every tip again (74329698 filed its 12:15 skip as a defect).
-# `devkit-tray` is resident: `installers.py maintain` starts a tray that died
-# (`install-tray.py`, 4e6fe3ae), so the logon trigger can fire beside one already
-# running, and the second start it is refused is the one tray working.
 # `devkit-fix-trigger` is the ship task's shape again, and `devkit-local-e2e` the medium
 # tier's: a run lasts up to an hour a project on a half-hourly cadence.
 # `devkit-dashboards` is resident with a 15-minute repetition that exists only to restart
@@ -149,7 +146,6 @@ OVERLAP_EXPECTED = frozenset(
     {
         "devkit-ship",
         "devkit-medium-tier",
-        "devkit-tray",
         "devkit-dashboards",
         "devkit-fix-trigger",
         "devkit-local-e2e",
@@ -207,7 +203,6 @@ ARTIFACTS: dict[str, str] = {
     "devkit-global-tools": "logs/global-tools.log",
     "devkit-rc-servers": "logs/rc-servers.log",
     "devkit-reap-stale": "logs/reap-stale.log",
-    "devkit-tray": "logs/tray.log",
     "devkit-workspace-status": "logs/scheduled-workspace-status.log",
     "devkit-installers": "logs/installers.log",
     "devkit-fix-pass": "logs/fix-pass.log",
@@ -382,7 +377,7 @@ class Job:
     # first run not yet made is the event not yet happened, not a run missed.
     event_only: bool = False
     # The scheduler's `Status` column as written (`Running`, `Ready`), or "" when the
-    # query did not carry it. Only a resident job's installer asks it (`install-tray.py`).
+    # query did not carry it. devkit's dashboard shows it (`devkit_dashboard.job_view`).
     status: str = ""
 
     @property
@@ -452,7 +447,7 @@ def parse_time(raw: str) -> _dt.datetime | None:
 def parse_tasks(stdout: str, prefix: str = PREFIX, also: frozenset[str] = frozenset()) -> list[Job]:
     """Every `prefix` job in `schtasks /Query /FO CSV /V` output, plus any named in `also`.
 
-    `also` is how the tray asks about the scheduled collectors in the same query: they
+    `also` is how devkit's dashboard asks about the scheduled collectors in the same query: they
     are named after their project, not `devkit-`, because they are not devkit's jobs --
     which is also why `report`, and the fix pass behind it, never pass it.
 
@@ -586,7 +581,7 @@ def problems(
     own kept copy, because the hint stat'ed the tree's empty `logs/`.
 
     `artifacts` replaces `ARTIFACTS` for the pointers, for a caller judging jobs that
-    table does not list -- the tray's scheduled collectors.
+    table does not list -- the dashboard's scheduled collectors.
 
     `awake`, when the machine last booted or woke in the scheduler's local time
     (`awake_local`), excuses an overlap that is its catch-up (`catching_up`).
@@ -606,7 +601,7 @@ def overlaps(job: Job) -> bool:
 
     Not for `OVERLAP_EXPECTED`, nor for a resident job -- every trigger an event -- which
     runs until something ends it, so a second start refused is the one running working,
-    as `devkit-tray`'s is: data-lake's pool restarts on a called-off shutdown, which
+    as the retired `devkit-tray`'s was: data-lake's pool restarts on a called-off shutdown, which
     mostly finds it still up (68357ee3).
     """
     return (

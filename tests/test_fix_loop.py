@@ -46,7 +46,7 @@ def ctx(tmp_path, monkeypatch):
     )
     # And its collectors: this machine's assignment, and a `docker ps` to judge it by.
     monkeypatch.setattr(fix_loop.collectors, "scheduled_tasks", lambda *a, **k: {})
-    monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda *a, **k: [])
+    monkeypatch.setattr(fix_loop.collectors, "status_rows", lambda *a, **k: [])
     monkeypatch.setattr(
         fix_loop.fix_verify, "verify", lambda *a, **k: fix_loop.fix_verify.Outcome()
     )
@@ -794,7 +794,7 @@ def test_a_tree_with_a_session_at_work_is_named_for_the_record(ctx, monkeypatch)
 
 
 def test_person_steps_name_each_awaited_step_and_owed_counts_the_rest(ctx):
-    """The tray's red rows and its fixers row (`tray_state.fix_pass_states`): a person's
+    """The dashboard's alerts and its fixers verdict (`devkit_dashboard.passes_view`): a person's
     step is owed to the person, every other open group to a fixer."""
     row = login_row(NOW - _dt.timedelta(hours=3))
     seed(ctx, row, f"{NOW.isoformat()}\tevent=fix-pass-finding\tproject=devkit\tdetail=x")
@@ -1740,7 +1740,7 @@ def test_only_a_health_row_is_weighed_against_its_verdict(ctx):
 
 def test_the_read_back_reads_the_verdicts_the_rows_were_drawn_from(ctx, monkeypatch):
     row, made = _resolved_collector(ctx)
-    monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda root: [row])
+    monkeypatch.setattr(fix_loop.collectors, "status_rows", lambda root: [row])
     monkeypatch.setenv("DEVKIT_DIR", str(ctx.devkit_dir))
     record = {"ibkr_trader": {"ok": False, fix_loop.collectors.CODE_AT: made - 86400}}
     path = ctx.devkit_dir / fix_loop.collectors.HEALTH
@@ -1751,7 +1751,7 @@ def test_the_read_back_reads_the_verdicts_the_rows_were_drawn_from(ctx, monkeypa
 
 def test_the_read_back_files_a_failing_collector(ctx, monkeypatch):
     row = ("collector: ibkr_trader", fix_loop.collectors.WARN, _IBKR_HEALTH)
-    monkeypatch.setattr(fix_loop.collectors, "tray_rows", lambda root: [row])
+    monkeypatch.setattr(fix_loop.collectors, "status_rows", lambda root: [row])
     journal = fix_findings.Journal(ctx.devkit_dir)
     fix_loop.close(ctx, journal)
     assert [f.project for f in journal.findings if f.kind == fix_loop.COLLECTOR_KIND] == [
