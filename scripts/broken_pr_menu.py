@@ -116,14 +116,45 @@ def failing_checks(rollup: object) -> int:
     if not isinstance(rollup, list):
         return 0
     failed = 0
-    for node in rollup:
-        if not isinstance(node, dict):
-            continue
+    for node in current_checks(rollup):
         if str(node.get("conclusion") or "").upper() in FAILED_CONCLUSIONS:
             failed += 1
         elif str(node.get("state") or "").upper() in FAILED_STATES:
             failed += 1
     return failed
+
+
+def current_checks(rollup: list) -> list[dict]:
+    """The rollup's dict nodes, with each named check run kept at its newest run only.
+
+    The rollup holds every run of a check at the head commit, not just the latest: a
+    second push of the same sha, or a `pull_request` event GitHub fires twice, starts a
+    run that `concurrency: cancel-in-progress` cancels, and its `CANCELLED` jobs stay in
+    the rollup beside the green run that replaced them. Counted as red, devkit #888 --
+    every job passing in its newest run -- went to a fixer as "9 checks failing". A
+    check run is identified by its workflow and job name, and the newest is the one that
+    started last (`startedAt`, then `completedAt`). A node with no name -- a legacy status
+    context, or a shape a future API adds -- is kept as it is.
+    """
+    newest: dict[tuple[str, str], dict] = {}
+    kept: list[dict] = []
+    for node in rollup:
+        if not isinstance(node, dict):
+            continue
+        name = node.get("name")
+        if not isinstance(name, str) or not name:
+            kept.append(node)
+            continue
+        key = (str(node.get("workflowName") or ""), name)
+        held = newest.get(key)
+        if held is None or _started(node) >= _started(held):
+            newest[key] = node
+    return kept + list(newest.values())
+
+
+def _started(node: dict) -> tuple[str, str]:
+    """When a check run started and finished, as ISO strings that sort as times do."""
+    return (str(node.get("startedAt") or ""), str(node.get("completedAt") or ""))
 
 
 def broken_reason(pr: dict) -> str:
