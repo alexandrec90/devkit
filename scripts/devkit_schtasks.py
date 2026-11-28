@@ -213,7 +213,7 @@ def logon_trigger(delay: str = "PT30S") -> str:
     """A trigger that fires when the user logs on.
 
     For the jobs whose subject is a *desktop* rather than the machine -- anything that
-    puts a window or a local server in front of someone -- and for closing the gap after a
+    puts a window or a tray icon in front of someone -- and for closing the gap after a
     restart: the next repetition of a repeating job can be a full interval away, and every
     job here runs with the interactive token, so logon is the first moment it could run.
 

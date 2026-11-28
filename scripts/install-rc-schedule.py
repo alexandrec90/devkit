@@ -162,7 +162,8 @@ def task_document(schedule: Schedule) -> str:
     """
     program, *arguments = schedule.command
     # `PureWindowsPath`, not `Path`: the document is Windows by construction, so it has to
-    # be split on backslashes whatever host builds it.
+    # be split on backslashes whatever host builds it -- see the same line in
+    # `install-tray.py`.
     root = str(PureWindowsPath(schedule.script).parent.parent)
     return devkit_schtasks.task_xml(
         program,

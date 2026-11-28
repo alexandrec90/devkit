@@ -108,7 +108,7 @@ MAX_LINES_PER_FAILURE = 25
 PYTEST_NO_TESTS_COLLECTED = 5
 
 # The tests that hold every module to a contract -- has a test module, is checked where
-# a scheduled job reaches it, registers what it installs, cites paths that exist -- so no
+# a scheduled job reaches it, is watched by the tray, cites paths that exist -- so no
 # changed file's name maps to them, and a run of "the tests for what changed" skipped
 # exactly the ones a new import or a new script breaks. #467 added an import to
 # fix-pass.py, ran its targeted tests green, and needed a second fixer for
@@ -128,6 +128,7 @@ PYTEST_NO_TESTS_COLLECTED = 5
 CONTRACT_TESTS = (
     "tests/test_test_contract.py",
     "tests/test_scheduled_jobs.py",
+    "tests/test_install_tray.py",
     "tests/test_self_hosting.py",
     "tests/test_doc_claims.py",
     "tests/test_installer_contract.py",

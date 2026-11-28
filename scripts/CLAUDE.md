@@ -238,7 +238,7 @@ either. **And every job's arguments go through `devkit_schtasks.logged`**, which
 them under `log-wrap.py --always` -- a runner that writes its own artifact included,
 because that artifact is overwritten by the next run and the wrapper's ledger event is
 not. Its label must not slug to the runner's own artifact. The exemptions -- the
-resident dashboard gateway, the fix pass, whose runner files its own, and the elevated worker -- are
+resident tray, the fix pass, whose runner files its own, and the elevated worker -- are
 `OFF_THE_LEDGER` in `tests/test_installer_contract.py`, each with its reason.
 
 **An installer is driven, not remembered.** `scripts/installers.py` runs every

@@ -57,10 +57,9 @@ checkout holds is not something a 15-minute timer should do. Without it a fix me
 the project never reached the container its health check runs in, so ibkr_trader's
 collector finding came back after every merged fix (51cca249) -- the image was a day old.
 
-`status_rows` is the status half, which devkit's dashboard (`devkit_dashboard.py`) and the
-fix pass read: one live `docker ps` per read, plus the last verdict of each project's own
-`health` command, which the pass records because running it takes a process inside the
-container and the dashboard reads every minute it is open.
+`tray_rows` is the tray's half: one live `docker ps` per poll, plus the last verdict of
+each project's own `health` command, which the pass records because running it takes a
+process inside the container and the tray polls every two minutes.
 """
 
 from __future__ import annotations
@@ -159,7 +158,7 @@ PS_FORMAT = (
 
 # Seconds. `up` is long because the first one on a machine builds the image.
 PS_TIMEOUT = 30
-STATUS_PS_TIMEOUT = 15
+TRAY_PS_TIMEOUT = 15
 UP_TIMEOUT = 1800
 STOP_TIMEOUT = 120
 HEALTH_TIMEOUT = 120
@@ -211,7 +210,7 @@ SCHEDULED_MOVE_BOUND = (
 # it (`follow_handoffs`): two of its passes, 15 minutes apart, and the restore.
 HANDOFF_GRACE = 2 * 15 * 60 + PICKUP_BOUND
 # What `move` writes into `PASS_LOCK` beside `{started_at, until}`: who holds it and for
-# which collectors, so the status rows stay green for the hour a move stops them
+# which collectors, so the tray keeps those rows green for the hour a move stops them
 # (`move_holding`), and a scheduled collector's fire runs nothing meanwhile (`fire`). A
 # pass writes neither; `IN_PASS` speaks for it.
 HOLDER, PROJECTS = "holder", "projects"
@@ -269,8 +268,10 @@ WSL_STUCK = ("STOP_PENDING", "START_PENDING")
 # Its step is marked `PERSON_STEP`, so its ledger group awaits the person rather than a
 # fixer, whose unelevated session cannot restart a service (aa6a9022).
 WSL_PROBE_TIMEOUT = 60
-# `harness_triage.PERSON_STEP`, which a test holds this to. Taken from `collector_tasks`,
-# which spells it for its own reason, rather than imported from `harness_triage`.
+# `harness_triage.PERSON_STEP`, which a test holds this to. Taken from `collector_tasks`
+# rather than imported from `harness_triage`: the resident tray imports this module, and
+# `install-tray.TRAY_MODULES` would have to watch `harness_triage` and everything it
+# imports for edits.
 PERSON_STEP = collector_tasks.PERSON_STEP
 WSL_HUNG = (
     f"docker is not answering: WSL itself does not answer (`wsl --list` ran past "
@@ -312,8 +313,8 @@ HOLD_SINCE = "hold_since"
 # passes every 15 left no pass that found nothing in flight (0c428d0e).
 BUSY_HOLD = 10 * 60
 
-# A status row's three levels, spelled as `devkit_dashboard` spells them. Not imported
-# from there: it imports this module, and `test_devkit_dashboard.py` pins the two together.
+# The tray's three levels, spelled as `tray_state` spells them. Not imported from there:
+# `tray_state` imports this module, and `test_collectors.py` pins the two to each other.
 OK, WARN, FAIL = "ok", "warn", "fail"
 ROW_PREFIX = "collector: "
 # A row's state when the project's own verdict is the failing part.
@@ -492,7 +493,7 @@ class WslProbes:
 class Docker(WslProbes):
     """Everything that touches the engine: one captured, window-less spawn per call.
     `restarts` is where `revive_engine` records a restart of Docker Desktop; None, as
-    for a status read, makes none. `holds` names the runs a restart would cut short now
+    for the tray, makes none. `holds` names the runs a restart would cut short now
     (`scheduled_in_flight`); None holds it for nothing."""
 
     def __init__(
@@ -791,7 +792,7 @@ def check_health(
     clock: float | None = None,
 ) -> dict:
     """Run the project's own health command; the verdict is theirs, so it is not a failure
-    of this job -- its status row is amber rather than turning the job red. A failing one
+    of this job -- the tray shows it amber rather than turning the job red. A failing one
     that says a name could not be looked up carries `UNRESOLVED_SINCE`, from `last` (the
     project's previous record) while it went on saying so, else `clock`."""
     code, out = docker.health(box, target.collector.health)
@@ -977,7 +978,7 @@ def keep_running(
     code = redeploy(target, box, docker, git or Git(), report, last)
     if code.pop("deployed", False):
         # As on a start: the container is seconds old and its verdict would be noise. The
-        # record holds no `ok`, so the status row is green until it has settled.
+        # record holds no `ok`, so the tray shows the row green until it has settled.
         return {**code, STARTED_AT: clock}
     if not target.collector.health:
         return code or None
@@ -1514,7 +1515,7 @@ def take_lock(path: Path, until: float, clock: float, extra: dict | None = None)
 
 def move_holding(path: Path, clock: float) -> dict[str, str]:
     """`{project: holder}` for each collector a live `move` holds `PASS_LOCK` for; {}
-    while a pass holds it, or nothing does. The status rows' reason to keep a collector `move`
+    while a pass holds it, or nothing does. The tray's reason to keep a collector `move`
     stopped for its export green (`holding`)."""
     if lock_holder(path, clock) is None:
         return {}
@@ -1708,7 +1709,7 @@ def move_one(collector: config.Collector, dest: str, here: Here) -> None:
     `PASS_LOCK` is held throughout, waited for as a verb waits for it: a scheduled pass
     meanwhile stands down rather than restarting the service or re-registering the task
     under the dump. The lock names this move and the collector (`move_holding`), so the
-    status row stays green and a scheduled collector's fire runs nothing (`fire`)."""
+    tray keeps its row green and a scheduled collector's fire runs nothing (`fire`)."""
     name = collector.project
     checkout = here.checkout(collector)
     holder = {HOLDER: f"`collectors.py move` to {dest}", PROJECTS: [name]}
@@ -1987,7 +1988,7 @@ def handoff_status(
                 )
 
 
-# --- the status half ------------------------------------------------------------
+# --- the tray's half --------------------------------------------------------------
 
 
 def row(
@@ -2035,7 +2036,7 @@ def down_row(box: Container | None, busy: bool, held: str = "") -> tuple[str, st
 def holding(target: Target, moving: dict[str, str], sent: dict[str, dict]) -> str:
     """`row`'s `held` for `target`: for a `run` one, the `move` exporting it (`moving`,
     `move_holding`); for a `stop` one, the machine this one handed it to (`sent`,
-    `handoff.OUTGOING`). Local files only -- a status read asks the store nothing."""
+    `handoff.OUTGOING`). Local files only -- the tray asks the store nothing."""
     if target.mode == config.RUN:
         return moving.get(target.collector.project, "")
     record = sent.get(target.collector.project)
@@ -2058,12 +2059,12 @@ def assigned(root: Path = REPO_ROOT) -> tuple[list[config.Collector], list[Targe
 def scheduled_tasks(root: Path = REPO_ROOT) -> dict[str, str]:
     """`{task name: its log}` for each scheduled collector this machine runs.
 
-    devkit's dashboard asks the scheduler about these beside devkit's own jobs, in one query,
+    The tray asks the scheduler about these beside devkit's own jobs, in the same query,
     and judges them the same way (`schedule_health.problems`). A `stop` one is not here:
-    its task is deleted, and `status_rows` reports it. Nor is one a live `move` holds
+    its task is deleted, and `tray_rows` reports it. Nor is one a live `move` holds
     (`move_holding`): its task is deleted for the export while the assignment is still
-    `run`, and a task missing then is the move at work, not a defect for the dashboard to show
-    red or the fix pass to file (`fix_loop.unscheduled`). `status_rows` reports that too.
+    `run`, and a task missing then is the move at work, not a defect for the tray to show
+    red or the fix pass to file (`fix_loop.unscheduled`). `tray_rows` reports that too.
     """
     _collectors, chosen = assigned(root)
     if not any(t.collector.scheduled and t.mode == config.RUN for t in chosen):
@@ -2078,7 +2079,7 @@ def scheduled_tasks(root: Path = REPO_ROOT) -> dict[str, str]:
     }
 
 
-def status_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tuple[str, str, str]]:
+def tray_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tuple[str, str, str]]:
     """`(row name, level, detail)` per collector assigned to this machine, except the
     scheduled ones it runs, which are scheduler rows (`scheduled_tasks`) unless a `move`
     holds one (`scheduled_row`). Never raises.
@@ -2106,7 +2107,7 @@ def status_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tu
     sent = handoff.load_outgoing(base / handoff.OUTGOING)
     moving = move_holding(base / PASS_LOCK, clock)
     if chosen:
-        containers = (docker or Docker(STATUS_PS_TIMEOUT)).ps()
+        containers = (docker or Docker(TRAY_PS_TIMEOUT)).ps()
         health = load_health(base / HEALTH)
         busy = in_pass(base / IN_PASS, clock)
         rows += [
@@ -2124,7 +2125,7 @@ def status_rows(root: Path = REPO_ROOT, docker: Docker | None = None) -> list[tu
 
 
 def scheduled_row(target: Target, held: str) -> tuple[str, str, str]:
-    """`status_rows`' row for a scheduled collector that is no scheduler row: a `stop` one,
+    """`tray_rows`' row for a scheduled collector that is no scheduler row: a `stop` one,
     green, saying where it was handed off to if it was; and a `run` one a `move` holds,
     whose task that move removed for the export (`scheduled_tasks`) -- green, as `row`
     keeps a container a move stopped."""

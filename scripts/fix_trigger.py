@@ -231,7 +231,7 @@ def move_green(repos: dict[str, dict], run: Run = sweep.run_bounded) -> list[str
 
 def ready_signals(slug: str, repo: dict) -> set[str]:
     """devkit's newest passing commit: what `fix_release.cut_release` waits for, and what
-    the pass brings this machine's own copy, jobs and dashboard up to."""
+    the pass brings this machine's own copy, jobs and tray up to."""
     said = judged(repo)
     return {f"ready:{slug}@{said[0][0][:12]}"} if said and said[0][1] else set()
 
