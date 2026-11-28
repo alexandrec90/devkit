@@ -406,8 +406,6 @@ ALLOWED_MISSING = {
     "DEVKIT_FILES.json": "the receipt `--pull` writes in a *consumer*; devkit is the "
     "source, so it has none",
     "known-fixes.md": "a consumer's project-owned sibling that retirement must not delete",
-    "scripts/deploy.py": "the optional install contract `deploy_merged.py` runs in a "
-    "consumer (tvshell's); devkit installs nothing, so it has none",
     "writing-conventions.md": "an illustrative filename in the progressive-disclosure "
     "example, not a file",
     "pyvenv.cfg": "the file that makes a directory a virtualenv, named as the thing "
