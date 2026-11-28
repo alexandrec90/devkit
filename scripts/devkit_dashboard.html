@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>devkit</title>
+<!-- Served by scripts/devkit_dashboard.py, which explains every number on it. -->
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f6f6f4; --surface-1: #ffffff; --surface-2: #f0f0ee; --line: #e2e2de;
+  --text-primary: #191919; --text-secondary: #666666; --text-tertiary: #8a8a86;
+  --series-1: #257de0; --series-2: #f47230; --series-3: #00b894;
+  --good: #0aac23; --warning: #fbb315; --critical: #dc3c3d;
+  --good-ink: #006c10; --warning-ink: #8a5a00; --critical-ink: #b3261e;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface-0: #111111; --surface-1: #191919; --surface-2: #222222; --line: #2e2e2e;
+    --text-primary: #efefef; --text-secondary: #9c9c9c; --text-tertiary: #767676;
+    --series-1: #338ced; --series-2: #e76624; --series-3: #00a888;
+    --good-ink: #5fd370; --warning-ink: #fbc54a; --critical-ink: #f08080;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 14px; padding: 18px 28px;
+  border-bottom: 1px solid var(--line); background: var(--surface-1); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+header .meta { color: var(--text-secondary); font-size: 13px; }
+header button { margin-left: auto; font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--text-primary); cursor: pointer; }
+main { max-width: 1320px; margin: 0 auto; padding: 22px 28px 60px; }
+section { margin-top: 30px; }
+h2 { font-size: 15px; margin: 0 0 4px; font-weight: 650; }
+.sub { color: var(--text-secondary); font-size: 13px; margin: 0 0 12px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; border: 1px solid var(--line); background: var(--surface-2); white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.ok .dot { background: var(--good); } .warn .dot { background: var(--warning); } .fail .dot { background: var(--critical); }
+.ok { color: var(--good-ink); } .warn { color: var(--warning-ink); } .fail { color: var(--critical-ink); }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.tile { background: var(--surface-1); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.tile .k { color: var(--text-secondary); font-size: 12px; }
+.tile .v { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.tile .n { color: var(--text-tertiary); font-size: 12px; margin-top: 2px; }
+.alerts { display: grid; gap: 8px; margin-top: 18px; }
+.alert { background: var(--surface-1); border: 1px solid var(--line); border-left: 4px solid var(--critical);
+  border-radius: 8px; padding: 10px 14px; }
+.alert.warn { border-left-color: var(--warning); }
+.alert .what { color: var(--text-primary); }
+.alert code { font-family: var(--mono); font-size: 12px; color: var(--text-secondary); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+.card { background: var(--surface-1); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; overflow: hidden; }
+.card h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.legend { display: flex; gap: 14px; color: var(--text-secondary); font-size: 12px; margin: 4px 0 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+svg text { fill: var(--text-tertiary); font-size: 10px; }
+.tablewrap { background: var(--surface-1); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-weight: 600; color: var(--text-secondary); font-size: 12px; padding: 9px 12px;
+  border-bottom: 1px solid var(--line); background: var(--surface-2); white-space: nowrap; }
+td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.when { white-space: nowrap; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+td.wrap { max-width: 520px; }
+.muted { color: var(--text-tertiary); }
+.mono { font-family: var(--mono); font-size: 12px; }
+tr.job { cursor: pointer; } tr.job:hover td { background: var(--surface-2); }
+tr.more td { background: var(--surface-2); padding: 12px 16px; }
+.runs { display: flex; gap: 3px; align-items: flex-end; height: 26px; }
+.runs span { width: 7px; border-radius: 2px 2px 0 0; background: var(--series-1); min-height: 3px; }
+.runs span.bad { background: var(--critical); }
+.chip { display: inline-block; padding: 0 7px; border-radius: 4px; background: var(--surface-2);
+  border: 1px solid var(--line); font-size: 11px; color: var(--text-secondary); margin: 1px 4px 1px 0; white-space: nowrap; }
+.tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.tabs button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }
+.tabs button.on { background: var(--surface-2); color: var(--text-primary); font-weight: 600; }
+.error { color: var(--critical-ink); font-size: 13px; padding: 10px 0; }
+#tip { position: fixed; pointer-events: none; background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.12);
+  display: none; z-index: 5; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>devkit</h1>
+  <span id="overall" class="pill"><span class="dot"></span>loading</span>
+  <span class="meta" id="meta"></span>
+  <button id="refresh" type="button">Refresh now</button>
+</header>
+<main>
+  <div class="tiles" id="tiles"></div>
+  <div class="alerts" id="alerts"></div>
+
+  <section>
+    <h2>Fixers</h2>
+    <p class="sub">Sessions the fix pass dispatched, from their transcripts. Tokens are counted once per API response.</p>
+    <div class="grid2">
+      <div class="card"><h3>Tokens per day</h3>
+        <div class="legend"><span><i style="background:var(--series-1)"></i>output</span></div>
+        <div id="chart-output"></div></div>
+      <div class="card"><h3>Issues per day</h3>
+        <div class="legend"><span><i style="background:var(--series-2)"></i>registered</span><span><i style="background:var(--series-3)"></i>resolved</span></div>
+        <div id="chart-issues"></div></div>
+    </div>
+    <div class="tablewrap" style="margin-top:14px"><table id="fixers"></table></div>
+  </section>
+
+  <section>
+    <h2>Fix passes</h2>
+    <p class="sub" id="passes-sub"></p>
+    <div class="card" style="margin-bottom:14px"><h3>Passes and sends per day</h3>
+      <div class="legend"><span><i style="background:var(--series-1)"></i>passes</span><span><i style="background:var(--series-2)"></i>fixers sent</span></div>
+      <div id="chart-passes"></div></div>
+    <div class="tablewrap"><table id="passes"></table></div>
+  </section>
+
+  <section>
+    <h2>Issues</h2>
+    <p class="sub">The harness-events ledger: what was registered, what was resolved, and what is open now.</p>
+    <div class="tabs" id="issue-tabs"></div>
+    <div class="tablewrap"><table id="issues"></table></div>
+  </section>
+
+  <section>
+    <h2>Scheduled jobs</h2>
+    <p class="sub">The scheduler's view of every devkit job and collector on this machine. Click a row for its runs.</p>
+    <div class="tablewrap"><table id="jobs"></table></div>
+  </section>
+</main>
+<div id="tip"></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const LABEL = {ok: "healthy", warn: "attention", fail: "broken"};
+const pill = (state, text) => `<span class="pill ${esc(state)}"><span class="dot"></span>${esc(text ?? LABEL[state] ?? state)}</span>`;
+let open = new Set(), issueTab = "open", last = null;
+
+function n(v) {
+  v = Number(v) || 0;
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+  if (v >= 1e4) return (v / 1e3).toFixed(0) + "k";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "k";
+  return String(Math.round(v));
+}
+function bytes(v) {
+  v = Number(v) || 0;
+  if (v >= 1048576) return (v / 1048576).toFixed(1) + " MB";
+  if (v >= 1024) return (v / 1024).toFixed(1) + " KB";
+  return v + " B";
+}
+function dur(s) {
+  s = Number(s) || 0;
+  if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + String(Math.round(s % 60)).padStart(2, "0") + "s";
+  return Math.floor(s / 3600) + "h " + String(Math.round((s % 3600) / 60)).padStart(2, "0") + "m";
+}
+function ago(iso) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (isNaN(t)) return iso;
+  const s = (Date.now() - t) / 1000, future = s < 0, a = Math.abs(s);
+  const txt = a < 90 ? Math.round(a) + "s" : a < 5400 ? Math.round(a / 60) + "m" : a < 172800 ? Math.round(a / 3600) + "h" : Math.round(a / 86400) + "d";
+  return future ? "in " + txt : txt + " ago";
+}
+function when(iso) {
+  if (!iso) return '<span class="muted">—</span>';
+  const t = new Date(iso);
+  if (isNaN(t)) return esc(iso);
+  return `<span title="${esc(t.toLocaleString())}">${esc(t.toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}))}</span>`;
+}
+function errorOf(part) { return part && !Array.isArray(part) && part.error ? `<div class="error">Could not read this: ${esc(part.error)}</div>` : ""; }
+
+// One grouped bar chart over the day axis; hover shows each day's values.
+function bars(el, days, series, fmt = n) {
+  if (!days || !days.length) { el.innerHTML = '<div class="muted">no data</div>'; return; }
+  const W = el.clientWidth || 560, H = 150, padL = 34, padB = 18, padT = 6;
+  const max = Math.max(1, ...days.flatMap((d) => series.map((s) => d[s.key] || 0)));
+  const step = (W - padL) / days.length, group = Math.min(step - 4, 10 * series.length + 2 * (series.length - 1));
+  const bw = (group - 2 * (series.length - 1)) / series.length, y = (v) => padT + (H - padT - padB) * (1 - v / max);
+  let svg = `<svg width="${W}" height="${H}" role="img">`;
+  for (const f of [0, 0.5, 1]) {
+    const yy = y(max * f);
+    svg += `<line x1="${padL}" x2="${W}" y1="${yy}" y2="${yy}" stroke="var(--line)" />`;
+    svg += `<text x="${padL - 6}" y="${yy + 3}" text-anchor="end">${esc(fmt(max * f))}</text>`;
+  }
+  days.forEach((d, i) => {
+    const x0 = padL + i * step + (step - group) / 2;
+    series.forEach((s, j) => {
+      const v = d[s.key] || 0, top = y(v), h = Math.max(0, H - padB - top);
+      if (h > 0) svg += `<path d="M${x0 + j * (bw + 2)},${H - padB} v${-Math.max(h - 3, 0)} q0,-3 3,-3 h${Math.max(bw - 6, 0)} q3,0 3,3 v${Math.max(h - 3, 0)} z" fill="${s.color}" />`;
+    });
+    svg += `<rect x="${padL + i * step}" y="0" width="${step}" height="${H}" fill="transparent" data-i="${i}" />`;
+    if (i % Math.ceil(days.length / 7) === 0 || i === days.length - 1)
+      svg += `<text x="${padL + i * step + step / 2}" y="${H - 4}" text-anchor="middle">${esc(d.day.slice(5))}</text>`;
+  });
+  el.innerHTML = svg + "</svg>";
+  const tip = $("tip");
+  el.querySelectorAll("rect[data-i]").forEach((r) => {
+    r.addEventListener("mousemove", (e) => {
+      const d = days[+r.dataset.i];
+      tip.innerHTML = `<b>${esc(d.day)}</b><br>` + series.map((s) => `<span class="dot" style="background:${s.color}"></span> ${esc(s.label)}: ${esc(fmt(d[s.key] || 0))}`).join("<br>");
+      tip.style.display = "block"; tip.style.left = e.clientX + 12 + "px"; tip.style.top = e.clientY + 12 + "px";
+    });
+    r.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  });
+}
+
+function sum(rows, key) { return (rows || []).reduce((a, r) => a + (Number(r[key]) || 0), 0); }
+
+function renderTop(s) {
+  const o = $("overall");
+  o.className = "pill " + s.overall;
+  o.innerHTML = `<span class="dot"></span>${esc(LABEL[s.overall])}`;
+  $("meta").textContent = `${s.host} · read ${new Date(s.generated).toLocaleTimeString()}`;
+  document.title = `devkit — ${LABEL[s.overall]}`;
+  const fx = s.fixers?.days || [], lg = s.ledger?.days || [], jobs = Array.isArray(s.jobs) ? s.jobs : [];
+  const week = (rows) => (rows || []).slice(-7);
+  const bad = jobs.filter((j) => j.state !== "ok").length;
+  const tiles = [
+    ["Fixer sessions", sum(week(fx), "sessions"), "last 7 days"],
+    ["Output tokens", n(sum(week(fx), "output")), `${n(sum(week(fx), "input"))} input incl. cache, 7 days`],
+    ["Issues resolved", sum(week(lg), "resolved"), "last 7 days"],
+    ["Issues registered", sum(week(lg), "registered"), "last 7 days"],
+    ["Open on the ledger", s.ledger?.open_count ?? "—", Object.entries(s.ledger?.open_by_kind || {}).map(([k, v]) => `${v} ${k}`).join(", ") || "nothing open"],
+    ["Jobs needing attention", `${bad} / ${jobs.length}`, bad ? jobs.filter((j) => j.state !== "ok").map((j) => j.name).slice(0, 3).join(", ") : "all healthy"],
+  ];
+  $("tiles").innerHTML = tiles.map(([k, v, note]) => `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="n">${esc(note)}</div></div>`).join("");
+  const p = s.passes || {}, alerts = [];
+  for (const step of p.person || [])
+    alerts.push(`<div class="alert">${pill("fail", "your step")} <span class="what">${esc(step.step)}</span>${step.count > 1 ? ` <span class="muted">(×${step.count})</span>` : ""}${step.then ? `<br><code>then: ${esc(step.then)}</code>` : ""}</div>`);
+  if (p.state && p.state !== "ok") alerts.push(`<div class="alert warn">${pill("warn", "fixers")} <span class="what">${esc(p.verdict)}</span></div>`);
+  $("alerts").innerHTML = alerts.join("");
+}
+
+function renderFixers(s) {
+  const f = s.fixers || {};
+  bars($("chart-output"), f.days, [{key: "output", label: "output tokens", color: "var(--series-1)"}]);
+  bars($("chart-issues"), s.ledger?.days, [
+    {key: "registered", label: "registered", color: "var(--series-2)"},
+    {key: "resolved", label: "resolved", color: "var(--series-3)"},
+  ]);
+  const rows = f.sessions || [];
+  $("fixers").innerHTML = errorOf(f) || `<thead><tr><th>Started</th><th>Project</th><th>Task</th><th class="num">Ran</th><th class="num">Calls</th><th class="num">Output</th><th class="num">Input · cache</th><th class="num">Resolved</th></tr></thead><tbody>` +
+    (rows.length ? rows.map((r) => `<tr>
+      <td class="when">${when(r.started)}</td>
+      <td><b>${esc(r.project)}</b><div class="muted mono">${esc(r.tree)}</div></td>
+      <td class="wrap">${esc(r.task)}<div class="muted">${esc(r.model)}</div></td>
+      <td class="num">${esc(dur(r.minutes * 60))}</td>
+      <td class="num">${esc(r.calls)}${r.failed_calls ? ` <span class="fail">(${esc(r.failed_calls)} failed)</span>` : ""}</td>
+      <td class="num">${esc(n(r.output))}</td>
+      <td class="num" title="fresh ${esc(r.input)} · cache write ${esc(r.cache_write)} · cache read ${esc(r.cache_read)}">${esc(n(r.input + r.cache_write))} · ${esc(n(r.cache_read))}</td>
+      <td class="num">${r.resolved ? `<span class="ok">${esc(r.resolved)}</span>` : '<span class="muted">0</span>'}</td></tr>`).join("")
+    : `<tr><td colspan="8" class="muted">No fixer sessions in the last 30 days.</td></tr>`) + "</tbody>";
+}
+
+function renderPasses(s) {
+  const p = s.passes || {};
+  if (p.error) { $("passes").innerHTML = errorOf(p); return; }
+  const lastRow = p.last || {};
+  $("passes-sub").innerHTML = lastRow.when
+    ? `Last pass ${esc(ago(lastRow.when))} (${esc(lastRow.mode)}); last fixer sent ${esc(ago(p.last_sent) || "never")}. ${pill(p.state, p.verdict)}`
+    : "No fix pass has run on this machine.";
+  bars($("chart-passes"), p.days, [
+    {key: "passes", label: "passes", color: "var(--series-1)"},
+    {key: "sends", label: "fixers sent", color: "var(--series-2)"},
+  ]);
+  const rows = p.recent || [];
+  $("passes").innerHTML = `<thead><tr><th>When</th><th>Mode</th><th>Sent</th><th class="num">Filed</th><th class="num">Backlog</th><th class="num">Owed</th><th class="num">At work</th><th class="num">Waiting</th><th>Harness</th></tr></thead><tbody>` +
+    rows.map((r) => `<tr>
+      <td class="when">${when(r.when)}</td><td>${esc(r.mode)}</td>
+      <td class="wrap">${r.sent.length ? r.sent.map((x) => `<span class="chip">${esc(x)}</span>`).join("") : '<span class="muted">—</span>'}</td>
+      <td class="num">${esc(r.filed)}</td><td class="num">${esc(r.backlog)}</td><td class="num">${esc(r.owed)}</td>
+      <td class="num">${esc(r.working)}</td><td class="num">${esc(r.waiting)}</td>
+      <td class="wrap">${r.harness.length ? `<span class="warn">${esc(r.harness.join("; "))}</span>` : '<span class="ok">clean</span>'}</td></tr>`).join("") + "</tbody>";
+}
+
+function renderIssues(s) {
+  const l = s.ledger || {};
+  const tabs = [["open", `Open (${l.open_count ?? 0})`], ["registered", "Registered"], ["resolved", "Resolved"]];
+  $("issue-tabs").innerHTML = tabs.map(([k, t]) => `<button type="button" data-k="${k}" class="${k === issueTab ? "on" : ""}">${esc(t)}</button>`).join("");
+  $("issue-tabs").querySelectorAll("button").forEach((b) => b.onclick = () => { issueTab = b.dataset.k; renderIssues(last); });
+  if (l.error) { $("issues").innerHTML = errorOf(l); return; }
+  const rows = l[issueTab] || [];
+  const resolvedTab = issueTab === "resolved";
+  $("issues").innerHTML = `<thead><tr><th>When</th><th>Kind</th><th>Project</th><th>${resolvedTab ? "Note" : "Detail"}</th><th>${resolvedTab ? "Landed in" : "Id"}</th></tr></thead><tbody>` +
+    (rows.length ? rows.map((r) => `<tr>
+      <td class="when">${when(r.when)}</td><td><span class="chip">${esc(r.event)}</span></td><td>${esc(r.project === "-" ? "" : r.project)}</td>
+      <td class="wrap">${esc(resolvedTab ? r.note : r.detail)}${!resolvedTab && r.cause ? `<div class="muted mono">${esc(r.cause)}</div>` : ""}</td>
+      <td class="mono">${esc(resolvedTab ? r.pr : r.id)}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="muted">Nothing here.</td></tr>`) + "</tbody>";
+}
+
+function runBars(runs) {
+  const rs = (runs || []).slice().reverse(), max = Math.max(1, ...rs.map((r) => r.seconds || 0));
+  return `<div class="runs">` + rs.map((r) => `<span class="${r.exit ? "bad" : ""}" style="height:${Math.max(3, 26 * (r.seconds || 0) / max)}px" title="${esc(new Date(r.started).toLocaleString())} · ${esc(dur(r.seconds))} · exit ${esc(r.exit)}"></span>`).join("") + "</div>";
+}
+
+function renderJobs(s) {
+  if (!Array.isArray(s.jobs)) { $("jobs").innerHTML = errorOf(s.jobs); return; }
+  const head = `<thead><tr><th>Job</th><th>Last run</th><th class="num">Ran</th><th class="num">Output</th><th>Next</th><th class="num">Every</th><th class="num">Failed (7d)</th><th>Recent runs</th></tr></thead>`;
+  const body = s.jobs.map((j, i) => {
+    const r0 = (j.runs || [])[0];
+    const failed = j.failures_7d ? `<span class="fail">${esc(j.failures_7d)}</span>${j.open_failures ? ` <span class="muted">(${esc(j.open_failures)} open)</span>` : ""}` : '<span class="muted">0</span>';
+    let row = `<tr class="job" data-name="${esc(j.name)}">
+      <td>${pill(j.state, j.name)}${j.detail ? `<div class="muted" style="margin-top:3px">${esc(j.detail)}</div>` : ""}</td>
+      <td class="when">${j.last_run ? `${when(j.last_run)}<div class="muted">${esc(ago(j.last_run))}</div>` : (j.event_only ? '<span class="muted">at logon</span>' : '<span class="muted">—</span>')}</td>
+      <td class="num">${r0 ? esc(dur(r0.seconds)) : '<span class="muted">—</span>'}${j.median_seconds ? `<div class="muted">median ${esc(dur(j.median_seconds))}</div>` : ""}</td>
+      <td class="num">${r0 ? `${esc(bytes(r0.output_bytes))}<div class="muted">${esc(r0.output_lines)} lines</div>` : '<span class="muted">—</span>'}</td>
+      <td class="when">${j.next_run ? `${when(j.next_run)}<div class="muted">${esc(ago(j.next_run))}</div>` : '<span class="muted">—</span>'}</td>
+      <td class="num">${j.every_minutes ? esc(j.every_minutes >= 1440 ? Math.round(j.every_minutes / 1440) + "d" : j.every_minutes >= 60 ? Math.round(j.every_minutes / 60) + "h" : j.every_minutes + "m") : '<span class="muted">—</span>'}</td>
+      <td class="num">${failed}</td>
+      <td>${(j.runs || []).length ? runBars(j.runs) : '<span class="muted">none recorded</span>'}</td></tr>`;
+    if (open.has(j.name)) {
+      const lf = j.last_failure;
+      row += `<tr class="more"><td colspan="8">
+        <div class="muted" style="margin-bottom:6px">${j.artifact ? `record: <span class="mono">${esc(j.artifact)}</span> · ` : ""}${j.label ? `runs as <span class="mono">${esc(j.label)}</span> · ` : ""}${j.status ? `scheduler: ${esc(j.status)} · ` : ""}${j.enabled === false ? '<span class="fail">disabled</span> · ' : ""}last result ${esc(j.last_result ?? "—")}</div>
+        ${lf ? `<div style="margin-bottom:8px"><b>Last failure</b> ${when(lf.when)} ${lf.open ? pill("fail", "open") : pill("ok", "resolved")}<div class="mono" style="margin-top:3px">${esc(lf.cause || lf.detail)}</div></div>` : ""}
+        ${(j.runs || []).length ? `<table><thead><tr><th>Started</th><th class="num">Ran</th><th class="num">Exit</th><th class="num">Output</th><th>Cause</th></tr></thead><tbody>${j.runs.map((r) => `<tr><td class="when">${when(r.started)}</td><td class="num">${esc(dur(r.seconds))}</td><td class="num ${r.exit ? "fail" : ""}">${esc(r.exit)}</td><td class="num">${esc(bytes(r.output_bytes))} · ${esc(r.output_lines)} lines</td><td class="mono">${esc(r.cause)}</td></tr>`).join("")}</tbody></table>` : '<span class="muted">No runs recorded yet: a job is recorded from its first run under log-wrap.py.</span>'}
+      </td></tr>`;
+    }
+    return row;
+  }).join("");
+  $("jobs").innerHTML = head + "<tbody>" + body + "</tbody>";
+  $("jobs").querySelectorAll("tr.job").forEach((tr) => tr.onclick = () => {
+    const name = tr.dataset.name;
+    open.has(name) ? open.delete(name) : open.add(name);
+    renderJobs(last);
+  });
+}
+
+function render(s) {
+  last = s;
+  renderTop(s); renderFixers(s); renderPasses(s); renderIssues(s); renderJobs(s);
+}
+
+async function load(fresh) {
+  try {
+    const res = await fetch("/api/state" + (fresh ? "?fresh=1" : ""), {cache: "no-store"});
+    render(await res.json());
+  } catch (e) {
+    $("meta").textContent = "could not reach the dashboard: " + e;
+  }
+}
+$("refresh").onclick = () => load(true);
+window.addEventListener("resize", () => last && render(last));
+load(false);
+setInterval(() => load(false), 60000);
+</script>
+</body>
+</html>

@@ -13,7 +13,7 @@ clock is a task, and this module is everything about that task:
   re-registers it the moment the declared cadence drifts -- `devkit_schtasks.run_check`
   against the same document, as every installer does.
 - **Named after the collector, never `devkit-`.** It is the project's job, not devkit's,
-  so `schedule_health` has to be told about it: the tray and the fix pass both pass
+  so `schedule_health` has to be told about it: devkit's dashboard and the fix pass pass
   `collectors.scheduled_tasks` as `also=`. Each failed fire is filed on the ledger by the
   `log-wrap.py --always` it runs under (`task_document`); a task gone missing, which no
   run can report, is filed by the pass (`fix_loop.unscheduled`).
@@ -24,7 +24,7 @@ clock is a task, and this module is everything about that task:
   `logs/collector-<name>.log`, which `pythonw.exe` would otherwise send nowhere, with a
   copy of each run under `logs/collector-runs/` (`keep_run`). It exits
   with the command's own code, so the scheduler's `Last Result` is the project's verdict
-  and the tray reads it through `schedule_health` like any other job.
+  and the dashboard reads it through `schedule_health` like any other job.
 
 Tested in `tests/test_collector_tasks.py`.
 """
@@ -103,7 +103,7 @@ WSL_STOPPING = "STOP_PENDING"
 WSL_SETTLE = 30
 SERVICE_STATE = re.compile(r"^\s*STATE\s*:\s*\d+\s+(?P<state>\w+)", re.M)
 # `harness_triage.PERSON_STEP`, which a test holds this to (`collectors` reuses it).
-# Spelled rather than imported, for the resident tray (`collectors.PERSON_STEP`). The
+# Spelled rather than imported, so a collector's fire loads none of the triage reader. The
 # stuck service's cause carries it, so its ledger group awaits the person: 063598eb was
 # sent to a fixer, whose unelevated session can only re-check it.
 PERSON_STEP = "a person's step:"

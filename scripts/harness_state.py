@@ -51,9 +51,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # A scheduled job reaches this module, so its runner defaults are held to
 # `tests/test_scheduled_jobs.py`'s windowless rule. Spelled here rather than imported
-# from `sweep`: the tray holds this module, and every module it imports is one
-# `install-tray.py --check` watches for an edit (`TRAY_MODULES`), so `sweep` and its
-# imports would put the tray out of date on every sweep change.
+# from `sweep`, which this small leaf module has no other reason to pull in.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 

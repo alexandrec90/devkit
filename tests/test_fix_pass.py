@@ -392,7 +392,7 @@ def world(tmp_path, monkeypatch):
     # Windows PC with any (D2R Net Logger, 2026-11-21) each became an open finding here.
     monkeypatch.setattr(loop.project_tasks, "unowned_on_machine", lambda claimed: [])
     monkeypatch.setattr(loop.collectors, "scheduled_tasks", lambda *a, **k: {})
-    monkeypatch.setattr(loop.collectors, "tray_rows", lambda *a, **k: [])
+    monkeypatch.setattr(loop.collectors, "status_rows", lambda *a, **k: [])
     monkeypatch.setattr(
         loop.fix_verify,
         "verify",

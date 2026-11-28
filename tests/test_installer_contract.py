@@ -182,9 +182,10 @@ def test_every_job_is_registrable_without_elevation(name, module, monkeypatch):
     document each installer's own `--check` hands the shared check, as `register` would
     register it.
 
-    The stub answers *not* current: on "current" `install-tray` goes on to ask the real
-    scheduler when its resident process started, and CI's Linux runner has no `schtasks`
-    (the job went red on exactly that). Any spawn at all fails here on every OS."""
+    The stub answers *not* current: on "current" an installer may go on to ask the real
+    scheduler more (the retired tray's asked when its resident process started), and CI's
+    Linux runner has no `schtasks` (the job went red on exactly that). Any spawn at all
+    fails here on every OS."""
     monkeypatch.setattr(module, "WINDOWS", True)
     monkeypatch.setattr(module.subprocess, "run", _never_spawn)
     seen: dict[str, str] = {}
@@ -229,14 +230,8 @@ def test_only_the_exempt_installer_can_spell_an_elevated_task():
 
 # A job whose task is not wrapped, and why. The reason is the whole exemption.
 OFF_THE_LEDGER: dict[str, str] = {
-    "devkit-tray": (
-        "resident, not a pass: it starts at logon and runs until logoff, so the wrapper "
-        "would hold everything it prints in memory for the whole session and could report "
-        "only once it exits. Its one failure with no other signal -- not starting -- is "
-        "what tray.py writes logs/tray.log for, and schedule_health reads its Last Result"
-    ),
     "devkit-dashboards": (
-        "resident, as the tray is: the gateway runs from logon to sign-out, so the wrapper "
+        "resident, not a pass: the gateway runs from logon to sign-out, so the wrapper "
         "would hold its output for the whole session and report only at exit. It appends "
         "its own logs/dashboards.log as it goes, and a gateway that died is restarted by "
         "the task's own 15-minute repetition"
