@@ -145,13 +145,6 @@ startSeconds = 600
 command = ["uv", "run", "sports-betting", "overlay-serve", "--port", "{port}"]
 port = 8765
 
-# devkit's own: fix passes, fixers, the ledger and every scheduled job, in place of the
-# old taskbar tray (scripts/devkit_dashboard.py). Stackless, so no slot: the port is
-# pinned. A first wake after a while reads every new fixer transcript once.
-[settings."devkit.dashboards".devkit]
-command = ["{python}", "scripts/devkit_dashboard.py", "--port", "{port}"]
-port = 8790
-
 # Options an installer should keep, keyed by installer file name. The daily
 # `devkit-installers` pass (`installers.py`) re-registers a scheduled job from what its
 # installer builds today, and an option chosen at install time is remembered by nothing

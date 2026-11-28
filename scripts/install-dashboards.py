@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install the dashboard gateway, `dashboards.py serve`, as a Windows Scheduled Task.
 
-`dashboards.py` explains the gateway. It is **resident**: it starts at logon
+`dashboards.py` explains the gateway. It is **resident**, like the tray: it starts at logon
 and runs until sign-out, so the task carries no execution time limit (`PT0S`, the
 scheduler's spelling of none). An hour's limit would close every dashboard an hour after
 logon, each day.
@@ -12,7 +12,7 @@ nothing (`schedule_health.OVERLAP_EXPECTED` knows to read the refusal as the gat
 working). Without it, a gateway that crashed would leave every dashboard port closed until
 the next logon.
 
-Not run under `log-wrap.py`, as no resident job is: the wrapper would hold everything a
+Not run under `log-wrap.py`, for the tray's reason: the wrapper would hold everything a
 resident process prints for the whole session. The gateway writes `logs/dashboards.log`
 itself, appending as it goes.
 

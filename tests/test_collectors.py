@@ -2233,14 +2233,14 @@ def devkit_home(tmp_path, monkeypatch, assignment=None, setting=None):
 def test_the_tray_on_an_unassigned_machine_shows_nothing_and_spawns_nothing(tmp_path, monkeypatch):
     devkit_home(tmp_path, monkeypatch)
     docker = FakeDocker([])
-    assert collectors.status_rows(docker=docker) == []
+    assert collectors.tray_rows(docker=docker) == []
     assert docker.calls == []
 
 
 def test_the_tray_shows_one_row_per_assigned_collector(tmp_path, monkeypatch):
     devkit_home(tmp_path, monkeypatch, {"ibkr_trader": RUN})
     docker = FakeDocker([box(workdir=str(tmp_path / "ibkr_trader"))])
-    assert collectors.status_rows(docker=docker) == [
+    assert collectors.tray_rows(docker=docker) == [
         ("collector: ibkr_trader", collectors.OK, "running (Up 2h)")
     ]
 
@@ -2259,11 +2259,11 @@ def test_a_container_a_pass_is_starting_is_green_and_red_once_the_pass_is_over(
         root / collectors.IN_PASS,
         json.dumps({collectors.STARTED_AT: 9_900.0, collectors.UNTIL: 12_000.0}),
     )
-    assert collectors.status_rows(docker=docker) == [
+    assert collectors.tray_rows(docker=docker) == [
         ("collector: ibkr_trader", collectors.OK, f"{collectors.STARTING} (Created)")
     ]
     (root / collectors.IN_PASS).unlink()
-    assert collectors.status_rows(docker=docker) == [
+    assert collectors.tray_rows(docker=docker) == [
         ("collector: ibkr_trader", collectors.FAIL, "not running (Created)")
     ]
 
@@ -2518,7 +2518,7 @@ def test_a_pass_that_only_stops_containers_writes_no_marker(tmp_path):
 
 def test_an_assignment_the_workspace_no_longer_declares_is_amber(tmp_path, monkeypatch):
     devkit_home(tmp_path, monkeypatch, {"retired": RUN})
-    rows = collectors.status_rows(docker=FakeDocker([]))
+    rows = collectors.tray_rows(docker=FakeDocker([]))
     assert (
         rows
         == [
@@ -2972,17 +2972,17 @@ def test_the_scheduled_tasks_the_tray_asks_about_are_the_ones_run_here(tmp_path,
 
 
 def test_a_scheduled_collector_this_machine_runs_is_not_a_container_row(tmp_path, monkeypatch):
-    """Its row is the scheduler's (`devkit_dashboard.jobs_view`); asking docker
+    """Its row is the scheduler's (`tray_state.collector_task_states`); asking docker
     about it would report a container that was never meant to exist."""
     scraper_home(tmp_path, monkeypatch, {"social-scraper": RUN})
     docker = FakeDocker([])
-    assert collectors.status_rows(docker=docker) == []
+    assert collectors.tray_rows(docker=docker) == []
     assert docker.calls == []
 
 
 def test_a_scheduled_collector_set_to_stop_is_a_green_row(tmp_path, monkeypatch):
     scraper_home(tmp_path, monkeypatch, {"social-scraper": STOP})
-    assert collectors.status_rows(docker=FakeDocker([])) == [
+    assert collectors.tray_rows(docker=FakeDocker([])) == [
         ("collector: social-scraper", collectors.OK, "off on this machine (by choice)")
     ]
 
@@ -3726,7 +3726,7 @@ def test_status_asks_nothing_of_a_collector_without_a_handoff(tmp_path, monkeypa
 
 def test_the_tray_shows_a_collector_handed_off_from_here(tmp_path, monkeypatch):
     sent_home(tmp_path, monkeypatch, 0.0)
-    assert collectors.status_rows(docker=FakeDocker([])) == [
+    assert collectors.tray_rows(docker=FakeDocker([])) == [
         (
             "collector: ibkr_trader",
             collectors.OK,
@@ -3752,14 +3752,14 @@ def test_the_tray_keeps_a_collector_being_moved_green(tmp_path, monkeypatch):
     }
     with collectors.one_pass(root / collectors.PASS_LOCK, 600, wait=False, extra=holder):
         rows = dict(
-            (name, (level, detail)) for name, level, detail in collectors.status_rows(docker=docker)
+            (name, (level, detail)) for name, level, detail in collectors.tray_rows(docker=docker)
         )
     level, detail = rows["collector: ibkr_trader"]
     assert level == collectors.OK and detail.startswith(
         f"`collectors.py move` to {OTHER} is acting on it"
     )
     assert rows["collector: sports_betting"][0] == collectors.FAIL, "only what the move holds"
-    assert collectors.status_rows(docker=docker)[0][1] == collectors.FAIL
+    assert collectors.tray_rows(docker=docker)[0][1] == collectors.FAIL
 
 
 def test_holding_reads_only_local_files(tmp_path):
@@ -4242,14 +4242,14 @@ def test_a_scheduled_collector_a_move_holds_is_no_scheduler_row_but_a_green_one(
     root = scraper_handoff_home(tmp_path, monkeypatch, {"social-scraper": RUN})
     at(monkeypatch, 1_000.0)
     assert collectors.scheduled_tasks() == {"social-scraper": "logs/collector-social-scraper.log"}
-    assert collectors.status_rows(docker=FakeDocker([])) == []
+    assert collectors.tray_rows(docker=FakeDocker([])) == []
     holder = {
         collectors.HOLDER: f"`collectors.py move` to {OTHER}",
         collectors.PROJECTS: ["social-scraper"],
     }
     assert collectors.take_lock(root / collectors.PASS_LOCK, 2_000.0, 1_000.0, holder)
     assert collectors.scheduled_tasks() == {}
-    [(name, level, detail)] = collectors.status_rows(docker=FakeDocker([]))
+    [(name, level, detail)] = collectors.tray_rows(docker=FakeDocker([]))
     assert (name, level) == ("collector: social-scraper", collectors.OK)
     assert detail.startswith(f"`collectors.py move` to {OTHER} is acting on it")
 
@@ -4259,7 +4259,7 @@ def test_a_scheduled_collector_handed_off_from_here_says_where_it_went(tmp_path,
     collectors.handoff.record_outgoing(
         root / collectors.handoff.OUTGOING, "social-scraper", OTHER, 0.0
     )
-    [(_name, level, detail)] = collectors.status_rows(docker=FakeDocker([]))
+    [(_name, level, detail)] = collectors.tray_rows(docker=FakeDocker([]))
     assert level == collectors.OK and detail.startswith(f"handed off to {OTHER}")
 
 

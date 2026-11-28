@@ -41,7 +41,7 @@ KIND = "elevated-worker"
 
 
 def step(host: str, checkout: Path) -> str:
-    """The person's step, naming the machine: it is all the dashboard's alert shows, and the
+    """The person's step, naming the machine: it is all the tray row shows, and the
     operator has more than one PC."""
     return (
         f"on {host}, from an elevated terminal, run "

@@ -16,7 +16,7 @@ answer to "what is actually off right now".
 | `jobs` | the scheduled jobs that deliver agent branches | `schtasks /Change /DISABLE` |
 
 `--job <name>` stands one scheduled job down (or back up) by name, from any group:
-`--off --job devkit-dashboards`. The ledger records every name either way, and that record is
+`--off --job devkit-tray`. The ledger records every name either way, and that record is
 what the job's installer and `installers.py` honour -- a stood-down job is registered
 *disabled* rather than skipped, so `--on` never needs an install.
 
@@ -94,7 +94,7 @@ WINDOWS = os.name == "nt"
 
 # The scheduled tasks that exist to move agent branches along, and only those. The others
 # this machine runs -- `devkit-docker-prune`, `devkit-docker-stop-idle`,
-# `devkit-global-tools`, `devkit-dashboards`, `devkit-rc-servers`, `devkit-reap-stale` -- are
+# `devkit-global-tools`, `devkit-tray`, `devkit-rc-servers`, `devkit-reap-stale` -- are
 # machine maintenance that
 # has nothing to do with whether an agent is running, so switching them off here would be
 # turning off the vacuum cleaner because you stopped cooking.
@@ -338,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         metavar="TASK",
         help=(
-            "one scheduled job by name, from any group (e.g. devkit-dashboards); repeatable. "
+            "one scheduled job by name, from any group (e.g. devkit-tray); repeatable. "
             "Recorded in the ledger so its installer registers it disabled"
         ),
     )

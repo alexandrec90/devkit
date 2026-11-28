@@ -545,7 +545,7 @@ class Account:
     reverted: tuple[str, ...] = ()
     # What a pass past its send deadline left to the next one (`fix-pass.LATE`).
     late: tuple[str, ...] = ()
-    # The dashboard's half (`devkit_dashboard.passes_view`): the fixer trees with a session at
+    # The tray's half (`tray_state.fix_pass_states`): the fixer trees with a session at
     # work, each person's step the ledger awaits (`fix_loop.person_steps`), and the open
     # groups a fixer is owed. `backlog` counts rows, and counts the person's groups too,
     # so "owed and nothing sent" cannot be read off it.

@@ -313,8 +313,7 @@ ELEVATED = (
 def is_elevated() -> bool:
     """Whether this process holds an elevated administrator token; False off Windows.
 
-    `windll` through `sys.modules`: mypy resolves an attribute against the platform it
-    runs on, so a bare `ctypes.windll` fails `[attr-defined]` on the Linux CI runner."""
+    `windll` through `sys.modules`, for the mypy reason `scripts/tray.py` gives."""
     if os.name != "nt":
         return False
     try:

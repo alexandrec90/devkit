@@ -729,8 +729,8 @@ def test_the_history_line_says_why_nothing_went():
     assert line["capped"] == ["carameli #412 -- 2 session(s) sent -- needs a human"]
 
 
-def test_the_history_line_carries_what_the_dashboard_shows():
-    """`devkit_dashboard.passes_view` reads only these lines: the fixers at work, the steps
+def test_the_history_line_carries_what_the_tray_shows():
+    """`tray_state.fix_pass_states` reads only this line: the fixers at work, the steps
     awaiting a person, and the groups still owed a fixer."""
     account = fix_cycle.Account(
         fix_cycle.DISPATCH,

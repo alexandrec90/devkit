@@ -57,7 +57,7 @@ def is_private(gh: Callable[..., object]) -> bool | None:
 
 
 def step(project: str) -> str:
-    """The person's step, naming the repo: it is all the dashboard's alert shows
+    """The person's step, naming the repo: it is all the tray row shows
     (`harness_triage.person_step` reads only what follows `PERSON_STEP`), and an
     unnamed "make it public" left homelab's row unanswerable (2026-11-04)."""
     return (
