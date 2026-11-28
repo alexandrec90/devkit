@@ -73,7 +73,9 @@ def test_read_jsonl_skips_what_is_not_an_object_line(tmp_path):
 
 
 def test_a_stamp_is_utc_whatever_its_spelling():
-    assert dash.parse_stamp("2026-11-27T10:00:00Z") == _dt.datetime(2026, 11, 27, 10, tzinfo=_dt.UTC)
+    assert dash.parse_stamp("2026-11-27T10:00:00Z") == _dt.datetime(
+        2026, 11, 27, 10, tzinfo=_dt.UTC
+    )
     assert dash.parse_stamp("2026-11-27T10:00:00").tzinfo is not None
     assert dash.parse_stamp("junk") is None and dash.parse_stamp(None) is None
 
@@ -131,7 +133,9 @@ def test_a_pass_that_sends_nothing_by_its_mode_says_so():
 
 def test_groups_awaiting_one_step_are_one_step_that_counts_them():
     billing = "settle the GitHub account's Actions billing"
-    steps = [f"{billing} -- then: python scripts/harness_triage.py --resolve-like {i}" for i in "ab"]
+    steps = [
+        f"{billing} -- then: python scripts/harness_triage.py --resolve-like {i}" for i in "ab"
+    ]
     found = dash.person_steps([pass_row(person=[*steps, "reboot"])])
     assert [(s["step"], s["count"]) for s in found] == [(billing, 2), ("reboot", 1)]
     assert found[0]["then"].startswith("python scripts/harness_triage.py")
@@ -175,7 +179,9 @@ def test_the_page_reads_the_line_the_pass_writes():
 # --- fixer sessions -----------------------------------------------------------------------
 
 
-def transcript(prompt: str, *, cwd: str = r"C:\ws\devkit\.claude\worktrees\fix-x-1127") -> list[dict]:
+def transcript(
+    prompt: str, *, cwd: str = r"C:\ws\devkit\.claude\worktrees\fix-x-1127"
+) -> list[dict]:
     """A fixer's transcript as Claude Code writes it: the usage repeated per block."""
     usage = {
         "input_tokens": 10,
@@ -210,7 +216,9 @@ def transcript(prompt: str, *, cwd: str = r"C:\ws\devkit\.claude\worktrees\fix-x
         },
         {
             "type": "user",
-            "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": True}]},
+            "message": {
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": True}]
+            },
         },
         {
             "type": "assistant",
@@ -294,8 +302,14 @@ def test_a_transcript_past_the_window_is_not_read(tmp_path):
 
 
 def test_a_session_is_credited_with_what_its_branch_resolved():
-    session = {"tree": "fix-x-1127", "started": "2026-11-27T10:00:00+00:00", "output": 5,
-               "input": 1, "cache_write": 2, "cache_read": 3}
+    session = {
+        "tree": "fix-x-1127",
+        "started": "2026-11-27T10:00:00+00:00",
+        "output": 5,
+        "input": 1,
+        "cache_write": 2,
+        "cache_read": 3,
+    }
     resolutions = [{"pr": "agent/fix-x-1127-2"}, {"pr": "agent/other"}, {"pr": ""}]
     view = dash.sessions_view([session], resolutions, NOW)
     assert view["sessions"][0]["resolved"] == 1
@@ -503,12 +517,16 @@ def test_the_state_is_read_again_only_once_it_is_stale():
 def test_the_server_serves_the_page_the_state_and_nothing_else(tmp_path):
     page = tmp_path / "page.html"
     page.write_text("<!doctype html><title>devkit</title>", encoding="utf-8")
-    server = ThreadingHTTPServer(("127.0.0.1", 0), dash.handler(dash.State(lambda: {"ok": 1}), page))
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0), dash.handler(dash.State(lambda: {"ok": 1}), page)
+    )
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         answers = {}
         for path in ("/", "/api/state", "/healthz", "/nope"):
-            connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_address[1], timeout=5
+            )
             connection.request("GET", path)
             response = connection.getresponse()
             answers[path] = (response.status, response.read())

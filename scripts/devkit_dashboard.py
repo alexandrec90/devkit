@@ -450,7 +450,7 @@ def sessions_view(sessions: list[dict], resolutions: list[dict], now: _dt.dateti
                 + session.get("cache_write", 0)
                 + session.get("cache_read", 0)
             )
-    return {"sessions": listed[:LISTED * 2], "days": [{"day": d, **per_day[d]} for d in axis]}
+    return {"sessions": listed[: LISTED * 2], "days": [{"day": d, **per_day[d]} for d in axis]}
 
 
 # --- the ledger -----------------------------------------------------------------------

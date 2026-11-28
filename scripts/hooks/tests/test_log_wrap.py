@@ -1121,7 +1121,9 @@ def test_every_run_passed_or_failed_is_one_history_line(tmp_path, monkeypatch):
     """The artifact keeps one run and the ledger keeps failures; this is the only place
     a job's duration and its last runs survive, for `devkit_dashboard.py` to draw."""
     _ledger(tmp_path, monkeypatch)
-    lw.main(["--always", "Scheduled: Prune", "--", "x"], run=lambda _c: (0, "a\nb\n"), root=tmp_path)
+    lw.main(
+        ["--always", "Scheduled: Prune", "--", "x"], run=lambda _c: (0, "a\nb\n"), root=tmp_path
+    )
     lw.main(["Clicked", "--", "x"], run=lambda _c: (3, "error: the disk is full"), root=tmp_path)
 
     passed, failed = _runs(tmp_path)
