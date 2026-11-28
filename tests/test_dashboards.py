@@ -153,14 +153,17 @@ def test_the_setting_itself(value, notes):
     assert all(want in got for want, got in zip(notes, said, strict=True))
 
 
-def test_the_committed_registry_declares_the_three_dashboards_cleanly():
+def test_the_committed_registry_declares_the_four_dashboards_cleanly():
     found, notes = dashboards.declared(REPO_ROOT)
     assert notes == []
     by_project = {d.project: d for d in found}
-    assert set(by_project) == {"d2-trader", "ibkr_trader", "sports_betting"}
+    assert set(by_project) == {"d2-trader", "devkit", "ibkr_trader", "sports_betting"}
     assert by_project["d2-trader"].port == 8010 and by_project["d2-trader"].container
     assert by_project["ibkr_trader"].port == 8001
     assert by_project["sports_betting"].port == 8765
+    assert by_project["devkit"].port == 8790
+    assert by_project["devkit"].command[1] == "scripts/devkit_dashboard.py"
+    assert (REPO_ROOT / by_project["devkit"].command[1]).is_file()
 
 
 def test_the_registry_port_is_the_app_port_plus_the_slot():

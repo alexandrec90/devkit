@@ -64,6 +64,11 @@ this morning's run. One extra bounded file per task that has ever failed. **The 
 names a third copy**, that failure's own under `logs/failed/` (`archive_artifact`): the
 per-job one is the next failure's by the time a sweep reaches an older group of the job.
 
+**Every run, passed or failed, is one line of `logs/job-runs.jsonl`** (`record_run`):
+when it started, how long it took, its exit, how much it printed and, failed, its cause.
+The artifact keeps one run and the ledger keeps failures, so that line is the only record
+of a job's duration and recent history; `devkit_dashboard.py` draws it.
+
 Colour survives the wrapping. A captured child is talking to a pipe rather than a
 terminal, and most tools drop their colour the moment they notice -- so `FORCE_COLOR`
 and `PY_COLORS` are set (when the caller has not) to keep the live view readable, and
@@ -120,6 +125,15 @@ FAILED_SUFFIX = ".failed"
 ARCHIVE_DIR = "failed"
 ARCHIVE_KEEP = 20
 ARCHIVE_STAMP = "%Y%m%d-%H%M%S"
+
+# One JSON line per run, passed or failed, appended to `logs/job-runs.jsonl`
+# (`record_run`). The artifact is one run and the ledger is failures only, so neither
+# could say how long a job ran, how much it printed, or how its last ten runs went;
+# `devkit_dashboard.py` reads this to show it. Started over at the newest `RUNS_KEEP`
+# once it passes `RUNS_MAX_BYTES`, so it is bounded like everything else here.
+RUNS_FILE = "job-runs.jsonl"
+RUNS_MAX_BYTES = 2_000_000
+RUNS_KEEP = 4000
 
 # The head and tail kept when a run is too long to store whole. Both ends matter and
 # the middle rarely does: the head carries what was run and the first thing to go
@@ -463,6 +477,44 @@ def write_artifact(root: Path, name: str, body: str, since: float = 0.0) -> Path
     return path
 
 
+def run_row(
+    title: str, started: float, ended: float, code: int, output: str, unattended: bool
+) -> dict:
+    """The `RUNS_FILE` line for one run: when, how long, its exit, how much it printed,
+    and for a failure the cause its ledger row would carry (`failure_cause`)."""
+    plain = strip_ansi(output)
+    return {
+        "task": title,
+        "slug": slug(title),
+        "started": _dt.datetime.fromtimestamp(started, _dt.timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+        "seconds": round(max(ended - started, 0.0), 1),
+        "exit": code,
+        "unattended": unattended,
+        "output_bytes": len(plain.encode("utf-8", "replace")),
+        "output_lines": len(plain.splitlines()),
+        "cause": failure_cause(plain) if code else "",
+    }
+
+
+def record_run(root: Path, row: dict) -> Path | None:
+    """Append `row` to `logs/RUNS_FILE`, starting it over at its newest `RUNS_KEEP` lines
+    once it passes `RUNS_MAX_BYTES`. Best-effort, as `write_artifact` is: a history that
+    cannot be written changes nothing the task reports."""
+    path = root / LOGS_DIR / RUNS_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+        if path.stat().st_size > RUNS_MAX_BYTES:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            path.write_text("\n".join(lines[-RUNS_KEEP:]) + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
 def archive_artifact(
     root: Path, name: str, body: str, now: _dt.datetime | None = None
 ) -> str | None:
@@ -699,6 +751,22 @@ def release(job: int | None) -> None:
         _kernel32().CloseHandle(job)
 
 
+def execute(
+    title: str, command: list[str], always: bool, root: Path, started: float, run=None
+) -> tuple[int, str, float]:
+    """`(exit code, output, last progress write)` of one run of `command`.
+
+    `run(command)` stands in for `stream` when given, and writes no progress file, so its
+    last write is `started`. Otherwise a run a person clicked keeps a progress file while
+    it streams; an unattended one (`always`) has nobody to read it and keeps none."""
+    if run is not None:
+        code, output = run(command)
+        return code, output, started
+    progress = None if always else open_progress(root, slug(title), title, command)
+    code, output = stream(command, child_env(unattended=always, title=title), progress)
+    return code, output, close_progress(progress, started)
+
+
 def main(argv: list[str] | None = None, run=None, root: Path | None = None) -> int:
     """`run(command)` is `stream` when None, in the environment `--always` asks for."""
     parsed = parse_argv(sys.argv[1:] if argv is None else argv)
@@ -714,13 +782,8 @@ def main(argv: list[str] | None = None, run=None, root: Path | None = None) -> i
     started = time.time()
     head = head_stamp(root or Path.cwd())
     name = slug(title)
-    last_write = started
-    if run is None:
-        progress = None if always else open_progress(root or Path.cwd(), name, title, command)
-        code, output = stream(command, child_env(unattended=always, title=title), progress)
-        last_write = close_progress(progress, started)
-    else:
-        code, output = run(command)
+    code, output, last_write = execute(title, command, always, root or Path.cwd(), started, run)
+    record_run(root or Path.cwd(), run_row(title, started, time.time(), code, output, always))
 
     path = write_artifact(
         root or Path.cwd(),

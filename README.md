@@ -94,14 +94,12 @@ else manages it.
 one installer anybody runs by hand, because it registers `devkit-installers` — which
 discovers every other `scripts/install-*.py` by glob and runs its `--check`, and its
 `--yes` where that says to, daily and at every logon. An installer added next month is
-picked up with no registration step. The tray icon reports what the scheduler is doing,
-and `scripts/installers.py` manages the set by hand when you want to: **check only**
-(`status`), **install or repair** (`maintain`, the same pass the schedule runs, and what
-repairs a machine that has drifted) or **remove** (`uninstall`, dry unless `--yes`).
-
-The tray has no *Exit*: closing it removed the icon and left every job running, which is
-indistinguishable from a machine with nothing to report. `schtasks /End /TN devkit-tray`
-stops it and `python scripts/install-tray.py --restart` brings it back.
+picked up with no registration step. devkit's dashboard, <http://127.0.0.1:8790/>, reports
+what the scheduler and the fix pass are doing, and `scripts/installers.py` manages the
+set by hand when you want to: **check only** (`status`), **install or repair**
+(`maintain`, the same pass the schedule runs, and what repairs a machine that has
+drifted, deleting any job devkit retired) or **remove** (`uninstall`, dry unless
+`--yes`).
 
 To take it all off again:
 
@@ -452,7 +450,7 @@ python scripts/harness-switch.py                       # what is off right now
 python scripts/harness-switch.py --off                 # hooks, instructions and jobs
 python scripts/harness-switch.py --off --group hooks   # one group at a time
 python scripts/harness-switch.py --on --group instructions
-python scripts/harness-switch.py --off --job devkit-tray  # one scheduled job, from any group
+python scripts/harness-switch.py --off --job devkit-dashboards  # one job, from any group
 ```
 
 | Group | What it stands down | How |
@@ -973,7 +971,6 @@ laptop actually runs them, and leaving a file to read when one fails.
 | `devkit-global-tools` | `scripts/install-global-tools.py` | daily 04:30 | `logs/global-tools.log` |
 | `devkit-rc-servers` | `scripts/install-rc-schedule.py` | every 15 min | `logs/rc-servers.log` |
 | `devkit-reap-stale` | `scripts/install-reap-schedule.py` | every 15 min | `logs/reap-stale.log` |
-| `devkit-tray` | `scripts/install-tray.py` | at logon, resident | `logs/tray.log` |
 | `devkit-installers` | `scripts/install-installers-schedule.py` | daily 08:45, and at logon | `logs/installers.log` |
 | `devkit-workspace-status` | `scripts/install-workspace-status.py` | daily 09:00 | `logs/scheduled-workspace-status.log` |
 | `devkit-fix-pass` | `scripts/install-fix-pass-task.py` | every 30 min, and whenever `devkit-fix-trigger` starts it, behind `devkit.fixPass` | `logs/fix-pass.log` |
@@ -1116,7 +1113,7 @@ The first three are the branch-delivery half, and are the ones
 `scripts/harness-switch.py --off --group jobs` disables: they exist to move agent
 branches along. The rest are machine maintenance and are left running, because stopping
 the vacuum cleaner is not part of stopping cooking. Any one of them can still be stood
-down by name — `--off --job devkit-tray` — and every installer declares which half it is
+down by name — `--off --job devkit-dashboards` — and every installer declares which half it is
 in (`GROUP`), which is what the switch's list is held to.
 
 `scripts/schedule_health.py` answers the question no artifact can — *did it run at all*
@@ -1270,7 +1267,7 @@ on the old machine, then `run-here` on the new one.
 
 While `move` exports, it holds the collectors pass lock (`PASS_LOCK` in
 `scripts/collectors.py`), waiting for it as `run-here` does. A scheduled pass meanwhile stands down rather than restarting the
-service under the dump, a scheduled collector's fire runs nothing, and the tray keeps the row green. The receiving pass runs its import
+service under the dump, a scheduled collector's fire runs nothing, and the dashboard keeps the row green. The receiving pass runs its import
 under its own lock, whose bound allows for the restore, so two imports never overlap.
 
 `devkit-collectors` is registered everywhere and acts only on the assignment. It starts a
@@ -1284,11 +1281,11 @@ terms -- unless the project's own PR gate pins that sibling to a commit: then th
 built from a context staged at the pin, and only a move of the pin redeploys it. A container it started or redeployed is not health-checked for its
 `settle` minutes (default 60, settable per collector beside `health`): until every job
 inside has fired on the new code, the verdict is still the old code's. A scheduled collector's task is registered on a `run-here` machine, and
-removed on a `stop-here` or `release`. The tray gets a `collector: <name>` row per
-assigned collector. A container shows its live state on every poll, plus the last health
+removed on a `stop-here` or `release`. devkit's dashboard gets a `collector: <name>` row
+per assigned collector. A container shows its live state on every read, plus the last health
 verdict, shown amber rather than red because it is the project's verdict, not a failure
 of the job. A scheduled one is judged from its task like any devkit job: red on a failed
-or missing run, amber when overdue. Clicking it opens that fire's log. Neither kind is in
+or missing run, amber when overdue; its row names that fire's log. Neither kind is in
 `schedule_health.report`, so a collector's failure is never filed as a devkit defect.
 
 #### Every PC at once: `fleet.py`
@@ -1549,47 +1546,42 @@ transcript, so such a session reads as active for as long as anyone works in tha
 checkout. Worktree-spawned sessions are matched by id and have no such ambiguity, which
 is one more reason `spawn: worktree` is the setting to prefer.
 
-#### The tray indicator: nothing is ever totally invisible
+#### devkit's dashboard: nothing is ever totally invisible
 
 Unattended jobs are invisible by construction. They run windowless, their stdout goes
 nowhere, and the only sign one has stopped is a line in the next `workspace-status.py`
-report — which requires someone to read it. `devkit-tray` is the always-on half of that:
-one notification-area icon, green when every registered job is healthy, amber when one
-is late or has never run, red when one has failed or is disabled. Right-click lists them
-all; clicking a job opens its own log.
+report — which requires someone to read it. devkit's dashboard,
+<http://127.0.0.1:8790/>, is the always-there half of that. It is served by the
+dashboard gateway like any project's (`devkit.dashboards.devkit` in `projects.toml`), so
+it wakes on the first request, sleeps when unused, and runs merged code after a merge.
+It replaced the taskbar tray, which `installers.py maintain` deletes (`RETIRED`).
+
+| Section | What it shows | Read off |
+| --- | --- | --- |
+| alerts | each step the ledger awaits a person for, with the command that retires it; the fixers turning amber | the newest fix-pass history line |
+| fixers | each session the pass dispatched: when, project, task, how long, tool calls, tokens in, out and cached, and the ledger items its branch resolved; output tokens per day | Claude Code transcripts opening with the pass's `ROLE` |
+| fix passes | every pass: mode, fixers sent, findings filed, backlog, owed, at work, waiting, and why project sends were held; passes and sends per day | `logs/fix-pass.history.jsonl` |
+| issues | what is open on the harness-events ledger, what was registered, what was resolved and where it landed; both per day | `harness_triage.load` |
+| scheduled jobs | every job and collector: verdict, last and next run, cadence, how long its last run took, how much it printed, failures this week, and its last runs and their causes | the scheduler, and `logs/job-runs.jsonl` |
 
 It makes no judgement of its own — `schedule_health.problems` decides what counts as a
-problem, and the tray adds only how loud each answer is. A second opinion would be worse
-than no indicator, because it would disagree with the `workspace-status.py` line about
-the same machine. A machine with nothing registered shows **amber, not green**: green over a set
-of zero jobs is the most misleading thing it could say.
+problem, `collectors.status_rows` how a collector is, and the pass whether the fixers are
+stuck; the page adds only how loud each answer is. A second opinion would disagree with
+the `workspace-status.py` line about the same machine. The fixers turn amber when a red
+harness holds every send, or when one has been owed for `devkit_dashboard.STUCK_PASSES`
+passes with none sent, at work or waiting. A stale login step does not stay red: the pass
+retires it once a fixer that began after it reaches an outcome (`fix_loop.retire_login`).
 
-The fix pass gets rows of its own, read off the newest line of
-`logs/fix-pass.history.jsonl` and judged by the pass, not the tray. A **`your step`** row,
-red, for each step the harness-defect ledger awaits a person for (`claude auth login`, a
-command only an administrator can run), with the command that retires it. A step the pass
-can take itself is never one: it starts a quit Docker Desktop, and answers Claude Code's
-trust prompt for a checkout (`fix_reports.trust`). And one **`fixers`** row: how many
-are at work, waiting, owed, and when one was last sent. It turns amber when a red harness
-holds every send, or when a fixer has been owed for `tray_state.STUCK_PASSES` passes with
-none sent, at work or waiting. Clicking either opens `logs/fix-pass.log`. A stale login
-row does not keep the tray red: the pass retires it once a fixer that began after it
-reaches an outcome (`fix_loop.retire_login`).
+A job's duration and output size come from `log-wrap.py`, which appends one line per run
+to `logs/job-runs.jsonl`; a job shows runs from its first run under it. A job not run
+under it (`OFF_THE_LEDGER` in `tests/test_installer_contract.py`: the gateway, the fix
+pass, the elevated worker) shows the scheduler's view alone. "How much it printed" is the generic measure of what a job did: no collector
+reports rows collected today, so a collector row carries its project's own health verdict.
 
 ```bash
-python scripts/tray.py --once            # what it would show, as text
-python scripts/install-tray.py --yes     # start it at every logon
-python scripts/install-tray.py --restart # adopt an edited tray.py without logging out
+python scripts/dashboards.py open devkit        # the page, which wakes it
+python scripts/devkit_dashboard.py --once       # the same state as JSON
 ```
-
-`--restart` exists because the tray is resident rather than a pass: it imported `tray.py`
-at logon and holds it until the session ends, so a change to the icon shows up nowhere —
-no error, no stale-looking log — until the process is replaced. It acts on the registered
-task by name, so it restarts whichever checkout is installed even when run from a
-worktree.
-
-Windows only, and stdlib only — Shell_NotifyIcon through `ctypes`. `tray.py --once`
-prints the same verdict anywhere, which is also how the read path is tested.
 
 The global-tools pass is the machine-wide counterpart to the project upgrade. Some of
 this workspace's MCP servers are launched from a **globally installed** npm bin rather
